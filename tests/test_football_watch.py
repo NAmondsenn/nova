@@ -1,13 +1,17 @@
 """Tests for what Nova says as a football match goes on, and for the switches and the record kept for each team and match."""
 
 import json
+import logging
+import threading
+import time
 from datetime import datetime, timezone
 
 import pytest
+import requests
 
-from voice_assistant import storage
-from voice_assistant.football import Match
-from voice_assistant.football_watch import GAP, KINDS, FootballChoices, events
+from voice_assistant import football_watch, storage
+from voice_assistant.football import CANT_GET, NOT_SET_UP, FootballUnavailable, Match, Reading, Team
+from voice_assistant.football_watch import GAP, KINDS, FootballChoices, FootballWatcher, events, user_home
 
 # An instant well away from any change of clock, so that a test passes in whichever time zone it runs.
 NOW = 1_800_000_000.0
@@ -302,6 +306,24 @@ def test_a_match_which_comes_back_from_being_off_is_taken_as_it_stands():
     assert _events(seen, _match("in", "first_half", 1, 1))[0] == [("goals", "Goal for Stevenage. Notts County 1, Stevenage 1.")]
 
 
+def test_a_match_which_is_off_in_play_and_then_back_is_taken_as_it_stands():
+    # Off and still "in", with no scores: the goal is not 0-0 to 1-0 when the match is back, whatever its state was.
+    _, seen = _events(None, _match("in", "first_half", 1, 0))
+    said, seen = _events(seen, _match("in", "off"))
+    assert said == [] and seen["phase"] == "off"
+    said, seen = _events(seen, _match("in", "first_half", 1, 0))
+    assert said == [] and (seen["home"], seen["away"], seen["phase"]) == (1, 0, "first_half")
+    assert _events(seen, _match("in", "first_half", 1, 1))[0] == [("goals", "Goal for Stevenage. Notts County 1, Stevenage 1.")]
+
+
+def test_a_look_with_no_phase_known_keeps_the_phase_of_a_record_however_old():
+    _, seen = _events(None, _match("in", "second_half", 0, 1))
+    said, seen = _events({**seen, "at": NOW - GAP - 1}, _match("in", "stoppage_time", 0, 1))
+    assert said == [] and seen["phase"] == "second_half"
+    # So the second half isn't said to have started when Home Assistant knows the phase again.
+    assert _events(seen, _match("in", "second_half", 0, 1))[0] == []
+
+
 def test_events_works_from_the_time_it_is_given():
     said, _ = events(None, _match(minutes=15), NOW, 900, {"285"})
     assert [event.kind for event in said] == ["starting"]
@@ -378,6 +400,19 @@ def test_what_was_seen_is_kept_and_old_matches_are_dropped(tmp_path, monkeypatch
     monkeypatch.setattr(storage, "save_json", fail)
     choices.remember("2", record)
     assert choices.seen("2") == record
+
+
+def test_a_caller_changing_a_record_it_gave_or_was_given_changes_nothing_kept(tmp_path):
+    choices = FootballChoices(str(tmp_path / "football.json"))
+    _, record = _events(None, _match("in", "first_half", 2, 2))
+    _, record = _events(record, _match("in", "first_half", 2, 1))
+    waiting = {"home": 2, "away": 1}
+    assert record["waiting"] == waiting
+    choices.remember("1", record)
+    record["waiting"]["home"] = 9
+    assert choices.seen("1")["waiting"] == waiting
+    choices.seen("1")["waiting"]["away"] = 9
+    assert choices.seen("1")["waiting"] == waiting
 
 
 def _counting_saves(monkeypatch, fail_first=0):
@@ -470,3 +505,408 @@ def test_a_match_record_the_file_holds_wrongly_is_taken_as_never_seen_and_forgot
     assert choices.seen("5") == good
     choices.forget_before(good["kickoff"])
     assert list(json.loads(path.read_text())["seen"]) == ["5"]
+
+
+def _team(team_id, name, now=None, next=(), stale=False):
+    """A followed team as Football.read() gives it: asked nothing, and no results."""
+    return Team(id=team_id, name=name, asked=None, stale=stale, now=now, next=tuple(next), last=())
+
+
+def _liverpool(goals=0):
+    """Liverpool (364) at home to Arsenal (359), in play: a match of another team than Stevenage's."""
+    return _match("in", "first_half", goals, 0, id="402", home="Liverpool", away="Arsenal", home_id="364", away_id="359")
+
+
+def _unavailable(sentence=CANT_GET, why=None):
+    """What Football.read() raises when it can't be got: the sentence to say, and why where there is a reason."""
+    error = FootballUnavailable(sentence)
+    error.__cause__ = why
+    return error
+
+
+class FakeFootball:
+    """Gives read() what a test sets - a reading, or an error to raise - and counts the reads."""
+
+    def __init__(self):
+        self.reading = Reading(teams=(), unknown=(), trimmed=False)
+        self.reads = 0
+
+    def read(self):
+        self.reads += 1
+        if isinstance(self.reading, Exception):
+            raise self.reading
+        return self.reading
+
+
+class Rig:
+    """A watcher with a fake football, and recording fakes for saying, quiet hours and whether the user is out."""
+
+    def __init__(self, tmp_path, quiet=False, at_home=True, can_say=True):
+        self.said = []
+        self.quiet, self.at_home, self.can_say = quiet, at_home, can_say
+        self.asked_home = 0
+        self.settings = {}
+        self.football = FakeFootball()
+        self.choices = FootballChoices(str(tmp_path / "football.json"))
+        self.watcher = FootballWatcher(
+            self.football, self.choices, self._say, lambda: self.quiet, self._home_now, lambda: self.settings)
+
+    def _say(self, message):
+        if self.can_say:
+            self.said.append(message)
+        return self.can_say
+
+    def _home_now(self):
+        self.asked_home += 1
+        return self.at_home
+
+    def look(self, *teams, at=NOW):
+        self.football.reading = Reading(teams=teams, unknown=(), trimmed=False)
+        self.watcher.check(at)
+
+
+GOAL = "Goal for Stevenage. Notts County 0, Stevenage 1."
+
+
+def _scored(tmp_path, **rig):
+    rig = Rig(tmp_path, **rig)
+    rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 0)))
+    rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 1)), at=NOW + 30)
+    return rig
+
+
+def test_a_goal_is_said(tmp_path):
+    assert _scored(tmp_path).said == [GOAL]
+
+
+def test_not_at_night_and_not_said_in_the_morning(tmp_path):
+    rig = _scored(tmp_path, quiet=True)
+    rig.quiet = False
+    rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 1)), at=NOW + 60)
+    assert rig.said == []
+
+
+def test_not_when_the_user_is_out_but_said_when_home_assistant_cant_say(tmp_path):
+    assert _scored(tmp_path, at_home=False).said == []
+    assert _scored(tmp_path / "b", at_home=None).said == [GOAL]
+
+
+def test_a_switch_turned_off(tmp_path):
+    rig = Rig(tmp_path)
+    rig.choices.set("285", "Stevenage", "goals", False)
+    rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 0)))
+    rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 1)), at=NOW + 30)
+    assert rig.said == []
+    rig.look(_team("285", "Stevenage", now=_match("in", "half_time", 0, 1)), at=NOW + 60)
+    assert rig.said == ["Half time. Notts County 0, Stevenage 1."]
+
+
+def test_one_that_cant_be_said_is_dropped(tmp_path):
+    rig = _scored(tmp_path, can_say=False)
+    assert rig.said == []
+    rig.can_say = True
+    rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 1)), at=NOW + 60)
+    assert rig.said == []
+    rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 2)), at=NOW + 90)
+    assert rig.said == ["Goal for Stevenage. Notts County 0, Stevenage 2."]
+
+
+def _both_follow(tmp_path, off=()):
+    """Stevenage and Notts County, who play each other, both followed; the goal is Stevenage's, with goals off for the teams in off."""
+    rig = Rig(tmp_path)
+    for team_id, name in off:
+        rig.choices.set(team_id, name, "goals", False)
+
+    def teams(away_score):
+        match = _match("in", "first_half", 0, away_score)
+        return _team("285", "Stevenage", now=match), _team("340", "Notts County", now=match)
+
+    rig.look(*teams(0))
+    rig.look(*teams(1), at=NOW + 30)
+    return rig
+
+
+def test_two_followed_teams_in_one_match(tmp_path):
+    assert _both_follow(tmp_path / "both").said == [GOAL]
+    # Said once if either has it on: the first team's switch being off doesn't lose it for the second.
+    assert _both_follow(tmp_path / "stevenage", off=[("285", "Stevenage")]).said == [GOAL]
+    assert _both_follow(tmp_path / "notts", off=[("340", "Notts County")]).said == [GOAL]
+    assert _both_follow(tmp_path / "neither", off=[("285", "Stevenage"), ("340", "Notts County")]).said == []
+
+
+def test_a_match_is_looked_at_once_however_many_followed_teams_it_is_in(tmp_path, monkeypatch):
+    calls = []
+    real = football_watch.events
+
+    def counting(before, match, now, lead, followed):
+        calls.append((match.id, followed))
+        return real(before, match, now, lead, followed)
+
+    monkeypatch.setattr(football_watch, "events", counting)
+    rig = Rig(tmp_path)
+    match = _match("in", "first_half", 0, 0)
+    # Each one's "now"; then one's "now" and the other's "next"; neither is looked at twice.
+    rig.look(_team("285", "Stevenage", now=match), _team("340", "Notts County", now=match))
+    rig.look(_team("285", "Stevenage", now=match), _team("340", "Notts County", next=(match,)), at=NOW + 30)
+    assert calls == [("401", {"285", "340"}), ("401", {"285", "340"})]
+    # Said once: the match is the "next" of the one and the "now" of the other.
+    goal = _match("in", "first_half", 0, 1)
+    rig.look(_team("285", "Stevenage", now=goal), _team("340", "Notts County", next=(goal,)), at=NOW + 60)
+    assert rig.said == [GOAL]
+
+
+def test_every_match_of_every_team_is_looked_at_in_the_same_look(tmp_path):
+    rig = Rig(tmp_path)
+    rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 0)), _team("364", "Liverpool", now=_liverpool(0)))
+    rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 1)), _team("364", "Liverpool", now=_liverpool(1)), at=NOW + 30)
+    assert rig.said == [GOAL, "Goal for Liverpool. Liverpool 1, Arsenal 0."]
+
+
+def test_a_team_with_a_match_in_play_and_another_to_come_is_watched_for_both(tmp_path):
+    rig = Rig(tmp_path)
+    later = _match(minutes=10, id="403")
+    rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 0), next=(later, _match(minutes=5, id="404"))))
+    # Only the next one, not the one after it.
+    assert rig.said == ["Stevenage play Notts County in 10 minutes."]
+
+
+def test_a_stale_team_is_passed_over_and_the_others_carry_on(tmp_path):
+    rig = Rig(tmp_path)
+
+    def stevenage(goals, stale=False):
+        return _team("285", "Stevenage", now=_match("in", "first_half", 0, goals), stale=stale)
+
+    rig.look(stevenage(0), _team("364", "Liverpool", now=_liverpool(0)))
+    rig.look(stevenage(1, stale=True), _team("364", "Liverpool", now=_liverpool(1)), at=NOW + 30)
+    assert rig.said == ["Goal for Liverpool. Liverpool 1, Arsenal 0."]
+    # Passed over entirely: its record is as it was, so the goal shown within five minutes of the last good look is said.
+    assert rig.choices.seen("401")["at"] == NOW
+    rig.look(stevenage(1), _team("364", "Liverpool", now=_liverpool(1)), at=NOW + 60)
+    assert rig.said == ["Goal for Liverpool. Liverpool 1, Arsenal 0.", GOAL]
+
+
+def test_a_team_stale_for_longer_than_the_gap_says_nothing_of_what_it_missed(tmp_path):
+    rig = Rig(tmp_path)
+    rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 0)))
+    for later in (30, 150, 270):
+        rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 1), stale=True), at=NOW + later)
+    rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 1)), at=NOW + GAP + 60)
+    assert rig.said == []
+    rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 2)), at=NOW + GAP + 90)
+    assert rig.said == ["Goal for Stevenage. Notts County 0, Stevenage 2."]
+
+
+def test_football_down_is_logged_once(tmp_path, caplog):
+    rig = Rig(tmp_path)
+    rig.football.reading = _unavailable(CANT_GET, KeyError("teams"))
+    with caplog.at_level(logging.INFO):
+        rig.watcher.check(NOW)
+        rig.watcher.check(NOW + 30)
+        warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+        assert rig.said == [] and len(warnings) == 1
+        assert CANT_GET in warnings[0] and "KeyError('teams')" in warnings[0]
+        rig.look(_team("285", "Stevenage"), at=NOW + 60)
+        rig.look(_team("285", "Stevenage"), at=NOW + 90)
+        assert len([record for record in caplog.records if "back" in record.getMessage()]) == 1
+        # Down again is down afresh, and where there is no cause the sentence stands alone.
+        rig.football.reading = _unavailable(NOT_SET_UP)
+        rig.watcher.check(NOW + 120)
+        warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 2 and NOT_SET_UP in warnings[1] and "None" not in warnings[1]
+
+
+def test_nothing_is_looked_at_while_football_is_down(tmp_path):
+    rig = _scored(tmp_path)
+    rig.football.reading = _unavailable()
+    rig.watcher.check(NOW + 2 * 86400)
+    # Not even forgetting: that is for a look at the matches.
+    assert rig.choices.seen("401") is not None
+
+
+def test_a_restart_says_nothing_twice(tmp_path):
+    rig = Rig(tmp_path)
+    rig.look(_team("285", "Stevenage", now=_match(minutes=10)))
+    assert rig.said == ["Stevenage play Notts County in 10 minutes."]
+    again = Rig(tmp_path)
+    again.look(_team("285", "Stevenage", now=_match(minutes=10)), at=NOW + 60)
+    assert again.said == []
+    again.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 1)), at=NOW + 90)
+    assert again.said == [GOAL]
+
+
+def test_a_match_tomorrow_night_is_warned_of_from_next(tmp_path):
+    rig = Rig(tmp_path)
+    rig.look(_team("285", "Stevenage", next=(_match(minutes=10),)))
+    assert rig.said == ["Stevenage play Notts County in 10 minutes."]
+
+
+def test_the_lead_is_read_each_time(tmp_path):
+    rig = Rig(tmp_path)
+    rig.settings["kickoff_minutes"] = 30
+    rig.look(_team("285", "Stevenage", next=(_match(minutes=25),)))
+    assert rig.said == ["Stevenage play Notts County in 25 minutes."]
+    rig.settings["kickoff_minutes"] = 15
+    # The new match is 24 and a half minutes off at this look.
+    rig.look(_team("285", "Stevenage", next=(_match(minutes=25, id="402"),)), at=NOW + 30)
+    assert len(rig.said) == 1
+
+
+@pytest.mark.parametrize("bad", ["soon", None, True, float("nan"), float("inf"), 0, -15, [15]])
+def test_a_lead_which_isnt_a_number_falls_back_on_the_default(tmp_path, caplog, bad):
+    rig = Rig(tmp_path)
+    rig.settings["kickoff_minutes"] = bad
+    with caplog.at_level(logging.WARNING):
+        rig.look(_team("285", "Stevenage", next=(_match(minutes=10),)))
+        rig.look(_team("285", "Stevenage", next=(_match(minutes=10),)), at=NOW + 30)
+    assert rig.said == ["Stevenage play Notts County in 10 minutes."]
+    # Once, not at every look.
+    assert len([record for record in caplog.records if "kickoff_minutes" in record.getMessage()]) == 1
+
+
+@pytest.mark.parametrize("bad", ["soon", None, True, float("nan"), float("inf"), 0, -30, [30]])
+def test_a_check_every_which_isnt_a_number_neither_ends_the_thread_nor_busies_it(tmp_path, caplog, bad):
+    rig = Rig(tmp_path)
+    rig.settings["check_every"] = bad
+    with caplog.at_level(logging.WARNING):
+        rig.watcher.start()
+        deadline = time.time() + 5
+        while "check_every" not in caplog.text and time.time() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.1)
+        thread = rig.watcher._thread
+        alive, reads = thread.is_alive(), rig.football.reads
+        rig.watcher.stop()
+    assert "check_every" in caplog.text
+    # The default of 30 seconds is waited, so it looked once and is waiting.
+    assert alive and reads == 1
+    assert not thread.is_alive()
+
+
+def test_old_matches_are_forgotten(tmp_path):
+    rig = Rig(tmp_path)
+    rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 0, minutes=0)))
+    assert rig.choices.seen("401") is not None
+    # A match is kept for a day after it kicks off.
+    rig.look(at=NOW + 86400)
+    assert rig.choices.seen("401") is not None
+    rig.look(at=NOW + 86401)
+    assert rig.choices.seen("401") is None
+
+
+def test_what_isnt_said_is_logged_with_why(tmp_path, caplog):
+    cases = {
+        "quiet": ({"quiet": True}, "quiet hours"),
+        "out": ({"at_home": False}, "the user is out"),
+        "away": ({"can_say": False}, "couldn't be said"),
+    }
+    for name, (rig_args, why) in cases.items():
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            _scored(tmp_path / name, **rig_args)
+        dropped = [record.getMessage() for record in caplog.records if GOAL in record.getMessage()]
+        assert len(dropped) == 1 and why in dropped[0], name
+    caplog.clear()
+    rig = Rig(tmp_path / "off")
+    rig.choices.set("285", "Stevenage", "goals", False)
+    with caplog.at_level(logging.INFO):
+        rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 0)))
+        rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 1)), at=NOW + 30)
+    dropped = [record.getMessage() for record in caplog.records if GOAL in record.getMessage()]
+    assert len(dropped) == 1 and "switched off" in dropped[0]
+
+
+def test_home_assistant_is_asked_where_the_user_is_only_when_something_is_to_be_said_and_once_a_look(tmp_path):
+    rig = Rig(tmp_path)
+    rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 0)))
+    rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 0)), at=NOW + 30)
+    assert rig.asked_home == 0
+    # A goal and half time in one look.
+    rig.look(_team("285", "Stevenage", now=_match("in", "half_time", 0, 1)), at=NOW + 60)
+    assert len(rig.said) == 2 and rig.asked_home == 1
+    # Nor when it is night: nothing to ask.
+    rig.quiet = True
+    rig.look(_team("285", "Stevenage", now=_match("in", "second_half", 0, 1)), at=NOW + 90)
+    assert len(rig.said) == 2 and rig.asked_home == 1
+
+
+def test_a_bug_with_one_match_doesnt_lose_the_others(tmp_path, caplog):
+    rig = Rig(tmp_path)
+    real = rig.choices.remember
+
+    def flaky(match_id, record):
+        if match_id == "401":
+            raise TypeError("boom")
+        real(match_id, record)
+
+    rig.choices.remember = flaky
+    rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 0)), _team("364", "Liverpool", now=_liverpool(0)))
+    with caplog.at_level(logging.WARNING):
+        rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 1)), _team("364", "Liverpool", now=_liverpool(1)), at=NOW + 30)
+    assert rig.said == ["Goal for Liverpool. Liverpool 1, Arsenal 0."]
+    assert "boom" in caplog.text
+
+
+def test_the_thread_starts_and_stops(tmp_path):
+    rig = Rig(tmp_path)
+    assert rig.watcher._thread is None
+    rig.settings["check_every"] = 0.01
+    rig.watcher.start()
+    deadline = time.time() + 5
+    while rig.football.reads < 3 and time.time() < deadline:
+        time.sleep(0.01)
+    thread = rig.watcher._thread
+    assert rig.football.reads >= 3
+    assert thread.name == "football" and thread.daemon and thread.is_alive()
+    started = time.time()
+    rig.watcher.stop()
+    assert time.time() - started < 5
+    assert not thread.is_alive() and rig.watcher._thread is None
+    assert not [t for t in threading.enumerate() if t.name == "football"]
+
+
+def test_a_look_which_fails_doesnt_end_the_thread(tmp_path, caplog):
+    rig = Rig(tmp_path)
+    rig.settings["check_every"] = 0.01
+    rig.football.reading = RuntimeError("boom")
+    with caplog.at_level(logging.WARNING):
+        rig.watcher.start()
+        deadline = time.time() + 5
+        while rig.football.reads < 3 and time.time() < deadline:
+            time.sleep(0.01)
+        rig.watcher.stop()
+    assert rig.football.reads >= 3 and "boom" in caplog.text
+
+
+class FakePeople:
+    """Answers people() as Home Assistant does, with what a test sets, or raises it."""
+
+    def __init__(self, found):
+        self.found = found
+
+    def people(self, timeout=None):
+        if isinstance(self.found, Exception):
+            raise self.found
+        return self.found
+
+
+def _person(state, person_id="person.n"):
+    return {"id": person_id, "name": "N", "state": state, "devices": []}
+
+
+@pytest.mark.parametrize("found, expected", [
+    ([_person("home")], True),
+    ([_person("not_home")], False),
+    ([_person("Work")], False),
+    ([_person("unknown")], None),
+    ([_person("unavailable")], None),
+    ([], None),
+    ([_person("home"), _person("not_home", "person.m")], True),
+    ([_person("not_home"), _person("home", "person.m")], False),
+    ([{"id": "person.n"}], None),
+    (requests.ConnectionError("down"), None),
+    (ValueError("not json"), None),
+    (KeyError("entity_id"), None),
+], ids=["home", "not home", "a zone", "unknown", "unavailable", "nobody", "the first is home", "the first is out",
+        "no state", "unreachable", "not json", "wrong shape"])
+def test_user_home(found, expected):
+    assert user_home(FakePeople(found)) is expected

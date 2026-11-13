@@ -4,26 +4,38 @@ What Nova says by itself about a followed team's match, from decision 7 of docs/
 
 Two pure parts: FootballChoices, which keeps which announcements are switched on for which
 team and what was last seen of each match, and events, which says what a change in a match
-means. The thread which reads Home Assistant and speaks them is the watcher's (see
-football.py for what Home Assistant says and when it can't be trusted).
+means. The third is FootballWatcher, the thread which reads Home Assistant (see football.py
+for what it says and when it can't be trusted), works out with events what is due, and says it.
 
-Nothing here reads the clock or Home Assistant: events is given the time and the match,
-so it says the same in any time zone, and says only what the match shows - the names and
-scores Home Assistant gave, never a scorer or a result worked out from anything else.
+Neither FootballChoices nor events reads the clock or Home Assistant: events is given the time
+and the match, so it says the same in any time zone, and says only what the match shows - the
+names and scores Home Assistant gave, never a scorer or a result worked out from anything else.
 """
 
+import copy
 import logging
 import math
+import threading
+import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
+from voice_assistant.batteries import HOME_FAILURES
 from voice_assistant.choices import ChoiceStore
-from voice_assistant.football import Match, _is_whole
+from voice_assistant.football import Football, FootballUnavailable, Match, Reading, _is_whole
 
 logger = logging.getLogger(__name__)
 
 # What can be announced, in the order the page lists the switches.
 KINDS = ("starting", "goals", "half_time", "second_half", "full_time")
+
+# Seconds between looks at the followed teams' matches, and minutes before kick-off from which a match
+# is said to be starting, where the settings give neither.
+CHECK_EVERY = 30
+KICKOFF_MINUTES = 15
+
+# Seconds after kick-off that what was seen of a match is kept: nothing is said of one so long over.
+KEEP_FOR = 86400
 
 # Seconds old what was last seen of a match may be and still be compared with. After longer,
 # whatever changed meanwhile isn't announced: Nova was restarted, or Home Assistant or that team's
@@ -193,13 +205,13 @@ class FootballChoices:
             match_id: ESPN's id for the match.
 
         Returns:
-            A copy of the record events() gave last, or None if the match was never seen, or
-            what the file holds for it isn't a record. After a restart that is the one the file
-            holds, which is old in "at", so that the first look says nothing of what changed meanwhile.
+            A deep copy of the record events() gave last, as it holds a dict, or None if the match was
+            never seen, or what the file holds for it isn't a record. After a restart that is the one the
+            file holds, which is old in "at", so that the first look says nothing of what changed meanwhile.
         """
         with self._lock:
             record = self._held(str(match_id))
-            return dict(record) if _is_record(record) else None
+            return copy.deepcopy(record) if _is_record(record) else None
 
     def remember(self, match_id: str, record: Dict):
         """
@@ -210,18 +222,18 @@ class FootballChoices:
 
         Args:
             match_id: ESPN's id for the match.
-            record: What events() gave. It is copied, so changing it later changes nothing here.
+            record: What events() gave. It is copied, all the way down, so changing it later changes nothing here.
 
         Raises:
             TypeError: If the record has something JSON can't hold. Nothing is changed then.
         """
         match_id = str(match_id)
-        record = dict(record)
+        record = copy.deepcopy(record)
         with self._lock:
             saved = self._state["seen"].get(match_id)
             if not (_is_record(saved) and _apart_from_when(saved) == _apart_from_when(record)):
                 try:
-                    self._store.change(lambda state: state["seen"].__setitem__(match_id, dict(record)))
+                    self._store.change(lambda state: state["seen"].__setitem__(match_id, copy.deepcopy(record)))
                 except OSError as e:
                     logger.warning(f"Couldn't save what was seen of a match: {e}")
             self._newest[match_id] = record
@@ -406,7 +418,8 @@ def events(
     which can't be trusted says nothing: an old copy of the match (an earlier state or phase
     than the record's, or no score where it had one) is passed over, the record keeping all
     but the time of the look; a score which has gone down waits for a second look (see _goals);
-    and a look with no known phase doesn't take the record's away. A match which is off says nothing.
+    and a look with no known phase doesn't take the record's away, however old the record. A match
+    which is off says nothing, and one which comes back from off is taken as it stands.
 
     Args:
         before: What was last seen of the match (the record this gave last time), or None.
@@ -437,20 +450,22 @@ def events(
 
     kept_phase = phase
     scores = {"home": match.home_score, "away": match.away_score, "waiting": None}
-    if recent and phase != "off":
+    if before is not None and phase != "off":
+        # Whatever the age of the record: a phase Home Assistant can't say now doesn't undo the one it could.
         kept_phase = phase or before["phase"]
-        if before["state"] != "post":
-            goals, scores = _goals(before, match)
-            if goals:
-                said.append(goals)
-            if phase != before["phase"]:
-                score = _score(match)
-                if phase == "half_time":
-                    said.append(Event("half_time", f"Half time. {score}"))
-                elif phase == "second_half":
-                    said.append(Event("second_half", f"The second half has started. {score}"))
-                elif phase == "full_time":
-                    said.append(Event("full_time", _full_time(match)))
+    # A match which was off had no scores to compare with, so what it shows on coming back is taken as it stands.
+    if recent and phase != "off" and before["state"] != "post" and before["phase"] != "off":
+        goals, scores = _goals(before, match)
+        if goals:
+            said.append(goals)
+        if phase != before["phase"]:
+            score = _score(match)
+            if phase == "half_time":
+                said.append(Event("half_time", f"Half time. {score}"))
+            elif phase == "second_half":
+                said.append(Event("second_half", f"The second half has started. {score}"))
+            elif phase == "full_time":
+                said.append(Event("full_time", _full_time(match)))
 
     record = {
         **scores,
@@ -461,3 +476,239 @@ def events(
         "kickoff": match.kickoff.timestamp(),
     }
     return said, record
+
+
+def user_home(home) -> Optional[bool]:
+    """
+    Says whether the user is at home, as Home Assistant has it: by the first person it lists, as the
+    battery watcher takes it for a device which is nobody's, there being one user.
+
+    Args:
+        home: Home Assistant, which has people().
+
+    Returns:
+        True if that person is home, False if they are anywhere else, None if Home Assistant couldn't
+        say - it couldn't be asked, lists nobody, or has no state for the person: "unknown" or
+        "unavailable" isn't away.
+    """
+    try:
+        people = home.people()
+        state = people[0]["state"] if people else None
+    except HOME_FAILURES as e:
+        logger.warning(f"Couldn't tell whether the user is home: {e!r}")
+        return None
+    if state in (None, "unknown", "unavailable"):
+        return None
+    return state == "home"
+
+
+class FootballWatcher:
+    """
+    Looks at the followed teams' matches every 30 seconds or so, and says what is due: that a match
+    is about to start, a goal, half time, the second half and full time (decision 7 of docs/decisions/0014).
+
+    Each is said on the default satellite, but not in quiet hours and not while Home Assistant says
+    the user is out. One which can't be said is dropped and logged, never held for later.
+    """
+
+    def __init__(
+        self,
+        football: Football,
+        choices: FootballChoices,
+        say: Callable[[str], bool],
+        quiet: Callable[[], bool],
+        home_now: Callable[[], Optional[bool]],
+        settings: Callable[[], Dict],
+    ):
+        """
+        Args:
+            football: Reads the followed teams.
+            choices: Which announcements are on for each team, and what was last seen of each match.
+            say: Says a message on the default satellite, returning whether it was said - it isn't
+                when no satellite is connected.
+            quiet: Whether it is quiet hours now.
+            home_now: Whether the user is at home - None if that can't be said. See user_home.
+            settings: Gives the football section of the settings as they are now, read at each use so
+                that a change on the settings page is used straight away. "check_every" is the seconds
+                between looks, and "kickoff_minutes" the minutes before kick-off to say a match is
+                starting; without them, CHECK_EVERY and KICKOFF_MINUTES.
+        """
+        self._football = football
+        self._choices = choices
+        self._say = say
+        self._quiet = quiet
+        self._home_now = home_now
+        self._settings = settings
+        self._down = False
+        # The setting each warning of one which isn't usable was about, so that it is said once and not every look.
+        self._warned: Dict[str, str] = {}
+        self._stopping = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    @property
+    def choices(self) -> FootballChoices:
+        """The switches and the matches seen, which the settings page changes."""
+        return self._choices
+
+    def check(self, now: float):
+        """
+        Does one look: reads the followed teams, works out what is due for each match, and says it.
+
+        If football can't be read, that is logged once until it can, and nothing else happens. A team
+        whose data is stale is passed over, so that its matches' records keep the time of the last good
+        look and a gap in looking is still a gap. A bug with one match is logged with its traceback
+        and the look goes on with the rest.
+
+        Args:
+            now: The current epoch time.
+
+        Raises:
+            Exception: A bug in reading football (apart from it being unavailable), or in forgetting
+                old matches. The thread's pass logs it, and the pass is over.
+        """
+        try:
+            reading = self._football.read()
+        except FootballUnavailable as e:
+            # A line every 30 seconds for a night of Home Assistant being restarted would bury the log.
+            if not self._down:
+                why = f" ({e.__cause__!r})" if e.__cause__ is not None else ""
+                logger.warning(f"Football can't be read, so matches aren't being watched: {e}{why}")
+            self._down = True
+            return
+        if self._down:
+            logger.info("Football is back, matches are being watched again.")
+            self._down = False
+        lead = self._number("kickoff_minutes", KICKOFF_MINUTES) * 60
+        asked: Dict[str, Optional[str]] = {}
+        for match, followed in self._matches(reading).values():
+            try:
+                before = self._choices.seen(match.id)
+                due, record = events(before, match, now, lead, followed)
+                # Kept before anything is said, so that what isn't said now is never said later.
+                self._choices.remember(match.id, record)
+                for event in due:
+                    self._announce(event, followed, asked)
+            except Exception:
+                logger.exception(f"Watching the football match {match.id} failed")
+        self._choices.forget_before(now - KEEP_FOR)
+
+    def start(self):
+        """Starts the daemon thread which looks every check_every seconds."""
+        self._stopping.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="football")
+        self._thread.start()
+
+    def stop(self):
+        """Stops the thread, waiting briefly for a look already under way to end."""
+        self._stopping.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
+
+    def _run(self):
+        while not self._stopping.is_set():
+            self._pass()
+            self._stopping.wait(self._pause())
+
+    def _pass(self):
+        """One pass of the thread, in which no error may end the thread."""
+        try:
+            self.check(time.time())
+        except Exception:
+            logger.exception("Watching football failed, will try again")
+
+    def _pause(self) -> float:
+        """
+        Gives the seconds to wait before the next look. Nothing it is given may end the thread.
+
+        Returns:
+            The check_every setting, or CHECK_EVERY if it isn't usable. Never longer than a wait can be.
+        """
+        try:
+            return min(self._number("check_every", CHECK_EVERY), threading.TIMEOUT_MAX)
+        except Exception:
+            logger.exception("Couldn't read how often to look at football, using the default")
+            return CHECK_EVERY
+
+    def _number(self, key: str, default: float) -> float:
+        """
+        Reads one of the settings, afresh.
+
+        Args:
+            key: The setting in the football section, e.g. "check_every".
+            default: What to use if the setting isn't usable.
+
+        Returns:
+            The setting, or the default if it isn't a number above zero: a bad one is warned of once,
+            as it can't be put right from here, and would otherwise fill the log or, as a wait, hammer
+            Home Assistant.
+        """
+        value = self._settings().get(key, default)
+        if _is_number(value) and 0 < value < math.inf:
+            self._warned.pop(key, None)
+            return value
+        if self._warned.get(key) != repr(value):
+            self._warned[key] = repr(value)
+            logger.warning(f"The football setting {key} is {value!r}, not a number above zero, so {default} is used.")
+        return default
+
+    @staticmethod
+    def _matches(reading: Reading) -> Dict[str, Tuple[Match, Set[str]]]:
+        """
+        Gathers the matches to look at: each team's match in play or today, and its next fixture.
+
+        Args:
+            reading: What football.read() gave.
+
+        Returns:
+            Each match once, by its id, with the ids of the followed teams it is the match of. A team
+            whose data is stale is left out altogether, a match it shares with a team whose data is
+            good being looked at as that team has it.
+        """
+        found: Dict[str, Tuple[Match, Set[str]]] = {}
+        for team in reading.teams:
+            if team.stale:
+                continue
+            for match in (team.now, team.next[0] if team.next else None):
+                if match is not None:
+                    found.setdefault(match.id, (match, set()))[1].add(team.id)
+        return found
+
+    def _announce(self, event: Event, followed: Set[str], asked: Dict[str, Optional[str]]):
+        """
+        Says one event if it should be, and logs why if it isn't.
+
+        Args:
+            event: What to say.
+            followed: The ids of the followed teams in the match: it is said if any has that kind on.
+            asked: Kept for the look, for _why_not_now.
+        """
+        if not any(self._choices.enabled(team_id, event.kind) for team_id in followed):
+            why = "it is switched off for every followed team in the match"
+        else:
+            why = self._why_not_now(asked)
+            if why is None and not self._say(event.message):
+                why = "it couldn't be said"
+        if why:
+            logger.info(f'Not saying "{event.message}": {why}.')
+
+    def _why_not_now(self, asked: Dict[str, Optional[str]]) -> Optional[str]:
+        """
+        Says why nothing may be said at this look, if so.
+
+        Args:
+            asked: What has been found out already at this look, which this adds to, so that
+                Home Assistant is asked where the user is once, and only if something is to be said.
+
+        Returns:
+            The reason - quiet hours, or Home Assistant saying the user is out (if it can't say, it
+            may be said) - or None if it may be said.
+        """
+        if "why" not in asked:
+            if self._quiet():
+                asked["why"] = "it is quiet hours"
+            elif self._home_now() is False:
+                asked["why"] = "Home Assistant says the user is out"
+            else:
+                asked["why"] = None
+        return asked["why"]

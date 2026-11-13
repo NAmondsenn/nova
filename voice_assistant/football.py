@@ -274,7 +274,8 @@ class Team:
         asked: The entry in Home Assistant's teams box which found it, e.g. "South Shields FC",
             so that unfollowing takes out exactly that - or None where Home Assistant doesn't say.
         stale: Whether Home Assistant is giving an old copy of this team's matches, as ESPN
-            couldn't be asked just now.
+            couldn't be asked just now - what it says of the team, or, from a Home Assistant which
+            doesn't say (see Football.read), whatever the sensor does.
         now: Its match in play or today, if any.
         next: Its next fixtures, soonest first.
         last: Its last results, latest first.
@@ -500,9 +501,10 @@ class Football:
         Reads the sensor of the followed teams, afresh.
 
         Returns:
-            The teams. A team is stale when Home Assistant says it is, or when the sensor is
-            stale and no team says so, as a Home Assistant which doesn't mark teams can't tell
-            whose data is old, so all of it is.
+            The teams. A team is stale when it says so itself. Only where the sensor is stale and
+            no team has a "stale" at all - a Home Assistant from before teams were marked, which
+            can't tell whose data is old - is every team. A sensor which is stale while every
+            team says it isn't leaves every team fresh: an entry nobody follows went wrong.
 
         Raises:
             FootballUnavailable: Whose text is what to say, if Home Assistant couldn't be asked
@@ -842,8 +844,10 @@ class Football:
         if age > stale_after:
             raise _cant_get(f"the sensor was last written {age:.0f} seconds ago")
 
-        teams = [Team.from_home(found) for found in _field(attributes, "teams", list)]
-        if _field(attributes, "stale", bool, False) and not any(team.stale for team in teams):
+        found_teams = _field(attributes, "teams", list)
+        teams = [Team.from_home(found) for found in found_teams]
+        # "stale": null is as good as left out, as _field has it.
+        if _field(attributes, "stale", bool, False) and all(found.get("stale") is None for found in found_teams):
             teams = [replace(team, stale=True) for team in teams]
         unknown = _field(attributes, "unknown", list, [])
         if not all(isinstance(name, str) for name in unknown):

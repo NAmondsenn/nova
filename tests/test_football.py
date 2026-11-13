@@ -159,15 +159,28 @@ def test_any_other_failure_is_said_as_nova_says_it_elsewhere(failure, said):
 
 def test_one_team_marked_stale():
     stevenage = _team("395", "Stevenage", stale=True)
-    liverpool = _team("364", "Liverpool")
+    liverpool = _team("364", "Liverpool", stale=False)
     home = FakeHome({FOOTBALL_TEAMS: _sensor([stevenage, liverpool], stale=True)})
     teams = {team.name: team for team in _football(home).read().teams}
     assert teams["Stevenage"].stale is True
     assert teams["Liverpool"].stale is False
 
 
+def test_a_team_marked_stale_is_stale_whatever_the_sensor_says():
+    home = FakeHome({FOOTBALL_TEAMS: _sensor([_team("395", "Stevenage", stale=True), _team("364", "Liverpool", stale=False)], stale=False)})
+    assert [team.stale for team in _football(home).read().teams] == [True, False]
+
+
+def test_a_stale_sensor_with_every_team_saying_it_isnt_leaves_every_team_fresh():
+    # An entry nobody follows went wrong, so the sensor is stale; each team says its own data is fine, and that stands.
+    teams = [_team("395", "Stevenage", stale=False), _team("364", "Liverpool", stale=False)]
+    home = FakeHome({FOOTBALL_TEAMS: _sensor(teams, stale=True)})
+    assert [team.stale for team in _football(home).read().teams] == [False, False]
+
+
 def test_an_older_home_assistant_marks_every_team():
-    # It doesn't mark teams yet, so with the sensor stale nobody can say whose data is old: all of it is.
+    # It doesn't mark teams yet - no team has a "stale" at all - so with the sensor stale nobody can say whose
+    # data is old: all of it is.
     older = _found_match(home="Man Utd", away="Chelsea")
     teams = [_team("360", "Manchester United", next=[older]), _team("364", "Liverpool")]
     home = FakeHome({FOOTBALL_TEAMS: _sensor(teams, stale=True)})
