@@ -253,6 +253,55 @@ def test_what_the_assist_rule_mustnt_catch_is_left_alone(text):
     assert _actions(text) is None
 
 
+def FOLLOWED():
+    """Stands in for Football.names: the teams the user follows."""
+    return ["Stevenage", "Liverpool", "South Shields"]
+
+
+@pytest.mark.parametrize("text", [
+    "Is Liverpool playing?", "Is the football on?", "Is Stevenage on?", "Is South Shields playing?",
+    "Is the Liverpool game on?", "Pause the football.",
+])
+def test_football_is_never_assists(text):
+    # Left to Claude, which has get_football - Assist would take "Liverpool" for a media player.
+    result = LocalIntents(home=HOME, football=FOLLOWED).match(text)
+    assert result is None
+
+
+def test_other_things_still_go_to_assist_with_teams_followed():
+    result = LocalIntents(home=HOME, football=FOLLOWED).match("Is the fan on?")
+    assert result["actions"] == [Action("control_home", {"command": "is the fan on", "wider": True, "question": True})]
+
+
+def test_a_team_nobody_follows_is_assists_to_turn_down():
+    # Assist matches nothing in it, so it reaches Claude the usual way - see Conversation.handle.
+    assert LocalIntents(home=HOME, football=FOLLOWED).match("Is Arsenal playing?") is not None
+
+
+def test_a_team_is_only_heard_as_whole_words():
+    # "Liverpool" isn't "Liverpoolish", so a thing which only starts with a team's name is still Assist's.
+    result = LocalIntents(home=HOME, football=lambda: ["Liverpool"]).match("Is the liverpoolish lamp on?")
+    assert result["actions"][0].tool == "control_home"
+
+
+def test_the_teams_are_only_asked_for_once_a_request_has_an_assist_shape():
+    asked = []
+    intents = LocalIntents(home=HOME, football=lambda: asked.append("names") or ["Liverpool"])
+    assert intents.match("What time is it?") is not None
+    assert intents.match("Turn it off.") is None
+    assert not asked
+    intents.match("Is the fan on?")
+    assert asked == ["names"]
+
+
+def test_the_football_calendar_is_still_heard():
+    # "Football" is only left out of Assist's things, not of the calendars' words, so a
+    # calendar of that name keeps working.
+    games = {"football": "football"}
+    result = LocalIntents(home=HOME, football=FOLLOWED, activities=lambda: games).match("When's football tomorrow?")
+    assert result["actions"][0].tool == "get_activity"
+
+
 def test_a_question_isnt_taken_for_a_light_sentence():
     # "Are the lights" isn't a light's name, which Nova's own lights would switch on
     # if the guard refused the sentence.

@@ -267,7 +267,7 @@ class LocalIntents:
     """Recognises the everyday commands handled without Claude."""
 
     def __init__(self, clock=None, ntfy=None, home=None, activities: Optional[Callable[[], Dict[str, str]]] = None,
-                 wake_word: str = DEFAULT_WAKE_WORD):
+                 wake_word: str = DEFAULT_WAKE_WORD, football: Optional[Callable[[], List[str]]] = None):
         """
         Args:
             clock: The Clock, to check there's exactly one timer before cancelling
@@ -281,6 +281,10 @@ class LocalIntents:
                 GoogleCalendar.activity_words. Asked at each match, so a calendar added
                 in Google is heard from then on. Without it, the activity rules don't
                 match, and Claude has them.
+            football: Gives the names of the teams the user follows - see Football.names.
+                Asked only once a request has the shape of one for Assist, so that a team
+                is never taken for a thing of Home Assistant's. Without it, only the word
+                "football" is left to Claude.
             wake_word: The wake word, e.g. "Hey Nova" - its last word, run into a command
                 said in the same breath ("Novopause."), is taken off it, and so are the
                 words before that ("Hey Novopause.").
@@ -289,6 +293,7 @@ class LocalIntents:
         self.ntfy = ntfy
         self.home = home
         self.activities = activities
+        self.football = football
         # How the wake word's last word starts a lone word it's been run into - and, for
         # "Nova", how Nemotron heard it so: "Nova, pause." said in one breath was "Novopause.".
         ending = (wake_word.split() or [""])[-1].lower()
@@ -526,8 +531,31 @@ class LocalIntents:
         if self.home is None or _says_a_time(words) or _thing_points_back(words) or any(
                 word in NOVAS_OWN or word in NOT_A_THING for word in words):
             return None
+        # Football is Claude's, which has get_football - Assist would take "Is Liverpool
+        # playing?" for a media player. Checked here rather than put in NOVAS_OWN, which
+        # also decides which calendars are heard (see _activity_words), so that a calendar
+        # called Football keeps working.
+        if "football" in words or self._names_a_team(words):
+            return None
         asked = {"command": found.string, "wider": True, **({"question": True} if question else {})}
         return self._result("Okay.", [Action("control_home", asked)])
+
+    def _names_a_team(self, words: List[str]) -> bool:
+        """
+        Whether the words have the name of a team the user follows, as whole words - "south
+        shields" in "is the south shields game on", but not "liverpool" in "liverpoolish".
+        Each name is tidied as a request is, so "St. Johnstone" is heard as said.
+
+        Args:
+            words: The thing a request is about, as the rules see it.
+
+        Returns:
+            True if one of the teams is in them, False without any, or without football.
+        """
+        if self.football is None:
+            return False
+        said = f" {' '.join(words)} "
+        return any(f" {tidy} " in said for tidy in map(_tidied, self.football()) if tidy)
 
     def _ask(self, found) -> Optional[Dict]:
         # Said to be a question, so that one the guard refuses - "is the garage door

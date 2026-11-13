@@ -1848,6 +1848,17 @@ def test_a_sessions_actions_read_the_brains_calendar(brain, make_session):
     assert session.actions.calendar is brain.calendar and session.intents.activities() is words
 
 
+def test_a_sessions_local_rules_leave_football_to_claude(brain, make_session):
+    # The teams the brain follows, so "is Stevenage on?" isn't taken for a media player.
+    brain.football = SimpleNamespace(names=lambda: ["Stevenage"])
+    session = make_session()
+    assert session.intents.football() == ["Stevenage"]
+
+
+def test_a_session_without_football_has_no_teams_for_its_local_rules(brain, make_session):
+    assert make_session().intents.football is None
+
+
 def test_a_sessions_actions_download_through_the_brain(brain, make_session):
     # One for the brain, so the same thing asked for on two satellites is requested once.
     brain.downloads = object()
