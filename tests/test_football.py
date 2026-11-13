@@ -1,13 +1,14 @@
 """Tests for reading the followed football teams - what Home Assistant's sensor says, and when football can't be got."""
 
+import threading
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 import requests
 
-from voice_assistant.football import NOT_SET_UP, Football, FootballUnavailable, Match
-from voice_assistant.home_assistant import FOOTBALL_TEAMS
+from voice_assistant.football import BOX_HOLDS, NOT_SET_UP, WAIT_FOR_SENSOR, Football, FootballUnavailable, Match
+from voice_assistant.home_assistant import FOOTBALL_BOX, FOOTBALL_TEAMS
 
 # An instant well away from any change of clock, so that a test passes in whichever time zone it runs.
 NOW = 1_800_000_000.0
@@ -19,16 +20,45 @@ def _iso(epoch):
 
 
 class FakeHome:
-    """Answers state() as Home Assistant does, with what a test sets for each entity, or raises what it sets."""
+    """
+    Answers state() as Home Assistant does, with what a test sets for each entity, or raises what it sets.
 
-    def __init__(self, states):
+    The teams box is kept as text (or an error to raise), and football_ask answers with answer (or raises it).
+    Each value written to the box is noted in written, and then given to after_write along with this home, to
+    change the sensor as Home Assistant would; write_fails is raised in place of writing.
+    """
+
+    def __init__(self, states, box="", answer=None, after_write=None, write_fails=None):
         self.states = dict(states)
+        self.box = box
+        self.answer = answer
+        self.after_write = after_write
+        self.write_fails = write_fails
+        self.written = []
+        self.asked = []
 
     def state(self, entity_id, timeout=None):
-        found = self.states[entity_id]
+        if entity_id == FOOTBALL_BOX:
+            found = {"state": self.box, "attributes": {}} if not isinstance(self.box, Exception) else self.box
+        else:
+            found = self.states[entity_id]
         if isinstance(found, Exception):
             raise found
         return found
+
+    def football_ask(self, what, name, date="", days=1):
+        self.asked.append((what, name, date, days))
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+    def set_football_teams(self, value):
+        if self.write_fails is not None:
+            raise self.write_fails
+        self.written.append(value)
+        self.box = value
+        if self.after_write is not None:
+            self.after_write(self, value)
 
 
 def _sensor(teams, age=10, state=None, **attributes):
@@ -67,8 +97,9 @@ def _team(team_id, name, **fields):
     return found
 
 
-def _football(home, stale_after=300):
-    return Football(home, lambda: {"stale_after": stale_after}, now=lambda: NOW)
+def _football(home, stale_after=300, sleep=None):
+    # Nothing waits for real: sleep is what counts the seconds, or does nothing.
+    return Football(home, lambda: {"stale_after": stale_after}, now=lambda: NOW, sleep=sleep or (lambda seconds: None))
 
 
 def test_the_teams_and_their_matches_are_read():
@@ -343,3 +374,340 @@ def test_home_assistant_not_being_reached_is_said_as_nova_says_it_elsewhere(fail
     with pytest.raises(FootballUnavailable) as caught:
         _football(FakeAsking(failure)).ask("team", "Arsenal")
     assert str(caught.value) == said
+
+
+# Following and unfollowing: the teams box is what is written, and the sensor is what shows it took.
+
+def _stevenage_and_liverpool():
+    """The two teams most of these tests start with, as the sensor has them."""
+    return [_team("395", "Stevenage", asked="Stevenage"), _team("364", "Liverpool", asked="Liverpool")]
+
+
+def _home_with_box(box="Stevenage, Liverpool", **kept):
+    """A Home Assistant whose box holds box, whose sensor shows Stevenage and Liverpool, and which acts as kept says."""
+    return FakeHome({FOOTBALL_TEAMS: _sensor(_stevenage_and_liverpool())}, box=box, **kept)
+
+
+def _asked_of(team_id, name, followed=False, **fields):
+    """Home Assistant's answer to a question about one team, with only what following needs of the Contract's."""
+    return {"team": {"id": team_id, "name": name, "followed": followed, **fields}, "stale": False}
+
+
+def _shows(*teams, unknown=()):
+    """What Home Assistant does once the box is written: its sensor shows these teams."""
+    def after_write(home, value):
+        home.states[FOOTBALL_TEAMS] = _sensor(list(teams), unknown=list(unknown))
+    return after_write
+
+
+ARSENAL = _team("359", "Arsenal", asked="Arsenal")
+
+
+def test_following_a_team():
+    home = _home_with_box(answer=_asked_of("359", "Arsenal"), after_write=_shows(*_stevenage_and_liverpool(), ARSENAL))
+    assert _football(home).follow("Arsenal") == {"success": True, "message": "You're now following Arsenal."}
+    assert home.written == ["Stevenage, Liverpool, Arsenal"]
+    assert home.asked == [("team", "Arsenal", "", 1)]
+
+
+def test_following_says_the_full_name():
+    newcastle = _team("361", "Newcastle", asked="Newcastle")
+    home = _home_with_box(answer=_asked_of("361", "Newcastle", full_name="Newcastle United"),
+                          after_write=_shows(*_stevenage_and_liverpool(), newcastle))
+    assert _football(home).follow("Newcastle") == {"success": True, "message": "You're now following Newcastle United."}
+    # The name is what Home Assistant finds the team by again, so that is what is written.
+    assert home.written == ["Stevenage, Liverpool, Newcastle"]
+
+
+def test_what_is_written_is_what_home_assistant_found_not_what_was_said():
+    home = _home_with_box(answer=_asked_of("359", "Arsenal"), after_write=_shows(*_stevenage_and_liverpool(), ARSENAL))
+    _football(home).follow("  the Gunners ")
+    assert home.asked == [("team", "the Gunners", "", 1)]
+    assert home.written == ["Stevenage, Liverpool, Arsenal"]
+
+
+@pytest.mark.parametrize("box, written", [
+    ("", "Arsenal"),
+    ("  stevenage ,Liverpool,, ", "stevenage, Liverpool, Arsenal"),
+])
+def test_the_box_is_written_back_as_clean_entries(box, written):
+    home = _home_with_box(box, answer=_asked_of("359", "Arsenal"), after_write=_shows(ARSENAL))
+    _football(home).follow("Arsenal")
+    assert home.written == [written]
+
+
+def test_it_waits_a_second_at_a_time_until_the_sensor_shows_the_team():
+    home = _home_with_box(answer=_asked_of("359", "Arsenal"))
+    slept = []
+
+    def sleep(seconds):
+        slept.append(seconds)
+        if len(slept) == 3:
+            home.states[FOOTBALL_TEAMS] = _sensor([*_stevenage_and_liverpool(), ARSENAL])
+
+    assert _football(home, sleep=sleep).follow("Arsenal")["message"] == "You're now following Arsenal."
+    assert slept == [1, 1, 1]
+
+
+def test_already_followed():
+    home = _home_with_box(answer=_asked_of("359", "Arsenal", followed=True))
+    assert _football(home).follow("Arsenal") == {"success": True, "message": "You're already following Arsenal."}
+    assert home.written == []
+
+
+def test_nothing_by_that_name_is_followed():
+    home = _home_with_box(answer={"unknown": ["Arsnal"], "stale": False})
+    assert _football(home).follow("Arsnal") == {"success": False, "message": "I couldn't find a team called Arsnal."}
+    assert home.written == []
+
+
+@pytest.mark.parametrize("answer", [
+    {"stale": False}, {"team": "Arsenal", "stale": False}, {"team": {"name": "Arsenal", "followed": False}, "stale": False},
+    {"team": {"id": 359, "name": "Arsenal", "followed": False}, "stale": False},
+    {"team": {"id": "359", "name": "", "followed": False}, "stale": False},
+    {"team": {"id": "359", "name": "Arsenal", "followed": "no"}, "stale": False},
+], ids=["no team", "team not a dict", "no id", "id not text", "no name", "followed not a flag"])
+def test_an_answer_which_isnt_a_team_is_not_followed(answer):
+    home = _home_with_box(answer=answer)
+    assert _football(home).follow("Arsenal") == {"success": False, "message": "I can't get football right now."}
+    assert home.written == []
+
+
+@pytest.mark.parametrize("shown_first", [
+    lambda: _sensor([*_stevenage_and_liverpool(), _team("334", "Queens Park Rangers", asked="Rangers")]),
+    lambda: _sensor(_stevenage_and_liverpool(), unknown=["rangers"]),
+], ids=["another team", "nothing"])
+def test_a_name_which_finds_another_team_is_followed_by_id(shown_first):
+    # "Rangers" alone finds Queens Park Rangers, or nothing, while ESPN's id 257 is the club which was asked about.
+    rangers = _team("257", "Rangers", asked="257")
+
+    def after_write(home, value):
+        home.states[FOOTBALL_TEAMS] = shown_first() if value.endswith(", Rangers") else _sensor([*_stevenage_and_liverpool(), rangers])
+
+    home = _home_with_box("Stevenage", answer=_asked_of("257", "Rangers"), after_write=after_write)
+    assert _football(home).follow("Rangers") == {"success": True, "message": "You're now following Rangers."}
+    assert home.written == ["Stevenage, Rangers", "Stevenage, 257"]
+
+
+def test_the_box_is_full():
+    home = _home_with_box("x" * 250, answer=_asked_of("359", "Arsenal"))
+    assert _football(home).follow("Arsenal") == {"success": False, "message": "Home Assistant's list of teams is full."}
+    assert home.written == []
+
+
+@pytest.mark.parametrize("length, fits", [(BOX_HOLDS, True), (BOX_HOLDS + 1, False)])
+def test_a_value_exactly_as_long_as_the_box_holds_is_written_and_one_more_is_not(length, fits):
+    # Home Assistant drops a value which is too long without a word, so Nova is the only one to say no.
+    box = "x" * (length - len(", Arsenal"))
+    home = _home_with_box(box, answer=_asked_of("359", "Arsenal"), after_write=_shows(ARSENAL))
+    result = _football(home).follow("Arsenal")
+    assert result["success"] is fits
+    assert home.written == ([f"{box}, Arsenal"] if fits else [])
+    assert all(len(value) <= BOX_HOLDS for value in home.written)
+
+
+def test_the_id_which_may_stand_in_for_a_name_has_to_fit_too():
+    # An id is longer than a short name, and writing it in place of the name later mustn't overflow the box.
+    box = "x" * (BOX_HOLDS - len(", Gent"))
+    home = _home_with_box(box, answer=_asked_of("123456", "Gent"))
+    assert _football(home).follow("Gent") == {"success": False, "message": "Home Assistant's list of teams is full."}
+    assert home.written == []
+
+
+def test_home_assistant_never_shows_it():
+    home = _home_with_box(answer=_asked_of("359", "Arsenal"))
+    slept = []
+    result = _football(home, sleep=slept.append).follow("Arsenal")
+    assert result == {"success": True, "message": "I've added Arsenal, but Home Assistant hasn't shown it yet."}
+    assert sum(slept) == WAIT_FOR_SENSOR
+    assert home.written == ["Stevenage, Liverpool, Arsenal"]
+
+
+def test_a_sensor_which_cant_be_read_for_a_moment_is_waited_through():
+    home = _home_with_box(answer=_asked_of("359", "Arsenal"))
+    slept = []
+
+    def sleep(seconds):
+        slept.append(seconds)
+        if len(slept) == 2:
+            home.states[FOOTBALL_TEAMS] = _sensor([*_stevenage_and_liverpool(), ARSENAL])
+
+    def after_write(home, value):
+        home.states[FOOTBALL_TEAMS] = requests.ConnectionError("restarting")
+
+    home.after_write = after_write
+    assert _football(home, sleep=sleep).follow("Arsenal")["message"] == "You're now following Arsenal."
+    assert slept == [1, 1]
+
+
+def test_a_team_already_in_the_box_which_hasnt_shown_yet_isnt_added_again():
+    # A follow which timed out, asked again: the entry is there, so only the wait is left to do.
+    home = _home_with_box("Stevenage, Liverpool, arsenal", answer=_asked_of("359", "Arsenal"))
+    slept = []
+
+    def sleep(seconds):
+        slept.append(seconds)
+        home.states[FOOTBALL_TEAMS] = _sensor([*_stevenage_and_liverpool(), ARSENAL])
+
+    assert _football(home, sleep=sleep).follow("Arsenal")["message"] == "You're now following Arsenal."
+    assert home.written == []
+
+
+def test_football_cant_be_got_so_nothing_is_followed():
+    home = _home_with_box(answer=requests.Timeout("slow"))
+    assert _football(home).follow("Arsenal") == {"success": False, "message": "I can't get football right now."}
+    assert home.written == []
+
+
+@pytest.mark.parametrize("how", ["follow", "unfollow"])
+@pytest.mark.parametrize("box, said", [
+    (requests.ConnectionError("refused"), "I can't reach Home Assistant right now."),
+    (requests.HTTPError("404", response=SimpleNamespace(status_code=404)), "Football isn't set up in Home Assistant."),
+    ("unavailable", "I can't get football right now."),
+    ("unknown", "I can't get football right now."),
+], ids=["down", "no box", "unavailable", "unknown"])
+def test_a_box_which_cant_be_read_is_never_written(how, box, said):
+    # "unavailable" is Home Assistant's word for a box it can't read, not a team, so it is never kept in the list.
+    home = _home_with_box(box, answer=_asked_of("359", "Arsenal"))
+    assert getattr(_football(home), how)("Arsenal") == {"success": False, "message": said}
+    assert home.written == []
+
+
+@pytest.mark.parametrize("how", ["follow", "unfollow"])
+def test_a_write_home_assistant_refuses_says_so(how):
+    home = _home_with_box(answer=_asked_of("359", "Arsenal"), write_fails=requests.ConnectionError("refused"))
+    result = getattr(_football(home), how)("Liverpool" if how == "unfollow" else "Arsenal")
+    assert result == {"success": False, "message": "I can't reach Home Assistant right now."}
+
+
+@pytest.mark.parametrize("how", ["follow", "unfollow"])
+@pytest.mark.parametrize("said", ["", "   ", "..."])
+def test_words_with_no_team_in_them_are_not_a_team(how, said):
+    home = _home_with_box(answer=_asked_of("359", "Arsenal"))
+    assert getattr(_football(home), how)(said) == {"success": False, "message": "I didn't catch which team."}
+    assert home.asked == home.written == []
+
+
+def test_reading_isnt_held_up_while_a_follow_waits():
+    # The watcher reads every 30 seconds and a session asks for the names as it builds its tools, so
+    # neither may wait for a follow's seconds - nor can a follow's own lock be the one reads use.
+    home = _home_with_box(answer=_asked_of("359", "Arsenal"), after_write=_shows(*_stevenage_and_liverpool(), ARSENAL))
+    held_up = []
+
+    def sleep(seconds):
+        reader = threading.Thread(target=lambda: (football.read(), football.names()), daemon=True)
+        reader.start()
+        reader.join(2)
+        held_up.append(reader.is_alive())
+
+    football = _football(home, sleep=sleep)
+    football.follow("Arsenal")
+    assert held_up == [False]
+
+
+def test_a_follow_and_an_unfollow_never_overlap():
+    # The settings page's thread and a voice session's can both ask, and each reads the box and writes it back
+    # whole, so one running in the middle of the other would lose its change.
+    home = _home_with_box(answer=_asked_of("359", "Arsenal"), after_write=_shows(*_stevenage_and_liverpool(), ARSENAL))
+    others, finished_in_time = [], []
+
+    def sleep(seconds):
+        other = threading.Thread(target=lambda: football.unfollow("Liverpool"), daemon=True)
+        other.start()
+        other.join(0.3)
+        others.append(other)
+        finished_in_time.append(not other.is_alive())
+
+    football = _football(home, sleep=sleep)
+    football.follow("Arsenal")
+    others[0].join(5)
+    assert finished_in_time == [False]
+    assert home.box == "Stevenage, Arsenal"
+
+
+def _four_teams():
+    """Teams as the sensor has them when the box was typed by hand, each marked with the entry which found it."""
+    return [_team("395", "Stevenage", asked="stevenage"), _team("334", "QPR", asked="Queens Park Rangers"),
+            _team("257", "Rangers", asked="Rangers"), _team("4521", "South Shields", asked="South Shields FC")]
+
+
+MESSY_BOX = "  stevenage ,Queens Park Rangers,  Rangers , South Shields FC"
+
+
+@pytest.mark.parametrize("said, written, says", [
+    ("Rangers", "stevenage, Queens Park Rangers, South Shields FC", "You've stopped following Rangers."),
+    ("south shields", "stevenage, Queens Park Rangers, Rangers", "You've stopped following South Shields."),
+    ("QPR", "stevenage, Rangers, South Shields FC", "You've stopped following QPR."),
+    ("queens park rangers", "stevenage, Rangers, South Shields FC", "You've stopped following QPR."),
+    ("Stevenage", "Queens Park Rangers, Rangers, South Shields FC", "You've stopped following Stevenage."),
+    ("shields", "stevenage, Queens Park Rangers, Rangers", "You've stopped following South Shields."),
+])
+def test_unfollowing_takes_the_right_entry(said, written, says):
+    # "Rangers" is inside Queens Park Rangers, whose entry has to stay; the box's stray spaces and capitals go with it.
+    home = FakeHome({FOOTBALL_TEAMS: _sensor(_four_teams())}, box=MESSY_BOX)
+    assert _football(home).unfollow(said) == {"success": True, "message": says}
+    assert home.written == [written]
+
+
+def test_unfollowing_without_asked():
+    # An older Home Assistant doesn't say which entry found a team, so the entry which is its name is the one.
+    teams = [_team("395", "Stevenage"), _team("257", "Rangers")]
+    home = FakeHome({FOOTBALL_TEAMS: _sensor(teams)}, box="Stevenage, RANGERS")
+    assert _football(home).unfollow("Rangers") == {"success": True, "message": "You've stopped following Rangers."}
+    assert home.written == ["Stevenage"]
+    # With no entry which is its name there is nothing to take out, and nothing is guessed at.
+    home = FakeHome({FOOTBALL_TEAMS: _sensor(teams)}, box="Stevenage, Glasgow Rangers")
+    assert _football(home).unfollow("Rangers") == {"success": False, "message": "I couldn't take Rangers off Home Assistant's list."}
+    assert home.written == []
+
+
+def test_an_entry_which_is_not_in_the_box_any_more_cant_be_taken_out():
+    home = FakeHome({FOOTBALL_TEAMS: _sensor(_four_teams())}, box="stevenage, Rangers")
+    assert _football(home).unfollow("QPR") == {"success": False, "message": "I couldn't take QPR off Home Assistant's list."}
+    assert home.written == []
+
+
+def test_unfollowing_a_team_nobody_follows():
+    home = _home_with_box()
+    assert _football(home).unfollow("Chelsea") == {"success": False, "message": "You're not following Chelsea."}
+    assert home.written == []
+
+
+def test_an_entry_home_assistant_couldnt_find_can_be_taken_off():
+    # Typed twice, it is listed twice and is still one thing to take out, both copies of it.
+    home = FakeHome({FOOTBALL_TEAMS: _sensor(_stevenage_and_liverpool(), unknown=["Stevnage", "stevnage"])},
+                    box="Stevenage, Stevnage, Liverpool, stevnage")
+    assert _football(home).unfollow("Stevnage") == {"success": True, "message": "Taken Stevnage off the list."}
+    assert home.written == ["Stevenage, Liverpool"]
+
+
+def test_the_last_team_can_be_unfollowed():
+    home = FakeHome({FOOTBALL_TEAMS: _sensor([_team("395", "Stevenage", asked="Stevenage")])}, box="Stevenage")
+    assert _football(home).unfollow("Stevenage")["success"] is True
+    assert home.written == [""]
+
+
+def test_a_team_is_found_by_the_full_name_its_matches_give_it():
+    # The sensor's name is ESPN's short one, and the full name is only to be had from the sides of its matches.
+    next_match = _found_match(home="Newcastle", home_name="Newcastle United", home_id="361", away="Arsenal", away_id="359")
+    teams = [_team("361", "Newcastle", asked="Newcastle", next=[next_match]), _team("359", "Arsenal", asked="Arsenal", next=[next_match])]
+    for said in ("Newcastle United", "newcastle", "NewcastleUnited"):
+        home = FakeHome({FOOTBALL_TEAMS: _sensor(teams)}, box="Newcastle, Arsenal")
+        assert _football(home).unfollow(said) == {"success": True, "message": "You've stopped following Newcastle United."}
+        assert home.written == ["Arsenal"]
+
+
+def test_two_teams_which_fit_the_words_equally_are_not_guessed_between():
+    teams = [_team("382", "Manchester City", asked="Man City"), _team("375", "Leicester City", asked="Leicester City")]
+    home = FakeHome({FOOTBALL_TEAMS: _sensor(teams)}, box="Man City, Leicester City")
+    assert _football(home).unfollow("city") == {
+        "success": False, "message": "Which one do you mean, Manchester City or Leicester City?"}
+    assert home.written == []
+    assert _football(home).unfollow("manchester")["message"] == "You've stopped following Manchester City."
+    assert home.written == ["Leicester City"]
+
+
+def test_football_cant_be_got_so_nothing_is_unfollowed():
+    home = FakeHome({FOOTBALL_TEAMS: _sensor(_stevenage_and_liverpool(), age=301)}, box="Stevenage, Liverpool")
+    assert _football(home).unfollow("Liverpool") == {"success": False, "message": "I can't get football right now."}
+    assert home.written == []

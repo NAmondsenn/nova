@@ -27,6 +27,7 @@ import requests
 from voice_assistant import network
 from voice_assistant.batteries import HOME_FAILURES, find, said
 from voice_assistant.devices import AppDevice, ring_call, said_as, where
+from voice_assistant.football import NO_TEAM
 from voice_assistant.football_words import describe as describe_football
 from voice_assistant.google_calendar import named_by_address
 from voice_assistant.home_assistant import CANT_REACH, HomeAssistant, NotAllowed
@@ -1100,6 +1101,21 @@ class ActionExecutor:
     )
     def get_football(self, team=None, competition=None, about=None, date=None, days=None):
         return describe_football(self.football, team=team, competition=competition, about=about, date=date, days=days)
+
+    # Changes Home Assistant's teams box through Football, which says what came of it - as it does
+    # for the settings page, so both go the same way.
+    @tool(
+        "Follow or stop following a football team - 'follow Arsenal', 'unfollow Norway'. Nova announces a followed "
+        "team's matches. What happened is said for you, so just reply 'Okay.'",
+        needs="football",
+        required=["team"],
+        team={"type": "string", "description": "The team, as the user said it, putting right anything clearly misheard."},
+        follow={"type": "boolean", "description": "False to stop following it. Leave out to follow it."},
+    )
+    def follow_team(self, team: Optional[str] = None, follow: bool = True):
+        if not isinstance(team, str) or not team.strip():
+            return {"success": False, "message": NO_TEAM}
+        return self.football.unfollow(team) if follow is False else self.football.follow(team)
 
     @tool(
         "Read the user's calendar for a day or a few days, for 'what have I got on "

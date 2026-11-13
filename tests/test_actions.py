@@ -1074,6 +1074,36 @@ def test_get_football_with_no_teams_followed_says_nothing_of_them():
     assert one["get_football"]["description"].endswith(" The user follows: Stevenage.")
 
 
+def test_follow_team_follows_and_unfollows():
+    calls = []
+    football = SimpleNamespace(
+        names=list,
+        follow=lambda team: calls.append(("follow", team)) or {"success": True, "message": "You're now following Arsenal."},
+        unfollow=lambda team: calls.append(("unfollow", team)) or {"success": True, "message": "You've stopped following Norway."})
+    executor = ActionExecutor(football=football)
+    followed = executor.execute(Action("follow_team", {"team": "Arsenal"}, from_model=True))
+    assert (followed.ok, followed.say) == (True, "You're now following Arsenal.")
+    unfollowed = executor.execute(Action("follow_team", {"team": "Norway", "follow": False}, from_model=True))
+    assert (unfollowed.ok, unfollowed.say) == (True, "You've stopped following Norway.")
+    assert calls == [("follow", "Arsenal"), ("unfollow", "Norway")]
+    # Leaving follow out follows; with no team, or one which is only blanks, nothing is asked of football.
+    for params in ({}, {"follow": False}, {"team": "  "}, {"team": None}, {"team": 5}):
+        missed = executor.execute(Action("follow_team", params, from_model=True))
+        assert (missed.ok, missed.say) == (False, "I didn't catch which team.")
+    assert len(calls) == 2
+
+
+def test_follow_team_is_only_offered_with_football_and_isnt_read_by_claude():
+    offered = {schema["name"]: schema for schema in ActionExecutor(football=SimpleNamespace(names=list)).tool_schemas()}
+    assert offered["follow_team"]["description"].startswith("Follow or stop following a football team")
+    assert offered["follow_team"]["input_schema"]["required"] == ["team"]
+    assert set(offered["follow_team"]["input_schema"]["properties"]) == {"team", "follow"}
+    assert "follow_team" not in {schema["name"] for schema in ActionExecutor().tool_schemas()}
+    assert ActionExecutor().execute(Action("follow_team", {"team": "Arsenal"})).say == "Football needs Home Assistant."
+    # What it did is said for Claude, so it isn't one of the tools whose answers go back to Claude.
+    assert "follow_team" not in ActionExecutor().read_tools()
+
+
 # Lists - Assist first, then Nova's own, through a real HomeAssistant and Lists with a fake
 # in place of Home Assistant's API, so the guard and the intents asked for are the real ones.
 
