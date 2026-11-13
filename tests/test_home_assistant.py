@@ -951,6 +951,12 @@ def test_the_wider_rule_comes_back_once_both_answer(make_home, caplog):
     ("light", "turn_on", {}),
     ("script", "turn_on", {"area_id": "hall"}),
     ("button", "press", {"entity_id": "button.bedroom_pve1_shut_down"}),
+    ("input_text", "set_value", {"entity_id": "input_text.something_else", "value": "x"}),
+    ("input_text", "set_value", {"entity_id": ["input_text.football_teams", "input_text.other"], "value": "x"}),
+    ("input_text", "reload", {"entity_id": "input_text.football_teams"}),
+    ("shell_command", "macbook_sleep", {}),
+    ("shell_command", "football_ask", {"entity_id": "light.lamp"}),
+    ("shell_command", "football_ask", {"what": "team", "command": "rm"}),
 ])
 def test_only_the_services_nova_calls_are_ever_called(make_home, domain, service, data):
     home = make_home({f"/api/services/{domain}/{service}": []})
@@ -993,6 +999,7 @@ def test_the_forecast_is_asked_for_its_answer_through_the_allowlist(make_home):
     # ...nor is what answers called without asking for its answer.
     ("weather", "get_forecasts", {"entity_id": "weather.forecast_home", "type": "daily"}, False),
     ("todo", "get_items", {"entity_id": "todo.shopping_list"}, False),
+    ("shell_command", "football_ask", {"what": "team", "name": "Arsenal"}, False),
 ])
 def test_an_answer_is_only_asked_of_what_both_lists_allow(make_home, domain, service, data, returns):
     home = make_home({f"/api/services/{domain}/{service}" + ("?return_response" if returns else ""): {}})
@@ -1091,6 +1098,97 @@ def test_updating_a_thing_only_ever_ticks_it_off(make_home, data):
     home = make_home({"/api/services/todo/update_item": []})
     with pytest.raises(NotAllowed):
         home._call_service("todo", "update_item", {"entity_id": "todo.shopping_list", "item": "a1", **data})
+    assert home._session.requests == []
+
+
+# Football, which Home Assistant has from ESPN: Nova reads one sensor, asks one command and
+# writes one box - see decision 14.
+ASK = "/api/services/shell_command/football_ask?return_response"
+SET = "/api/services/input_text/set_value"
+
+
+def _answer(stdout, returncode=0):
+    """What shell_command.football_ask answers with return_response: the script's own output."""
+    return {"changed_states": [], "service_response": {"stdout": stdout, "stderr": "", "returncode": returncode}}
+
+
+def test_one_entitys_state_is_read(make_home):
+    home = make_home({"/api/states/sensor.football_teams": {"entity_id": "sensor.football_teams", "state": "4",
+                                                           "attributes": {"teams": []}}})
+    assert home.state("sensor.football_teams")["attributes"] == {"teams": []}
+
+
+@pytest.mark.parametrize("state", [["no"], {"entity_id": "sensor.football_teams", "attributes": "no"}])
+def test_a_state_which_isnt_one_is_refused(make_home, state):
+    home = make_home({"/api/states/sensor.football_teams": state})
+    with pytest.raises(ValueError):
+        home.state("sensor.football_teams")
+
+
+def test_football_is_asked_through_the_allowlist(make_home):
+    home = make_home({ASK: _answer('{"team": {"id": "359"}, "stale": false}')})
+    assert home.football_ask("team", "Arsenal") == {"team": {"id": "359"}, "stale": False}
+    assert home._session.requests == [
+        ("POST", ASK, {"json": {"what": "team", "name": "Arsenal", "date": "", "days": 1}})]
+
+
+def test_football_is_given_longer_to_answer_than_the_rest(make_home):
+    # ESPN is asked behind it, which can take far longer than Home Assistant does on its own.
+    home = make_home({ASK: _answer('{"stale": false}'), "/api/states/sensor.football_teams": {"attributes": {}}})
+    home.football_ask("team", "Arsenal")
+    home.state("sensor.football_teams")
+    assert home._session.timeouts == [home_assistant.ASK_TIMEOUT, REQUEST_TIMEOUT]
+    assert home_assistant.ASK_TIMEOUT > REQUEST_TIMEOUT
+
+
+@pytest.mark.parametrize("name, sent", [
+    ("  Man   Utd ", "Man Utd"), ("O'Higgins; rm -rf", "OHiggins rm -rf"), ("Bodø/Glimt", "Bodø/Glimt"),
+    ("Brighton & Hove Albion", "Brighton & Hove Albion"), ("1. FC Köln", "1. FC Köln"), ("x" * 100, "x" * 60),
+])
+def test_a_name_is_cut_down_before_it_goes(make_home, name, sent):
+    home = make_home({ASK: _answer('{"stale": false}')})
+    home.football_ask("team", name)
+    assert home._session.requests[0][2]["json"]["name"] == sent
+
+
+@pytest.mark.parametrize("date, days, sent", [
+    ("20261124", 2, ("20261124", 2)), ("next week", 99, ("", 31)), ("", 0, ("", 1))])
+def test_a_date_and_days_are_kept_in_bounds(make_home, date, days, sent):
+    home = make_home({ASK: _answer('{"stale": false}')})
+    home.football_ask("competition", "Champions League", date, days)
+    sent_json = home._session.requests[0][2]["json"]
+    assert (sent_json["date"], sent_json["days"]) == sent
+
+
+@pytest.mark.parametrize("response", [
+    {"stdout": "", "stderr": "boom", "returncode": 1}, {"stdout": "not json", "stderr": "", "returncode": 0},
+    {"stdout": "[1]", "stderr": "", "returncode": 0}, {"returncode": 0}, None])
+def test_an_answer_which_cant_be_read_is_refused(make_home, response):
+    home = make_home({ASK: {"service_response": response}})
+    with pytest.raises(ValueError):
+        home.football_ask("team", "Arsenal")
+
+
+def test_only_the_four_questions_are_asked(make_home):
+    home = make_home({})
+    with pytest.raises(ValueError):
+        home.football_ask("weather", "Arsenal")
+    assert home._session.requests == []
+
+
+def test_only_the_football_box_is_ever_written(make_home):
+    home = make_home({SET: []})
+    home.set_football_teams("Stevenage, Liverpool")
+    assert home._session.requests == [
+        ("POST", SET, {"json": {"entity_id": "input_text.football_teams", "value": "Stevenage, Liverpool"}})]
+
+
+@pytest.mark.parametrize("data", [
+    {"entity_id": "light.lamp"}, {"what": "team", "command": "rm"}, {"what": "team", "target": "x"}])
+def test_the_football_command_takes_only_its_own_fields(make_home, data):
+    home = make_home({ASK: _answer('{"stale": false}')})
+    with pytest.raises(NotAllowed):
+        home._call_service("shell_command", "football_ask", data, returns=True)
     assert home._session.requests == []
 
 

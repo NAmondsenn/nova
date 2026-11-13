@@ -43,6 +43,10 @@ it runs none.
 Claude can read the state of anything else - "is Navidrome up?" - with status, which
 only reads /api/states and calls nothing.
 
+Football is Home Assistant's, from ESPN, which Nova never calls itself: it reads one
+sensor, asks one shell command a question and writes one text box - see FOOTBALL_TEAMS,
+football_ask and FOOTBALL_BOX, the only three names it knows of.
+
 The weather is Home Assistant's own, Met's for its home location - see weather.py. The
 calendar isn't Home Assistant's: Nova reads it from Google itself - see google_calendar.py.
 """
@@ -100,14 +104,28 @@ DEFAULT_AGENT = "conversation.home_assistant"
 # down and restart the hosts and their guests, and nothing at all without a snapshot.
 # A light is never one of the PC's HASS.Agent commands made as a light (see _never_worked),
 # and a room with one is given as its other lights instead (see set_lights).
+# The one text box Nova writes is football's list of teams, FOOTBALL_BOX, and no other. The
+# one shell command is football_ask, given nothing but its own few fields and no target.
 SERVICES = {"light": ("turn_on", "turn_off"), "script": ("turn_on",), "scene": ("turn_on",),
             "weather": ("get_forecasts",), "todo": ("add_item", "update_item", "get_items"),
-            "notify": re.compile(r"mobile_app_[a-z0-9_]+"), "button": ("press",)}
+            "notify": re.compile(r"mobile_app_[a-z0-9_]+"), "button": ("press",),
+            "input_text": ("set_value",), "shell_command": ("football_ask",)}
 BY_AREA = ("light",)
-UNTARGETED = ("notify",)
+UNTARGETED = ("notify", "shell_command")
 # The services Nova asks for an answer from - only reads, which change nothing. Each is
 # still only called if SERVICES has it too, and always with its answer asked for.
-RETURNS = {("weather", "get_forecasts"), ("todo", "get_items")}
+RETURNS = {("weather", "get_forecasts"), ("todo", "get_items"), ("shell_command", "football_ask")}
+
+# Football, which Home Assistant has from ESPN: the sensor of the teams followed, with their
+# matches; the box of their names, which Nova writes to follow or unfollow one; and how long
+# to wait for the command which asks ESPN about one, which is slower than Home Assistant is.
+# Nova keeps no list of teams, leagues or abbreviations - ESPN is asked each time.
+FOOTBALL_TEAMS = "sensor.football_teams"
+FOOTBALL_BOX = "input_text.football_teams"
+ASK_TIMEOUT = 20
+# What football_ask may be asked, and the most of a name it sends on.
+FOOTBALL_QUESTIONS = ("team", "competition", "table", "left")
+FOOTBALL_NAME_LENGTH = 60
 
 # How far "dim" and "brighten" move a light, in points of brightness. 30 is steps that
 # can be told apart across a room - 10 isn't - and a light at 40% takes two to go dark.
@@ -588,6 +606,87 @@ class HomeAssistant:
                 isinstance(state, dict) and isinstance(state.get("attributes", {}), dict) for state in states):
             raise ValueError("Home Assistant's states aren't a list of states")
         return states
+
+    def state(self, entity_id: str, timeout: Optional[float] = None) -> Dict:
+        """
+        One entity's state, as /api/states/<id> has it - read afresh each time.
+
+        Args:
+            entity_id: The entity, e.g. FOOTBALL_TEAMS.
+            timeout: Seconds to wait for Home Assistant, or None for REQUEST_TIMEOUT.
+
+        Returns:
+            It, with its "state" and its "attributes".
+
+        Raises:
+            requests.RequestException: If Home Assistant couldn't be asked, or hasn't got
+                the entity, which it says with a 404.
+            ValueError: If it didn't answer with a state whose attributes are a dict.
+        """
+        state = self._request("GET", f"/api/states/{entity_id}", timeout=timeout).json()
+        if not isinstance(state, dict) or not isinstance(state.get("attributes"), dict):
+            raise ValueError(f"Home Assistant's state of {entity_id} isn't a state")
+        return state
+
+    def football_ask(self, what: str, name: str, date: str = "", days: int = 1) -> Dict:
+        """
+        Asks Home Assistant's football command a question - which asks ESPN, as Nova
+        never does - through shell_command.football_ask.
+
+        Args:
+            what: The question: "team", "competition", "table" or "left".
+            name: The team or competition asked about, as it was said. Cut down to letters
+                of any alphabet, digits, spaces and . & / - before it goes, one space at
+                a time and at most FOOTBALL_NAME_LENGTH characters, as it ends up in a
+                command line.
+            date: A day, as eight digits - 20261124 - or "" for none, which is what any
+                other text is taken for.
+            days: How many days from the date, from 1 to 31 - anything else is brought to
+                the nearest.
+
+        Returns:
+            The command's answer, as it printed it: a dict.
+
+        Raises:
+            ValueError: If what isn't one of the four, or the command failed - a
+                returncode other than 0 - or what it printed isn't a JSON object.
+            NotAllowed: If _call_service refuses it, which it only does for a fault here.
+            requests.RequestException: If Home Assistant couldn't be asked, or didn't
+                answer within ASK_TIMEOUT.
+        """
+        if what not in FOOTBALL_QUESTIONS:
+            raise ValueError(f"{what!r} isn't something to ask about football")
+        kept = "".join(char for char in name if char.isalnum() or char.isspace() or char in ".&/-")
+        data = {"what": what, "name": " ".join(kept.split())[:FOOTBALL_NAME_LENGTH].rstrip(),
+                "date": date if re.fullmatch(r"[0-9]{8}", date) else "", "days": max(1, min(31, days))}
+        answer = self._call_service("shell_command", "football_ask", data, returns=True, timeout=ASK_TIMEOUT)
+        if not isinstance(answer, dict):
+            raise ValueError("Home Assistant's football command gave no answer")
+        if answer.get("returncode") != 0:
+            raise ValueError(f"Home Assistant's football command failed: {answer.get('returncode')}, "
+                             f"{str(answer.get('stderr'))[:200]!r}")
+        stdout = answer.get("stdout")
+        try:
+            printed = json.loads(stdout) if isinstance(stdout, str) else None
+        except ValueError:
+            printed = None
+        if not isinstance(printed, dict):
+            raise ValueError("Home Assistant's football command didn't print a JSON object")
+        return printed
+
+    def set_football_teams(self, value: str) -> None:
+        """
+        Writes the football teams box, which is the teams Nova follows - names separated
+        by commas. The only text box Nova writes, and the only thing it writes it with.
+
+        Args:
+            value: The names, e.g. "Stevenage, Liverpool".
+
+        Raises:
+            requests.RequestException: If Home Assistant couldn't be asked, or turned
+                the value down, as it does for one longer than the box holds.
+        """
+        self._call_service("input_text", "set_value", {"entity_id": FOOTBALL_BOX, "value": value})
 
     def command(self, request: str, wider: bool = False, only: Optional[Sequence[str]] = None) -> Dict:
         """
@@ -1533,7 +1632,8 @@ class HomeAssistant:
             return {"success": False, "message": self.failure_message(e)}
         return {"success": True, "message": "Done.", "chime": True}
 
-    def _call_service(self, domain: str, service: str, data: Dict, returns: bool = False) -> Optional[Dict]:
+    def _call_service(self, domain: str, service: str, data: Dict, returns: bool = False,
+                      timeout: Optional[float] = None) -> Optional[Dict]:
         """
         Calls a Home Assistant service - the only place Nova does, so what it may
         call is decided here alone, by SERVICES.
@@ -1545,9 +1645,11 @@ class HomeAssistant:
                 lights - and anything else it takes, e.g. {"brightness_pct": 30}.
             returns: Whether to ask for the service's answer - which those in RETURNS,
                 and only those, must be.
+            timeout: Seconds to wait for Home Assistant, or None for REQUEST_TIMEOUT.
 
         Returns:
-            The service's answer, by entity id, with returns - else None.
+            The service's answer, with returns - else None. By entity id, for most; for
+            shell_command.football_ask, its stdout, stderr and returncode.
 
         Raises:
             NotAllowed: If SERVICES doesn't have the service, or it's given anything
@@ -1556,7 +1658,9 @@ class HomeAssistant:
                 data - or returns doesn't match whether RETURNS has it - or, for a button,
                 anything but one of the PC's, one at a time (see _pressable) - or, for a
                 light, one Nova never works (see _never_worked) - or, for
-                todo.update_item, anything but marking a thing completed.
+                todo.update_item, anything but marking a thing completed - or, for
+                input_text, anything but FOOTBALL_BOX alone - or, for shell_command, any
+                field but football_ask's own: what, name, date and days.
             requests.RequestException: If Home Assistant couldn't be asked.
         """
         entities = data.get("entity_id")
@@ -1579,11 +1683,15 @@ class HomeAssistant:
                 or (domain == "light" and any(_never_worked(entity, self.snapshot()) for entity in entities))
                 # Only ever completing a thing - never renaming it or putting it back to do.
                 or ((domain, service) == ("todo", "update_item")
-                    and not (set(data) <= {"entity_id", "item", "status"} and data.get("status") == "completed"))):
+                    and not (set(data) <= {"entity_id", "item", "status"} and data.get("status") == "completed"))
+                # Never another text box, which could hold a setting something else reads.
+                or (domain == "input_text" and entities != [FOOTBALL_BOX])
+                # Only what the script is asked, never a field it might take for a command.
+                or (domain == "shell_command" and not set(data) <= {"what", "name", "date", "days"})):
             logger.warning(f"Refused to call {domain}.{service} with {data}")
             raise NotAllowed(f"{domain}.{service}")
         response = self._request("POST", f"/api/services/{domain}/{service}" + ("?return_response" if returns else ""),
-                                 json=data)
+                                 timeout=timeout, json=data)
         if not returns:
             return None
         answer = response.json()
