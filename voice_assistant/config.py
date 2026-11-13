@@ -74,14 +74,18 @@ LIMITS: Dict[Tuple[str, str], Limit] = {
     # more than an hour for a song, or four for an album, is a download which has stalled.
     ("music", "song_download_minutes"): Limit("number", 1, 60, True),
     ("music", "album_download_minutes"): Limit("number", 1, 240, True),
-    # Looking more often than every 10 seconds would only hammer Home Assistant, and less often than
-    # every 10 minutes a goal would be said long after it was scored.
-    ("football", "check_every"): Limit("number", 10, 600, True),
+    # Under 10 seconds would only hammer Home Assistant. A look at least once a minute keeps inside
+    # football_watch.GAP, the five minutes what was last seen of a match may be old and still be compared
+    # with - past it only a match starting would ever be said - and inside the shortest time before
+    # kick-off that a match is said to be starting, so that no match's start falls between two looks.
+    ("football", "check_every"): Limit("number", 10, 60, True),
     # Home Assistant's scores are up to a minute behind ESPN's, so under 2 minutes football would be called
-    # old while it is as fresh as it gets, and over an hour a score would be said long after it was true.
-    ("football", "stale_after"): Limit("number", 120, 3600, True),
-    # A match is starting a minute before it does at the soonest, and not two hours before it.
-    ("football", "kickoff_minutes"): Limit("number", 1, 120, True),
+    # old while it is as fresh as it gets. Over GAP, data which had stood still would be taken for fresh,
+    # and a goal long since scored said as if it were news.
+    ("football", "stale_after"): Limit("number", 120, 300, True),
+    # Under 2 minutes a look every minute could miss the time before kick-off altogether, and over 2 hours
+    # is long before a match is near.
+    ("football", "kickoff_minutes"): Limit("number", 2, 120, True),
     ("mqtt", "host"): Limit("host"),
     ("mqtt", "port"): Limit("number", 1, 65535, True),
     ("voice", "speed"): Limit("number", 0.75, 1.5),

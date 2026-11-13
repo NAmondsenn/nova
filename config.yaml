@@ -294,12 +294,15 @@ football:
   # to play, scores, reaches half time, starts the second half and finishes - see
   # docs/decisions/0014. Home Assistant needs its football sensor and command for this. Which
   # teams you follow, and what's said for each, are on the settings page.
-  # How often, in seconds, Nova looks at the followed teams' matches.
+  # How often, in seconds, Nova looks at the followed teams' matches: from 10 to 60. Nova compares
+  # a match with how it was at the last look only if that was within five minutes, so a longer
+  # wait would say nothing but that a match is starting, and might miss that.
   check_every: 30
-  # How old Home Assistant's football may be, in seconds, before Nova says it can't get football.
+  # How old Home Assistant's football may be, in seconds, before Nova says it can't get football:
+  # from 120 to 300. Data older than the five minutes Nova compares within is never taken for fresh.
   stale_after: 300
-  # How many minutes before kick-off Nova says a match is starting. On the settings page, and
-  # read at each look, so a change is used straight away.
+  # How many minutes before kick-off Nova says a match is starting: from 2 to 120. On the
+  # settings page, and read at each look, so a change is used straight away.
   kickoff_minutes: 15
 
 mqtt:

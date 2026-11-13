@@ -366,12 +366,14 @@ def test_the_minutes_before_kick_off_are_on_the_page_and_used_straight_away(file
     setting = next(s for s in page.state()["settings"] if s["key"] == "football.kickoff_minutes")
     assert setting["label"] == "Minutes before kick-off that Nova says a match is starting"
     assert (setting["value"], setting["min"], setting["max"], setting["whole"], setting["used"]) == (
-        15, 1, 120, True, NOW)
+        15, 2, 120, True, NOW)
     # How often Nova looks, and how old football may be, are for config.yaml and not the page.
     assert not {"football.check_every", "football.stale_after"} & {s["key"] for s in page.state()["settings"]}
     assert page.save_settings({"football.kickoff_minutes": "30"}, LOGIN)["success"]
     assert running.section("football")["kickoff_minutes"] == 30
+    # Under 2, a look every minute could miss the time before kick-off.
     assert not page.save_settings({"football.kickoff_minutes": "0"}, LOGIN)["success"]
+    assert not page.save_settings({"football.kickoff_minutes": "1"}, LOGIN)["success"]
     assert running.section("football")["kickoff_minutes"] == 30
 
 

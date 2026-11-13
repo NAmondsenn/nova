@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from voice_assistant import football_watch
 from voice_assistant.config import LIMITS, Config, ConfigError, check, clashes, limit_problem, removed
 
 DEFAULTS = """
@@ -242,6 +243,17 @@ def test_the_football_defaults_are_checked(tmp_path):
     assert (football["check_every"], football["stale_after"], football["kickoff_minutes"]) == (30, 300, 15)
 
 
+def test_the_football_limits_keep_the_watcher_within_what_it_can_work_with():
+    # What the watcher compares a match with is no older than GAP, so a look must come well within it, and
+    # within the shortest time before kick-off a match is said to be starting, so none falls between two
+    # looks; and football older than GAP is never taken for fresh.
+    check_every = LIMITS[("football", "check_every")]
+    kickoff_minutes = LIMITS[("football", "kickoff_minutes")]
+    assert check_every.high < football_watch.GAP
+    assert check_every.high <= kickoff_minutes.low * 60 / 2
+    assert LIMITS[("football", "stale_after")].high <= football_watch.GAP
+
+
 @pytest.mark.parametrize("setting", ["check_every", "stale_after", "kickoff_minutes"])
 @pytest.mark.parametrize("own", ["", "0", "-5", '"soon"', "true"])
 def test_a_football_setting_which_cant_work_is_refused_by_name(tmp_path, setting, own):
@@ -277,9 +289,9 @@ IN_AND_OUT = {
     ("music", "song_download_minutes"): ([1, 10, 60], [0, 61, 10.5, True]),
     ("music", "album_download_minutes"): ([1, 30, 240], [0, 241, 30.5, True]),
     ("display", "port"): ([0, 8766, 65535], [-1, 70000, 8766.5, True]),
-    ("football", "check_every"): ([10, 30, 600], [9, 601, 30.5, True]),
-    ("football", "stale_after"): ([120, 300, 3600], [119, 3601, 300.5, True]),
-    ("football", "kickoff_minutes"): ([1, 15, 120], [0, 121, 15.5, True]),
+    ("football", "check_every"): ([10, 30, 60], [9, 61, 30.5, True]),
+    ("football", "stale_after"): ([120, 300], [119, 301, 200.5, True]),
+    ("football", "kickoff_minutes"): ([2, 15, 120], [1, 121, 15.5, True]),
     # 0 is no spending alert.
     ("usage", "daily_limit"): ([0, 0.25, 100], [-1, -0.01, 100.5, True]),
     ("usage", "pounds_per_dollar"): ([0.1, 0.79, 10], [0, 0.09, 10.5, True]),

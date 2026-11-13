@@ -2241,8 +2241,9 @@ def test_the_football_watcher_is_given_the_brains_football_and_settings_and_a_fi
     # What the watcher and the page switch is kept in the brain's own data folder.
     watcher.choices.set("364", "Liverpool", "goals", False)
     assert FootballChoices(str(tmp_path / "football.json")).enabled("364", "goals") is False
-    # Both read the settings as they are at each use, so a change on the page reaches them at once.
-    assert watcher._settings() == {"check_every": 12, "kickoff_minutes": 20} == brain.football._settings()
+    # Both are given the one callable, read at each use, so a change on the page reaches them at once.
+    assert watcher._settings == brain.football._settings == brain._football_settings
+    assert watcher._settings() == {"check_every": 12, "kickoff_minutes": 20}
     assert brain.apply_settings({("football", "kickoff_minutes"): 30}) == []
     assert watcher._settings()["kickoff_minutes"] == 30 == brain.football._settings()["kickoff_minutes"]
 

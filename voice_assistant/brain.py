@@ -348,7 +348,7 @@ class Brain:
         # tools and the announcements are made from - one for the brain, so what is said is one
         # reading. Its settings are read as they are now, so it needs none to start - see
         # docs/decisions/0014-football.md.
-        self.football = Football(self.home, lambda: self.config.section("football")) if self.home else None
+        self.football = Football(self.home, self._football_settings) if self.home else None
         # What it says by itself of a followed team's match, from that same reading. Started by run().
         self.football_watcher = self._make_football_watcher() if self.home else None
         # What's playing, for each satellite's wake word in its own room - see media_watch.py
@@ -439,8 +439,17 @@ class Brain:
         # The same night as the battery watcher's, so one changed on the settings page reaches both.
         quiet = (self.ntfy or self._night).quiet
         return FootballWatcher(self.football, choices, say=self._say_football, quiet=quiet,
-                               home_now=lambda: user_home(self.home),
-                               settings=lambda: self.config.section("football"))
+                               home_now=lambda: user_home(self.home), settings=self._football_settings)
+
+    def _football_settings(self) -> Dict[str, Any]:
+        """
+        Gives the football section of the settings as they are now, for the brain's Football and
+        its watcher to read at each use, so a change saved on the settings page is used straight away.
+
+        Returns:
+            The section, which holds the settings as they are at this moment.
+        """
+        return self.config.section("football")
 
     def apply_settings(self, changes: Dict[Tuple[str, str], Any]) -> List[Tuple[str, str]]:
         """
@@ -474,7 +483,7 @@ class Brain:
             if self.ntfy is None:
                 # Nothing is sent to a topic until Nova restarts with an ntfy server to send
                 # through - one saved with its address, say. The night is used now, by the
-                # battery watcher.
+                # battery and football watchers.
                 unused += [key for key in ntfy_changes
                            if key[1] not in ("quiet_from", "quiet_until") and key not in unused]
         if ("logging", "log_transcripts") in changes:
@@ -1324,19 +1333,7 @@ class Brain:
             saying it failed, and the watcher then sends it or holds it instead. Never
             raises.
         """
-        session = self.session_for(None)
-        if session is None:
-            logger.warning("A battery warning wasn't said, as the default satellite isn't connected")
-            return False
-        try:
-            said = session.announce(message)
-        except Exception:
-            # The satellite going away mid-sentence, most likely.
-            logger.exception("A battery warning couldn't be said")
-            return False
-        if not said:
-            logger.warning("A battery warning wasn't said")
-        return bool(said)
+        return self._announce_on_default(message, "A battery warning")
 
     def _say_football(self, message: str) -> bool:
         """
@@ -1351,18 +1348,34 @@ class Brain:
             Whether it was said - it wasn't with the default satellite away, or if saying it
             failed, and the watcher then drops it and logs why. Never raises.
         """
+        return self._announce_on_default(message, "A football announcement")
+
+    def _announce_on_default(self, message: str, what: str) -> bool:
+        """
+        Says something the brain has to tell the user on the default satellite, with the usual
+        announcement sound - the one way a battery warning and football's news are both said, so
+        that how the default satellite is found and its failures are looked after in one place.
+
+        Args:
+            message: What to say.
+            what: What it is, as a log line begins with it, e.g. "A battery warning".
+
+        Returns:
+            Whether it was said - it wasn't with the default satellite away, or if saying it
+            failed, and the caller then decides what becomes of it. Never raises.
+        """
         session = self.session_for(None)
         if session is None:
-            logger.warning("A football announcement wasn't said, as the default satellite isn't connected")
+            logger.warning(f"{what} wasn't said, as the default satellite isn't connected")
             return False
         try:
             said = session.announce(message)
         except Exception:
             # The satellite going away mid-sentence, most likely.
-            logger.exception("A football announcement couldn't be said")
+            logger.exception(f"{what} couldn't be said")
             return False
         if not said:
-            logger.warning("A football announcement wasn't said")
+            logger.warning(f"{what} wasn't said")
         return bool(said)
 
     def _say_download(self, satellite: Optional[str], message: str) -> None:
