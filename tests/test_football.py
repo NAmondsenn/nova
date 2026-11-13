@@ -7,8 +7,9 @@ from types import SimpleNamespace
 import pytest
 import requests
 
-from voice_assistant.football import BOX_HOLDS, NOT_SET_UP, WAIT_FOR_SENSOR, Football, FootballUnavailable, Match
-from voice_assistant.home_assistant import FOOTBALL_BOX, FOOTBALL_TEAMS
+from voice_assistant.football import (
+    BOX_HOLDS, LOOK_TIMEOUT, NOT_SET_UP, WAIT_FOR_SENSOR, Football, FootballUnavailable, Match)
+from voice_assistant.home_assistant import FOOTBALL_BOX, FOOTBALL_TEAMS, REQUEST_TIMEOUT
 
 # An instant well away from any change of clock, so that a test passes in whichever time zone it runs.
 NOW = 1_800_000_000.0
@@ -25,7 +26,8 @@ class FakeHome:
 
     The teams box is kept as text (or an error to raise), and football_ask answers with answer (or raises it).
     Each value written to the box is noted in written, and then given to after_write along with this home, to
-    change the sensor as Home Assistant would; write_fails is raised in place of writing.
+    change the sensor as Home Assistant would; write_fails is raised in place of writing. The timeout each
+    look at the sensor was given is noted in sensor_timeouts.
     """
 
     def __init__(self, states, box="", answer=None, after_write=None, write_fails=None):
@@ -36,8 +38,11 @@ class FakeHome:
         self.write_fails = write_fails
         self.written = []
         self.asked = []
+        self.sensor_timeouts = []
 
     def state(self, entity_id, timeout=None):
+        if entity_id == FOOTBALL_TEAMS:
+            self.sensor_timeouts.append(timeout)
         if entity_id == FOOTBALL_BOX:
             found = {"state": self.box, "attributes": {}} if not isinstance(self.box, Exception) else self.box
         else:
@@ -711,3 +716,63 @@ def test_football_cant_be_got_so_nothing_is_unfollowed():
     home = FakeHome({FOOTBALL_TEAMS: _sensor(_stevenage_and_liverpool(), age=301)}, box="Stevenage, Liverpool")
     assert _football(home).unfollow("Liverpool") == {"success": False, "message": "I can't get football right now."}
     assert home.written == []
+
+
+def _bare_comma_box(*entries):
+    """The box as it is typed by hand, with bare commas and no spaces - which holds more than ", " would."""
+    return ",".join(entries)
+
+
+def test_taking_an_entry_out_never_writes_more_than_the_box_holds():
+    # Written back with ", " the 245 characters of names and six separators which are left would be 257, and Home
+    # Assistant would drop that without a word while Nova said the team was gone.
+    others = ["A" * 34 + str(number) for number in range(7)]
+    box = _bare_comma_box("QPR", *others)
+    assert len(box) == BOX_HOLDS
+    teams = [_team("334", "QPR", asked="QPR")] + [_team(str(number), name, asked=name) for number, name in enumerate(others)]
+    home = FakeHome({FOOTBALL_TEAMS: _sensor(teams)}, box=box)
+    assert _football(home).unfollow("QPR") == {"success": True, "message": "You've stopped following QPR."}
+    assert home.written == [",".join(others)]
+    assert all(len(value) <= BOX_HOLDS for value in home.written)
+
+
+def test_taking_an_entry_out_keeps_the_usual_spaces_where_they_fit():
+    others = ["A" * 34 + str(number) for number in range(6)]
+    teams = [_team("334", "QPR", asked="QPR")] + [_team(str(number), name, asked=name) for number, name in enumerate(others)]
+    home = FakeHome({FOOTBALL_TEAMS: _sensor(teams)}, box=_bare_comma_box("QPR", *others))
+    _football(home).unfollow("QPR")
+    assert home.written == [", ".join(others)]
+
+
+def test_a_value_which_wont_fit_even_so_is_never_written():
+    # A box which holds more than 255 characters can't be written back as one that does.
+    others = ["A" * 34 + str(number) for number in range(8)]
+    teams = [_team("334", "QPR", asked="QPR")] + [_team(str(number), name, asked=name) for number, name in enumerate(others)]
+    home = FakeHome({FOOTBALL_TEAMS: _sensor(teams)}, box=_bare_comma_box("QPR", *others))
+    assert _football(home).unfollow("QPR") == {"success": False, "message": "Home Assistant's list of teams is full."}
+    assert home.written == []
+
+
+def test_the_wait_ends_by_the_clock_not_by_the_number_of_looks():
+    # A slow Home Assistant makes each look take seconds, and the user waits in silence meanwhile: here each
+    # pass of the wait moves the clock four seconds, so fifteen seconds are gone after four looks and not fifteen.
+    home = _home_with_box(answer=_asked_of("359", "Arsenal"))
+    clock = [NOW]
+
+    def sleep(seconds):
+        clock[0] += 4
+
+    football = Football(home, dict, now=lambda: clock[0], sleep=sleep)
+    assert football.follow("Arsenal") == {
+        "success": True, "message": "I've added Arsenal, but Home Assistant hasn't shown it yet."}
+    looks = -(-WAIT_FOR_SENSOR // 4)
+    assert len(home.sensor_timeouts) == looks == 4
+    assert WAIT_FOR_SENSOR <= clock[0] - NOW < WAIT_FOR_SENSOR + 4
+
+
+def test_each_look_at_the_sensor_is_given_a_short_timeout():
+    # So that one slow answer can't use up the whole wait.
+    home = _home_with_box(answer=_asked_of("359", "Arsenal"))
+    _football(home).follow("Arsenal")
+    assert home.sensor_timeouts == [LOOK_TIMEOUT] * WAIT_FOR_SENSOR
+    assert 0 < LOOK_TIMEOUT < REQUEST_TIMEOUT

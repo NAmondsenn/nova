@@ -44,6 +44,10 @@ BOX_HOLDS = 255
 # again a few seconds after the box changes.
 WAIT_FOR_SENSOR = 15
 
+# Seconds one look at the sensor may take while waiting for it - shorter than a request to Home
+# Assistant is usually given, so that one slow answer can't use up the wait.
+LOOK_TIMEOUT = 3
+
 # Seconds old the sensor may be and still count as current. Home Assistant's script runs
 # every minute, so a reading five minutes old means it has stopped - which its own "stale"
 # flag can't say, as that only reports ESPN's old copies, and not the script not running at all.
@@ -346,6 +350,22 @@ def _same_entry(one: str, other: str) -> bool:
     return one.strip().casefold() == other.strip().casefold()
 
 
+def _joined(entries: List[str]) -> str:
+    """
+    Joins entries as the teams box has them, by ", " - or by "," where that wouldn't fit. A box typed by
+    hand with bare commas holds more than the same entries in ", " would, and taking one out of it
+    mustn't be what overfills it.
+
+    Args:
+        entries: The entries to keep.
+
+    Returns:
+        The value to write, which is longer than BOX_HOLDS only if even the bare commas don't fit.
+    """
+    value = ", ".join(entries)
+    return value if len(value) <= BOX_HOLDS else ",".join(entries)
+
+
 def _full_name(team: Team) -> Optional[str]:
     """
     Finds a team's full name, which the sensor only gives for the sides of its matches.
@@ -610,7 +630,7 @@ class Football:
         kept = [entry for entry in entries if not _same_entry(entry, chosen.entry)]
         if len(kept) == len(entries):
             return {"success": False, "message": f"I couldn't take {chosen.called} off Home Assistant's list."}
-        self._write(", ".join(kept))
+        self._write(_joined(kept))
         if chosen.found:
             return {"success": True, "message": f"You've stopped following {chosen.called}."}
         return {"success": True, "message": f"Taken {chosen.entry} off the list."}
@@ -673,7 +693,9 @@ class Football:
         Waits for the sensor to show a team which was just added to the box, a second at a time.
 
         Reads the sensor itself and not read(), as one which is stale or has an error still shows who is
-        followed - and a failure to read it for a moment is waited through, not given up on.
+        followed - and a failure to read it for a moment is waited through, not given up on. It ends by
+        the clock as well as by the count of looks, as a slow Home Assistant makes each look take seconds
+        and the user waits in silence; a look already under way is let finish, within LOOK_TIMEOUT.
 
         Args:
             team_id: The team's id, which the sensor should show a team of.
@@ -683,10 +705,13 @@ class Football:
         Returns:
             _SHOWN, _FOUND_ELSEWHERE or _NOT_YET, the last once WAIT_FOR_SENSOR seconds have gone.
         """
+        deadline = self._now() + WAIT_FOR_SENSOR
         for _ in range(WAIT_FOR_SENSOR):
+            if self._now() >= deadline:
+                break
             self._sleep(1)
             try:
-                attributes = self._home.state(FOOTBALL_TEAMS)["attributes"]
+                attributes = self._home.state(FOOTBALL_TEAMS, timeout=LOOK_TIMEOUT)["attributes"]
             except HOME_FAILURES as e:
                 logger.debug(f"The football sensor couldn't be read while waiting for it: {e!r}")
                 continue
@@ -742,12 +767,17 @@ class Football:
         Writes the teams box.
 
         Args:
-            value: The entries, joined by ", ". No longer than BOX_HOLDS, which the caller checks.
+            value: The entries, joined by commas.
 
         Raises:
-            FootballUnavailable: Whose text is what to say, as HomeAssistant.failure_message has it,
-                if Home Assistant couldn't be asked.
+            FootballUnavailable: With BOX_FULL, writing nothing, if the value is longer than BOX_HOLDS -
+                the one guard every write goes through, as Home Assistant would drop it without a word.
+                Otherwise whose text is what to say, as HomeAssistant.failure_message has it, if Home
+                Assistant couldn't be asked.
         """
+        if len(value) > BOX_HOLDS:
+            logger.warning(f"The football teams box wasn't written, as {len(value)} characters is more than it holds")
+            raise FootballUnavailable(BOX_FULL)
         try:
             self._home.set_football_teams(value)
         except (requests.RequestException, ValueError) as e:
