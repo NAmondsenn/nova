@@ -277,3 +277,69 @@ def test_a_match_must_have_what_the_contract_says_it_always_has(missing):
     del found[missing]
     with pytest.raises(KeyError):
         Match.from_home(found)
+
+
+class FakeAsking:
+    """Answers football_ask() as Home Assistant does: with what a test sets, or raising it - and notes what it was asked."""
+
+    def __init__(self, answer):
+        self.answer = answer
+        self.asked = []
+
+    def football_ask(self, what, name, date="", days=1):
+        self.asked.append((what, name, date, days))
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+
+def test_a_question_is_asked_of_home_assistant_as_given():
+    home = FakeAsking({"team": {"id": "359", "name": "Arsenal"}, "stale": False})
+    answer = _football(home).ask("competition", "Champions League", "20261124", 2)
+    assert answer == {"team": {"id": "359", "name": "Arsenal"}, "stale": False}
+    assert home.asked == [("competition", "Champions League", "20261124", 2)]
+
+
+def test_a_question_with_no_date_or_days_is_asked_for_today_and_one_day():
+    home = FakeAsking({"stale": False})
+    _football(home).ask("team", "Arsenal")
+    assert home.asked == [("team", "Arsenal", "", 1)]
+
+
+def test_a_name_espn_doesnt_know_is_an_answer_not_a_failure():
+    answer = {"unknown": ["Arsnal"], "stale": False}
+    assert _football(FakeAsking(answer)).ask("team", "Arsnal") == answer
+
+
+@pytest.mark.parametrize("answer", [
+    {"stale": True, "team": {}}, {"stale": False, "error": "OSError: down"}, {"stale": True, "error": "OSError: down"},
+    {"team": {}}, {"stale": "false", "team": {}}, {"stale": None}, {"stale": True, "unknown": ["Arsnal"]}, ["stale"], None,
+], ids=["stale", "error", "stale and error", "no stale key", "stale not a flag", "stale empty", "stale and unknown",
+        "not a dict", "nothing"])
+def test_an_old_or_failed_or_unreadable_answer_cant_be_got(answer):
+    with pytest.raises(FootballUnavailable) as caught:
+        _football(FakeAsking(answer)).ask("team", "Arsenal")
+    assert str(caught.value) == "I can't get football right now."
+
+
+@pytest.mark.parametrize("failure", [
+    ValueError("Home Assistant's football command failed: 1, 'boom'"), requests.Timeout("slow"), requests.ReadTimeout("slow"),
+    requests.exceptions.JSONDecodeError("not json", "", 0),
+], ids=["unreadable", "timeout", "read timeout", "not json"])
+def test_an_answer_which_cant_be_read_or_didnt_come_in_time_cant_be_got(failure):
+    # A timeout is football not being got in time, not Home Assistant being out of reach as it would be said elsewhere.
+    with pytest.raises(FootballUnavailable) as caught:
+        _football(FakeAsking(failure)).ask("team", "Arsenal")
+    assert str(caught.value) == "I can't get football right now."
+
+
+@pytest.mark.parametrize("failure, said", [
+    (requests.ConnectionError("refused"), "I can't reach Home Assistant right now."),
+    (requests.HTTPError("500", response=SimpleNamespace(status_code=500)), "Home Assistant had a problem with that."),
+    (requests.HTTPError("401", response=SimpleNamespace(status_code=401)),
+     "Home Assistant didn't accept my token. HA_TOKEN in the .env file needs checking."),
+])
+def test_home_assistant_not_being_reached_is_said_as_nova_says_it_elsewhere(failure, said):
+    with pytest.raises(FootballUnavailable) as caught:
+        _football(FakeAsking(failure)).ask("team", "Arsenal")
+    assert str(caught.value) == said

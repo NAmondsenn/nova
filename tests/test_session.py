@@ -254,7 +254,7 @@ def brain(tmp_path, monkeypatch, make_config):
     return SimpleNamespace(config=config, clock=Clock(config=config, start=False), memory=None,
                            routines=Routines(path=str(tmp_path / "routines.json")), ntfy=None, weather=None,
                            batteries=None, lists=None, pc=None, registry=None, calendar=None, media=None,
-                           downloads=None, usage=None, tts=FakePiper(), stt=FakeSpeechToText(),
+                           downloads=None, football=None, usage=None, tts=FakePiper(), stt=FakeSpeechToText(),
                            sounds_folder=Path(paths.SOUNDS_DIR))
 
 
@@ -1827,6 +1827,16 @@ def test_a_sessions_actions_read_batteries_from_the_brains_watcher(brain, make_s
     # One watcher for the brain, so a spoken answer and a warning are the same reading.
     brain.batteries = object()
     assert make_session().actions.batteries is brain.batteries
+
+
+def test_a_sessions_actions_read_football_from_the_brain(brain, make_session):
+    # A session names the followed teams to Claude as it starts, so it asks for them.
+    asked = []
+    brain.football = SimpleNamespace(names=lambda: asked.append("names") or ["Stevenage"])
+    session = make_session()
+    assert session.actions.football is brain.football
+    tools = {tool["name"]: tool for tool in session.llm.tools}
+    assert asked and tools["get_football"]["description"].endswith(" The user follows: Stevenage.")
 
 
 def test_a_sessions_actions_read_the_brains_calendar(brain, make_session):

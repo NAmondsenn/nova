@@ -17,6 +17,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Tuple
 
+import requests
+
 from voice_assistant.batteries import HOME_FAILURES
 from voice_assistant.home_assistant import FOOTBALL_TEAMS, HomeAssistant
 
@@ -119,17 +121,19 @@ def _ground(venue: Optional[Dict]) -> Optional[str]:
     return f"{name} in {city}" if city else name
 
 
-def _cant_get(why: str) -> FootballUnavailable:
+def _cant_get(why: str, level: int = logging.DEBUG) -> FootballUnavailable:
     """
     Makes the error for football which can't be got.
 
     Args:
-        why: The reason, which is logged at debug level only: the watcher reads every 30 seconds.
+        why: The reason, which is logged.
+        level: At what level. The default is debug, as the watcher reads every 30 seconds; a
+            question someone asked is worth a warning.
 
     Returns:
         The error, whose text is CANT_GET whatever the reason.
     """
-    logger.debug(f"Football can't be got: {why}")
+    logger.log(level, f"Football can't be got: {why}")
     return FootballUnavailable(CANT_GET)
 
 
@@ -369,6 +373,49 @@ class Football:
         """
         with self._lock:
             return list(self._names)
+
+    def ask(self, what: str, name: str, date: Optional[str] = None, days: Optional[int] = None) -> Dict:
+        """
+        Asks Home Assistant a question about football which the followed teams' sensor can't
+        answer - any team or competition - and checks that the answer can be trusted.
+
+        Args:
+            what: The question: "team", "competition", "table" or "left".
+            name: The team or competition asked about.
+            date: The first day, as YYYYMMDD, or None for today.
+            days: How many days from it, or None for one.
+
+        Returns:
+            The answer, as the Contract has it for the question - or, where ESPN found nothing
+            by the name, one with "unknown" listing it, which is for the caller to say.
+
+        Raises:
+            FootballUnavailable: Whose text is CANT_GET if the answer is old, has an error, isn't
+                shaped as an answer, can't be read or didn't come in time - or what to say, as
+                HomeAssistant.failure_message has it, if Home Assistant couldn't be asked at all.
+        """
+        try:
+            answer = self._home.football_ask(what, name, date or "", 1 if days is None else days)
+        except requests.Timeout as e:
+            # Said before any other failure, as failure_message would call it Home Assistant being out of reach.
+            raise _cant_get(f"Home Assistant didn't answer in time: {e!r}", logging.WARNING) from e
+        except ValueError as e:
+            # Also what requests raises for an answer which isn't JSON, and what Nova's own refusal of a
+            # service call is, so both are caught here and not as a failure to reach Home Assistant.
+            raise _cant_get(f"Home Assistant's answer couldn't be read: {e!r}", logging.WARNING) from e
+        except requests.RequestException as e:
+            logger.warning(f"Football couldn't be asked of Home Assistant: {e!r}")
+            raise FootballUnavailable(HomeAssistant.failure_message(e)) from e
+        if not isinstance(answer, dict):
+            raise _cant_get(f"Home Assistant's answer isn't a dict: {answer!r}", logging.WARNING)
+        if "error" in answer:
+            raise _cant_get(f"Home Assistant's football command had an error: {answer['error']!r}", logging.WARNING)
+        # Every answer says whether it is old, so one which doesn't can't be vouched for.
+        if not isinstance(answer.get("stale"), bool):
+            raise _cant_get(f"Home Assistant's answer doesn't say whether it is old: {answer.get('stale')!r}", logging.WARNING)
+        if answer["stale"]:
+            raise _cant_get("Home Assistant's answer is an old copy", logging.WARNING)
+        return answer
 
     def _reading(self, sensor: Dict, stale_after: float) -> Reading:
         """

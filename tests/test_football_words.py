@@ -1,13 +1,18 @@
 """Tests for the words Claude is given to answer football questions from."""
 
+import logging
 import time
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
+import requests
 
-from voice_assistant.football import Match, Reading, Team
+from voice_assistant import football_words
+from voice_assistant.football import Football, Match, Reading, Team
 from voice_assistant.football_words import (
-    LAG, said_competition, said_followed, said_left, said_match, said_table, said_team)
+    LAG, describe, said_competition, said_followed, said_left, said_match, said_table, said_team)
+from voice_assistant.home_assistant import FOOTBALL_TEAMS
 
 # An instant well away from any change of clock, so that a test passes in whichever time zone it runs.
 NOW = 1_800_000_000.0
@@ -478,3 +483,227 @@ def test_an_answer_of_the_wrong_shape_is_refused(london, changes):
     AT = datetime(2026, 11, 13, 12, 0).astimezone()
     with pytest.raises((KeyError, TypeError, ValueError)):
         said_left(_left_answer(**changes), AT)
+
+
+class FakeHome:
+    """
+    Gives the sensor as Home Assistant does and answers football_ask() with what a test sets - or raises
+    what it sets - noting what was asked.
+    """
+
+    def __init__(self, teams=(), answer=None, **sensor):
+        self.sensor = {"entity_id": FOOTBALL_TEAMS, "state": "1", "attributes": {"teams": list(teams), **sensor},
+                       "last_reported": _iso(NOW - 10)}
+        self.answer = answer
+        self.asked = []
+
+    def state(self, entity_id, timeout=None):
+        assert entity_id == FOOTBALL_TEAMS
+        if isinstance(self.sensor, Exception):
+            raise self.sensor
+        return self.sensor
+
+    def football_ask(self, what, name, date="", days=1):
+        self.asked.append((what, name, date, days))
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+
+def _football(home):
+    return Football(home, dict, now=lambda: NOW)
+
+
+def _said(home, now=None, **asked):
+    """What describe says of a question, with the words built for a Friday midday in London unless a test gives a time."""
+    return describe(_football(home), now=now or datetime(2026, 11, 13, 12, 0).astimezone(), **asked)
+
+
+NOT_GOT = {"success": False, "message": "I can't get football right now."}
+
+
+def test_asked_of_nobody_it_reads_the_sensor(london):
+    AT = datetime(2026, 11, 13, 12, 0).astimezone()
+    teams = [_team("395", "Stevenage", next=[_found_match(kickoff="2026-11-21T15:00:00+00:00", home="Notts County",
+                                                          away="Stevenage", league="EFL League One")]),
+             _team("364", "Liverpool", now=_found_match(**LIVE))]
+    home = FakeHome(teams)
+    said = describe(_football(home), now=AT)
+    assert said == {"success": True, "message": said_followed(_reading(*teams), AT)}
+    assert "Stevenage: Next: Notts County v Stevenage" in said["message"] and said["message"].endswith(LAG)
+    assert home.asked == []
+
+
+def test_asked_of_nobody_with_no_teams_followed_says_so(london):
+    assert _said(FakeHome([])) == {"success": True, "message": "No teams are followed."}
+
+
+def test_one_stale_team_stops_the_overview(london):
+    home = FakeHome([_team("395", "Stevenage", stale=True), _team("364", "Liverpool")], stale=True)
+    assert _said(home) == NOT_GOT
+
+
+def test_a_sensor_which_is_stale_with_no_team_marked_stops_the_overview(london):
+    # An older Home Assistant doesn't mark teams, so with the sensor stale all of them are.
+    assert _said(FakeHome([_team("364", "Liverpool")], stale=True)) == NOT_GOT
+
+
+@pytest.mark.parametrize("failure, said", [
+    (requests.ConnectionError("refused"), "I can't reach Home Assistant right now."),
+    (requests.HTTPError("404", response=SimpleNamespace(status_code=404)), "Football isn't set up in Home Assistant."),
+])
+def test_a_sensor_which_cant_be_read_says_why(london, failure, said):
+    home = FakeHome()
+    home.sensor = failure
+    assert _said(home) == {"success": False, "message": said}
+
+
+def test_a_sensor_of_the_wrong_shape_cant_be_got(london):
+    assert _said(FakeHome(["Liverpool"])) == NOT_GOT
+
+
+def test_a_team_is_asked_of_home_assistant(london):
+    AT = datetime(2026, 11, 13, 12, 0).astimezone()
+    answer = _team_answer(next=[_found_match(kickoff="2026-11-22T16:30:00+00:00", home="Arsenal", away="Liverpool")])
+    home = FakeHome(answer=answer)
+    assert describe(_football(home), team="Arsenal", now=AT) == {"success": True, "message": said_team(answer, AT)}
+    assert home.asked == [("team", "Arsenal", "", 1)]
+
+
+@pytest.mark.parametrize("given, asked", [
+    ({"competition": "Champions League", "date": "2026-11-24", "days": 2}, ("competition", "Champions League", "20261124", 2)),
+    ({"competition": "Premier League", "about": "table"}, ("table", "Premier League", "", 1)),
+    ({"competition": "Carabao Cup", "about": "left"}, ("left", "Carabao Cup", "", 1)),
+    ({"team": "Liverpool", "competition": "Carabao Cup", "about": "left"}, ("left", "Carabao Cup", "", 1)),
+    ({"team": "Liverpool", "about": "table"}, ("team", "Liverpool", "", 1)),
+    ({"team": "Liverpool", "competition": "Carabao Cup"}, ("competition", "Carabao Cup", "", 1)),
+    ({"competition": "Carabao Cup", "about": "matches"}, ("competition", "Carabao Cup", "", 1)),
+    ({"team": "Liverpool", "about": "matches"}, ("team", "Liverpool", "", 1)),
+    ({"team": "Liverpool", "about": "left"}, ("team", "Liverpool", "", 1)),
+    ({"competition": "Premier League", "about": " Table "}, ("table", "Premier League", "", 1)),
+    ({"competition": "Premier League", "about": "standings"}, ("competition", "Premier League", "", 1)),
+    ({"team": "  Liverpool ", "competition": "  "}, ("team", "Liverpool", "", 1)),
+])
+def test_each_question_goes_to_the_right_ask(london, given, asked):
+    home = FakeHome(answer={"stale": False, "unknown": ["x"]})
+    _said(home, **given)
+    assert home.asked == [asked]
+
+
+@pytest.mark.parametrize("about, answer, said_by, words", [
+    ("matches", _competition_answer([_found_match(**LIVE)]), said_competition, "in play, second half, 67'"),
+    ("table", {"competition": {"slug": "eng.1", "name": "Premier League"}, "stale": False,
+               "groups": [{"name": "Premier League", "rows": [
+                   {"rank": 1, "team": "Arsenal", "played": 10, "won": 8, "drawn": 1, "lost": 1, "gd": 14, "points": 25}]}]},
+     lambda answer, now: said_table(answer), "1. Arsenal, played 10, 25 points"),
+    ("left", _left_answer(teams=["Arsenal", "Liverpool"]), said_left, "Still in the Carabao Cup: Arsenal and Liverpool."),
+])
+def test_each_answer_is_said_by_its_own_words(london, about, answer, said_by, words):
+    AT = datetime(2026, 11, 13, 12, 0).astimezone()
+    said = describe(_football(FakeHome(answer=answer)), competition="Anything", about=about, now=AT)
+    assert said == {"success": True, "message": said_by(answer, AT)}
+    assert words in said["message"]
+
+
+@pytest.mark.parametrize("answer", [{"stale": True, "team": {}}, {"stale": False, "error": "OSError: down"}])
+def test_an_old_or_failed_answer_cant_be_got(london, answer):
+    assert _said(FakeHome(answer=answer), team="Arsenal") == NOT_GOT
+
+
+@pytest.mark.parametrize("failure", [ValueError("not json"), requests.Timeout("slow")])
+def test_an_answer_which_cant_be_read_or_didnt_come_cant_be_got(london, failure):
+    assert _said(FakeHome(answer=failure), team="Arsenal") == NOT_GOT
+
+
+def test_home_assistant_being_out_of_reach_is_said_so(london):
+    said = _said(FakeHome(answer=requests.ConnectionError("refused")), team="Arsenal")
+    assert said == {"success": False, "message": "I can't reach Home Assistant right now."}
+
+
+def test_a_name_espn_doesnt_know(london):
+    answer = {"unknown": ["Arsnal"], "stale": False}
+    assert _said(FakeHome(answer=answer), team="Arsnal") == {
+        "success": True, "message": "ESPN, where Home Assistant's football comes from, found nothing called Arsnal."}
+
+
+def test_names_espn_doesnt_know_are_all_said_and_no_words_are_built_for_them(london, monkeypatch):
+    def refused(*_):
+        raise AssertionError("said_* was called for an answer which found nothing")
+
+    for name in ("said_team", "said_competition", "said_table", "said_left"):
+        monkeypatch.setattr(football_words, name, refused)
+    answer = {"unknown": ["Arsnal", "Chelsee"], "stale": False}
+    for given in ({"team": "Arsnal"}, {"competition": "x"}, {"competition": "x", "about": "table"},
+                  {"competition": "x", "about": "left"}):
+        assert _said(FakeHome(answer=answer), **given) == {
+            "success": True,
+            "message": "ESPN, where Home Assistant's football comes from, found nothing called Arsnal and Chelsee."}
+
+
+def test_an_old_answer_is_old_even_if_it_found_nothing(london):
+    assert _said(FakeHome(answer={"unknown": ["Arsnal"], "stale": True}), team="Arsnal") == NOT_GOT
+
+
+@pytest.mark.parametrize("given, answer", [
+    ({"team": "Arsenal"}, {"stale": False}),
+    ({"team": "Arsenal"}, _team_answer(next="soon")),
+    ({"team": "Arsenal"}, _team_answer(next=[{"id": "1"}])),
+    ({"team": "Arsenal"}, _team_answer(next=[_found_match(odds={"home": "55", "draw": 23, "away": 22})])),
+    ({"competition": "Premier League"}, _competition_answer([_found_match(state="live")])),
+    ({"competition": "Premier League"}, _competition_answer([_found_match()], days=["next week"])),
+    ({"competition": "Premier League", "about": "table"}, {"competition": {"name": "Premier League"}, "stale": False}),
+    ({"competition": "Premier League", "about": "left"}, _left_answer(knockout="yes")),
+    ({"competition": "Premier League", "about": "left"}, {"stale": False, "unknown": "Arsnal"}),
+    ({"competition": "Premier League", "about": "left"}, {"stale": False, "unknown": [4]}),
+], ids=["no team", "next not a list", "match lacking keys", "odds not numbers", "match state unknown", "day not a day",
+        "table with no groups", "knockout not a flag", "unknown not a list", "unknown not names"])
+def test_an_answer_of_the_wrong_shape_cant_be_got_and_is_logged(london, caplog, given, answer):
+    with caplog.at_level(logging.WARNING, logger="voice_assistant.football_words"):
+        assert _said(FakeHome(answer=answer), **given) == NOT_GOT
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]
+    assert "isn't shaped as expected" in caplog.records[0].getMessage()
+
+
+def test_a_wrong_shaped_sensor_odds_cant_be_got_and_is_logged(london, caplog):
+    teams = [_team("364", "Liverpool", next=[_found_match(odds={"home": 55})])]
+    with caplog.at_level(logging.WARNING, logger="voice_assistant.football_words"):
+        assert _said(FakeHome(teams)) == NOT_GOT
+    assert len(caplog.records) == 1
+
+
+@pytest.mark.parametrize("given, asked", [
+    (5, 5), ("5", 5), (" 5 ", 5), (2.0, 2), (31, 31), (40, 40), (0, 0),
+    (None, 1), ("abc", 1), ("", 1), (2.5, 1), ("2.5", 1), (True, 1), ([3], 1), ({"days": 3}, 1), (float("nan"), 1), (float("inf"), 1),
+], ids=repr)
+def test_days_are_a_whole_number_or_one(london, given, asked):
+    # Home Assistant's own call keeps it between 1 and 31; this only makes sure it is a number it can be given.
+    home = FakeHome(answer={"stale": False, "unknown": ["x"]})
+    _said(home, competition="Premier League", days=given)
+    assert home.asked == [("competition", "Premier League", "", asked)]
+
+
+@pytest.mark.parametrize("given, asked", [
+    ("2026-11-24", "20261124"), (" 2026-11-24 ", "20261124"), ("2026-02-28", "20260228"),
+    ("20261124", ""), ("24/11/2026", ""), ("2026-11-24T12:00", ""), ("2026-13-45", ""), ("2026-02-30", ""), ("tomorrow", ""),
+    ("", ""), (None, ""), (20261124, ""), (["2026-11-24"], ""), ("٢٠٢٦-١١-٢٤", ""),
+], ids=repr)
+def test_a_date_is_sent_on_only_as_yyyy_mm_dd(london, given, asked):
+    home = FakeHome(answer={"stale": False, "unknown": ["x"]})
+    _said(home, competition="Premier League", date=given)
+    assert home.asked == [("competition", "Premier League", asked, 1)]
+
+
+@pytest.mark.parametrize("given", [{"team": 5}, {"competition": ["Premier League"]}, {"team": "Arsenal", "competition": {}}])
+def test_a_team_or_competition_which_isnt_a_name_isnt_guessed_at(london, given):
+    home = FakeHome(answer={"stale": False, "unknown": ["x"]})
+    assert _said(home, **given) == {"success": False, "message": "I didn't catch which team or competition."}
+    assert home.asked == []
+
+
+def test_it_is_said_for_the_time_now_unless_a_time_is_given(london):
+    # With no time given, the words are built for the machine's own clock - "today" is today there.
+    today = datetime.now().astimezone()
+    kickoff = today.replace(hour=23, minute=59).astimezone(timezone.utc).isoformat()
+    answer = _team_answer(next=[_found_match(kickoff=kickoff)])
+    said = describe(_football(FakeHome(answer=answer)), team="Liverpool")
+    assert said["success"] and "Liverpool v Arsenal, Premier League, today at" in said["message"]

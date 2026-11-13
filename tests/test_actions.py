@@ -1032,7 +1032,46 @@ def test_home_status_is_only_offered_with_home_assistant():
     assert "home_status" not in offered(ActionExecutor())
     assert ActionExecutor().execute(Action("home_status", {"about": "sunset"})).say == "Home Assistant isn't set up yet."
     # These are the tools whose answers go back to Claude rather than being said.
-    assert ActionExecutor().read_tools() == ["downloads_waiting", "home_status"]
+    assert ActionExecutor().read_tools() == ["downloads_waiting", "home_status", "get_football"]
+
+
+def test_get_football_is_read_by_claude_and_names_the_followed_teams(monkeypatch):
+    from voice_assistant import actions as actions_module
+
+    # What it asks football is what the words are built from, so a fake stands in for that.
+    monkeypatch.setattr(actions_module, "describe_football", lambda football, **asked: {
+        "success": True, "message": f"asked {sorted(asked.items())}"})
+    football = SimpleNamespace(names=lambda: ["Stevenage", "Liverpool", "England"])
+    executor = ActionExecutor(football=football)
+    schema = {tool["name"]: tool for tool in executor.tool_schemas()}["get_football"]
+    assert schema["description"].endswith(" The user follows: England, Liverpool and Stevenage.")
+    assert "never from memory" in schema["description"]
+    result = executor.execute(Action("get_football", {"team": "Liverpool"}, from_model=True))
+    assert result.ok and "('team', 'Liverpool')" in result.say
+    assert "get_football" not in {tool["name"] for tool in ActionExecutor().tool_schemas()}
+    assert ActionExecutor().execute(Action("get_football")).say == "Football needs Home Assistant."
+
+
+def test_get_football_hands_everything_it_was_given_to_the_words(monkeypatch):
+    from voice_assistant import actions as actions_module
+
+    given = []
+    monkeypatch.setattr(actions_module, "describe_football", lambda football, **asked: given.append((football, asked)) or {
+        "success": False, "message": "I can't get football right now."})
+    football = SimpleNamespace(names=list)
+    result = ActionExecutor(football=football).execute(Action("get_football", {
+        "team": "Arsenal", "competition": "Premier League", "about": "table", "date": "2026-11-24", "days": 2, "mood": "keen"},
+        from_model=True))
+    assert (result.ok, result.say) == (False, "I can't get football right now.")
+    assert given == [(football, {"team": "Arsenal", "competition": "Premier League", "about": "table",
+                                 "date": "2026-11-24", "days": 2})]
+
+
+def test_get_football_with_no_teams_followed_says_nothing_of_them():
+    schema = {tool["name"]: tool for tool in ActionExecutor(football=SimpleNamespace(names=list)).tool_schemas()}["get_football"]
+    assert "The user follows" not in schema["description"] and schema["description"].endswith("how fresh it is.")
+    one = {tool["name"]: tool for tool in ActionExecutor(football=SimpleNamespace(names=lambda: ["Stevenage"])).tool_schemas()}
+    assert one["get_football"]["description"].endswith(" The user follows: Stevenage.")
 
 
 # Lists - Assist first, then Nova's own, through a real HomeAssistant and Lists with a fake

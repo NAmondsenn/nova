@@ -27,6 +27,7 @@ import requests
 from voice_assistant import network
 from voice_assistant.batteries import HOME_FAILURES, find, said
 from voice_assistant.devices import AppDevice, ring_call, said_as, where
+from voice_assistant.football_words import describe as describe_football
 from voice_assistant.google_calendar import named_by_address
 from voice_assistant.home_assistant import CANT_REACH, HomeAssistant, NotAllowed
 from voice_assistant.lists import NO_ANSWER, names_list
@@ -51,6 +52,7 @@ UNAVAILABLE = {
     "pc": "Your PC needs Home Assistant.",
     "calendar": "The calendar isn't set up yet.",
     "downloads": "Downloading music isn't set up.",
+    "football": "Football needs Home Assistant.",
 }
 
 # The most days of calendar read at once - a fortnight is already a lot to listen to -
@@ -264,7 +266,7 @@ class ActionExecutor:
 
     def __init__(self, music=None, clock=None, volume=None, weather=None, home=None, memory=None, ntfy=None,
                  satellite: Optional[str] = None, batteries=None, lists=None, pc=None, calendar=None,
-                 downloads=None):
+                 downloads=None, football=None):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -287,6 +289,8 @@ class ActionExecutor:
                 set up.
             downloads: Downloads, for music fetched through SoulSync, or None if there's
                 none. It says itself when SoulSync isn't set up.
+            football: Football, for the followed teams and any football question, or None if
+                Home Assistant isn't set up.
         """
         self.music = music
         self.clock = clock
@@ -301,6 +305,7 @@ class ActionExecutor:
         self.pc = pc
         self.calendar = calendar
         self.downloads = downloads
+        self.football = football
         # What was last asked, and what the assistant said - or the last alert, and
         # all of it - for "send that to my phone". Kept up to date by the Conversation.
         self.last_answer: Optional[Tuple[str, str]] = None
@@ -317,7 +322,8 @@ class ActionExecutor:
         those which are only for the local commands and the offline fallback.
         """
         return [{"name": name,
-                 "description": method.tool["description"] + (self._activities_told() if name == "get_activity" else ""),
+                 "description": (method.tool["description"] + (self._activities_told() if name == "get_activity" else "")
+                                 + (self._teams_told() if name == "get_football" else "")),
                  "input_schema": {"type": "object", "properties": method.tool["parameters"],
                                   "required": method.tool["required"]}}
                 for name, method in self.tools().items()
@@ -336,6 +342,19 @@ class ActionExecutor:
         if not names:
             return ""
         return f" The user's activities: {names[0] if len(names) == 1 else ', '.join(names[:-1]) + ' and ' + names[-1]}."
+
+    def _teams_told(self) -> str:
+        """
+        The teams the user follows, named as Home Assistant has them, to end get_football's
+        description - " The user follows: England, Liverpool and Stevenage." - or nothing while
+        there are none. In order, so a change in the order Home Assistant lists them in doesn't
+        change the tools, and the API's cache. Only what the last good read found, so a request
+        isn't held up for a call to Home Assistant, and none are told while it can't be read.
+        """
+        names = sorted((name.strip() for name in self.football.names() if name.strip()), key=str.lower)
+        if not names:
+            return ""
+        return f" The user follows: {names[0] if len(names) == 1 else ', '.join(names[:-1]) + ' and ' + names[-1]}."
 
     @classmethod
     def private_tools(cls) -> List[str]:
@@ -1058,6 +1077,29 @@ class ActionExecutor:
         if not isinstance(about, str) or not about.strip():
             return {"success": False, "message": "I didn't catch what to look up."}
         return self.home.status(about)
+
+    # Only ever read, by Claude, to answer from - see football_words.describe, which says what came
+    # of the question in words, or that football can't be got.
+    @tool(
+        "Read football from Home Assistant: fixtures, live scores, results, tables, who's left in a cup, the ground "
+        "and bookmakers' odds - for 'what's the Liverpool score?', 'when do Arsenal play next?', 'did Stevenage win?', "
+        "'is the Champions League on next week?', 'where are Liverpool in the table?' or 'who's left in the Carabao "
+        "Cup?'. Give the team or the competition asked about, putting right a name that was clearly misheard; leave "
+        "both out for the user's own teams. You get what Home Assistant has, to reply from. Answer fixtures, scores, "
+        "results and tables only from that, never from memory, and if it hasn't got something - scorers, line-ups - "
+        "say Home Assistant's football doesn't have it. Say how far behind a live score may be only if asked how "
+        "fresh it is.",
+        needs="football",
+        reads=True,
+        team={"type": "string", "description": "The team asked about, e.g. 'Liverpool' or 'Bayern Munich'."},
+        competition={"type": "string", "description": "The league or cup asked about, e.g. 'Premier League' or 'Carabao Cup'."},
+        about={"type": "string", "enum": ["matches", "table", "left"],
+               "description": "'table' for a league table, 'left' for who is still in a cup, else 'matches'."},
+        date={"type": "string", "description": "The first day of a competition's matches, as YYYY-MM-DD. Leave out for today."},
+        days={"type": "integer", "description": "How many days from it, 1 to 31. Leave out for one day."},
+    )
+    def get_football(self, team=None, competition=None, about=None, date=None, days=None):
+        return describe_football(self.football, team=team, competition=competition, about=about, date=date, days=days)
 
     @tool(
         "Read the user's calendar for a day or a few days, for 'what have I got on "

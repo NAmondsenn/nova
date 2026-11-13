@@ -6,22 +6,30 @@ Nova gives Claude plain text built from what Home Assistant returned, not Home A
 JSON: the full names, the kick-off as a local day and time, the ground, the odds and who
 won already worked out, so that Claude never has to convert a time zone or guess. This is
 part of football (see football.py, which reads what Home Assistant says and knows when it
-can't be trusted); nothing here asks Home Assistant for anything. A stale answer, one with
-an error or one which found nothing by the name asked for is the caller's to deal with
-before it gets here (see CANT_GET). The words say only what the data holds: no scorers, no
-result worked out from a score, no phase they don't know.
+can't be trusted); only describe asks it anything, through Football. A stale answer, one with
+an error or one which found nothing by the name asked for never gets to the said_ functions:
+describe deals with each first (see football.CANT_GET). The words say only what the data holds:
+no scorers, no result worked out from a score, no phase they don't know.
 """
 
+import logging
+import re
 from datetime import date, datetime
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from voice_assistant.clock import spoken_clock_time
-# _field is football.py's own check of the type of a key Home Assistant gave, used here for the answers too.
-from voice_assistant.football import Match, Reading, _field
+# The underscored names are football.py's own checks and error, used here for the answers too.
+from voice_assistant.football import (
+    CANT_GET, Football, FootballUnavailable, Match, Reading, _cant_get, _field, _is_whole)
 from voice_assistant.google_calendar import _ordinal, spoken_day
+
+logger = logging.getLogger(__name__)
 
 # What is said at the end of any answer with a match in play in it, and of no other.
 LAG = "Live scores can be up to a minute behind the match."
+
+# What is said when the team or competition asked about isn't a name, as the model can give anything.
+NOT_A_NAME = "I didn't catch which team or competition."
 
 # How each phase of a match which has started is said. "off" (postponed, abandoned, cancelled)
 # is said another way, and a phase which isn't here is one Home Assistant's side has added since:
@@ -476,3 +484,140 @@ def said_left(answer: Dict, now: datetime) -> str:
             verb = "haven't" if stage and stage.endswith("s") else "hasn't"
             said += f" {undrawn} {verb} been drawn yet, so these are the winners of the {earlier}."
     return "\n".join(_with_lag([said] + [_asked_line(match, now) for match in matches], matches))
+
+
+def _asked_days(given) -> int:
+    """
+    Reads how many days the model asked for, which may be a number in any form.
+
+    Args:
+        given: What it gave: a whole number, one as a float ("2.0") or as text ("5"), or anything.
+
+    Returns:
+        The whole number of days, or 1 where it isn't one - a bool, a fraction, a word. Left to
+        HomeAssistant.football_ask to bring between 1 and 31.
+    """
+    if _is_whole(given):
+        return given
+    if isinstance(given, float) and given.is_integer():
+        return int(given)
+    if isinstance(given, str) and re.fullmatch(r"[0-9]+", given.strip()):
+        return int(given.strip())
+    return 1
+
+
+def _asked_date(given) -> Optional[str]:
+    """
+    Reads the first day the model asked for.
+
+    Args:
+        given: What it gave: a date as YYYY-MM-DD, or anything.
+
+    Returns:
+        The day as YYYYMMDD, which is how Home Assistant's command has it - or None if it isn't a
+        real day written as YYYY-MM-DD, which is today.
+    """
+    text = given.strip() if isinstance(given, str) else ""
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", text):
+        return None
+    try:
+        date.fromisoformat(text)
+    except ValueError:
+        return None
+    return text.replace("-", "")
+
+
+def _question(team: str, competition: str, about: object) -> Tuple[str, str]:
+    """
+    Picks which question to ask Home Assistant, and of whom.
+
+    Args:
+        team: The team asked about, or "" for none.
+        competition: The competition asked about, or "" for none. Not both blank.
+        about: "matches", "table" or "left" - or anything, which is taken for matches.
+
+    Returns:
+        The question, one of football_ask's, and the name to ask it of. A competition wins over
+        a team, and a table or who is left is only a question of a competition: a team alone is
+        asked about as a team, whatever else is said of it.
+    """
+    if competition:
+        kind = about.strip().lower() if isinstance(about, str) else ""
+        return (kind if kind in ("table", "left") else "competition"), competition
+    return "team", team
+
+
+def _said_answer(what: str, answer: Dict, now: datetime) -> str:
+    """
+    Puts an answer of Football.ask into words.
+
+    Args:
+        what: The question it answers.
+        answer: The answer, not stale and with no error, but maybe one which found nothing.
+        now: The current time, aware and local.
+
+    Returns:
+        What to say, which for an answer which found nothing by the name is that, without the
+        said_ functions being used.
+
+    Raises:
+        KeyError: If a key is missing from the answer, a match or a table row.
+        TypeError: If a value isn't of the type it should be.
+        ValueError: If a match or a day is of the wrong shape.
+    """
+    unknown = answer.get("unknown")
+    if unknown:
+        if not isinstance(unknown, list) or not all(isinstance(name, str) and name for name in unknown):
+            raise TypeError(f"unknown should be a list of names, not {unknown!r}")
+        return f"ESPN, where Home Assistant's football comes from, found nothing called {_and_list(unknown)}."
+    if what == "table":
+        return said_table(answer)
+    return {"team": said_team, "competition": said_competition, "left": said_left}[what](answer, now)
+
+
+def describe(football: Football, team=None, competition=None, about=None, date=None, days=None,
+             now: Optional[datetime] = None) -> Dict:
+    """
+    Answers a football question for Claude to reply from: asks for what it needs, and says
+    in words what it got, or that it can't be got - so that only what Home Assistant said is
+    ever said. What the question holds may be of any type, as it comes from the model.
+
+    Args:
+        football: Football, for the sensor of the followed teams and for questions.
+        team: The team asked about. With no team and no competition, the followed teams are
+            what is said.
+        competition: The league or cup asked about, which wins over a team.
+        about: "table" or "left" with a competition - its table or who is still in it; any
+            other value, its matches.
+        date: The first day of a competition's matches, as YYYY-MM-DD, or none for today.
+        days: How many days from it, or none for one.
+        now: The current time, aware and local, which the words are built for. Defaults to the
+            time now, so a test is the only one to give it.
+
+    Returns:
+        {"success": True, "message": the words} - including where ESPN found nothing by the
+        name asked for, which is said. {"success": False, "message": what to say} where football
+        can't be got: CANT_GET, also for any answer of the wrong shape (logged at warning level);
+        or what Football says of Home Assistant not being reached, or not set up; or that the
+        team or competition isn't a name.
+    """
+    if not all(isinstance(given, (str, type(None))) for given in (team, competition)):
+        return {"success": False, "message": NOT_A_NAME}
+    team, competition = ((given or "").strip() for given in (team, competition))
+    if now is None:
+        now = datetime.now().astimezone()
+    try:
+        if not team and not competition:
+            reading = football.read()
+            # Said whole, so a line from an old copy would pass for a current one: any stops it all.
+            if any(followed.stale for followed in reading.teams):
+                raise _cant_get("a followed team's matches are an old copy", logging.WARNING)
+            return {"success": True, "message": said_followed(reading, now)}
+        what, name = _question(team, competition, about)
+        answer = football.ask(what, name, _asked_date(date), _asked_days(days))
+        return {"success": True, "message": _said_answer(what, answer, now)}
+    except FootballUnavailable as e:
+        return {"success": False, "message": str(e)}
+    except (KeyError, TypeError, ValueError) as e:
+        logger.warning(f"What Home Assistant gave for football isn't shaped as expected: {e!r}")
+        return {"success": False, "message": CANT_GET}
