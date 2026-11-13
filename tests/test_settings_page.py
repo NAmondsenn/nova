@@ -38,6 +38,8 @@ from voice_assistant.clock import Clock
 from voice_assistant.config import Config
 from voice_assistant.displays import Displays
 from voice_assistant.downloads import Downloads
+from voice_assistant.football import CANT_GET, NOT_SET_UP, FootballUnavailable, Reading, Team
+from voice_assistant.football_watch import FootballChoices
 from voice_assistant.ha_registry import Entry, Snapshot
 from voice_assistant.lists import Lists
 from voice_assistant.ntfy import Ntfy
@@ -245,6 +247,7 @@ class FakeBrain:
         self.clock, self.memory = FakeClock(), FakeMemory()
         self.ntfy = self.stt = self.routines = self.batteries = self.config = self.calendar = None
         self.home = self.lists = self.weather = self.pc = None
+        self.football = self.football_watcher = None
         self.displays, self.display_server = NoDisplays(), None
         self._night = Ntfy("")
         self.ran = []
@@ -2678,6 +2681,187 @@ def test_a_battery_change_needs_the_pages_own_header(files, tmp_path):
         assert not choices.enabled(MAC) and not choices.also_send_when_said
         # No server error for nonsense.
         assert json.loads(_ask(page, "/api/batteries", {"enabled": False}, X_Nova="page")[2])["success"] is False
+    finally:
+        page.stop()
+
+
+# Football
+
+NOT_CONNECTED = "Nova isn't connected to Home Assistant."
+
+
+def _team(team_id, name, stale=False):
+    """A followed team as Home Assistant shows it, with no matches."""
+    return Team(id=team_id, name=name, asked=name, stale=stale, now=None, next=(), last=())
+
+
+class FakeFootball:
+    """Stands in for Football: what read() gives is the box as a test sets it, and a follow or unfollow is noted."""
+
+    def __init__(self):
+        self.fails = None
+        self.reading = Reading(teams=(_team("285", "Stevenage"), _team("364", "Liverpool")),
+                               unknown=("Stevnage",), trimmed=False)
+        self.followed, self.unfollowed = [], []
+        # Set for a test which has a follow wait, as one does for Home Assistant to show the team.
+        self.waiting_in_follow = self.let_follow_finish = None
+
+    def read(self):
+        if self.fails:
+            raise self.fails
+        return self.reading
+
+    def follow(self, name):
+        self.followed.append(name)
+        if self.waiting_in_follow:
+            self.waiting_in_follow.set()
+            assert self.let_follow_finish.wait(5)
+        return {"success": True, "message": f"You're now following {name}."}
+
+    def unfollow(self, name):
+        self.unfollowed.append(name)
+        return {"success": True, "message": f"You've stopped following {name}."}
+
+
+def _football_page(tmp_path):
+    """A page over a fake Football and the real choices the brain's watcher would have, to change and look at."""
+    football = FakeFootball()
+    choices = FootballChoices(str(tmp_path / "football.json"))
+    return _page(football=football, football_watcher=SimpleNamespace(choices=choices)), football, choices
+
+
+def test_the_followed_teams_are_listed_with_their_switches(files, tmp_path):
+    page, football, choices = _football_page(tmp_path)
+    choices.set("364", "Liverpool", "goals", False)
+    state = page.football_state()
+    assert state["available"] is True and state["unknown"] == ["Stevnage"] and state["trimmed"] is False
+    assert [team["name"] for team in state["teams"]] == ["Stevenage", "Liverpool"]
+    assert state["teams"][1] == {"id": "364", "name": "Liverpool", "stale": False,
+                                 "switches": {"starting": True, "goals": False, "half_time": True,
+                                              "second_half": True, "full_time": True}}
+    # A team whose data is old says so, and Home Assistant leaving some out is passed on.
+    football.reading = Reading(teams=(_team("285", "Stevenage", stale=True),), unknown=(), trimmed=True)
+    state = page.football_state()
+    assert state["teams"][0]["stale"] is True and state["unknown"] == [] and state["trimmed"] is True
+
+
+def test_a_switch_is_changed_and_used_straight_away(files, tmp_path, caplog):
+    page, football, choices = _football_page(tmp_path)
+    with caplog.at_level(logging.INFO):
+        result = page.set_football("285", "half_time", False, LOGIN)
+    assert result["success"] and "restart" not in result["message"].lower()
+    assert choices.enabled("285", "half_time") is False and choices.enabled("285", "goals") is True
+    assert LOGIN in caplog.text and "285" in caplog.text
+    # It is kept by the team's id, with its name beside it, and is what the page shows from then on.
+    assert choices._state["teams"]["285"]["name"] == "Stevenage"
+    assert page.football_state()["teams"][0]["switches"]["half_time"] is False
+    assert page.set_football("285", "half_time", True, LOGIN)["success"]
+    assert choices.enabled("285", "half_time") is True
+
+
+def test_a_football_change_which_makes_no_sense_is_refused(files, tmp_path, monkeypatch):
+    page, football, choices = _football_page(tmp_path)
+    nonsense = {"success": False, "message": "That didn't make sense."}
+    # In Python bool("false") is True, so nothing is coerced; and an id or a kind which isn't text isn't one.
+    assert page.set_football("285", "goals", "false", LOGIN) == nonsense
+    assert page.set_football("285", "goals", 0, LOGIN) == nonsense
+    assert page.set_football(285, "goals", False, LOGIN) == nonsense
+    assert page.set_football("285", None, False, LOGIN) == nonsense
+    assert page.set_football(["285"], "goals", False, LOGIN) == nonsense
+    # A kind there is no switch for, and a team Home Assistant isn't showing, are said as they are.
+    refused = page.set_football("285", "corners", False, LOGIN)
+    assert refused["success"] is False and "corners" in refused["message"]
+    assert page.set_football("999", "goals", False, LOGIN) == {
+        "success": False, "message": "Home Assistant isn't showing that team just now."}
+    # Nor is one changed while football can't be read, which is said as the section says it.
+    football.fails = FootballUnavailable(CANT_GET)
+    assert page.set_football("285", "goals", False, LOGIN) == {"success": False, "message": CANT_GET}
+    football.fails = None
+
+    def full(*args):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(choices._store, "change", full)
+    assert page.set_football("285", "goals", False, LOGIN) == {"success": False, "message": "Couldn't save that."}
+    monkeypatch.undo()
+    # Nothing was changed by any of it.
+    assert choices._state["teams"] == {}
+    assert page.football_state()["teams"][0]["switches"] == dict.fromkeys(
+        ("starting", "goals", "half_time", "second_half", "full_time"), True)
+
+
+def test_following_and_unfollowing_from_the_page(files, tmp_path, caplog):
+    page, football, choices = _football_page(tmp_path)
+    with caplog.at_level(logging.INFO):
+        assert page.follow_football("Arsenal", LOGIN) == {"success": True, "message": "You're now following Arsenal."}
+        assert page.unfollow_football("Everton", LOGIN) == {"success": True,
+                                                            "message": "You've stopped following Everton."}
+    assert football.followed == ["Arsenal"] and football.unfollowed == ["Everton"]
+    assert LOGIN in caplog.text and "Arsenal" in caplog.text and "Everton" in caplog.text
+    # Football takes what it's given to be text with a team's name in it, so nothing else gets that far.
+    for bad in (None, 7, True, ["Arsenal"], {"name": "Arsenal"}, "", "   ", "\n"):
+        assert page.follow_football(bad, LOGIN) == {"success": False, "message": "That didn't make sense."}
+        assert page.unfollow_football(bad, LOGIN) == {"success": False, "message": "That didn't make sense."}
+    assert football.followed == ["Arsenal"] and football.unfollowed == ["Everton"]
+
+
+def test_a_follow_which_waits_for_home_assistant_doesnt_hold_up_other_changes(files, tmp_path):
+    # A follow waits up to half a minute for Home Assistant to show the team, and the page's other
+    # changes, which take its saving lock, mustn't wait with it.
+    page, football, choices = _football_page(tmp_path)
+    football.waiting_in_follow, football.let_follow_finish = threading.Event(), threading.Event()
+    follow = threading.Thread(target=page.follow_football, args=("Arsenal", LOGIN))
+    follow.start()
+    try:
+        assert football.waiting_in_follow.wait(5)
+        assert page._saving.acquire(timeout=1), "a follow is holding the page's saving lock"
+        page._saving.release()
+        assert page.set_football("285", "goals", False, LOGIN)["success"]
+    finally:
+        football.let_follow_finish.set()
+        follow.join(5)
+    assert not follow.is_alive() and football.followed == ["Arsenal"]
+
+
+def test_the_section_says_when_football_cant_be_read(files, tmp_path):
+    page, football, choices = _football_page(tmp_path)
+    football.fails = FootballUnavailable(CANT_GET)
+    assert page.football_state() == {"available": False, "message": "I can't get football right now."}
+    football.fails = FootballUnavailable(NOT_SET_UP)
+    assert page.football_state() == {"available": False, "message": NOT_SET_UP}
+    # Nor does it with nothing to reach Home Assistant with - and nothing is changed then, or raises.
+    for bare in (_page(), _page(football=football), _page(football_watcher=SimpleNamespace(choices=choices))):
+        assert bare.football_state() == {"available": False, "message": page_module.NO_HOME}
+        assert bare.set_football("285", "goals", False, LOGIN) == {"success": False, "message": NOT_CONNECTED}
+    bare = _page()
+    assert bare.follow_football("Arsenal", LOGIN) == {"success": False, "message": NOT_CONNECTED}
+    assert bare.unfollow_football("Arsenal", LOGIN) == {"success": False, "message": NOT_CONNECTED}
+    assert football.followed == [] and football.unfollowed == [] and choices._state["teams"] == {}
+
+
+def test_a_football_change_needs_the_pages_own_header(files, tmp_path):
+    page, football, choices = _football_page(tmp_path)
+    page.start()
+    try:
+        body = {"id": "285", "kind": "goals", "on": False}
+        assert _ask(page, "/api/football", body)[0] == 403
+        assert _ask(page, "/api/football/follow", {"name": "Arsenal"})[0] == 403
+        assert _ask(page, "/api/football/unfollow", {"name": "Everton"})[0] == 403
+        assert _ask(page, "/api/football", body, X_Nova="page", Sec_Fetch_Site="cross-site")[0] == 403
+        assert choices.enabled("285", "goals") and football.followed == [] and football.unfollowed == []
+        state = json.loads(_ask(page, "/api/football")[2])
+        assert state["available"] is True and state["teams"][0]["id"] == "285"
+        assert json.loads(_ask(page, "/api/football", body, X_Nova="page")[2])["success"]
+        assert not choices.enabled("285", "goals")
+        assert json.loads(_ask(page, "/api/football/follow", {"name": "Arsenal"}, X_Nova="page")[2])["success"]
+        assert json.loads(_ask(page, "/api/football/unfollow", {"name": "Everton"}, X_Nova="page")[2])["success"]
+        assert football.followed == ["Arsenal"] and football.unfollowed == ["Everton"]
+        # No server error for nonsense: a missing key, or a name which isn't text.
+        for path, nonsense in (("/api/football", {"kind": "goals"}), ("/api/football/follow", {}),
+                               ("/api/football/follow", {"name": 7}), ("/api/football/unfollow", {"name": ["Everton"]})):
+            assert json.loads(_ask(page, path, nonsense, X_Nova="page")[2]) == {
+                "success": False, "message": "That didn't make sense."}
+        assert football.followed == ["Arsenal"] and football.unfollowed == ["Everton"]
     finally:
         page.stop()
 

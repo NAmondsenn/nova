@@ -55,6 +55,7 @@ from voice_assistant.batteries import HOME_FAILURES
 from voice_assistant.clock import format_duration
 from voice_assistant.config import CHOICES, LIMITS, Config, ConfigError, check, clashes, limit_problem
 from voice_assistant.devices import AppDevice
+from voice_assistant.football import FootballUnavailable
 from voice_assistant.google_calendar import READ_FAILURES, ClientRefused, GoogleSignInError, SignInNeeded
 from voice_assistant.music import _chosen, why_no_player
 from voice_assistant.ntfy import RETOPIC
@@ -773,6 +774,34 @@ class SettingsPage:
             if battery.id in deciding:
                 devices[-1]["person"] = deciding[battery.id]
         return {"available": True, "also_send_when_said": choices.also_send_when_said, "devices": devices}
+
+    def football_state(self) -> Dict:
+        """
+        The teams followed in Home Assistant, read fresh each time, with which of their
+        announcements are on - what the Football section shows.
+
+        Returns:
+            {"available": True, "teams": [...], "unknown": [...], "trimmed": ...} with the
+            teams in the order of Home Assistant's box, each with its id, name, "stale"
+            (whether what Home Assistant shows of it is an old copy) and "switches" (every
+            kind of announcement, on or off); "unknown" the entries in the box which no team
+            was found by, so that they can be removed; and "trimmed" whether Home Assistant
+            left some teams out to keep its sensor small. Else {"available": False,
+            "message": ...}, the message being what to say.
+        """
+        football, watcher = self.brain.football, self.brain.football_watcher
+        if football is None or watcher is None:
+            return {"available": False, "message": NO_HOME}
+        try:
+            reading = football.read()
+        except FootballUnavailable as e:
+            # Not logged here: the watcher says so once itself, and the page asks again each
+            # time it is opened.
+            return {"available": False, "message": str(e)}
+        choices = watcher.choices
+        teams = [{"id": team.id, "name": team.name, "stale": team.stale, "switches": choices.switches(team.id)}
+                 for team in reading.teams]
+        return {"available": True, "teams": teams, "unknown": list(reading.unknown), "trimmed": reading.trimmed}
 
     def calendars_state(self) -> Dict:
         """
@@ -1601,6 +1630,97 @@ class SettingsPage:
         logger.info(f"Settings page: {who} {'switched on' if on else 'switched off'} sending what Nova says about batteries")
         return {"success": True, "message": "Saved. It's used straight away."}
 
+    def set_football(self, team_id, kind, on, who: str) -> Dict:
+        """
+        Switches one kind of announcement on or off for a followed team - see
+        FootballChoices. It takes effect at the watcher's next look, with no restart. The
+        types are checked here, as bool("false") would be True.
+
+        Args:
+            team_id: The team's ESPN id, which the switches are kept by. Home Assistant has
+                to be showing it just now, so that nothing is kept for a team it never had.
+            kind: One of the watcher's KINDS, e.g. "goals".
+            on: Whether it is to be said.
+            who: The login making the change.
+
+        Returns:
+            {"success": ..., "message": ...}
+        """
+        if not (isinstance(team_id, str) and isinstance(kind, str) and isinstance(on, bool)):
+            return {"success": False, "message": "That didn't make sense."}
+        football, watcher = self.brain.football, self.brain.football_watcher
+        if football is None or watcher is None:
+            return {"success": False, "message": "Nova isn't connected to Home Assistant."}
+        try:
+            reading = football.read()
+        except FootballUnavailable as e:
+            return {"success": False, "message": str(e)}
+        team = next((each for each in reading.teams if each.id == team_id), None)
+        if team is None:
+            return {"success": False, "message": "Home Assistant isn't showing that team just now."}
+        with self._saving:
+            try:
+                watcher.choices.set(team.id, team.name, kind, on)
+            except ValueError as e:
+                return {"success": False, "message": str(e)}
+            except OSError as e:
+                logger.error(f"Settings page: couldn't save a football change: {e}")
+                return {"success": False, "message": "Couldn't save that."}
+        logger.info(f"Settings page: {who} switched the {kind} announcements {'on' if on else 'off'} "
+                    f"for {team.name} ({team.id})")
+        return {"success": True, "message": f"Saved. It's used straight away for {team.name}."}
+
+    def follow_football(self, name, who: str) -> Dict:
+        """
+        Follows a team, as saying so would - see Football.follow, which asks Home Assistant
+        what it makes of the name and waits for it to show the team, up to half a minute.
+        _saving isn't held for that: nothing of Nova's own is saved, and Football keeps
+        two follows from writing over each other itself, so every other change on the page
+        would otherwise wait for Home Assistant.
+
+        Args:
+            name: The team, as it would be said - text with something in it.
+            who: The login making the change.
+
+        Returns:
+            {"success": ..., "message": ...}, what Football says of it.
+        """
+        refused = self._football_name_refused(name)
+        if refused:
+            return refused
+        logger.info(f"Settings page: {who} asked to follow {name!r}")
+        return self.brain.football.follow(name)
+
+    def unfollow_football(self, name, who: str) -> Dict:
+        """
+        Unfollows a team, or takes an entry which no team was found by out of Home
+        Assistant's box - see Football.unfollow.
+
+        Args:
+            name: The team's name, or the entry, as the page shows it.
+            who: The login making the change.
+
+        Returns:
+            {"success": ..., "message": ...}, what Football says of it.
+        """
+        refused = self._football_name_refused(name)
+        if refused:
+            return refused
+        logger.info(f"Settings page: {who} asked to unfollow {name!r}")
+        return self.brain.football.unfollow(name)
+
+    def _football_name_refused(self, name) -> Optional[Dict]:
+        """
+        What to answer a follow or an unfollow with when it can't be tried: the name isn't
+        text with something in it - Football strips what it is given, so has to be given
+        text - or there is no football to ask. None when it can.
+        """
+        if not isinstance(name, str) or not name.strip():
+            return {"success": False, "message": "That didn't make sense."}
+        if self.brain.football is None:
+            return {"success": False, "message": "Nova isn't connected to Home Assistant."}
+        return None
+
     def run(self, entity_id: str, who: str, satellite: Optional[str] = None, confirmed: bool = False) -> Dict:
         """
         Runs a script or sets a scene - see HomeAssistant.run, whose guard still decides.
@@ -2093,6 +2213,9 @@ ACTIONS: Dict[str, Callable[[SettingsPage, Dict, str], Dict]] = {
     "/api/batteries": lambda page, body, who: page.set_battery(
         body["id"], who, body.get("enabled"), body.get("marks"), body.get("send_to_phone"), body.get("reset", False)),
     "/api/batteries/also": lambda page, body, who: page.set_battery_also_send(body["on"], who),
+    "/api/football": lambda page, body, who: page.set_football(body["id"], body["kind"], body["on"], who),
+    "/api/football/follow": lambda page, body, who: page.follow_football(body["name"], who),
+    "/api/football/unfollow": lambda page, body, who: page.unfollow_football(body["name"], who),
     "/api/run": lambda page, body, who: page.run(
         body["id"], who, body.get("satellite"), body.get("confirmed", False)),
     "/api/routines": lambda page, body, who: page.save_routine(body["routine"], who),
@@ -2194,6 +2317,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(page.home_state(satellite))
         elif path == "/api/batteries":
             self._send_json(page.batteries_state())
+        elif path == "/api/football":
+            self._send_json(page.football_state())
         elif path == "/api/calendars":
             self._send_json(page.calendars_state())
         elif path == "/api/home-choices":
