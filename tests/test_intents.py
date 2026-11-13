@@ -294,6 +294,25 @@ def test_the_teams_are_only_asked_for_once_a_request_has_an_assist_shape():
     assert asked == ["names"]
 
 
+@pytest.mark.parametrize("text, followed", [
+    # Said in plain letters or the accented ones, as the speech recogniser may write either.
+    ("Is Atletico Madrid playing?", "Atlético Madrid"), ("Is Atlético Madrid playing?", "Atlético Madrid"),
+    ("Is Bodo Glimt playing?", "Bodø/Glimt"), ("Is Bodø Glimt playing?", "Bodø/Glimt"),
+    ("Is Koln playing?", "Köln"), ("Is Lodz playing?", "Łódź"), ("Is Atletico Madrid playing?", "ATLÉTICO MADRID"),
+])
+def test_a_team_is_heard_with_its_accents_or_without(text, followed):
+    assert LocalIntents(home=HOME, football=lambda: [followed]).match(text) is None
+
+
+def test_a_team_is_heard_by_any_name_it_is_known_by():
+    # Football.known_as gives the short name ESPN has, the full name and the entry of the box.
+    def known_as():
+        return ["Nott'm Forest", "Nottingham Forest", "Forest"]
+
+    assert LocalIntents(home=HOME, football=known_as).match("Is Nottingham Forest playing?") is None
+    assert LocalIntents(home=HOME, football=known_as).match("Is Forest on?") is None
+
+
 def test_the_football_calendar_is_still_heard():
     # "Football" is only left out of Assist's things, not of the calendars' words, so a
     # calendar of that name keeps working.

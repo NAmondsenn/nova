@@ -18,6 +18,7 @@ come first.
 
 import logging
 import re
+import unicodedata
 from datetime import date, datetime, timedelta
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -257,6 +258,16 @@ def _tidied(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9' ]", " ", text.lower())).strip()
 
 
+# The letters which Unicode doesn't decompose into a plain letter and an accent, as they are written plain.
+_UNACCENTED = str.maketrans({"ø": "o", "æ": "ae", "œ": "oe", "ß": "ss", "ł": "l", "đ": "d"})
+
+
+def _plain(text: str) -> str:
+    """Text with its accents taken off, in lower case: "Atlético" is "atletico", "Bodø" is "bodo"."""
+    decomposed = unicodedata.normalize("NFKD", text.lower())
+    return "".join(char for char in decomposed if not unicodedata.combining(char)).translate(_UNACCENTED)
+
+
 def _ordinal(day: int) -> str:
     """A day of the month as it's said, e.g. 4 -> "4th"."""
     suffix = "th" if 11 <= day % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
@@ -281,10 +292,10 @@ class LocalIntents:
                 GoogleCalendar.activity_words. Asked at each match, so a calendar added
                 in Google is heard from then on. Without it, the activity rules don't
                 match, and Claude has them.
-            football: Gives the names of the teams the user follows - see Football.names.
-                Asked only once a request has the shape of one for Assist, so that a team
-                is never taken for a thing of Home Assistant's. Without it, only the word
-                "football" is left to Claude.
+            football: Gives every name the teams the user follows are known by - see
+                Football.known_as. Asked only once a request has the shape of one for
+                Assist, so that a team is never taken for a thing of Home Assistant's.
+                Without it, only the word "football" is left to Claude.
             wake_word: The wake word, e.g. "Hey Nova" - its last word, run into a command
                 said in the same breath ("Novopause."), is taken off it, and so are the
                 words before that ("Hey Novopause.").
@@ -544,7 +555,9 @@ class LocalIntents:
         """
         Whether the words have the name of a team the user follows, as whole words - "south
         shields" in "is the south shields game on", but not "liverpool" in "liverpoolish".
-        Each name is tidied as a request is, so "St. Johnstone" is heard as said.
+        Each name is tidied as a request is, and heard with its accents as well as without
+        them: the speech recogniser may write "Atlético Madrid" either way, and tidied as it
+        is "Atletico Madrid" is "atl tico madrid" only.
 
         Args:
             words: The thing a request is about, as the rules see it.
@@ -555,7 +568,9 @@ class LocalIntents:
         if self.football is None:
             return False
         said = f" {' '.join(words)} "
-        return any(f" {tidy} " in said for tidy in map(_tidied, self.football()) if tidy)
+        # Both forms of each name, as a request with its accents is split by _tidied in the same places.
+        heard = {_tidied(form) for name in self.football() for form in (name, _plain(name))}
+        return any(f" {tidy} " in said for tidy in heard if tidy)
 
     def _ask(self, found) -> Optional[Dict]:
         # Said to be a question, so that one the guard refuses - "is the garage door

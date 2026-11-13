@@ -1832,7 +1832,7 @@ def test_a_sessions_actions_read_batteries_from_the_brains_watcher(brain, make_s
 def test_a_sessions_actions_read_football_from_the_brain(brain, make_session):
     # A session names the followed teams to Claude as it starts, so it asks for them.
     asked = []
-    brain.football = SimpleNamespace(names=lambda: asked.append("names") or ["Stevenage"])
+    brain.football = SimpleNamespace(names=lambda: asked.append("names") or ["Stevenage"], known_as=lambda: [])
     session = make_session()
     assert session.actions.football is brain.football
     tools = {tool["name"]: tool for tool in session.llm.tools}
@@ -1849,10 +1849,13 @@ def test_a_sessions_actions_read_the_brains_calendar(brain, make_session):
 
 
 def test_a_sessions_local_rules_leave_football_to_claude(brain, make_session):
-    # The teams the brain follows, so "is Stevenage on?" isn't taken for a media player.
-    brain.football = SimpleNamespace(names=lambda: ["Stevenage"])
+    # Every name of the teams the brain follows - not only the short ones its tools are told - so that
+    # "is Nottingham Forest playing?" isn't taken for a media player.
+    known_as = ["Nott'm Forest", "Nottingham Forest"]
+    brain.football = SimpleNamespace(names=lambda: ["Nott'm Forest"], known_as=lambda: known_as)
     session = make_session()
-    assert session.intents.football() == ["Stevenage"]
+    assert session.intents.football() == known_as
+    assert session.intents.match("Is Nottingham Forest playing?") is None
 
 
 def test_a_session_without_football_has_no_teams_for_its_local_rules(brain, make_session):

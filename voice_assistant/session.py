@@ -230,11 +230,11 @@ class Session:
                                       downloads=brain.downloads, football=brain.football)
 
         # The everyday commands handled without Claude - see intents.py. The activities are
-        # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar;
-        # the teams are the ones followed, which are left to Claude rather than to Assist.
+        # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.
+        # The teams followed are given by every name they have, as they are left to Claude, not Assist.
         self.intents = LocalIntents(clock=brain.clock, ntfy=brain.ntfy, home=self.home,
                                     activities=brain.calendar.activity_words if brain.calendar else None,
-                                    football=brain.football.names if brain.football else None,
+                                    football=brain.football.known_as if brain.football else None,
                                     wake_word=self.wake_word)
 
         # The satellite as a device of its own in Home Assistant, over MQTT, or None

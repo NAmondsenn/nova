@@ -427,6 +427,24 @@ def _followed(reading: Reading) -> List[_Followed]:
     return listed
 
 
+def _known_as(reading: Reading) -> List[str]:
+    """
+    Lists every name the followed teams can be asked for by, from the same names unfollowing goes by.
+
+    Args:
+        reading: What the sensor says.
+
+    Returns:
+        Each team's name, its full name where a match gives one, and the entry of the box which found it,
+        in the order of the box and without one said twice. The entries no team was found by are left out.
+    """
+    known: List[str] = []
+    for one in _followed(reading):
+        if one.found:
+            known.extend(name for name in one.names if not any(_key(name) == _key(seen) for seen in known))
+    return known
+
+
 def _meant(said: str, listed: List[_Followed]) -> List[_Followed]:
     """
     Works out which of the followed were meant: those called exactly what was said, if there are any, else
@@ -475,6 +493,7 @@ class Football:
         self._lock = threading.Lock()
         self._changing = threading.Lock()
         self._names: List[str] = []
+        self._known_as: List[str] = []
 
     def read(self) -> Reading:
         """
@@ -501,6 +520,7 @@ class Football:
             raise FootballUnavailable(CANT_GET) from e
         with self._lock:
             self._names = [team.name for team in reading.teams]
+            self._known_as = _known_as(reading)
         return reading
 
     def names(self) -> List[str]:
@@ -511,6 +531,17 @@ class Football:
         """
         with self._lock:
             return list(self._names)
+
+    def known_as(self) -> List[str]:
+        """
+        Returns every name the followed teams are known by from the last good read, asking nothing -
+        each team's name, its full name where a match gives one, and its entry in Home Assistant's
+        teams box - so that a request can be told to be about one of them however it is said: "Nott'm
+        Forest" is also "Nottingham Forest". A read which failed doesn't empty them. Empty before
+        any read.
+        """
+        with self._lock:
+            return list(self._known_as)
 
     def ask(self, what: str, name: str, date: Optional[str] = None, days: Optional[int] = None) -> Dict:
         """

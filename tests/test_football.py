@@ -195,6 +195,38 @@ def test_names_come_from_the_last_good_read():
     assert football.names() == ["Stevenage", "Liverpool"]
 
 
+def test_every_name_a_team_is_known_by_comes_from_the_last_good_read():
+    # Its short name, the full name its match gives it, and the entry of the box which found it - each said
+    # without repeating one, and "Liverpool" is all three.
+    forest = _team("393", "Nott'm Forest", asked="Forest", next=[_found_match(
+        home="Nott'm Forest", home_name="Nottingham Forest", home_id="393", away="Arsenal", away_id="359")])
+    home = FakeHome({FOOTBALL_TEAMS: _sensor([forest, _team("364", "Liverpool", asked="Liverpool")])})
+    football = _football(home)
+    assert football.known_as() == []
+    football.read()
+    assert football.known_as() == ["Nott'm Forest", "Nottingham Forest", "Forest", "Liverpool"]
+    assert football.names() == ["Nott'm Forest", "Liverpool"]
+    home.states[FOOTBALL_TEAMS] = requests.ConnectionError("refused")
+    with pytest.raises(FootballUnavailable):
+        football.read()
+    assert football.known_as() == ["Nott'm Forest", "Nottingham Forest", "Forest", "Liverpool"]
+
+
+def test_a_team_without_a_match_or_an_entry_is_only_known_by_its_name():
+    # An older Home Assistant gives no entry for a team, and a team may have no match to give a full name.
+    home = FakeHome({FOOTBALL_TEAMS: _sensor([_team("395", "Stevenage")])})
+    football = _football(home)
+    football.read()
+    assert football.known_as() == ["Stevenage"]
+
+
+def test_an_entry_no_team_was_found_by_is_not_a_name_a_team_is_known_by():
+    home = FakeHome({FOOTBALL_TEAMS: _sensor([_team("395", "Stevenage")], unknown=["Nowhere FC"])})
+    football = _football(home)
+    football.read()
+    assert football.known_as() == ["Stevenage"]
+
+
 def test_the_unknown_names_and_the_trimmed_flag_are_read():
     home = FakeHome({FOOTBALL_TEAMS: _sensor([], unknown=["Nowhere FC"], trimmed=True)})
     reading = _football(home).read()
