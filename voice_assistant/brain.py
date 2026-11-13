@@ -36,6 +36,7 @@ from voice_assistant.display_feed import DisplayFeed
 from voice_assistant.display_server import DisplayServer
 from voice_assistant.displays import Displays
 from voice_assistant.downloads import Downloads
+from voice_assistant.football import Football
 from voice_assistant.google_calendar import READ_FAILURES, GoogleCalendar
 from voice_assistant.ha_registry import REGISTRY_TIMEOUT, HomeRegistry, HomeSocket
 from voice_assistant.home_assistant import HomeAssistant
@@ -342,6 +343,11 @@ class Brain:
         if self.home:
             self.home.registry = self.registry
         self.batteries = self._make_battery_watcher() if self.home else None
+        # Football from Home Assistant, which Claude answers questions from through every session's
+        # tools and, later, the announcements are made from - one for the brain, so what is said
+        # is one reading. Its settings are read as they are now, so it needs none to start - see
+        # docs/decisions/0014-football.md.
+        self.football = Football(self.home, lambda: self.config.section("football")) if self.home else None
         # What's playing, for each satellite's wake word in its own room - see media_watch.py
         # and Session.playing_here. Started by run().
         self.media = MediaWatcher(self.home, on_change=self._send_states) if self.home else None

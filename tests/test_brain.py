@@ -38,6 +38,7 @@ from voice_assistant.batteries import Battery, BatteryChoices, BatteryWatcher
 from voice_assistant.config import Config
 from voice_assistant.displays import Displays
 from voice_assistant.downloads import Downloads
+from voice_assistant.football import Football
 from voice_assistant.google_calendar import GoogleCalendar
 from voice_assistant.ha_registry import HomeRegistry
 from voice_assistant.media_watch import MediaWatcher
@@ -2220,6 +2221,11 @@ def test_the_brain_has_no_battery_watcher_without_home_assistant(make_brain, mon
     brain = make_brain(home_assistant=HOME_ASSISTANT)
     assert brain.batteries is None and brain.home is None
     assert make_brain().batteries is None
+
+
+def test_football_is_set_up_with_home_assistant_and_not_without(make_brain, home_assistant_token):
+    assert make_brain().football is None
+    assert isinstance(make_brain(home_assistant=HOME_ASSISTANT).football, Football)
 
 
 def test_the_brain_watches_whats_playing_when_home_assistant_is_set_up(make_brain, home_assistant_token):
