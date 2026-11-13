@@ -72,6 +72,9 @@ def test_goals():
     assert said == [("goals", "Goal for Notts County. Notts County 1, Stevenage 1.")]
     said, seen = _events(seen, _match("in", "first_half", 2, 2))
     assert said == [("goals", "Goals for both sides. Notts County 2, Stevenage 2.")]
+    # A score which goes down may be an old copy, so it is said only when the next look shows it again.
+    said, seen = _events(seen, _match("in", "first_half", 2, 1))
+    assert said == []
     said, seen = _events(seen, _match("in", "first_half", 2, 1))
     assert said == [("goals", "Goal ruled out. Notts County 2, Stevenage 1.")]
 
@@ -168,10 +171,135 @@ def test_a_phase_home_assistant_has_added_since_counts_as_none():
 
 def test_the_record_is_the_match_as_it_is_now():
     _, record = _events(None, _match("in", "second_half", 1, 2, minutes=-60))
-    assert record == {"home": 1, "away": 2, "phase": "second_half", "state": "in", "starting": False,
+    assert record == {"home": 1, "away": 2, "waiting": None, "phase": "second_half", "state": "in", "starting": False,
                       "at": NOW, "kickoff": NOW - 3600}
     assert _events(None, _match(minutes=10))[1] == {
-        "home": None, "away": None, "phase": None, "state": "pre", "starting": True, "at": NOW, "kickoff": NOW + 600}
+        "home": None, "away": None, "waiting": None, "phase": None, "state": "pre", "starting": True,
+        "at": NOW, "kickoff": NOW + 600}
+
+
+def test_a_goal_which_flickers_away_and_back_is_said_once():
+    _, seen = _events(None, _match("in", "first_half", 0, 0))
+    said, seen = _events(seen, _match("in", "first_half", 0, 1))
+    assert said == [("goals", "Goal for Stevenage. Notts County 0, Stevenage 1.")]
+    # One look at the score as it was is an old copy: not a goal ruled out, and not the goal again when it is back.
+    said, seen = _events(seen, _match("in", "first_half", 0, 0))
+    assert said == []
+    assert _events(seen, _match("in", "first_half", 0, 1))[0] == []
+
+
+def test_a_goal_ruled_out_is_said_once_it_is_seen_on_two_looks_running():
+    _, seen = _events(None, _match("in", "first_half", 2, 2))
+    said, seen = _events(seen, _match("in", "first_half", 2, 1))
+    assert said == []
+    # The higher score is kept meanwhile, and the lower one is noted as waiting.
+    assert (seen["home"], seen["away"], seen["waiting"]) == (2, 2, {"home": 2, "away": 1})
+    said, seen = _events(seen, _match("in", "first_half", 2, 1))
+    assert said == [("goals", "Goal ruled out. Notts County 2, Stevenage 1.")]
+    assert (seen["home"], seen["away"], seen["waiting"]) == (2, 1, None)
+    assert _events(seen, _match("in", "first_half", 2, 1))[0] == []
+
+
+def test_one_lower_look_and_then_the_old_score_again_says_nothing():
+    _, seen = _events(None, _match("in", "first_half", 2, 2))
+    _, seen = _events(seen, _match("in", "first_half", 2, 1))
+    said, seen = _events(seen, _match("in", "first_half", 2, 2))
+    assert said == [] and seen["waiting"] is None
+    assert _events(seen, _match("in", "first_half", 2, 2))[0] == []
+
+
+def test_a_lower_score_waiting_is_dropped_when_the_next_look_is_something_else():
+    _, seen = _events(None, _match("in", "first_half", 2, 2))
+    _, seen = _events(seen, _match("in", "first_half", 2, 1))
+    # Another lower score waits in its turn, and is said only when seen again.
+    said, seen = _events(seen, _match("in", "first_half", 1, 1))
+    assert said == [] and seen["waiting"] == {"home": 1, "away": 1}
+    # A goal is compared with the score kept, not with the one which waited.
+    said, seen = _events(seen, _match("in", "first_half", 3, 2))
+    assert said == [("goals", "Goal for Notts County. Notts County 3, Stevenage 2.")]
+    assert seen["waiting"] is None
+
+
+def test_an_older_pre_look_in_the_middle_of_a_match_is_an_old_copy():
+    _, seen = _events(None, _match("in", "first_half", 1, 0))
+    # Scores not given and, once, a kick-off in ten minutes: neither "Goal ruled out" nor "starting".
+    for old_copy in (_match(), _match(minutes=10)):
+        said, seen = _events(seen, old_copy)
+        assert said == [] and seen["state"] == "in" and (seen["home"], seen["away"]) == (1, 0)
+    assert _events(seen, _match("in", "first_half", 1, 0))[0] == []
+    assert _events(seen, _match("in", "first_half", 2, 0))[0] == [("goals", "Goal for Notts County. Notts County 2, Stevenage 0.")]
+
+
+def test_a_look_without_the_scores_the_record_has_is_an_old_copy():
+    _, seen = _events(None, _match("in", "second_half", 1, 2))
+    assert _events(seen, _match("in", "second_half"))[0] == []
+    assert _events(seen, _match("in", "second_half", 1, None))[0] == []
+
+
+def test_an_old_copy_changes_nothing_in_the_record_but_when_it_was_made():
+    _, seen = _events(None, _match("in", "second_half", 1, 2, minutes=-60))
+    old_copy = _match("in", "first_half", 0, 0, minutes=-60)
+    said, record = events(seen, old_copy, NOW + 30, 900, {"285"})
+    assert said == [] and record == {**seen, "at": NOW + 30}
+
+
+def test_after_a_gap_an_older_look_is_the_match_as_it_is_not_an_old_copy():
+    _, seen = _events(None, _match("in", "second_half", 1, 2))
+    said, seen = _events({**seen, "at": NOW - 301}, _match())
+    assert said == [] and seen["state"] == "pre" and seen["home"] is None
+
+
+def test_a_phase_which_flickers_is_said_once():
+    _, seen = _events(None, _match("in", "second_half", 0, 1))
+    said, seen = _events(seen, _match("in", "half_time", 0, 1))
+    assert said == [] and seen["phase"] == "second_half"
+    assert _events(seen, _match("in", "second_half", 0, 1))[0] == []
+
+    _, seen = _events(None, _match("in", "first_half", 0, 1))
+    said, seen = _events(seen, _match("in", "half_time", 0, 1))
+    assert said == [("half_time", "Half time. Notts County 0, Stevenage 1.")]
+    said, seen = _events(seen, _match("in", "first_half", 0, 1))
+    assert said == []
+    assert _events(seen, _match("in", "half_time", 0, 1))[0] == []
+
+
+def test_a_look_with_no_phase_known_never_takes_the_phase_away():
+    _, seen = _events(None, _match("in", "second_half", 0, 1))
+    # The state and the scores move on as usual; the phase stays.
+    said, seen = _events(seen, _match("in", "stoppage_time", 0, 2))
+    assert said == [("goals", "Goal for Stevenage. Notts County 0, Stevenage 2.")]
+    assert seen["phase"] == "second_half" and seen["away"] == 2
+    assert _events(seen, _match("in", "second_half", 0, 2))[0] == []
+    said, seen = _events(seen, _match("in", None, 0, 2))
+    assert said == [] and seen["phase"] == "second_half"
+    assert _events(seen, _match("in", "second_half", 0, 2))[0] == []
+
+
+def test_a_full_time_which_flickers_is_said_once():
+    _, seen = _events(None, _match("in", "second_half", 1, 2))
+    said, seen = _events(seen, _match("post", "full_time", 1, 2, winner="away"))
+    assert said == [("full_time", "Full time. Notts County 1, Stevenage 2.")]
+    said, seen = _events(seen, _match("in", "second_half", 1, 2))
+    assert said == [] and seen["state"] == "post" and seen["phase"] == "full_time"
+    assert _events(seen, _match("post", "full_time", 1, 2, winner="away"))[0] == []
+
+
+def test_a_match_which_is_off_says_nothing_whatever_its_score_does():
+    _, seen = _events(None, _match("in", "first_half", 1, 0))
+    said, off = _events(seen, _match("post", "off", 0, 0))
+    assert said == []
+    assert (off["state"], off["phase"], off["home"], off["away"]) == ("post", "off", 0, 0)
+    assert _events(seen, _match("post", "off", 2, 0))[0] == []
+    # Scores Home Assistant can no longer read arrive as none, which isn't 0-0.
+    assert _events(seen, _match("post", "off"))[0] == []
+
+
+def test_a_match_which_comes_back_from_being_off_is_taken_as_it_stands():
+    _, seen = _events(None, _match("in", "first_half", 1, 0))
+    _, seen = _events(seen, _match("post", "off", 1, 0))
+    said, seen = _events(seen, _match("in", "first_half", 1, 0))
+    assert said == [] and seen["state"] == "in"
+    assert _events(seen, _match("in", "first_half", 1, 1))[0] == [("goals", "Goal for Stevenage. Notts County 1, Stevenage 1.")]
 
 
 def test_events_works_from_the_time_it_is_given():
@@ -252,6 +380,75 @@ def test_what_was_seen_is_kept_and_old_matches_are_dropped(tmp_path, monkeypatch
     assert choices.seen("2") == record
 
 
+def _counting_saves(monkeypatch, fail_first=0):
+    """Counts the saves of football.json, failing the first fail_first of them; returns the list of paths saved."""
+    saved = []
+    real = storage.save_json
+
+    def save(path, data, indent=None):
+        if len(saved) < fail_first:
+            saved.append(None)
+            raise OSError("disk full")
+        saved.append(path)
+        real(path, data, indent)
+
+    monkeypatch.setattr(storage, "save_json", save)
+    return saved
+
+
+def test_a_record_which_differs_only_in_when_it_was_made_isnt_saved(tmp_path, monkeypatch):
+    path = str(tmp_path / "football.json")
+    choices = FootballChoices(path)
+    _, first = _events(None, _match("in", "first_half", 0, 1))
+    second = {**first, "at": first["at"] + 30}
+    saved = _counting_saves(monkeypatch)
+    choices.remember("1", first)
+    choices.remember("1", second)
+    assert len(saved) == 1
+    # What is asked for is the newest, and what a restart finds is what was saved.
+    assert choices.seen("1") == second
+    assert FootballChoices(path).seen("1") == first
+    # Nor is one which differs only so from what the file held at the start.
+    again = FootballChoices(path)
+    again.remember("1", {**first, "at": first["at"] + 60})
+    assert len(saved) == 1 and again.seen("1")["at"] == first["at"] + 60
+
+
+def test_a_record_which_differs_in_anything_else_is_saved(tmp_path, monkeypatch):
+    path = str(tmp_path / "football.json")
+    choices = FootballChoices(path)
+    _, first = _events(None, _match("in", "first_half", 0, 0))
+    _, goal = _events(first, _match("in", "first_half", 0, 1))
+    saved = _counting_saves(monkeypatch)
+    choices.remember("1", first)
+    choices.remember("1", goal)
+    assert len(saved) == 2
+    assert FootballChoices(path).seen("1") == goal
+
+
+def test_a_save_which_failed_is_tried_again_at_the_next_look(tmp_path, monkeypatch):
+    path = str(tmp_path / "football.json")
+    choices = FootballChoices(path)
+    _, first = _events(None, _match("in", "first_half", 0, 1))
+    second = {**first, "at": first["at"] + 30}
+    saved = _counting_saves(monkeypatch, fail_first=1)
+    choices.remember("1", first)
+    assert choices.seen("1") == first
+    choices.remember("1", second)
+    assert len(saved) == 2
+    assert FootballChoices(path).seen("1") == second
+
+
+def test_forgetting_a_match_forgets_the_newest_record_of_it_too(tmp_path):
+    path = str(tmp_path / "football.json")
+    choices = FootballChoices(path)
+    _, first = _events(None, _match("in", "first_half", 0, 1))
+    choices.remember("1", first)
+    choices.remember("1", {**first, "at": first["at"] + 30})
+    choices.forget_before(first["kickoff"] + 1)
+    assert choices.seen("1") is None
+
+
 def test_forgetting_old_matches_leaves_the_switches(tmp_path):
     path = str(tmp_path / "football.json")
     choices = FootballChoices(path)
@@ -266,9 +463,10 @@ def test_a_match_record_the_file_holds_wrongly_is_taken_as_never_seen_and_forgot
     path = tmp_path / "football.json"
     good = _events(None, _match("in", "first_half", 0, 1))[1]
     path.write_text(json.dumps({"seen": {
-        "1": {"state": "in"}, "2": "in", "3": {**good, "home": "0"}, "4": {**good, "state": "live"}, "5": good}}))
+        "1": {"state": "in"}, "2": "in", "3": {**good, "home": "0"}, "4": {**good, "state": "live"},
+        "6": {**good, "waiting": {"home": "1", "away": 0}}, "5": good}}))
     choices = FootballChoices(str(path))
-    assert [choices.seen(match_id) for match_id in "1234"] == [None] * 4
+    assert [choices.seen(match_id) for match_id in "12346"] == [None] * 5
     assert choices.seen("5") == good
     choices.forget_before(good["kickoff"])
     assert list(json.loads(path.read_text())["seen"]) == ["5"]
