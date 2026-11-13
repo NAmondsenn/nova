@@ -67,7 +67,22 @@ _REQUIRED = object()
 
 
 class FootballUnavailable(Exception):
-    """Football can't be read just now. str() of it is what to say."""
+    """
+    Football can't be read just now. str() of it is what to say.
+
+    Attributes:
+        why: What went wrong, for the log and never to be said - or None where the error's
+            __cause__ says it, as for Home Assistant not answering.
+    """
+
+    def __init__(self, sentence: str, why: Optional[str] = None):
+        """
+        Args:
+            sentence: What to say.
+            why: What went wrong, if the sentence doesn't tell it.
+        """
+        super().__init__(sentence)
+        self.why = why
 
 
 def _is_whole(value) -> bool:
@@ -156,10 +171,11 @@ def _cant_get(why: str, level: int = logging.DEBUG) -> FootballUnavailable:
             question someone asked is worth a warning.
 
     Returns:
-        The error, whose text is CANT_GET whatever the reason.
+        The error, whose text is CANT_GET whatever the reason, and which carries the reason as
+        its "why", so that whoever catches it - the watcher, which says it once - can log it.
     """
     logger.log(level, f"Football can't be got: {why}")
-    return FootballUnavailable(CANT_GET)
+    return FootballUnavailable(CANT_GET, why)
 
 
 @dataclass(frozen=True)
@@ -510,7 +526,8 @@ class Football:
             FootballUnavailable: Whose text is what to say, if Home Assistant couldn't be asked
                 (as HomeAssistant.failure_message says), has no football sensor (NOT_SET_UP), or
                 the sensor is unavailable, has an error, was last written more than the
-                stale_after setting ago, or isn't shaped as the Contract has it (CANT_GET).
+                stale_after setting ago, or isn't shaped as the Contract has it (CANT_GET, with
+                its "why" saying which).
         """
         sensor = self._state(FOOTBALL_TEAMS)
         stale_after = float(self._settings().get("stale_after", STALE_AFTER))
@@ -519,7 +536,7 @@ class Football:
         except (KeyError, TypeError, ValueError) as e:
             # Not logged above debug: the watcher reads every 30 seconds, and says it once itself.
             logger.debug(f"The football sensor isn't shaped as expected: {e!r}")
-            raise FootballUnavailable(CANT_GET) from e
+            raise FootballUnavailable(CANT_GET, "the sensor isn't shaped as expected") from e
         with self._lock:
             self._names = [team.name for team in reading.teams]
             self._known_as = _known_as(reading)

@@ -10,8 +10,9 @@ import pytest
 import requests
 
 from voice_assistant import football_watch, storage
-from voice_assistant.football import CANT_GET, NOT_SET_UP, FootballUnavailable, Match, Reading, Team
+from voice_assistant.football import CANT_GET, NOT_SET_UP, Football, FootballUnavailable, Match, Reading, Team
 from voice_assistant.football_watch import GAP, KINDS, FootballChoices, FootballWatcher, events, user_home
+from voice_assistant.home_assistant import FOOTBALL_TEAMS
 
 # An instant well away from any change of clock, so that a test passes in whichever time zone it runs.
 NOW = 1_800_000_000.0
@@ -544,6 +545,8 @@ class Rig:
     def __init__(self, tmp_path, quiet=False, at_home=True, can_say=True):
         self.said = []
         self.quiet, self.at_home, self.can_say = quiet, at_home, can_say
+        # Called after each announcement is tried, to change things as they change while one is being said.
+        self.on_say = None
         self.asked_home = 0
         self.settings = {}
         self.football = FakeFootball()
@@ -554,6 +557,8 @@ class Rig:
     def _say(self, message):
         if self.can_say:
             self.said.append(message)
+        if self.on_say is not None:
+            self.on_say()
         return self.can_say
 
     def _home_now(self):
@@ -634,6 +639,26 @@ def test_two_followed_teams_in_one_match(tmp_path):
     assert _both_follow(tmp_path / "neither", off=[("285", "Stevenage"), ("340", "Notts County")]).said == []
 
 
+def test_a_stale_teams_switches_still_count_for_a_match_it_shares(tmp_path):
+    rig = Rig(tmp_path)
+    rig.choices.set("340", "Notts County", "goals", False)
+    nil = _match("in", "first_half", 0, 0)
+    rig.look(_team("285", "Stevenage", now=nil), _team("340", "Notts County", now=nil))
+    # Stevenage's data is old at the look which shows its goal, and Notts County's isn't: the goal is from Notts
+    # County's copy, and is said because Stevenage, who has goals on, is one of the teams in the match.
+    rig.look(_team("285", "Stevenage", now=nil, stale=True), _team("340", "Notts County", now=_match("in", "first_half", 0, 1)),
+             at=NOW + 30)
+    assert rig.said == [GOAL]
+    # With goals off for both it is not said, stale or not.
+    off = Rig(tmp_path / "off")
+    off.choices.set("285", "Stevenage", "goals", False)
+    off.choices.set("340", "Notts County", "goals", False)
+    off.look(_team("285", "Stevenage", now=nil), _team("340", "Notts County", now=nil))
+    off.look(_team("285", "Stevenage", now=nil, stale=True), _team("340", "Notts County", now=_match("in", "first_half", 0, 1)),
+             at=NOW + 30)
+    assert off.said == []
+
+
 def test_a_match_is_looked_at_once_however_many_followed_teams_it_is_in(tmp_path, monkeypatch):
     calls = []
     real = football_watch.events
@@ -694,6 +719,41 @@ def test_a_team_stale_for_longer_than_the_gap_says_nothing_of_what_it_missed(tmp
     assert rig.said == []
     rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 2)), at=NOW + GAP + 90)
     assert rig.said == ["Goal for Stevenage. Notts County 0, Stevenage 2."]
+
+
+class FakeHome:
+    """Gives the football sensor a test sets, for a real Football to read."""
+
+    def __init__(self, sensor):
+        self.sensor = sensor
+
+    def state(self, entity_id, timeout=None):
+        assert entity_id == FOOTBALL_TEAMS
+        return self.sensor
+
+
+def _sensor(age=10, state="1", **attributes):
+    """The sensor as /api/states/<id> has it, last written by Home Assistant age seconds before NOW, with no teams."""
+    reported = datetime.fromtimestamp(NOW - age, timezone.utc).isoformat()
+    return {"entity_id": FOOTBALL_TEAMS, "state": state, "attributes": {"teams": [], **attributes},
+            "last_changed": reported, "last_updated": reported, "last_reported": reported}
+
+
+@pytest.mark.parametrize("sensor, why", [
+    (_sensor(error="OSError: ESPN down"), "the sensor has an error: 'OSError: ESPN down'"),
+    (_sensor(state="unavailable"), "the sensor is unavailable"),
+    (_sensor(age=600), "the sensor was last written 600 seconds ago"),
+    ({**_sensor(), "attributes": {}}, "the sensor isn't shaped as expected"),
+], ids=["an error", "unavailable", "too old", "wrong shape"])
+def test_why_football_cant_be_read_is_in_the_one_warning(tmp_path, caplog, sensor, why):
+    football = Football(FakeHome(sensor), lambda: {}, now=lambda: NOW)
+    watcher = FootballWatcher(football, FootballChoices(str(tmp_path / "football.json")), lambda message: True,
+                              lambda: False, lambda: True, lambda: {})
+    with caplog.at_level(logging.INFO):
+        watcher.check(NOW)
+        watcher.check(NOW + 30)
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1 and CANT_GET in warnings[0] and why in warnings[0]
 
 
 def test_football_down_is_logged_once(tmp_path, caplog):
@@ -827,6 +887,32 @@ def test_home_assistant_is_asked_where_the_user_is_only_when_something_is_to_be_
     rig.quiet = True
     rig.look(_team("285", "Stevenage", now=_match("in", "second_half", 0, 1)), at=NOW + 90)
     assert len(rig.said) == 2 and rig.asked_home == 1
+
+
+def test_quiet_hours_are_asked_before_each_announcement_not_once_a_look(tmp_path, caplog):
+    rig = Rig(tmp_path)
+    rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 0, 0)))
+    # Night falls while the goal is being said, and half time is the next thing to say in the same look.
+    rig.on_say = lambda: setattr(rig, "quiet", True)
+    with caplog.at_level(logging.INFO):
+        rig.look(_team("285", "Stevenage", now=_match("in", "half_time", 0, 1)), at=NOW + 30)
+    assert rig.said == [GOAL]
+    dropped = [record.getMessage() for record in caplog.records if "Half time" in record.getMessage()]
+    assert len(dropped) == 1 and "quiet hours" in dropped[0]
+
+
+def test_a_match_which_kicked_off_over_a_day_ago_is_left_alone(tmp_path, monkeypatch):
+    rig = Rig(tmp_path)
+    saved = _counting_saves(monkeypatch)
+    # Home Assistant going on listing it, look after look, must not have it remembered and forgotten each time.
+    old = _match("post", "full_time", 1, 0, minutes=-2 * 24 * 60)
+    rig.look(_team("285", "Stevenage", next=(old,)))
+    rig.look(_team("285", "Stevenage", next=(old,)), at=NOW + 30)
+    assert rig.choices.seen("401") is None and saved == []
+    # One which kicked off exactly a day ago is still looked at, as it is still kept.
+    day = Rig(tmp_path / "day")
+    day.look(_team("285", "Stevenage", next=(_match("in", "first_half", 0, 0, minutes=-24 * 60),)))
+    assert day.choices.seen("401") is not None
 
 
 def test_a_bug_with_one_match_doesnt_lose_the_others(tmp_path, caplog):

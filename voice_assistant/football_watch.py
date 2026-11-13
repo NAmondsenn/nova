@@ -571,7 +571,10 @@ class FootballWatcher:
         except FootballUnavailable as e:
             # A line every 30 seconds for a night of Home Assistant being restarted would bury the log.
             if not self._down:
-                why = f" ({e.__cause__!r})" if e.__cause__ is not None else ""
+                reasons = [e.why] if e.why else []
+                if e.__cause__ is not None:
+                    reasons.append(repr(e.__cause__))
+                why = f" ({'; '.join(reasons)})" if reasons else ""
                 logger.warning(f"Football can't be read, so matches aren't being watched: {e}{why}")
             self._down = True
             return
@@ -579,8 +582,8 @@ class FootballWatcher:
             logger.info("Football is back, matches are being watched again.")
             self._down = False
         lead = self._number("kickoff_minutes", KICKOFF_MINUTES) * 60
-        asked: Dict[str, Optional[str]] = {}
-        for match, followed in self._matches(reading).values():
+        asked: Dict[str, Optional[bool]] = {}
+        for match, followed in self._matches(reading, now).values():
             try:
                 before = self._choices.seen(match.id)
                 due, record = events(before, match, now, lead, followed)
@@ -653,28 +656,34 @@ class FootballWatcher:
         return default
 
     @staticmethod
-    def _matches(reading: Reading) -> Dict[str, Tuple[Match, Set[str]]]:
+    def _matches(reading: Reading, now: float) -> Dict[str, Tuple[Match, Set[str]]]:
         """
         Gathers the matches to look at: each team's match in play or today, and its next fixture.
 
         Args:
             reading: What football.read() gave.
+            now: The current epoch time.
 
         Returns:
-            Each match once, by its id, with the ids of the followed teams it is the match of. A team
-            whose data is stale is left out altogether, a match it shares with a team whose data is
-            good being looked at as that team has it.
+            Each match once, by its id, with the ids of the followed teams in it. A team whose data is
+            stale is no source of a match, so one it shares with a team whose data is good is looked
+            at as that team has it - but it is still a followed team in the match, as the switches
+            of both count (decision 7: said if either team's is on). A match which kicked off more
+            than KEEP_FOR ago is left out: nothing is said of one so long over, and it would be
+            remembered and forgotten again, with a save each time, at every look.
         """
         found: Dict[str, Tuple[Match, Set[str]]] = {}
         for team in reading.teams:
             if team.stale:
                 continue
             for match in (team.now, team.next[0] if team.next else None):
-                if match is not None:
+                if match is not None and match.kickoff.timestamp() >= now - KEEP_FOR:
                     found.setdefault(match.id, (match, set()))[1].add(team.id)
+        for match, followed in found.values():
+            followed.update(team.id for team in reading.teams if team.id in (match.home_id, match.away_id))
         return found
 
-    def _announce(self, event: Event, followed: Set[str], asked: Dict[str, Optional[str]]):
+    def _announce(self, event: Event, followed: Set[str], asked: Dict[str, Optional[bool]]):
         """
         Says one event if it should be, and logs why if it isn't.
 
@@ -692,23 +701,24 @@ class FootballWatcher:
         if why:
             logger.info(f'Not saying "{event.message}": {why}.')
 
-    def _why_not_now(self, asked: Dict[str, Optional[str]]) -> Optional[str]:
+    def _why_not_now(self, asked: Dict[str, Optional[bool]]) -> Optional[str]:
         """
-        Says why nothing may be said at this look, if so.
+        Says why nothing may be said just now, if so.
 
         Args:
-            asked: What has been found out already at this look, which this adds to, so that
-                Home Assistant is asked where the user is once, and only if something is to be said.
+            asked: What has been found out already at this look, which this adds to. Only where the
+                user is: Home Assistant is asked once, and only if something is to be said. Quiet
+                hours are asked each time, as a look with several announcements takes as long as
+                saying them does, and may reach the night part way through.
 
         Returns:
             The reason - quiet hours, or Home Assistant saying the user is out (if it can't say, it
             may be said) - or None if it may be said.
         """
-        if "why" not in asked:
-            if self._quiet():
-                asked["why"] = "it is quiet hours"
-            elif self._home_now() is False:
-                asked["why"] = "Home Assistant says the user is out"
-            else:
-                asked["why"] = None
-        return asked["why"]
+        if self._quiet():
+            return "it is quiet hours"
+        if "home" not in asked:
+            asked["home"] = self._home_now()
+        if asked["home"] is False:
+            return "Home Assistant says the user is out"
+        return None

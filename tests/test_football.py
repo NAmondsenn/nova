@@ -128,6 +128,19 @@ def test_football_cant_be_got(sensor):
     assert str(caught.value) == "I can't get football right now."
 
 
+@pytest.mark.parametrize("sensor, why", [
+    (_sensor([], error="OSError: down"), "the sensor has an error: 'OSError: down'"),
+    (_sensor([], state="unavailable"), "the sensor is unavailable"),
+    (_sensor([], age=301), "the sensor was last written 301 seconds ago"),
+    (_sensor("not a list"), "the sensor isn't shaped as expected"),
+], ids=["an error", "unavailable", "too old", "wrong shape"])
+def test_why_football_cant_be_got_is_kept_on_the_error_but_never_said(sensor, why):
+    with pytest.raises(FootballUnavailable) as caught:
+        _football(FakeHome({FOOTBALL_TEAMS: sensor})).read()
+    assert caught.value.why == why
+    assert str(caught.value) == "I can't get football right now."
+
+
 def test_a_reading_five_minutes_old_is_still_good():
     assert _football(FakeHome({FOOTBALL_TEAMS: _sensor([], age=300)})).read().teams == ()
 
@@ -189,6 +202,23 @@ def test_an_older_home_assistant_marks_every_team():
     assert reading.teams[0].next[0].phase is None
     assert reading.teams[0].asked is None
     assert reading.teams[0].next[0].home == "Man Utd"
+
+
+def test_a_stale_sensor_with_one_team_marked_and_another_with_no_mark_leaves_the_other_fresh():
+    # Only a Home Assistant which marks no team at all leaves who is stale to the sensor.
+    teams = [_team("395", "Stevenage", stale=True), _team("364", "Liverpool")]
+    home = FakeHome({FOOTBALL_TEAMS: _sensor(teams, stale=True)})
+    assert [team.stale for team in _football(home).read().teams] == [True, False]
+
+
+def test_a_team_whose_stale_is_null_counts_as_having_no_mark():
+    # With no team marked otherwise the sensor decides, as for a team which leaves the key out; beside a team which says it isn't, it doesn't.
+    nobody = [_team("395", "Stevenage", stale=None), _team("364", "Liverpool", stale=None)]
+    home = FakeHome({FOOTBALL_TEAMS: _sensor(nobody, stale=True)})
+    assert [team.stale for team in _football(home).read().teams] == [True, True]
+    one = [_team("395", "Stevenage", stale=False), _team("364", "Liverpool", stale=None)]
+    home = FakeHome({FOOTBALL_TEAMS: _sensor(one, stale=True)})
+    assert [team.stale for team in _football(home).read().teams] == [False, False]
 
 
 def test_a_sensor_that_isnt_stale_marks_no_team_it_doesnt_say_is():
