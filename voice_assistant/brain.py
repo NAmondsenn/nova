@@ -37,6 +37,7 @@ from voice_assistant.display_server import DisplayServer
 from voice_assistant.displays import Displays
 from voice_assistant.downloads import Downloads
 from voice_assistant.football import Football
+from voice_assistant.football_watch import FootballChoices, FootballWatcher, user_home
 from voice_assistant.google_calendar import READ_FAILURES, GoogleCalendar
 from voice_assistant.ha_registry import REGISTRY_TIMEOUT, HomeRegistry, HomeSocket
 from voice_assistant.home_assistant import HomeAssistant
@@ -344,10 +345,12 @@ class Brain:
             self.home.registry = self.registry
         self.batteries = self._make_battery_watcher() if self.home else None
         # Football from Home Assistant, which Claude answers questions from through every session's
-        # tools and, later, the announcements are made from - one for the brain, so what is said
-        # is one reading. Its settings are read as they are now, so it needs none to start - see
+        # tools and the announcements are made from - one for the brain, so what is said is one
+        # reading. Its settings are read as they are now, so it needs none to start - see
         # docs/decisions/0014-football.md.
         self.football = Football(self.home, lambda: self.config.section("football")) if self.home else None
+        # What it says by itself of a followed team's match, from that same reading. Started by run().
+        self.football_watcher = self._make_football_watcher() if self.home else None
         # What's playing, for each satellite's wake word in its own room - see media_watch.py
         # and Session.playing_here. Started by run().
         self.media = MediaWatcher(self.home, on_change=self._send_states) if self.home else None
@@ -421,6 +424,23 @@ class Brain:
         quiet = (self.ntfy or self._night).quiet
         return BatteryWatcher(self.home, choices, say=self._say_battery, send=send, quiet=quiet,
                               check_every=settings["check_every"], stale_after=settings["stale_after"])
+
+    def _make_football_watcher(self) -> FootballWatcher:
+        """
+        The watcher for the followed teams' matches, which says on the default satellite that one
+        is about to start, a goal, half time, the second half and full time - see FootballWatcher
+        and decision 7 of docs/decisions/0014-football.md. It's started by run().
+
+        Returns:
+            The watcher, reading the brain's own Football, keeping ntfy's quiet hours - or, with no
+            ntfy, the brain's own night's - and Home Assistant's word on whether the user is home.
+        """
+        choices = FootballChoices(os.path.join(paths.DATA_DIR, "football.json"))
+        # The same night as the battery watcher's, so one changed on the settings page reaches both.
+        quiet = (self.ntfy or self._night).quiet
+        return FootballWatcher(self.football, choices, say=self._say_football, quiet=quiet,
+                               home_now=lambda: user_home(self.home),
+                               settings=lambda: self.config.section("football"))
 
     def apply_settings(self, changes: Dict[Tuple[str, str], Any]) -> List[Tuple[str, str]]:
         """
@@ -1318,6 +1338,33 @@ class Brain:
             logger.warning("A battery warning wasn't said")
         return bool(said)
 
+    def _say_football(self, message: str) -> bool:
+        """
+        Says what happened in a followed team's match on the default satellite, as FootballWatcher
+        has it said. It's never sent to the phone or kept for later, as decision 7 of
+        docs/decisions/0014-football.md has it: one which isn't said is dropped.
+
+        Args:
+            message: What to say, e.g. "Goal for Liverpool. Liverpool 1, Arsenal 0."
+
+        Returns:
+            Whether it was said - it wasn't with the default satellite away, or if saying it
+            failed, and the watcher then drops it and logs why. Never raises.
+        """
+        session = self.session_for(None)
+        if session is None:
+            logger.warning("A football announcement wasn't said, as the default satellite isn't connected")
+            return False
+        try:
+            said = session.announce(message)
+        except Exception:
+            # The satellite going away mid-sentence, most likely.
+            logger.exception("A football announcement couldn't be said")
+            return False
+        if not said:
+            logger.warning("A football announcement wasn't said")
+        return bool(said)
+
     def _say_download(self, satellite: Optional[str], message: str) -> None:
         """
         Says how a download went on the satellite which asked for it, as Downloads has
@@ -1573,6 +1620,8 @@ class Brain:
         threading.Thread(target=self._run_routines_when_due, daemon=True, name="routines").start()
         if self.batteries:
             self.batteries.start()
+        if self.football_watcher:
+            self.football_watcher.start()
         if self.media:
             self.media.start()
         if self.registry:
@@ -1636,10 +1685,11 @@ class Brain:
     def _clean_up(self):
         """
         Closes everything down in order - the clock, so nothing else starts ringing,
-        and the downloads, so nothing more is said of them, then the batteries, what's
-        playing, the usage device, ntfy, the settings page and the clock displays' server and feed, then
-        every satellite's session, so its device in Home Assistant and its music stop -
-        and then the Piper process kept waiting for the next thing to say.
+        and the downloads, so nothing more is said of them, then the batteries, the football
+        watcher, what's playing, the usage device, ntfy, the settings page and the clock
+        displays' server and feed, then every satellite's session, so its device in Home
+        Assistant and its music stop - and then the Piper process kept waiting for the next
+        thing to say.
         """
         self.running = False
         self.clock.stop()
@@ -1650,6 +1700,8 @@ class Brain:
         self.downloads.stop()
         if self.batteries:
             self.batteries.stop()
+        if self.football_watcher:
+            self.football_watcher.stop()
         if self.media:
             self.media.stop()
         if self.registry:

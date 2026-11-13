@@ -237,6 +237,21 @@ def test_a_battery_setting_which_cant_work_is_refused_by_name(tmp_path, own, set
     assert f"'batteries.{setting}'" in str(caught.value)
 
 
+def test_the_football_defaults_are_checked(tmp_path):
+    football = Config(path=str(tmp_path / "none.yaml")).section("football")
+    assert (football["check_every"], football["stale_after"], football["kickoff_minutes"]) == (30, 300, 15)
+
+
+@pytest.mark.parametrize("setting", ["check_every", "stale_after", "kickoff_minutes"])
+@pytest.mark.parametrize("own", ["", "0", "-5", '"soon"', "true"])
+def test_a_football_setting_which_cant_work_is_refused_by_name(tmp_path, setting, own):
+    # An empty one is read as nothing at all, which only the check for a number above zero refuses.
+    (tmp_path / "config.yaml").write_text(f"football:\n  {setting}: {own}\n")
+    with pytest.raises(ConfigError) as caught:
+        Config(path=str(tmp_path / "config.yaml"))
+    assert f"'football.{setting}'" in str(caught.value)
+
+
 # For each limit, what passes and what just doesn't - the table in design 0009.
 IN_AND_OUT = {
     ("ntfy", "quiet_from"): (["23:59", "00:00"], ["24:00", "7:00", "11pm", 2300, ""]),
@@ -262,6 +277,9 @@ IN_AND_OUT = {
     ("music", "song_download_minutes"): ([1, 10, 60], [0, 61, 10.5, True]),
     ("music", "album_download_minutes"): ([1, 30, 240], [0, 241, 30.5, True]),
     ("display", "port"): ([0, 8766, 65535], [-1, 70000, 8766.5, True]),
+    ("football", "check_every"): ([10, 30, 600], [9, 601, 30.5, True]),
+    ("football", "stale_after"): ([120, 300, 3600], [119, 3601, 300.5, True]),
+    ("football", "kickoff_minutes"): ([1, 15, 120], [0, 121, 15.5, True]),
     # 0 is no spending alert.
     ("usage", "daily_limit"): ([0, 0.25, 100], [-1, -0.01, 100.5, True]),
     ("usage", "pounds_per_dollar"): ([0.1, 0.79, 10], [0, 0.09, 10.5, True]),

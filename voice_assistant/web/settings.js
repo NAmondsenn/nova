@@ -110,6 +110,7 @@ const VOLUMES = {
 // under Other, so a new setting turns up on the page without it changing.
 const GROUPS = [
   ["Music", ["music.", "navidrome.", "soulsync.", "spotify."]],
+  ["Football", ["football."]],
   ["Voice", ["voice."]],
   ["Sounds", ["sounds."]],
   ["Claude", ["web_search.", "conversation.", "usage."]],

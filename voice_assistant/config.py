@@ -33,9 +33,11 @@ BETWEEN_0_AND_1 = {("thresholds", "vad_threshold"), ("thresholds", "silence_thre
 CHOICES = {("music", "player"): ("navidrome", "spotify")}
 # Battery marks are percentages, and how many each kind of device has - the settings page
 # allows no other number. The battery watcher can't check every 0 seconds or call a
-# reading old after -5.
+# reading old after -5, nor can the football watcher, or say a match is starting 0 minutes
+# before it does.
 MARKS = {("batteries", "mobile_marks"): 1, ("batteries", "other_marks"): 2}
-POSITIVE = {("batteries", "check_every"), ("batteries", "stale_after")}
+POSITIVE = {("batteries", "check_every"), ("batteries", "stale_after"),
+            ("football", "check_every"), ("football", "stale_after"), ("football", "kickoff_minutes")}
 
 
 class Limit(NamedTuple):
@@ -72,6 +74,14 @@ LIMITS: Dict[Tuple[str, str], Limit] = {
     # more than an hour for a song, or four for an album, is a download which has stalled.
     ("music", "song_download_minutes"): Limit("number", 1, 60, True),
     ("music", "album_download_minutes"): Limit("number", 1, 240, True),
+    # Looking more often than every 10 seconds would only hammer Home Assistant, and less often than
+    # every 10 minutes a goal would be said long after it was scored.
+    ("football", "check_every"): Limit("number", 10, 600, True),
+    # Home Assistant's scores are up to a minute behind ESPN's, so under 2 minutes football would be called
+    # old while it is as fresh as it gets, and over an hour a score would be said long after it was true.
+    ("football", "stale_after"): Limit("number", 120, 3600, True),
+    # A match is starting a minute before it does at the soonest, and not two hours before it.
+    ("football", "kickoff_minutes"): Limit("number", 1, 120, True),
     ("mqtt", "host"): Limit("host"),
     ("mqtt", "port"): Limit("number", 1, 65535, True),
     ("voice", "speed"): Limit("number", 0.75, 1.5),

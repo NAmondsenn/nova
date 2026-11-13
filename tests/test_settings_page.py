@@ -361,6 +361,20 @@ def test_the_download_settings_are_under_music_and_used_straight_away(files):
     assert not page.save_settings({"music.album_download_minutes": 241}, LOGIN)["success"]
 
 
+def test_the_minutes_before_kick_off_are_on_the_page_and_used_straight_away(files):
+    page, running = _running(files)
+    setting = next(s for s in page.state()["settings"] if s["key"] == "football.kickoff_minutes")
+    assert setting["label"] == "Minutes before kick-off that Nova says a match is starting"
+    assert (setting["value"], setting["min"], setting["max"], setting["whole"], setting["used"]) == (
+        15, 1, 120, True, NOW)
+    # How often Nova looks, and how old football may be, are for config.yaml and not the page.
+    assert not {"football.check_every", "football.stale_after"} & {s["key"] for s in page.state()["settings"]}
+    assert page.save_settings({"football.kickoff_minutes": "30"}, LOGIN)["success"]
+    assert running.section("football")["kickoff_minutes"] == 30
+    assert not page.save_settings({"football.kickoff_minutes": "0"}, LOGIN)["success"]
+    assert running.section("football")["kickoff_minutes"] == 30
+
+
 def test_soulsyncs_key_is_saved_and_never_shown(files):
     page = _page()
     assert "SOULSYNC_API_KEY" in {key["name"] for key in page.state()["keys"]}
@@ -1961,6 +1975,7 @@ def test_every_setting_on_the_page_has_a_group_of_its_own(files):
     starts = {name: re.findall(r'"([a-z_]+\.)"', line)
               for name, line in re.findall(r'^\s*\["([^"]+)", (\[.*\])\],$', groups, re.M)}
     assert "usage." in starts["Claude"]
+    assert starts["Football"] == ["football."]
     for section, name, *_ in page_module.EDITABLE:
         key = f"{section}.{name}"
         assert any(key.startswith(start) for prefixes in starts.values() for start in prefixes), key

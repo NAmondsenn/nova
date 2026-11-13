@@ -289,6 +289,19 @@ batteries:
   # is said with its age - "was on 88%, 3 days ago" - so it isn't taken for the level now.
   stale_after: 3600
 
+football:
+  # Nova answers football questions from Home Assistant, and says when a team you follow is about
+  # to play, scores, reaches half time, starts the second half and finishes - see
+  # docs/decisions/0014. Home Assistant needs its football sensor and command for this. Which
+  # teams you follow, and what's said for each, are on the settings page.
+  # How often, in seconds, Nova looks at the followed teams' matches.
+  check_every: 30
+  # How old Home Assistant's football may be, in seconds, before Nova says it can't get football.
+  stale_after: 300
+  # How many minutes before kick-off Nova says a match is starting. On the settings page, and
+  # read at each look, so a change is used straight away.
+  kickoff_minutes: 15
+
 mqtt:
   # Home Assistant's MQTT broker - the Mosquitto add-on - through which Nova is a
   # device of its own in Home Assistant, with its controls and its room there. See

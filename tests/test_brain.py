@@ -39,6 +39,7 @@ from voice_assistant.config import Config
 from voice_assistant.displays import Displays
 from voice_assistant.downloads import Downloads
 from voice_assistant.football import Football
+from voice_assistant.football_watch import FootballChoices, FootballWatcher
 from voice_assistant.google_calendar import GoogleCalendar
 from voice_assistant.ha_registry import HomeRegistry
 from voice_assistant.media_watch import MediaWatcher
@@ -2224,8 +2225,37 @@ def test_the_brain_has_no_battery_watcher_without_home_assistant(make_brain, mon
 
 
 def test_football_is_set_up_with_home_assistant_and_not_without(make_brain, home_assistant_token):
-    assert make_brain().football is None
-    assert isinstance(make_brain(home_assistant=HOME_ASSISTANT).football, Football)
+    assert make_brain().football is None and make_brain().football_watcher is None
+    brain = make_brain(home_assistant=HOME_ASSISTANT)
+    assert isinstance(brain.football, Football) and isinstance(brain.football_watcher, FootballWatcher)
+    # Not running until run() starts it.
+    assert brain.football_watcher._thread is None
+    assert not [thread for thread in threading.enumerate() if thread.name == "football"]
+
+
+def test_the_football_watcher_is_given_the_brains_football_and_settings_and_a_file_of_its_own(
+        make_brain, home_assistant_token, tmp_path):
+    brain = make_brain(home_assistant=HOME_ASSISTANT, football={"check_every": 12, "kickoff_minutes": 20})
+    watcher = brain.football_watcher
+    assert watcher._football is brain.football and watcher._say == brain._say_football
+    # What the watcher and the page switch is kept in the brain's own data folder.
+    watcher.choices.set("364", "Liverpool", "goals", False)
+    assert FootballChoices(str(tmp_path / "football.json")).enabled("364", "goals") is False
+    # Both read the settings as they are at each use, so a change on the page reaches them at once.
+    assert watcher._settings() == {"check_every": 12, "kickoff_minutes": 20} == brain.football._settings()
+    assert brain.apply_settings({("football", "kickoff_minutes"): 30}) == []
+    assert watcher._settings()["kickoff_minutes"] == 30 == brain.football._settings()["kickoff_minutes"]
+
+
+def test_football_asks_home_assistant_whether_the_user_is_home(make_brain, home_assistant_token):
+    brain = make_brain(home_assistant=HOME_ASSISTANT)
+    brain.home.people = lambda: [{"state": "home"}]
+    assert brain.football_watcher._home_now() is True
+    brain.home.people = lambda: [{"state": "not_home"}]
+    assert brain.football_watcher._home_now() is False
+    # With nobody listed, it can't say, and the watcher then goes by the rest.
+    brain.home.people = lambda: []
+    assert brain.football_watcher._home_now() is None
 
 
 def test_the_brain_watches_whats_playing_when_home_assistant_is_set_up(make_brain, home_assistant_token):
@@ -2434,6 +2464,79 @@ def test_saying_a_battery_warning_never_raises(brain, connect, caplog):
     assert "battery warning" in caplog.text
 
 
+def test_a_football_announcement_is_said_on_the_default_satellite(brain, connect):
+    # With the bedroom, the first satellite added, away, there's nothing to say it.
+    assert brain._say_football("Liverpool are about to play Arsenal.") is False
+    serving(brain)
+    connect(brain, "kitchen", KITCHEN)
+    kitchen = connected(brain, "kitchen")
+    assert brain._say_football("Liverpool are about to play Arsenal.") is False
+
+    connect(brain)
+    bedroom = connected(brain)
+    assert brain._say_football("Goal for Liverpool. Liverpool 1, Arsenal 0.") is True
+    # With the usual announcement sound, and on the bedroom's alone.
+    assert bedroom.announced == ["Goal for Liverpool. Liverpool 1, Arsenal 0."] and kitchen.announced == []
+    assert bedroom.sounds == ["announcement_sound.wav"]
+
+
+def test_a_football_announcement_is_never_sent_to_the_phone(brain, connect):
+    brain.ntfy = FakeNtfy()
+    assert brain._say_football("Liverpool are about to play Arsenal.") is False
+    serving(brain)
+    connect(brain)
+    connected(brain)
+    assert brain._say_football("Liverpool are about to play Arsenal.") is True
+    # Nothing went to the phone, whether it was said or not: the watcher drops one which isn't.
+    assert brain.ntfy.sent == []
+
+
+def test_saying_a_football_announcement_never_raises(brain, connect, caplog):
+    serving(brain)
+    connect(brain)
+    bedroom = connected(brain)
+
+    def fail(message, *args, **kwargs):
+        raise OSError("the satellite went mid-sentence")
+
+    bedroom.announce = fail
+    with caplog.at_level(logging.WARNING):
+        assert brain._say_football("Liverpool are about to play Arsenal.") is False
+    assert "football announcement" in caplog.text
+
+
+def test_a_football_announcement_not_said_to_the_end_counts_as_not_said(brain, connect, caplog):
+    serving(brain)
+    connect(brain)
+    bedroom = connected(brain)
+    bedroom.said = False
+    with caplog.at_level(logging.WARNING):
+        assert brain._say_football("Liverpool are about to play Arsenal.") is False
+    assert "football announcement" in caplog.text
+
+
+def test_football_keeps_the_night(make_brain, home_assistant_token):
+    # With no ntfy, the brain's own night: 23:00 to 07:00 unless changed.
+    brain = make_brain(home_assistant=HOME_ASSISTANT)
+    assert brain.ntfy is None
+    brain._night._now = lambda: datetime(2026, 11, 13, 23, 30)
+    assert brain.football_watcher._quiet()
+    brain._night._now = lambda: datetime(2026, 11, 13, 12, 0)
+    assert not brain.football_watcher._quiet()
+    # And a night changed on the settings page is the one it keeps.
+    brain._night._now = lambda: datetime(2026, 11, 13, 22, 30)
+    assert not brain.football_watcher._quiet()
+    assert brain.apply_settings({("ntfy", "quiet_from"): "22:00"}) == []
+    assert brain.football_watcher._quiet()
+
+
+def test_football_keeps_ntfys_night_when_there_is_ntfy(make_brain, home_assistant_token):
+    brain = make_brain(home_assistant=HOME_ASSISTANT,
+                       ntfy={"url": "http://ntfy.test", "phone": "my-phone", "quiet_from": "22:00",
+                             "quiet_until": "06:30"})
+    assert brain.football_watcher._quiet == brain.ntfy.quiet
+
+
 def test_warnings_go_to_the_phone_through_ntfy_and_wait_for_ntfys_quiet_hours(make_brain, home_assistant_token):
     brain = make_brain(home_assistant=HOME_ASSISTANT,
                        ntfy={"url": "http://ntfy.test", "phone": "my-phone", "quiet_from": "22:00",
@@ -2623,6 +2726,28 @@ def test_the_battery_watcher_runs_while_the_brain_does_and_stops_with_it(brain, 
     brain.run()
     assert running == [True]
     assert not any(thread.name == "batteries" for thread in threading.enumerate())
+
+
+def test_the_football_thread_runs_while_the_brain_does_and_stops_with_it(make_brain, home_assistant_token):
+    brain = make_brain(home_assistant=HOME_ASSISTANT)
+    # Nothing here may reach a real Home Assistant.
+    brain.home.batteries = lambda timeout=None: []
+    brain.home.people = lambda: []
+    brain.registry.refresh = lambda: True
+    looked = threading.Event()
+    brain.football_watcher.check = lambda now: looked.set()
+    running = []
+
+    def serve():
+        # It looks as soon as it starts, so a thread which is there but never looks is found out.
+        running.append(looked.wait(5) and any(thread.name == "football" and thread.is_alive()
+                                              for thread in threading.enumerate()))
+
+    brain.serve = serve
+    brain.run()
+    assert running == [True]
+    assert not any(thread.name == "football" for thread in threading.enumerate())
+    assert brain.football_watcher._thread is None
 
 
 def test_the_registry_is_read_while_the_brain_runs_and_stops_with_it(make_brain, home_assistant_token):

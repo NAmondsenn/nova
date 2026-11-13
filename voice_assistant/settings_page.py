@@ -99,6 +99,7 @@ EDITABLE = [
     ("music", "song_download_minutes", "Minutes to wait for a song to download", "now"),
     ("music", "album_download_minutes", "Minutes to wait for an album to download", "now"),
     ("soulsync", "url", "SoulSync's address", "now"),
+    ("football", "kickoff_minutes", "Minutes before kick-off that Nova says a match is starting", "now"),
     ("home_assistant", "url", "Home Assistant's address", "restart"),
     ("ntfy", "url", "Your ntfy server", "restart"),
     ("ntfy", "alerts", "Topics read out as they arrive, separated by commas", "restart"),
