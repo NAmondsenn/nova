@@ -763,7 +763,7 @@ def said_competition(answer: Dict, now: datetime) -> str:
         now: The current time, aware and local.
 
     Returns:
-        With matches: a line naming the round of a cup if there is one, each match on its own
+        A line naming the round of a cup if there is one; then, with matches, each on its own
         line, the days with matches (all of them, even where some matches were left out), that
         only some of the matches are listed if Home Assistant trimmed them, and LAG if a match
         is in play. With none, "No UEFA Champions League matches in those days."
@@ -777,12 +777,14 @@ def said_competition(answer: Dict, now: datetime) -> str:
     competition = _field(answer, "competition", dict)
     name = _field(competition, "name", str)
     matches = _matches(answer, "matches")
-    if not matches:
-        return f"No {name} matches in those days."
     lines = []
+    # The round is said even with no match in the days asked about, as a cup plays on few days and
+    # "what round is it at?" is answered by it alone.
     stage = _field(competition, "round", str, None)
     if stage:
         lines.append(f"{_the(name, capital=True)} is at the {stage}.")
+    if not matches:
+        return "\n".join(lines + [f"No {name} matches in those days."])
     lines += [_asked_line(match, now) for match in matches]
     today = now.astimezone().date()
     days = [spoken_day(datetime.strptime(day, "%Y%m%d").date(), today) for day in _field(answer, "match_days", list, [])]
@@ -860,15 +862,15 @@ def said_left(answer: Dict, now: datetime) -> str:
         raise TypeError(f"teams should be a list of names, not {teams!r}")
     earlier = _field(answer, "from_round", str, None)
     matches = _matches(answer, "matches")
+    at = f", which is at the {stage}" if stage else ""
 
     if not knockout:
         # A round can be one nobody is knocked out of in a competition which is a knockout one.
         said = (f"Nobody is knocked out of {_the(name)} at the {stage}." if stage
                 else f"{_the(name, capital=True)} isn't a knockout competition, so nobody is knocked out of it.")
     elif not teams:
-        said = f"No teams are listed as still in {_the(name)}."
+        said = f"No teams are listed as still in {_the(name)}{at}."
     else:
-        at = f", which is at the {stage}" if stage else ""
         said = f"Still in {_the(name)}{at}: {_and_list(teams)}."
         if earlier:
             # Names of rounds in the plural ("Quarterfinals") go with "haven't", the rest with "hasn't".

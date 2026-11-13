@@ -556,7 +556,7 @@ def test_a_team_espn_doesnt_cover(london):
             "so only their cup ties show.")
     south_shields = {"id": "1", "name": "South Shields", "followed": True}
     assert note in said_team(_team_answer(team=south_shields), AT).split("\n")
-    # With a place in a table, a fixture to come or a match today, its league is covered.
+    # The note is only for a team with no table, no match today and no fixture to come: any one of them and it isn't said.
     row = {"league": "National League North", "group": "", "rank": 4, "of": 20, "played": 10, "won": 5, "drawn": 3, "lost": 2,
            "gd": 4, "points": 18}
     assert note not in said_team(_team_answer(team=south_shields, tables=[row]), AT)
@@ -629,6 +629,13 @@ def test_a_cup_says_its_round(london):
     ]
 
 
+def test_a_cup_says_its_round_even_with_no_matches(london):
+    AT = datetime(2026, 11, 13, 12, 0).astimezone()
+    cup = {"slug": "eng.fa", "name": "FA Cup", "round": "Quarterfinals"}
+    assert said_competition(_competition_answer([], competition=cup), AT).split("\n") == [
+        "The FA Cup is at the Quarterfinals.", "No FA Cup matches in those days."]
+
+
 def test_a_competition_with_a_match_in_play_ends_with_the_warning(london):
     AT = datetime(2026, 11, 13, 12, 0).astimezone()
     answer = _competition_answer([_found_match(**LIVE)], days=["20261113"])
@@ -695,6 +702,10 @@ def test_whos_left_in_the_other_cases(london):
         "Still in the Carabao Cup: Arsenal and Liverpool. The next round hasn't been drawn yet, so these are the winners of the Fourth Round.")
     assert said_left(_left_answer(teams=[]), AT) == "No teams are listed as still in the Carabao Cup."
     assert said_left(_left_answer(), AT) == "No teams are listed as still in the Carabao Cup."
+    # A cup's round is said with none left to list, as it is the answer to "what round is it at?".
+    quarterfinals = {"slug": "eng.league_cup", "name": "Carabao Cup", "round": "Quarterfinals"}
+    assert said_left(_left_answer(teams=[], competition=quarterfinals), AT) == (
+        "No teams are listed as still in the Carabao Cup, which is at the Quarterfinals.")
     # A round nobody is knocked out of, in a competition which is a knockout one.
     phase = _left_answer(knockout=False, competition={"slug": "uefa.champions", "name": "UEFA Champions League", "round": "League Phase"})
     assert said_left(phase, AT) == "Nobody is knocked out of the UEFA Champions League at the League Phase."
