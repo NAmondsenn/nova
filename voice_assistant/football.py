@@ -461,12 +461,16 @@ def _known_as(reading: Reading) -> List[str]:
 
     Returns:
         Each team's name, its full name where a match gives one, and the entry of the box which found it,
-        in the order of the box and without one said twice. The entries no team was found by are left out.
+        in the order of the box and without one said twice. The entries no team was found by are left out,
+        and so is an entry which is all digits: ESPN's id, which a follow writes in place of a name which
+        found another team, is no name anyone asks for it by, and a request with the number in it would
+        be taken to be about football.
     """
     known: List[str] = []
     for one in _followed(reading):
         if one.found:
-            known.extend(name for name in one.names if not any(_key(name) == _key(seen) for seen in known))
+            known.extend(name for name in one.names
+                         if not name.isdigit() and not any(_key(name) == _key(seen) for seen in known))
     return known
 
 
@@ -564,9 +568,9 @@ class Football:
         """
         Returns every name the followed teams are known by from the last good read, asking nothing -
         each team's name, its full name where a match gives one, and its entry in Home Assistant's
-        teams box - so that a request can be told to be about one of them however it is said: "Nott'm
-        Forest" is also "Nottingham Forest". A read which failed doesn't empty them. Empty before
-        any read.
+        teams box (unless that is only ESPN's id) - so that a request can be told to be about one of
+        them however it is said: "Nott'm Forest" is also "Nottingham Forest". A read which failed
+        doesn't empty them. Empty before any read.
         """
         with self._lock:
             return list(self._known_as)

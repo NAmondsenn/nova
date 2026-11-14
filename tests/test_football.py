@@ -263,6 +263,19 @@ def test_a_team_without_a_match_or_an_entry_is_only_known_by_its_name():
     assert football.known_as() == ["Stevenage"]
 
 
+def test_the_id_which_stands_in_for_a_name_is_not_a_name_a_team_is_known_by():
+    # After a follow by id the entry which found Rangers is "257", and nobody asks for a team by that: a request
+    # with the number in it would be taken to be about football, and go to Claude and not to Assist.
+    rangers = _team("257", "Rangers", asked="257")
+    football = _football(FakeHome({FOOTBALL_TEAMS: _sensor([rangers, _team("364", "Liverpool", asked="Liverpool")])}))
+    football.read()
+    assert football.known_as() == ["Rangers", "Liverpool"]
+    # It can still be unfollowed by that number, as it is what the box holds.
+    home = FakeHome({FOOTBALL_TEAMS: _sensor([rangers])}, box="Stevenage, 257")
+    assert _football(home).unfollow("257") == {"success": True, "message": "You've stopped following Rangers."}
+    assert home.written == ["Stevenage"]
+
+
 def test_an_entry_no_team_was_found_by_is_not_a_name_a_team_is_known_by():
     home = FakeHome({FOOTBALL_TEAMS: _sensor([_team("395", "Stevenage")], unknown=["Nowhere FC"])})
     football = _football(home)
