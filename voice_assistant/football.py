@@ -190,7 +190,8 @@ class Match:
         phase: Where a match which has started is - "first_half", "half_time", "second_half",
             "extra_time", "penalties", "full_time", or "off" for one postponed, abandoned or
             cancelled - or None where Home Assistant doesn't say.
-        clock: ESPN's own word for the minute, e.g. "67'" or "HT", or "" if it gave none.
+        clock: The source's own word for the minute - ESPN's, or for a match from BBC Sport BBC's label -
+            e.g. "67'" or "HT", or "" if it gave none.
         home: The name to say for the home side - the full one, where Home Assistant gave it.
         away: The same for the away side.
         home_id: The home side's id: ESPN's, or for the side of a match from BBC Sport that is not the
