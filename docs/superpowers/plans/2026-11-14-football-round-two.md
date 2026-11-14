@@ -32,7 +32,7 @@ Round one's Contract stands as it is. This round adds three things.
 1. A line-up with one side out and the other not: the side that's out is said, and the other is said as not out yet (Task 1, `test_one_side_out`).
 2. Line-ups asked with no team named and no followed team playing today (Task 1, `test_lineups_with_no_team_and_nobody_playing`).
 3. A match from BBC (ids and slug beginning `bbc:`) read, said and announced, the followed side known by its ESPN id (Task 3, `test_a_bbc_match_is_read_and_said`, `test_a_goal_in_a_bbc_match_is_announced`).
-4. BBC down for days, so South Shields is stale while the other teams aren't: "is anyone playing today?" says the others and names South Shields; every team stale, or a sensor too old to mark teams, still "I can't get football right now." (Task 2, `test_the_overview_names_a_team_it_cant_get`, `test_the_overview_with_every_team_stale`).
+4. One followed team stale (say its league's scoreboard couldn't be read) while the others aren't: "is anyone playing today?" says the others and names that team; every team stale, or a sensor too old to mark teams, still "I can't get football right now." (Task 2, `test_the_overview_names_a_team_it_cant_get`, `test_the_overview_with_every_team_stale`).
 5. A line-ups answer of the wrong shape (sides not a list, a starter not a name, a bench missing): "I can't get football right now." (Task 1, `test_a_lineups_answer_of_the_wrong_shape_is_refused`).
 
 ---
