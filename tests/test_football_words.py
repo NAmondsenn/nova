@@ -701,7 +701,7 @@ def test_the_overview_names_a_team_it_cant_get(london):
     AT = datetime(2026, 11, 13, 12, 0).astimezone()
     liverpool = _team("364", "Liverpool", now=_found_match(**LIVE))
     # The stale team's match is an old copy, so nothing of it is said, only that it can't be got.
-    shields = _team("396", "South Shields", stale=True, now=_found_match(
+    shields = _team("18312", "South Shields", asked="18312", stale=True, now=_found_match(
         id="21", home="South Shields", away="Gateshead", league="Northern Premier League"))
     home = FakeHome([liverpool, shields], stale=True)
     said = _said(home)
@@ -714,10 +714,23 @@ def test_the_overview_names_a_team_it_cant_get(london):
     assert home.asked == []
 
 
+def test_a_match_in_play_in_a_stale_teams_old_copy_is_neither_said_nor_warned_of_in_the_overview(london):
+    AT = datetime(2026, 11, 13, 12, 0).astimezone()
+    stevenage = _team("395", "Stevenage", next=[_found_match(kickoff="2026-11-21T15:00:00+00:00", home="Notts County",
+                                                             away="Stevenage", league="EFL League One")])
+    # Nobody which isn't stale is in play: the one match in play is a stale team's old copy, which is not the match now.
+    shields = _team("18312", "South Shields", asked="18312", stale=True, now=_found_match(
+        id="21", state="in", phase="second_half", clock="67'", home="South Shields", away="Gateshead", home_score=1,
+        away_score=0, league="Northern Premier League"))
+    said = _said(FakeHome([stevenage, shields]))
+    assert said == {"success": True, "message": said_followed(_reading(stevenage), AT) + "\n" + CANT_GET_SHIELDS}
+    assert LAG not in said["message"] and "Gateshead" not in said["message"] and "South Shields:" not in said["message"]
+
+
 def test_the_overview_names_each_team_it_cant_get_as_its_last_line_with_nothing_in_play(london):
     AT = datetime(2026, 11, 13, 12, 0).astimezone()
     liverpool = _team("364", "Liverpool", next=[_found_match(**SUNDAY_AWAY)])
-    home = FakeHome([_team("395", "Stevenage", stale=True), liverpool, _team("396", "South Shields", stale=True)])
+    home = FakeHome([_team("395", "Stevenage", stale=True), liverpool, _team("18312", "South Shields", asked="18312", stale=True)])
     said = _said(home)
     assert said == {"success": True, "message": said_followed(_reading(liverpool), AT)
                     + "\nI can't get Stevenage and South Shields right now."}
@@ -725,13 +738,13 @@ def test_the_overview_names_each_team_it_cant_get_as_its_last_line_with_nothing_
 
 def test_the_overview_names_the_stale_team_though_the_fresh_one_has_nothing_listed(london):
     # A fresh team with nothing listed is still a team, so this is not "No teams are followed."
-    home = FakeHome([_team("395", "Stevenage"), _team("396", "South Shields", stale=True)])
+    home = FakeHome([_team("395", "Stevenage"), _team("18312", "South Shields", asked="18312", stale=True)])
     assert _said(home) == {"success": True, "message": f"Stevenage: no fixtures listed.\n{CANT_GET_SHIELDS}"}
 
 
 def test_the_overview_says_what_is_left_out_first_then_the_team_it_cant_get_then_the_warning(london):
     sentence = "Home Assistant is showing only some of the followed teams."
-    home = FakeHome([_team("364", "Liverpool", now=_found_match(**LIVE)), _team("396", "South Shields", stale=True)],
+    home = FakeHome([_team("364", "Liverpool", now=_found_match(**LIVE)), _team("18312", "South Shields", asked="18312", stale=True)],
                     trimmed=True)
     assert _said(home)["message"].split("\n")[-3:] == [sentence, CANT_GET_SHIELDS, LAG]
 
