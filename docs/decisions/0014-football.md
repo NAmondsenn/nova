@@ -1,6 +1,6 @@
 # 0014: Football, through Home Assistant
 
-13 November 2026 · Agreed with the user in chat · Not built yet
+13 November 2026 · Agreed with the user in chat · Built
 
 **Context.** Home Assistant has had football since 12 November 2026, from ESPN's free feed (no key, unofficial, so its shape can change). A script, `football.py`, is run every minute by a command-line sensor in a package, `football.yaml`; both live in the user's own Home Assistant configuration, which is kept in a private repository, not this one. It began as a whole Football view, with a calendar of every league's matches and the tables. On 13 November the user had that taken out - "i just need the small widget" - and what is left is small on purpose: a card on the Home views when one of his teams plays today or tomorrow, and behind it:
 
@@ -37,7 +37,7 @@ The user picked the second on 13 November. For the wording, Claude says every an
 
 **Decision.**
 
-1. **Two parts and one contract.** Home Assistant's side grows a little (2 and 3); Nova's side is new (4 to 10). They meet in the contract below, and the names in it are fixed in Nova's code, not settings: `sensor.football_teams`, `input_text.football_teams` and `shell_command.football_ask`. Nova's side can be built and tested against the contract before Home Assistant's side is live. Home Assistant's side adds no sensor, no view and nothing to a dashboard: the sensor's matches gain fields, and the script gains a command.
+1. **Two parts and one contract.** Home Assistant's side grows a little (2 and 3); Nova's side is new (4 to 10). They meet in the contract below, and the names in it are fixed in Nova's code, not settings: `sensor.football_teams`, `input_text.football_teams` and `shell_command.football_ask`. Nova's side is three files: `voice_assistant/football.py` reads Home Assistant, and follows and unfollows; `voice_assistant/football_words.py` turns what was read into words, including `describe`, which the `get_football` tool calls; and `voice_assistant/football_watch.py` is the watcher and the saved switches. Nova's side can be built and tested against the contract before Home Assistant's side is live. Home Assistant's side adds no sensor, no view and nothing to a dashboard: the sensor's matches gain fields, and the script gains a command.
 
 2. **Home Assistant: more in each match.** `football.py` adds, wherever it gives a match:
    - `home_name` and `away_name` - the team's full name ("Manchester United"), only where it differs from the short one;
@@ -47,7 +47,7 @@ The user picked the second on 13 November. For the wording, Claude says every an
 
    And in `sensor.football_teams`:
    - each team carries `asked`, the entry in the teams box it was found by ("South Shields FC" for South Shields), so that unfollowing takes out exactly that entry;
-   - each team carries `stale: true` when an old copy stood in for any of its own fetches. The sensor's own `stale` stays as it is, true when any team's did;
+   - each team carries `stale`, `true` when an old copy stood in for any of its own fetches and `false` when none did, so that each team says for itself whether what is shown of it is old. The sensor's own `stale` stays as it is, true when any team's did;
    - a match still in play at midnight stays the team's `now` until it ends, rather than vanishing for the night.
 
 3. **Home Assistant: `shell_command.football_ask`.** It runs `football.py` with a question and returns what the script prints, as the shell command's response. Nothing calls it but Nova, and only when asked something. Finding a league by name, the tables and a league's matches come back from the script's history where they fit; a month's matches come in one request. It takes `what`, `name`, `date` (`YYYYMMDD`, today if left out) and `days` (1 if left out, 31 at most):
@@ -63,10 +63,11 @@ The user picked the second on 13 November. For the wording, Claude says every an
    - With a team or a competition it asks `football_ask`.
    - What Claude is given is text Nova builds, not Home Assistant's JSON: full names, kick-off times already as local days and times, the ground, the odds as percentages with the bookmaker named, who won and how. Claude never works out a time zone.
    - The tool's description names the followed teams, read from Home Assistant as Nova runs, so that a misheard name is put right to one of them. It tells Claude to answer fixtures, scores, results and tables only from what the tool returns, never from what it remembers, and to say so when the tool hasn't got something.
-   - Football is never handed to Assist: a request naming a followed team, or with "football" in it, goes to Claude. "Is Liverpool playing?", "is the football on?" and "is Stevenage on?" must reach `get_football`.
+   - Football is never handed to Assist: a request naming a followed team, or with "football" in it, goes to Claude. A team is named by its short name, its full name or its entry in the teams box, said with its accents or without them. "Is Liverpool playing?", "is the football on?" and "is Stevenage on?" must reach `get_football`.
 
 5. **Saying plainly what it can't know.**
-   - "I can't get football right now." when the sensor has an `error`, is unavailable, or was last written by Home Assistant more than five minutes ago (its `last_reported`: `stale` stays false if Home Assistant has stopped running the script at all); when the team asked about is marked `stale`, or, asked of nobody in particular, any followed team is; when an answer from `football_ask` is stale, has an error, can't be read or doesn't come in time; and Nova's usual sentences when Home Assistant itself can't be reached. One team's old data never stops another's from being said: with the sensor `stale` and no team marked - a Home Assistant side which doesn't mark teams yet - every team counts as stale.
+   - "I can't get football right now." when the sensor has an `error`, is unavailable, or was last written by Home Assistant more than the `stale_after` setting ago, five minutes unless changed (its `last_reported`: `stale` stays false if Home Assistant has stopped running the script at all); when, asked of nobody in particular, any followed team is stale; when an answer from `football_ask` is stale, has an error, can't be read or doesn't come in time; and Nova's usual sentences when Home Assistant itself can't be reached.
+   - A team is stale when its own `stale` is true, or when the sensor as a whole says `stale` and no team carries the key at all - a Home Assistant side from before teams were marked, which can't tell whose data is old. A sensor which says `stale` while every team says it isn't leaves every team fresh. One team's old data never stops another's from being said, except in the answer about nobody in particular, which is said whole or not at all.
    - A team with no league table and no league fixtures: Nova says that ESPN, where Home Assistant's football comes from, doesn't seem to cover its league, so only its cup ties show. This is how South Shields are answered, worked out from the data each time, with no team named in Nova.
    - Odds are bookmakers' prices turned into percentages, and Nova says so; with none listed, it says ESPN lists no odds for that match.
    - Claude is told that live scores can be up to a minute behind, and says so when asked how fresh a score is - not after every score.
@@ -75,35 +76,43 @@ The user picked the second on 13 November. For the wording, Claude says every an
 6. **Following and unfollowing.** By voice ("follow Arsenal", "unfollow Norway"), through a second tool, `follow_team`, and on the settings page; both go the same way.
    - To follow, Nova first asks `football_ask` for the team, so it knows what ESPN makes of the name. Found nothing: "I couldn't find a team called X.", and nothing is written. Already followed: "You're already following Arsenal." Otherwise it adds a name to the teams box with `input_text.set_value`, waits for `sensor.football_teams` to show the team, and says "You're now following Arsenal.", with the full name ESPN found, so a wrong match is heard at once.
    - To unfollow, Nova finds the followed team meant and takes its `asked` entry out of the box: "You've stopped following Norway."
+   - A follow, from the page or by voice, can take up to half a minute, because Home Assistant looks the team up.
    - The box holds 255 characters. A name which wouldn't fit isn't written: "Home Assistant's list of teams is full."
    - `SERVICES` gains exactly two things: `input_text.set_value` for `input_text.football_teams` and nothing else, and `shell_command.football_ask`, whose answer is asked for. What Nova sends as a name is cut down to letters, digits, spaces and a few marks before it goes, and Home Assistant strips quotes again.
 
 7. **Announcements.** A watcher on the brain reads `sensor.football_teams` every 30 seconds and says, for each followed team's match:
    - **Starting** - once, when the match is first seen with no more than the lead time to go, 15 minutes unless changed: "Stevenage play Notts County in 15 minutes." The minutes said are those really left. Not for a match which is `off`.
-   - **Goals** - when either side's score has gone up since the last look: "Goal for Stevenage. Notts County 0, Stevenage 1." The opponent's goals are said too, so the score heard is never behind. A score which has gone down: "Goal ruled out. Notts County 0, Stevenage 0."
+   - **Goals** - when either side's score has gone up since the last look: "Goal for Stevenage. Notts County 0, Stevenage 1." The opponent's goals are said too, so the score heard is never behind. A score which has gone down is said, once the lower score has been seen on two looks running: "Goal ruled out. Notts County 0, Stevenage 0." Until then the higher score stands.
    - **Half time** - when `phase` becomes `half_time`: "Half time. Notts County 0, Stevenage 1."
    - **Second half** - when `phase` becomes `second_half`: "The second half has started. Notts County 0, Stevenage 1."
    - **Full time** - when `phase` becomes `full_time`: "Full time. Notts County 1, Stevenage 2.", with "after extra time" or "Stevenage won 4-3 on penalties" when that's how it ended. Never for a match which is `off`.
 
-   Each is said on the default satellite, after the usual announcement sound, in full names. An announcement goes ahead only if that kind is switched on for that team; it isn't quiet hours (ntfy's, 23:00 to 07:00 unless changed); and Home Assistant doesn't say the user is out (if it can't say, it's said). One which isn't said - quiet hours, the user out, the satellite away - is dropped and logged: never held for later, never sent to the phone. When two followed teams play each other it's said once, if either team's switch is on.
+   Each is said on the default satellite, after the usual announcement sound, in full names. An announcement goes ahead only if that kind is switched on for that team; it isn't quiet hours (ntfy's, 23:00 to 07:00 unless changed), which are asked before each announcement and not once for the look, as saying several can run into the night; and Home Assistant doesn't say the user is out (if it can't say, it's said). One which isn't said - quiet hours, the user out, the satellite away - is dropped and logged: never held for later, never sent to the phone. When two followed teams play each other it's said once, if either team's switch is on.
 
    Whether the user is out is asked of Home Assistant's person as the battery watcher asks it for a device which is nobody's: the first person there is.
 
-   What the watcher has seen and said for each match is kept on the brain, so a restart neither repeats an announcement nor makes up for lost time. A match first seen already in play is taken as it stands, with nothing said for the goals so far. After more than five minutes without a good look at a team - Nova restarted, Home Assistant down, that team's data stale - whatever changed in its match meanwhile isn't announced. A team whose data is stale is passed over on its own; the others carry on.
+   What the watcher will not say, because said unprompted a false or repeated announcement is worse than one missed:
+   - Anything on a look which goes backwards: an earlier state or phase than the last look showed, or a score known before and now gone. That is taken for an old copy of the match, and the match is left as it was.
+   - Anything for a match which is `off` (postponed, cancelled or abandoned). One which comes back from `off` is taken as it stands.
+   - Anything for a match which kicked off more than a day ago: it isn't looked at.
 
-8. **The settings page gets a Football section.** It lists the followed teams, read from Home Assistant, each with five switches - Starting, Goals, Half time, Second half, Full time - and Remove; a box and a Follow button to add a team; and the minutes before kick-off for Starting. A name Home Assistant couldn't find is shown with Remove, so a bad entry typed in Home Assistant can be cleared. When football can't be read, the section says so.
+   What the watcher has seen and said for each match is kept on the brain, so a restart neither repeats an announcement nor makes up for lost time. A match first seen already in play is taken as it stands, with nothing said for the goals so far. After more than five minutes without a good look at a team - Nova restarted, Home Assistant down, that team's data stale - whatever changed in its match meanwhile isn't announced. A team whose data is stale is passed over on its own; the others carry on. A match it shares with a followed team whose data is fresh is still looked at, as that team has it, and the switches of both teams count.
+
+8. **The settings page gets a Football section.** It follows Batteries, and lists the followed teams, read from Home Assistant, each with five switches - Starting, Goals, Half time, Second half, Full time - and Remove; and a box and a Follow button to add a team. The minutes before kick-off for Starting are not in the section but in the Football group of Settings, with the page's other settings. A name Home Assistant couldn't find is shown with Remove, so a bad entry typed in Home Assistant can be cleared. A team Home Assistant can't read just now, because what it shows of the team is an old copy, says so under its name. When football can't be read, the section says so.
 
    ```
    Football
-     Minutes before kick-off [15]
      Stevenage    Starting [on]  Goals [on]   Half time [on]  Second half [on]  Full time [on]   Remove
      Liverpool    Starting [on]  Goals [off]  Half time [on]  Second half [on]  Full time [on]   Remove
      Add a team [______________] Follow
+
+   Settings, Football
+     Minutes before kick-off [15]
    ```
 
-   A switch changed is kept on the brain for that team, by its ESPN id, and used straight away. A team never changed has everything on. An unfollowed team's switches are kept, in case it comes back. With Home Assistant's Football view gone, this section and the voice are where teams are followed.
+   A switch changed is kept on the brain for that team, by its ESPN id, and used straight away. A team never changed has everything on. Remove asks nothing first, and an unfollowed team's switches are kept, so that a team followed again has the switches chosen for it. Home Assistant's sensor catches up a few seconds after its box changes, so after a follow or an unfollow the page looks again eight seconds later, as well as at its usual look. With Home Assistant's Football view gone, this section and the voice are where teams are followed.
 
-9. **Defaults.** A new `football` section in the repository's `config.yaml`: how often the watcher looks (30 seconds), how old the sensor may be (300 seconds), and the minutes before kick-off (15), which is also on the page and used straight away. With Home Assistant set up but no football in it, `get_football` says football isn't set up in Home Assistant, and the watcher says nothing.
+9. **Defaults.** A new `football` section in the repository's `config.yaml`: how often the watcher looks (30 seconds), how old the sensor may be (300 seconds), and the minutes before kick-off (15), which is also on the page and used straight away. Each has limits, so that every value allowed leaves the announcements working: `check_every` 10 to 60 seconds, `kickoff_minutes` 2 to 120, `stale_after` 120 to 300 seconds. With Home Assistant set up but no football in it, `get_football` says football isn't set up in Home Assistant, and the watcher says nothing.
 
 10. **At the first deploy** Liverpool's Goals switch is set off through the settings page's own API, as the user asked on 13 November ("all notifications on but Liverpool for goals"). It's a choice saved on the brain like any he makes later, never a default in code.
 

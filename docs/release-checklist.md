@@ -76,6 +76,13 @@ With Navidrome, and SoulSync set up (its address under Settings, its key under K
 21a. The internet down, but not the network: take the router's connection to the internet out (its WAN cable), leaving the home network up, and wait 10 seconds. "Hey Nova, set a one minute timer" - it's set straight away. "Hey Nova, how far away is the moon?" - straight away, it says it can't reach the internet. The lights ("turn on the lamp") and Navidrome still work, as they're on the home network. Plug the connection back in.
 22. `systemctl --user restart voice-assistant` - it stops within a second or two, rather than hanging for 20.
 23. `kill -STOP $(systemctl --user show -p MainPID --value voice-assistant)` - within about a minute, systemd restarts it (`journalctl --user-unit voice-assistant` says "Watchdog timeout").
+24a. "Hey Nova, when do Liverpool play next?", "where are Liverpool in the table?", "did Stevenage win?" - each is answered from Home Assistant, with the local day and time.
+24b. "Hey Nova, who's left in the Carabao Cup?", "is the Champions League on next week?", "what stadium are Liverpool playing in next?", "what are the odds for Liverpool's next game?" - each is answered, or with a plain "ESPN lists no odds for it".
+24c. "Hey Nova, follow Arsenal", then "unfollow Arsenal" - "You're now following Arsenal." and "You've stopped following Arsenal.", and the settings page's Football section shows each within a minute.
+24d. On the settings page, add a team and remove it. Switch one team's Goals off and on.
+24e. With a followed team's match about to start, "... play ... in 15 minutes." is said once, after the announcement sound. During the match, a goal, half time, the second half and full time are each said within about two minutes.
+24f. "Hey Nova, is Liverpool playing?" - Nova answers it, and the brain's log shows nothing sent to Assist for it.
+24g. With Home Assistant's football sensor made unavailable (or its script renamed) for six minutes: asking about football gets "I can't get football right now.", and nothing is announced.
 
 ## The manual scripts
 
