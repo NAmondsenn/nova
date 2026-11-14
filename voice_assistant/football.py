@@ -184,7 +184,7 @@ class Match:
     One match, as Home Assistant gives it.
 
     Attributes:
-        id: ESPN's id for the match.
+        id: The match's id: ESPN's, or for a match from BBC Sport BBC's, which begins "bbc:".
         kickoff: When it starts, as an aware time in UTC.
         state: "pre" (not started), "in" (in play) or "post" (over).
         phase: Where a match which has started is - "first_half", "half_time", "second_half",
@@ -193,8 +193,9 @@ class Match:
         clock: ESPN's own word for the minute, e.g. "67'" or "HT", or "" if it gave none.
         home: The name to say for the home side - the full one, where Home Assistant gave it.
         away: The same for the away side.
-        home_id: The home side's id.
-        away_id: The away side's id.
+        home_id: The home side's id: ESPN's, or for the side of a match from BBC Sport that is not the
+            followed team's, BBC's, which begins "bbc:" (the followed team's side keeps its ESPN id).
+        away_id: The away side's id, the same.
         home_score: The home side's goals, or None before it starts.
         away_score: The away side's goals, or None before it starts.
         league: The competition's name.

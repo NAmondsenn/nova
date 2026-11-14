@@ -1040,7 +1040,7 @@ def test_lineups_of_a_competition_is_its_matches(london):
 
 def test_lineups_of_a_team_are_asked_of_it_whatever_competition_is_given(london):
     # "Who's starting for Liverpool in the Champions League tonight?" is about the team, and a team's line-ups are asked
-    # of it, where its table or who is left are only a competition's.
+    # of it, where a table or who is left is only a competition's.
     home = FakeHome(answer={"stale": False, "unknown": ["x"]})
     _said(home, team="Liverpool", competition="UEFA Champions League", about=" Lineups ")
     _said(home, team="Liverpool", competition="UEFA Champions League", about="left")

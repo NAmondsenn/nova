@@ -709,7 +709,7 @@ def _question(team: str, competition: str, about: object) -> Tuple[str, str]:
 
     Returns:
         The question, one of football_ask's, and the name to ask it of. A team's line-ups are
-        asked of the team, whatever competition is given with it, as they are the team's match.
+        asked of the team, whatever competition is given with it, as they are of the team's match.
         Otherwise a competition wins over a team, and a table or who is left is only a question
         of a competition: a team alone is asked about as a team, whatever else is said of it.
         The line-ups of a competition alone are its matches.

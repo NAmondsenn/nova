@@ -1087,9 +1087,10 @@ class ActionExecutor:
         "Stevenage win?', 'is the Champions League on next week?', 'where are Liverpool in the table?', 'what's the "
         "starting 11 for Liverpool?' or 'who's left in the Carabao Cup?'. Give the team or the competition asked "
         "about, putting right a name that was clearly misheard; leave both out to ask about the user's own teams in "
-        "general. You get what Home Assistant has, to reply from. Answer fixtures, scores, results, tables and "
-        "line-ups only from that, never from memory, and if it hasn't got something - scorers - say Home Assistant's "
-        "football doesn't have it. Say how far behind a live score may be only if asked how fresh it is.",
+        "general. You get what Home Assistant has, to reply from. Answer fixtures, scores, results, tables, "
+        "line-ups, who is left, the ground and the odds only from that, never from memory, and if it hasn't got "
+        "something - scorers - say Home Assistant's football doesn't have it. Say how far behind a live score may be "
+        "only if asked how fresh it is.",
         needs="football",
         reads=True,
         team={"type": "string", "description": "The team asked about, e.g. 'Liverpool' or 'Bayern Munich'."},
