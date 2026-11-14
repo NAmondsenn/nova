@@ -345,11 +345,15 @@ class Reading:
         teams: The teams, in the order of the box.
         unknown: The entries in the box which ESPN found no team by.
         trimmed: Whether Home Assistant left some teams out to keep the sensor small.
+        reported: When Home Assistant last wrote the sensor, in epoch seconds - later at each run of
+            its script, so what tells a reading from the same one looked at again. Always there in
+            one which read() gave; None only in one built by hand, which then can't be told apart.
     """
 
     teams: Tuple[Team, ...]
     unknown: Tuple[str, ...]
     trimmed: bool
+    reported: Optional[float] = None
 
 
 def _key(text: str) -> str:
@@ -520,7 +524,8 @@ class Football:
             The teams. A team is stale when it says so itself. Only where the sensor is stale and
             no team has a "stale" at all - a Home Assistant from before teams were marked, which
             can't tell whose data is old - is every team. A sensor which is stale while every
-            team says it isn't leaves every team fresh: an entry nobody follows went wrong.
+            team says it isn't leaves every team fresh: an entry nobody follows went wrong. Its
+            reported is when Home Assistant last wrote the sensor.
 
         Raises:
             FootballUnavailable: Whose text is what to say, if Home Assistant couldn't be asked
@@ -856,8 +861,8 @@ class Football:
             raise _cant_get(f"the sensor has an error: {attributes['error']!r}")
         # last_reported is when Home Assistant last heard from the script, even when nothing changed,
         # so it's the age of the reading; older versions only have last_updated.
-        reported = sensor.get("last_reported") or sensor.get("last_updated")
-        age = self._now() - _instant(reported).timestamp()
+        reported = _instant(sensor.get("last_reported") or sensor.get("last_updated")).timestamp()
+        age = self._now() - reported
         if age > stale_after:
             raise _cant_get(f"the sensor was last written {age:.0f} seconds ago")
 
@@ -873,4 +878,5 @@ class Football:
             teams=tuple(teams),
             unknown=tuple(unknown),
             trimmed=_field(attributes, "trimmed", bool, False),
+            reported=reported,
         )

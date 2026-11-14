@@ -17,6 +17,10 @@ from voice_assistant.home_assistant import FOOTBALL_TEAMS
 # An instant well away from any change of clock, so that a test passes in whichever time zone it runs.
 NOW = 1_800_000_000.0
 
+# When Home Assistant wrote the sensor for three readings running, each later than the one before: what tells
+# a reading from the same one seen again, as Nova looks more often than Home Assistant writes it.
+READING_1, READING_2, READING_3 = NOW - 90, NOW - 60, NOW - 30
+
 
 def _match(state="pre", phase=None, home_score=None, away_score=None, minutes=None, **more):
     """Notts County (340) at home to Stevenage (285), kicking off minutes from NOW - two hours ago if not given."""
@@ -30,9 +34,9 @@ def _match(state="pre", phase=None, home_score=None, away_score=None, minutes=No
     return Match(**found)
 
 
-def _events(before, match, lead=15, followed=("285",)):
+def _events(before, match, lead=15, followed=("285",), reported=None):
     """What events says as (kind, message) pairs, with the record to keep. The lead is in minutes, as it is said."""
-    said, record = events(before, match, NOW, lead * 60, set(followed))
+    said, record = events(before, match, NOW, lead * 60, set(followed), reported)
     return [(event.kind, event.message) for event in said], record
 
 
@@ -77,10 +81,10 @@ def test_goals():
     assert said == [("goals", "Goal for Notts County. Notts County 1, Stevenage 1.")]
     said, seen = _events(seen, _match("in", "first_half", 2, 2))
     assert said == [("goals", "Goals for both sides. Notts County 2, Stevenage 2.")]
-    # A score which goes down may be an old copy, so it is said only when the next look shows it again.
-    said, seen = _events(seen, _match("in", "first_half", 2, 1))
+    # A score which goes down may be an old copy, so it is said only when a later reading shows it again.
+    said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=READING_1)
     assert said == []
-    said, seen = _events(seen, _match("in", "first_half", 2, 1))
+    said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=READING_2)
     assert said == [("goals", "Goal ruled out. Notts County 2, Stevenage 1.")]
 
 
@@ -188,39 +192,79 @@ def test_a_goal_which_flickers_away_and_back_is_said_once():
     said, seen = _events(seen, _match("in", "first_half", 0, 1))
     assert said == [("goals", "Goal for Stevenage. Notts County 0, Stevenage 1.")]
     # One look at the score as it was is an old copy: not a goal ruled out, and not the goal again when it is back.
-    said, seen = _events(seen, _match("in", "first_half", 0, 0))
+    said, seen = _events(seen, _match("in", "first_half", 0, 0), reported=READING_1)
     assert said == []
-    assert _events(seen, _match("in", "first_half", 0, 1))[0] == []
+    assert _events(seen, _match("in", "first_half", 0, 1), reported=READING_2)[0] == []
 
 
-def test_a_goal_ruled_out_is_said_once_it_is_seen_on_two_looks_running():
+def test_a_goal_ruled_out_is_said_once_it_is_seen_on_two_readings_running():
     _, seen = _events(None, _match("in", "first_half", 2, 2))
-    said, seen = _events(seen, _match("in", "first_half", 2, 1))
+    said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=READING_1)
     assert said == []
-    # The higher score is kept meanwhile, and the lower one is noted as waiting.
-    assert (seen["home"], seen["away"], seen["waiting"]) == (2, 2, {"home": 2, "away": 1})
-    said, seen = _events(seen, _match("in", "first_half", 2, 1))
+    # The higher score is kept meanwhile, and the lower one is noted as waiting, with the reading it was first on.
+    assert (seen["home"], seen["away"], seen["waiting"]) == (2, 2, {"home": 2, "away": 1, "reported": READING_1})
+    said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=READING_2)
     assert said == [("goals", "Goal ruled out. Notts County 2, Stevenage 1.")]
     assert (seen["home"], seen["away"], seen["waiting"]) == (2, 1, None)
+    assert _events(seen, _match("in", "first_half", 2, 1), reported=READING_3)[0] == []
+
+
+def test_a_lower_score_seen_again_on_the_same_reading_is_not_a_goal_ruled_out():
+    # Home Assistant writes the sensor once a minute and Nova looks twice, so the second look is often the same
+    # reading - which may be the old copy of the match ESPN gave, and is no confirmation of itself.
+    down = _match("in", "first_half", 2, 1)
+    _, seen = _events(None, _match("in", "first_half", 2, 2))
+    said, seen = _events(seen, down, reported=READING_1)
+    assert said == []
+    said, record = events(seen, down, NOW + 30, 900, {"285"}, READING_1)
+    assert said == [] and record == {**seen, "at": NOW + 30}
+    # Only a later reading, still showing it, says it - and says it once.
+    said, seen = _events(record, down, reported=READING_2)
+    assert said == [("goals", "Goal ruled out. Notts County 2, Stevenage 1.")]
+    assert _events(seen, down, reported=READING_2)[0] == []
+    assert _events(seen, down, reported=READING_3)[0] == []
+
+
+def test_a_lower_score_which_is_the_old_score_again_on_a_later_reading_says_nothing_at_all():
+    _, seen = _events(None, _match("in", "first_half", 2, 2))
+    down = _match("in", "first_half", 2, 1)
+    _, seen = _events(seen, down, reported=READING_1)
+    said, seen = _events(seen, down, reported=READING_1)
+    assert said == []
+    # The reading which comes next has the score as it was: neither "ruled out" nor "Goal for Stevenage" again.
+    said, seen = _events(seen, _match("in", "first_half", 2, 2), reported=READING_2)
+    assert said == [] and seen["waiting"] is None and (seen["home"], seen["away"]) == (2, 2)
+    assert _events(seen, _match("in", "first_half", 2, 2), reported=READING_3)[0] == []
+
+
+def test_a_lower_score_is_never_confirmed_without_a_report_time_to_tell_the_readings_apart():
+    _, seen = _events(None, _match("in", "first_half", 2, 2))
+    for _ in range(3):
+        said, seen = _events(seen, _match("in", "first_half", 2, 1))
+        assert said == [] and seen["waiting"] is None and (seen["home"], seen["away"]) == (2, 2)
+    # Nor one first seen on a dated reading and then on one which has no date.
+    _, seen = _events(seen, _match("in", "first_half", 2, 1), reported=READING_1)
     assert _events(seen, _match("in", "first_half", 2, 1))[0] == []
+    # Nor on an earlier reading than the one it was first seen on.
+    assert _events(seen, _match("in", "first_half", 2, 1), reported=READING_1 - 30)[0] == []
 
 
 def test_one_lower_look_and_then_the_old_score_again_says_nothing():
     _, seen = _events(None, _match("in", "first_half", 2, 2))
-    _, seen = _events(seen, _match("in", "first_half", 2, 1))
-    said, seen = _events(seen, _match("in", "first_half", 2, 2))
+    _, seen = _events(seen, _match("in", "first_half", 2, 1), reported=READING_1)
+    said, seen = _events(seen, _match("in", "first_half", 2, 2), reported=READING_2)
     assert said == [] and seen["waiting"] is None
-    assert _events(seen, _match("in", "first_half", 2, 2))[0] == []
+    assert _events(seen, _match("in", "first_half", 2, 2), reported=READING_3)[0] == []
 
 
 def test_a_lower_score_waiting_is_dropped_when_the_next_look_is_something_else():
     _, seen = _events(None, _match("in", "first_half", 2, 2))
-    _, seen = _events(seen, _match("in", "first_half", 2, 1))
-    # Another lower score waits in its turn, and is said only when seen again.
-    said, seen = _events(seen, _match("in", "first_half", 1, 1))
-    assert said == [] and seen["waiting"] == {"home": 1, "away": 1}
+    _, seen = _events(seen, _match("in", "first_half", 2, 1), reported=READING_1)
+    # Another lower score waits in its turn, and is said only when a later reading shows it again.
+    said, seen = _events(seen, _match("in", "first_half", 1, 1), reported=READING_2)
+    assert said == [] and seen["waiting"] == {"home": 1, "away": 1, "reported": READING_2}
     # A goal is compared with the score kept, not with the one which waited.
-    said, seen = _events(seen, _match("in", "first_half", 3, 2))
+    said, seen = _events(seen, _match("in", "first_half", 3, 2), reported=READING_3)
     assert said == [("goals", "Goal for Notts County. Notts County 3, Stevenage 2.")]
     assert seen["waiting"] is None
 
@@ -406,8 +450,8 @@ def test_what_was_seen_is_kept_and_old_matches_are_dropped(tmp_path, monkeypatch
 def test_a_caller_changing_a_record_it_gave_or_was_given_changes_nothing_kept(tmp_path):
     choices = FootballChoices(str(tmp_path / "football.json"))
     _, record = _events(None, _match("in", "first_half", 2, 2))
-    _, record = _events(record, _match("in", "first_half", 2, 1))
-    waiting = {"home": 2, "away": 1}
+    _, record = _events(record, _match("in", "first_half", 2, 1), reported=READING_1)
+    waiting = {"home": 2, "away": 1, "reported": READING_1}
     assert record["waiting"] == waiting
     choices.remember("1", record)
     record["waiting"]["home"] = 9
@@ -508,6 +552,34 @@ def test_a_match_record_the_file_holds_wrongly_is_taken_as_never_seen_and_forgot
     assert list(json.loads(path.read_text())["seen"]) == ["5"]
 
 
+def test_a_record_with_a_lower_score_waiting_is_kept_and_read_back(tmp_path):
+    path = str(tmp_path / "football.json")
+    _, record = _events(None, _match("in", "first_half", 2, 2))
+    _, record = _events(record, _match("in", "first_half", 2, 1), reported=READING_1)
+    assert record["waiting"] == {"home": 2, "away": 1, "reported": READING_1}
+    FootballChoices(path).remember("1", record)
+    assert FootballChoices(path).seen("1") == record
+
+
+@pytest.mark.parametrize("waiting", [
+    {"home": 2, "away": 1},
+    {"home": 2, "away": 1, "reported": "soon"},
+    {"home": 2, "away": 1, "reported": None},
+    {"home": 2, "away": 1, "reported": True},
+    {"home": "2", "away": 1, "reported": READING_1},
+    {"home": 2, "reported": READING_1},
+], ids=["the old shape, with no reading", "a reading which is text", "no reading", "a reading which is a bool",
+        "a score which is text", "no away score"])
+def test_a_lower_score_waiting_of_the_wrong_shape_is_taken_as_no_record_and_forgotten(tmp_path, waiting):
+    path = tmp_path / "football.json"
+    good = _events(None, _match("in", "first_half", 2, 2))[1]
+    path.write_text(json.dumps({"seen": {"1": {**good, "waiting": waiting}}}))
+    choices = FootballChoices(str(path))
+    assert choices.seen("1") is None
+    choices.forget_before(good["kickoff"])
+    assert json.loads(path.read_text())["seen"] == {}
+
+
 def _team(team_id, name, now=None, next=(), stale=False):
     """A followed team as Football.read() gives it: asked nothing, and no results."""
     return Team(id=team_id, name=name, asked=None, stale=stale, now=now, next=tuple(next), last=())
@@ -565,8 +637,9 @@ class Rig:
         self.asked_home += 1
         return self.at_home
 
-    def look(self, *teams, at=NOW):
-        self.football.reading = Reading(teams=teams, unknown=(), trimmed=False)
+    def look(self, *teams, at=NOW, reported=None):
+        """One look at the teams as Home Assistant has them, in a reading written at reported (None: not given)."""
+        self.football.reading = Reading(teams=teams, unknown=(), trimmed=False, reported=reported)
         self.watcher.check(at)
 
 
@@ -616,6 +689,57 @@ def test_one_that_cant_be_said_is_dropped(tmp_path):
     assert rig.said == ["Goal for Stevenage. Notts County 0, Stevenage 2."]
 
 
+def _score_of_the_match_at(rig, away_score, at, reported):
+    """One look, in which Stevenage (away) have away_score and Notts County one, at NOW + at in a reading written at reported."""
+    rig.look(_team("285", "Stevenage", now=_match("in", "first_half", 1, away_score)), at=NOW + at, reported=reported)
+
+
+def test_a_goal_ruled_out_is_said_on_a_later_reading_never_on_the_same_one_seen_again(tmp_path, monkeypatch):
+    rig = Rig(tmp_path)
+    saved = _counting_saves(monkeypatch)
+    _score_of_the_match_at(rig, 1, 0, READING_1)
+    _score_of_the_match_at(rig, 0, 30, READING_2)
+    saves = len(saved)
+    # Nova looks twice for each time Home Assistant writes the sensor: the second look is the same reading, which
+    # may be ESPN's old copy of the match, and it says nothing and is not written.
+    _score_of_the_match_at(rig, 0, 60, READING_2)
+    assert rig.said == [] and len(saved) == saves
+    _score_of_the_match_at(rig, 0, 90, READING_3)
+    assert rig.said == ["Goal ruled out. Notts County 1, Stevenage 0."]
+    _score_of_the_match_at(rig, 0, 120, READING_3)
+    assert len(rig.said) == 1
+
+
+def test_a_lower_score_which_is_back_up_before_a_later_reading_confirms_it_says_nothing_at_all(tmp_path):
+    rig = Rig(tmp_path)
+    _score_of_the_match_at(rig, 1, 0, READING_1)
+    _score_of_the_match_at(rig, 0, 30, READING_2)
+    _score_of_the_match_at(rig, 0, 60, READING_2)
+    # The old copy was passed over: when the score is back there is no goal ruled out and no second goal for Stevenage.
+    _score_of_the_match_at(rig, 1, 90, READING_3)
+    _score_of_the_match_at(rig, 1, 120, NOW)
+    assert rig.said == []
+
+
+def test_a_goal_is_not_ruled_out_on_a_reading_with_no_report_time(tmp_path):
+    rig = Rig(tmp_path)
+    for step, away_score in enumerate((1, 0, 0, 0)):
+        _score_of_the_match_at(rig, away_score, 30 * step, None)
+    assert rig.said == []
+
+
+def test_a_record_of_the_old_shape_in_the_file_is_taken_as_a_match_never_seen(tmp_path):
+    # Before the readings were told apart, a lower score waiting was only the two scores.
+    old = {"home": 1, "away": 1, "waiting": {"home": 1, "away": 0}, "phase": "first_half", "state": "in",
+           "starting": False, "at": NOW - 30, "kickoff": NOW - 7200}
+    (tmp_path / "football.json").write_text(json.dumps({"seen": {"401": old}}))
+    rig = Rig(tmp_path)
+    _score_of_the_match_at(rig, 0, 0, READING_1)
+    # Taken as it stands, with nothing said for it, and its lower score only now noted as waiting.
+    assert rig.said == []
+    assert rig.choices.seen("401")["waiting"] is None and rig.choices.seen("401")["away"] == 0
+
+
 def _both_follow(tmp_path, off=()):
     """Stevenage and Notts County, who play each other, both followed; the goal is Stevenage's, with goals off for the teams in off."""
     rig = Rig(tmp_path)
@@ -663,9 +787,9 @@ def test_a_match_is_looked_at_once_however_many_followed_teams_it_is_in(tmp_path
     calls = []
     real = football_watch.events
 
-    def counting(before, match, now, lead, followed):
+    def counting(before, match, now, lead, followed, reported):
         calls.append((match.id, followed))
-        return real(before, match, now, lead, followed)
+        return real(before, match, now, lead, followed, reported)
 
     monkeypatch.setattr(football_watch, "events", counting)
     rig = Rig(tmp_path)

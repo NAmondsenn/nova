@@ -301,6 +301,18 @@ def test_a_reading_is_as_old_as_it_was_last_reported_not_last_changed():
     assert _football(FakeHome({FOOTBALL_TEAMS: sensor})).read().teams == ()
 
 
+def test_a_reading_says_when_home_assistant_wrote_the_sensor_as_an_epoch_time():
+    # What tells one reading from the same one looked at again: it is later each time the script runs.
+    sensor = _sensor([], age=10)
+    sensor["last_changed"] = _iso(NOW - 86400)
+    sensor["last_updated"] = _iso(NOW - 3600)
+    assert _football(FakeHome({FOOTBALL_TEAMS: sensor})).read().reported == NOW - 10
+    # A Home Assistant with no last_reported has only last_updated.
+    del sensor["last_reported"]
+    sensor["last_updated"] = _iso(NOW - 20)
+    assert _football(FakeHome({FOOTBALL_TEAMS: sensor})).read().reported == NOW - 20
+
+
 def test_a_home_assistant_with_no_last_reported_is_read_by_last_updated():
     sensor = _sensor([], age=10)
     del sensor["last_reported"]

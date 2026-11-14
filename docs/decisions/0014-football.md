@@ -82,7 +82,7 @@ The user picked the second on 13 November. For the wording, Claude says every an
 
 7. **Announcements.** A watcher on the brain reads `sensor.football_teams` every 30 seconds and says, for each followed team's match:
    - **Starting** - once, when the match is first seen with no more than the lead time to go, 15 minutes unless changed: "Stevenage play Notts County in 15 minutes." The minutes said are those really left. Not for a match which is `off`.
-   - **Goals** - when either side's score has gone up since the last look: "Goal for Stevenage. Notts County 0, Stevenage 1." The opponent's goals are said too, so the score heard is never behind. A score which has gone down is said, once the lower score has been seen on two looks running: "Goal ruled out. Notts County 0, Stevenage 0." Until then the higher score stands.
+   - **Goals** - when either side's score has gone up since the last look: "Goal for Stevenage. Notts County 0, Stevenage 1." The opponent's goals are said too, so the score heard is never behind. A score which has gone down is said, once the lower score has been seen on two readings from Home Assistant running (Nova looks more often than Home Assistant writes the sensor, so two looks are often one reading): "Goal ruled out. Notts County 0, Stevenage 0." Until then the higher score stands.
    - **Half time** - when `phase` becomes `half_time`: "Half time. Notts County 0, Stevenage 1."
    - **Second half** - when `phase` becomes `second_half`: "The second half has started. Notts County 0, Stevenage 1."
    - **Full time** - when `phase` becomes `full_time`: "Full time. Notts County 1, Stevenage 2.", with "after extra time" or "Stevenage won 4-3 on penalties" when that's how it ended. Never for a match which is `off`.

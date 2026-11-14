@@ -57,10 +57,15 @@ def _is_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _is_scores(scores) -> bool:
-    """Whether something is a pair of scores, each a whole number or None: {"home": 1, "away": None}."""
-    return (isinstance(scores, dict) and set(scores) == {"home", "away"}
-            and all(goals is None or _is_whole(goals) for goals in scores.values()))
+def _is_waiting(waiting) -> bool:
+    """
+    Whether something is the note of a lower score waiting for a later reading to confirm it, as _goals
+    makes it: the two scores, each a whole number or None, and when Home Assistant wrote the reading
+    which first showed them - {"home": 1, "away": None, "reported": 1800000000.0}.
+    """
+    return (isinstance(waiting, dict) and set(waiting) == {"home", "away", "reported"}
+            and all(waiting[key] is None or _is_whole(waiting[key]) for key in ("home", "away"))
+            and _is_number(waiting["reported"]))
 
 
 def _is_record(record) -> bool:
@@ -75,7 +80,7 @@ def _is_record(record) -> bool:
             record["state"] in _MATCH_STATES
             and (record["phase"] is None or isinstance(record["phase"], str))
             and all(record[key] is None or _is_whole(record[key]) for key in ("home", "away"))
-            and (record["waiting"] is None or _is_scores(record["waiting"]))
+            and (record["waiting"] is None or _is_waiting(record["waiting"]))
             and isinstance(record["starting"], bool)
             and _is_number(record["at"])
             and _is_number(record["kickoff"])
@@ -317,24 +322,29 @@ def _starting(match: Match, now: float, lead: float, followed: Set[str]) -> Opti
     return Event("starting", f"{first} play {second} in {_minutes(math.ceil(left / 60))}.")
 
 
-def _goals(before: Dict, match: Match) -> Tuple[Optional[Event], Dict]:
+def _goals(before: Dict, match: Match, reported: Optional[float]) -> Tuple[Optional[Event], Dict]:
     """
     Says what a change in the score means.
 
     A score which has gone down is not said at once, as it may be an old copy of the match
-    which Home Assistant gave for a look: the higher score is kept, and the lower one noted as
-    waiting. If the next look shows that same lower score it is said, as a goal ruled out;
-    if it shows anything else the note is dropped and that look is compared as usual.
+    which Home Assistant gave: the higher score is kept, and the lower one noted as waiting,
+    with when Home Assistant wrote the reading which showed it. If a later reading shows that
+    same lower score it is said, as a goal ruled out; if it shows anything else the note is
+    dropped and that reading is compared as usual. The same reading seen again confirms
+    nothing, as Nova looks more often than Home Assistant writes the sensor, so the second
+    look is usually the first one's reading and the old copy would be said to be a goal ruled out.
 
     Args:
         before: What was last seen of the match.
         match: The match as it is.
+        reported: Epoch seconds when Home Assistant wrote the reading the match is from, or None
+            where that isn't known: a lower score is then never noted or confirmed.
 
     Returns:
         The event, or None if there is nothing to say, and the scores for the record to keep:
-        {"home", "away", "waiting"}. A goal for either side is said, so that the score heard is
-        never behind. A goal which went in as another was ruled out is said as the goal, as
-        that is the news and the score shows the rest.
+        {"home", "away", "waiting"}, where waiting is None or {"home", "away", "reported"}. A goal
+        for either side is said, so that the score heard is never behind. A goal which went in as
+        another was ruled out is said as the goal, as that is the news and the score shows the rest.
     """
     here = {"home": match.home_score, "away": match.away_score}
     taken = {**here, "waiting": None}
@@ -347,9 +357,14 @@ def _goals(before: Dict, match: Match) -> Tuple[Optional[Event], Dict]:
     if home_up or away_up:
         return Event("goals", f"Goal for {match.home if home_up else match.away}. {score}"), taken
     if home < was_home or away < was_away:
-        if before["waiting"] == here:
-            return Event("goals", f"Goal ruled out. {score}"), taken
-        return None, {"home": before["home"], "away": before["away"], "waiting": here}
+        kept = {"home": before["home"], "away": before["away"]}
+        waiting = before["waiting"]
+        if waiting is not None and (waiting["home"], waiting["away"]) == (here["home"], here["away"]):
+            if reported is not None and reported > waiting["reported"]:
+                return Event("goals", f"Goal ruled out. {score}"), taken
+            # The reading it was first seen on, or one which can't be told from it: the note stays as it was.
+            return None, {**kept, "waiting": waiting}
+        return None, {**kept, "waiting": None if reported is None else {**here, "reported": reported}}
     return None, taken
 
 
@@ -404,7 +419,8 @@ def _is_old_copy(before: Dict, match: Match, phase: Optional[str]) -> bool:
 
 
 def events(
-    before: Optional[Dict], match: Match, now: float, lead: float, followed: Set[str]
+    before: Optional[Dict], match: Match, now: float, lead: float, followed: Set[str],
+    reported: Optional[float] = None
 ) -> Tuple[List[Event], Dict]:
     """
     Works out what to announce about a match, from what was last seen of it and how it is now.
@@ -417,7 +433,7 @@ def events(
     Said unprompted, a false or repeated announcement is worse than one missed, so a look
     which can't be trusted says nothing: an old copy of the match (an earlier state or phase
     than the record's, or no score where it had one) is passed over, the record keeping all
-    but the time of the look; a score which has gone down waits for a second look (see _goals);
+    but the time of the look; a score which has gone down waits for a second reading (see _goals);
     and a look with no known phase doesn't take the record's away, however old the record. A match
     which is off says nothing, and one which comes back from off is taken as it stands.
 
@@ -427,6 +443,9 @@ def events(
         now: The time, in epoch seconds. Given, not read, so that this says the same in any time zone.
         lead: Seconds before kick-off to say that it is starting from.
         followed: The ids of the followed teams in the match.
+        reported: Epoch seconds when Home Assistant wrote the reading the match is from, which
+            is what tells a second reading from the first one seen again. Without it (None), a
+            score which has gone down is never said to be a goal ruled out.
 
     Returns:
         The events in the order to say them - goals first, then one of half time, the second
@@ -455,7 +474,7 @@ def events(
         kept_phase = phase or before["phase"]
     # A match which was off had no scores to compare with, so what it shows on coming back is taken as it stands.
     if recent and phase != "off" and before["state"] != "post" and before["phase"] != "off":
-        goals, scores = _goals(before, match)
+        goals, scores = _goals(before, match, reported)
         if goals:
             said.append(goals)
         if phase != before["phase"]:
@@ -586,7 +605,7 @@ class FootballWatcher:
         for match, followed in self._matches(reading, now).values():
             try:
                 before = self._choices.seen(match.id)
-                due, record = events(before, match, now, lead, followed)
+                due, record = events(before, match, now, lead, followed, reading.reported)
                 # Kept before anything is said, so that what isn't said now is never said later.
                 self._choices.remember(match.id, record)
                 for event in due:
