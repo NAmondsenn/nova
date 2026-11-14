@@ -16,7 +16,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 
@@ -1881,6 +1881,17 @@ def test_a_sessions_local_rules_know_its_wake_word(brain, make_session):
     assert session.intents.match("Jarvispause.")["actions"][0].tool == "control_playback"
 
 
+def _stand_in_brain(session):
+    """
+    A brain with only what saying a battery warning or an alert needs: this real session as the
+    default satellite's, and the brain's own way of announcing on it, bound to the stand-in so
+    that the tests go through the real thing and not a copy of it.
+    """
+    brain = SimpleNamespace(session_for=lambda satellite: session)
+    brain._announce_on_default = MethodType(Brain._announce_on_default, brain)
+    return brain
+
+
 def _the_brain_says(session, message):
     """
     What Brain._say_battery and Brain._alert return with this real session as the default
@@ -1890,7 +1901,7 @@ def _the_brain_says(session, message):
     from voice_assistant.brain import Brain
     from voice_assistant.ntfy import Alert
 
-    brain = SimpleNamespace(session_for=lambda satellite: session)
+    brain = _stand_in_brain(session)
     return Brain._say_battery(brain, message), Brain._alert(brain, Alert("homelab", message, ""))
 
 
@@ -1938,7 +1949,7 @@ def test_an_overdue_chime_doesnt_lose_the_words_and_an_overdue_speech_counts_as_
     assert session.announce("Your reminder: take the bins out.") is True
     assert len(pi.messages("play_sound")) == 1 and len(pi.messages("play_stream")) == 1
     from voice_assistant.brain import Brain
-    brain = SimpleNamespace(session_for=lambda satellite: session)
+    brain = _stand_in_brain(session)
     assert Brain._say_battery(brain, "Your phone's battery is down to 5%.") is True
     assert len(pi.messages("play_stream")) == 2
 
@@ -1950,7 +1961,7 @@ def test_a_stop_during_a_battery_warning_still_counts_as_said(connect, make_sess
     session = make_session(satellite)
     pi.held = {1}
     from voice_assistant.brain import Brain
-    brain = SimpleNamespace(session_for=lambda satellite: session)
+    brain = _stand_in_brain(session)
     results = []
     saying = threading.Thread(target=lambda: results.append(
         Brain._say_battery(brain, "Your phone's battery is down to 5%.")), daemon=True)
