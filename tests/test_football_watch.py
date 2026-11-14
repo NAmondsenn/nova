@@ -672,6 +672,43 @@ def test_a_goal_is_said(tmp_path):
     assert _scored(tmp_path).said == [GOAL]
 
 
+def _shields_at_worksop(away_score, phase="first_half"):
+    """
+    South Shields' match as Home Assistant gives it when it comes from BBC Sport, read as Nova reads it: BBC's id,
+    slug and id for the other side, and South Shields' own side with their ESPN id (18312). In play, 0 to away_score.
+    """
+    return Match.from_home({
+        "id": "bbc:abc", "slug": "bbc:national-league-north", "kickoff": datetime.fromtimestamp(NOW - 1800, timezone.utc).isoformat(),
+        "state": "in", "phase": phase, "clock": "30'", "home": "Worksop Town", "home_id": "bbc:worksop", "home_score": 0,
+        "away": "South Shields", "away_id": "18312", "away_score": away_score, "league": "National League N / S"})
+
+
+BBC_GOAL = "Goal for South Shields. Worksop Town 0, South Shields 1."
+
+
+def test_a_goal_in_a_bbc_match_is_said_once(tmp_path):
+    rig = Rig(tmp_path)
+    rig.look(_team("18312", "South Shields", now=_shields_at_worksop(0)))
+    rig.look(_team("18312", "South Shields", now=_shields_at_worksop(1)), at=NOW + 30)
+    assert rig.said == [BBC_GOAL]
+    # The same score on the next looks is no new goal, and the record is of the match by BBC's id.
+    rig.look(_team("18312", "South Shields", now=_shields_at_worksop(1)), at=NOW + 60)
+    rig.look(_team("18312", "South Shields", now=_shields_at_worksop(1)), at=NOW + 90)
+    assert rig.said == [BBC_GOAL]
+    assert rig.choices.seen("bbc:abc")["away"] == 1
+
+
+def test_a_goal_in_a_bbc_match_is_not_said_with_goals_off_for_the_team(tmp_path):
+    rig = Rig(tmp_path)
+    rig.choices.set("18312", "South Shields", "goals", False)
+    rig.look(_team("18312", "South Shields", now=_shields_at_worksop(0)))
+    rig.look(_team("18312", "South Shields", now=_shields_at_worksop(1)), at=NOW + 30)
+    assert rig.said == []
+    # The team's other switches still count: half time is said.
+    rig.look(_team("18312", "South Shields", now=_shields_at_worksop(1, "half_time")), at=NOW + 60)
+    assert rig.said == ["Half time. Worksop Town 0, South Shields 1."]
+
+
 def test_not_at_night_and_not_said_in_the_morning(tmp_path):
     rig = _scored(tmp_path, quiet=True)
     rig.quiet = False
