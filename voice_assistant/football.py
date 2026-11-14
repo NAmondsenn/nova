@@ -367,8 +367,12 @@ def _words(text: str) -> Set[str]:
 
 
 def _same_entry(one: str, other: str) -> bool:
-    """Whether two entries of the teams box are the one, ignoring case and the spaces round them, as it is typed by hand."""
-    return one.strip().casefold() == other.strip().casefold()
+    """
+    Whether two entries of the teams box are the one, ignoring case and the spaces round them, as it is typed
+    by hand - and the apostrophe, which Home Assistant takes out of the box before its script sees it. So the
+    entry the sensor says found a team or found none, "Nottm Forest", is the box's "Nott'm Forest".
+    """
+    return one.replace("'", "").strip().casefold() == other.replace("'", "").strip().casefold()
 
 
 def _joined(entries: List[str]) -> str:

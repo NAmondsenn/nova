@@ -581,6 +581,27 @@ def test_a_name_which_finds_another_team_is_followed_by_id(shown_first):
     assert home.written == ["Stevenage, Rangers", "Stevenage, 257"]
 
 
+def test_a_name_with_an_apostrophe_which_finds_another_team_is_followed_by_id():
+    # The box has "Nott'm Forest" but Home Assistant strips the quote before its script looks, so the sensor says
+    # "Nottm Forest" found nothing - which only counts as the entry written if the quote is ignored in comparing.
+    forest = _team("393", "Nott'm Forest", asked="393")
+
+    def after_write(home, value):
+        found = [*_stevenage_and_liverpool(), forest] if value.endswith(", 393") else _stevenage_and_liverpool()
+        home.states[FOOTBALL_TEAMS] = _sensor(found, unknown=[] if value.endswith(", 393") else ["Nottm Forest"])
+
+    home = _home_with_box("Stevenage", answer=_asked_of("393", "Nott'm Forest", full_name="Nottingham Forest"), after_write=after_write)
+    assert _football(home).follow("Nottingham Forest") == {"success": True, "message": "You're now following Nottingham Forest."}
+    assert home.written == ["Stevenage, Nott'm Forest", "Stevenage, 393"]
+
+
+def test_a_team_in_the_box_without_the_apostrophe_of_its_name_isnt_added_again():
+    # Typed by hand without it, "Nottm Forest" is the entry which "Nott'm Forest" would be to Home Assistant.
+    home = _home_with_box("Stevenage, Nottm Forest", answer=_asked_of("393", "Nott'm Forest"))
+    _football(home).follow("Nottingham Forest")
+    assert home.written == []
+
+
 def test_the_box_is_full():
     home = _home_with_box("x" * 250, answer=_asked_of("359", "Arsenal"))
     assert _football(home).follow("Arsenal") == {"success": False, "message": "Home Assistant's list of teams is full."}
@@ -770,6 +791,24 @@ def test_an_entry_home_assistant_couldnt_find_can_be_taken_off():
     home = FakeHome({FOOTBALL_TEAMS: _sensor(_stevenage_and_liverpool(), unknown=["Stevnage", "stevnage"])},
                     box="Stevenage, Stevnage, Liverpool, stevnage")
     assert _football(home).unfollow("Stevnage") == {"success": True, "message": "Taken Stevnage off the list."}
+    assert home.written == ["Stevenage, Liverpool"]
+
+
+def test_a_team_whose_name_has_an_apostrophe_can_be_unfollowed():
+    # Nova writes ESPN's short name in the box, "Nott'm Forest", and Home Assistant takes the quote out before its script
+    # sees it, so the sensor says the entry which found the team was "Nottm Forest".
+    match = _found_match(home="Nott'm Forest", home_name="Nottingham Forest", home_id="393")
+    forest = _team("393", "Nott'm Forest", asked="Nottm Forest", next=[match])
+    home = FakeHome({FOOTBALL_TEAMS: _sensor([_team("395", "Stevenage", asked="Stevenage"), forest])}, box="Stevenage, Nott'm Forest")
+    assert _football(home).unfollow("Nottingham Forest") == {"success": True, "message": "You've stopped following Nottingham Forest."}
+    assert home.written == ["Stevenage"]
+
+
+def test_an_entry_with_an_apostrophe_which_found_no_team_can_be_cleared():
+    # The sensor lists it without the quote, as Home Assistant took it out, and the box still has it.
+    home = FakeHome({FOOTBALL_TEAMS: _sensor(_stevenage_and_liverpool(), unknown=["OHiggins"])},
+                    box="Stevenage, O'Higgins, Liverpool")
+    assert _football(home).unfollow("O'Higgins") == {"success": True, "message": "Taken OHiggins off the list."}
     assert home.written == ["Stevenage, Liverpool"]
 
 
