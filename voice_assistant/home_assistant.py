@@ -683,8 +683,9 @@ class HomeAssistant:
             value: The names, e.g. "Stevenage, Liverpool".
 
         Raises:
-            requests.RequestException: If Home Assistant couldn't be asked, or turned
-                the value down, as it does for one longer than the box holds.
+            requests.RequestException: If Home Assistant couldn't be asked. A value longer
+                than the box holds isn't refused: Home Assistant drops it without a word
+                and answers as if it had been kept, so the caller checks the length itself.
         """
         self._call_service("input_text", "set_value", {"entity_id": FOOTBALL_BOX, "value": value})
 

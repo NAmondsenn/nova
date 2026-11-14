@@ -82,7 +82,7 @@ With Navidrome, and SoulSync set up (its address under Settings, its key under K
 24d. On the settings page, add a team and remove it. Switch one team's Goals off and on.
 24e. With a followed team's match about to start, "... play ... in 15 minutes." is said once, after the announcement sound. During the match, a goal, half time, the second half and full time are each said within about two minutes.
 24f. "Hey Nova, is Liverpool playing?" - Nova answers it, and the brain's log shows nothing sent to Assist for it.
-24g. With Home Assistant's football sensor made unavailable (or its script renamed) for six minutes: "Hey Nova, what's the score?", naming no team, gets "I can't get football right now."; with the script renamed, "Hey Nova, when do Liverpool play next?" gets it too. And nothing is announced.
+24g. With Home Assistant's football sensor made unavailable (or its script renamed - the file `football.py` in Home Assistant's scripts folder, not the shell command's entry) for six minutes: "Hey Nova, what's the score?", naming no team, gets "I can't get football right now."; with the script renamed, "Hey Nova, when do Liverpool play next?" gets it too. And nothing is announced. (With the shell command's entry renamed instead, that question gets "Football isn't set up in Home Assistant.", as Home Assistant no longer has the command.)
 
 ## The manual scripts
 
