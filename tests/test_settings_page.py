@@ -1533,6 +1533,8 @@ def test_the_pages_script_and_style_are_served_with_its_safety_headers(served, p
         assert b'changeFootball("/api/football", { id: team.id, kind, on: box.checked })' in body
         assert b'changeFootball("/api/football/follow", { name })' in body
         assert b'changeFootball("/api/football/unfollow", { name: team.name })' in body
+        # A team followed or removed is asked for again once Home Assistant's sensor has caught up, a switch not.
+        assert b'if (path !== "/api/football") setTimeout(loadFootball, FOOTBALL_SETTLES);' in body
         # Its form, list and icon are on the page.
         assert b'id="football"' in html and b'id="follow-team"' in html and b'id="i-football"' in html
 

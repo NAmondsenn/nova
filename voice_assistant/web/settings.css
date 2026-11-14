@@ -1515,8 +1515,8 @@ input[type="range"].warmth::-moz-range-progress { background: transparent; }
   justify-self: start;
 }
 
-/* A followed team's switches are laid out as the batteries' two are, in as many columns as
-   fit at least 150px wide - each 44px tall, as the batteries' choices are. */
+/* A followed team's five switches sit in as many columns as fit at least 150px wide, each a
+   label then its switch, 44px tall as the batteries' choices are (which are full-width rows). */
 
 .football .switches {
   display: grid;

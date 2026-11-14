@@ -33,9 +33,9 @@ const BATTERIES_EVERY = 60000;
 const FOOTBALL_EVERY = 60000;
 
 // How long after a team is followed or removed the teams are asked for again, in
-// milliseconds: Home Assistant runs its sensor again about five seconds after its box
-// changes, and until then the sensor still shows the team as it was.
-const FOOTBALL_SETTLES = 6000;
+// milliseconds: Home Assistant runs its sensor again within about five seconds of its box
+// changing, and until then the sensor still shows the team as it was. Eight, for margin.
+const FOOTBALL_SETTLES = 8000;
 
 // The kinds of announcement a followed team has a switch for, as the brain names them
 // and as the page labels them, in the order they are said in a match.
@@ -1875,12 +1875,13 @@ async function loadFootball() {
 
 // Sends a change to the followed teams - a switch, a team followed or one removed. The
 // rows are drawn again whatever the data says, as a switch which failed to save is still
-// showing what wasn't saved - and again once Home Assistant's sensor has caught up, or a
-// removed team would stay shown until the next look.
+// showing what wasn't saved. A team followed or removed is drawn again once Home
+// Assistant's sensor has caught up too, or a removed team would stay shown until the
+// next look - not a switch, which is Nova's own and never touches Home Assistant's box.
 function changeFootball(path, body) {
   return change(path, body, () => {
     delete drawn.football;
-    setTimeout(loadFootball, FOOTBALL_SETTLES);
+    if (path !== "/api/football") setTimeout(loadFootball, FOOTBALL_SETTLES);
     return loadFootball();
   });
 }
