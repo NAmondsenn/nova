@@ -762,7 +762,11 @@ def _team_playing(reading: Reading, now: datetime) -> Optional[Team]:
         The team whose match is in play; else the one whose match is still to come today, the
         earliest first, as its line-up is the one which is about to come out; else the one
         whose match was today and is over, the earliest first; or None where no team has a
-        match today. Only teams which aren't stale count, as a stale team's match is an old copy.
+        match today. Within each of those, a team whose match is from BBC Sport (its id begins
+        "bbc:") comes after one whose isn't, however early its kick-off, as BBC's matches never
+        have line-ups: South Shields, first in the box, don't win over Stevenage, whose line-up
+        there is to say. With none but BBC's, one of those is picked as before. Only teams which
+        aren't stale count, as a stale team's match is an old copy.
 
     Raises:
         FootballUnavailable: If no team which isn't stale has a match today but one which is stale
@@ -770,12 +774,17 @@ def _team_playing(reading: Reading, now: datetime) -> Optional[Team]:
     """
     fresh = [team for team in reading.teams if not team.stale]
     with_match = [team for team in fresh if team.now is not None]
+
+    def from_bbc(team: Team) -> bool:
+        return team.now.id.startswith("bbc:")
+
     playing = [team for team in with_match if _in_play(team.now)]
     if playing:
-        return playing[0]
+        # min takes the first of equals, so the box's order stands between two of the same source.
+        return min(playing, key=from_bbc)
     today = [team for team in with_match if team.now.kickoff.astimezone().date() == now.astimezone().date()]
     if today:
-        return min(today, key=lambda team: (not _to_come(team.now), team.now.kickoff))
+        return min(today, key=lambda team: (not _to_come(team.now), from_bbc(team), team.now.kickoff))
     if len(fresh) < len(reading.teams):
         raise _cant_get("a followed team's matches are an old copy", logging.WARNING)
     return None

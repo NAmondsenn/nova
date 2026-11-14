@@ -1000,6 +1000,58 @@ def test_lineups_with_no_team_ask_for_a_team_in_play_before_one_to_come(london):
     assert home.asked == [("lineups", "Liverpool", "", 1)]
 
 
+def _shields_match(**fields):
+    """South Shields' match as it comes from BBC Sport, which never has line-ups: today at 15:00 unless a test says."""
+    return _found_match(**{
+        "id": "bbc:301", "slug": "bbc:national-league-north", "league": "National League N / S", "home": "South Shields",
+        "home_id": "18312", "away": "Worksop Town", "away_id": "bbc:77", "kickoff": "2026-11-13T15:00:00+00:00", **fields})
+
+
+def _stevenage_match(**fields):
+    """Stevenage's match as it comes from ESPN, which has line-ups: today at 15:00 unless a test says."""
+    return _found_match(**{
+        "id": "30", "home": "Stevenage", "home_id": "395", "away": "Wigan", "away_id": "361",
+        "kickoff": "2026-11-13T15:00:00+00:00", **fields})
+
+
+@pytest.mark.parametrize("state, phase", [("in", "first_half"), ("pre", None), ("post", "full_time")],
+                         ids=["in play", "to come today", "over today"])
+def test_lineups_with_no_team_ask_for_a_match_which_can_have_them_before_one_from_bbc(london, state, phase):
+    # South Shields come first in the box and are in the same state at the same time, but their match never has line-ups.
+    mark = {"state": state, **({"phase": phase} if phase else {})}
+    teams = [_team("18312", "South Shields", now=_shields_match(**mark)), _team("395", "Stevenage", now=_stevenage_match(**mark))]
+    home = FakeHome(teams, answer=_lineups_answer(match=_found_match()))
+    assert _said(home, about="lineups")["success"]
+    assert home.asked == [("lineups", "Stevenage", "", 1)]
+
+
+def test_lineups_with_no_team_ask_for_a_match_from_bbc_after_one_which_can_have_them_whatever_the_kick_offs(london):
+    # The later kick-off is asked for: South Shields' earlier one has no line-ups to come out.
+    teams = [_team("18312", "South Shields", now=_shields_match(kickoff="2026-11-13T12:30:00+00:00")),
+             _team("395", "Stevenage", now=_stevenage_match(kickoff="2026-11-13T19:45:00+00:00"))]
+    home = FakeHome(teams, answer=_lineups_answer(match=_found_match()))
+    _said(home, about="lineups")
+    assert home.asked == [("lineups", "Stevenage", "", 1)]
+
+
+def test_lineups_with_no_team_ask_for_a_match_from_bbc_in_play_before_a_match_not_from_bbc_still_to_come(london):
+    # The match in play comes first, whichever source it is from: the order is only within each.
+    teams = [_team("395", "Stevenage", now=_stevenage_match(kickoff="2026-11-13T19:45:00+00:00")),
+             _team("18312", "South Shields", now=_shields_match(state="in", phase="first_half"))]
+    home = FakeHome(teams, answer=_lineups_answer(match=_found_match()))
+    _said(home, about="lineups")
+    assert home.asked == [("lineups", "South Shields", "", 1)]
+
+
+def test_lineups_with_no_team_ask_for_south_shields_when_they_are_the_only_team_playing(london):
+    for state in ("in", "pre", "post"):
+        shields = {"id": "18312", "name": "South Shields", "followed": True}
+        home = FakeHome([_team("18312", "South Shields", now=_shields_match(state=state))],
+                        answer=_lineups_answer(team=shields, match=_shields_match()))
+        assert _said(home, about="lineups")["success"]
+        assert home.asked == [("lineups", "South Shields", "", 1)]
+
+
 def test_lineups_with_no_team_ask_for_the_team_by_the_entry_of_the_box_which_found_it(london):
     # Home Assistant is known to find a team by that, which its short name from ESPN may not be.
     teams = [_team("360", "Man Utd", asked="Manchester United FC", now=_found_match(**LIVE))]
