@@ -207,7 +207,7 @@ class FootballChoices:
         Gives what was last seen of a match.
 
         Args:
-            match_id: ESPN's id for the match.
+            match_id: The match's id: ESPN's, or for a match from BBC Sport its id beginning "bbc:".
 
         Returns:
             A deep copy of the record events() gave last, as it holds a dict, or None if the match was
@@ -226,7 +226,7 @@ class FootballChoices:
         a restart - and is tried again at the next look, which is when it can be.
 
         Args:
-            match_id: ESPN's id for the match.
+            match_id: The match's id: ESPN's, or for a match from BBC Sport its id beginning "bbc:".
             record: What events() gave. It is copied, all the way down, so changing it later changes nothing here.
 
         Raises:

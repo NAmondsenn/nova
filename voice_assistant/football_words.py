@@ -766,8 +766,9 @@ def _team_playing(reading: Reading, now: datetime) -> Optional[Team]:
         match today. Within each of those, a team whose match is from BBC Sport (its id begins
         "bbc:") comes after one whose isn't, however early its kick-off, as BBC's matches never
         have line-ups: South Shields, first in the box, don't win over Stevenage, whose line-up
-        there is to say. With none but BBC's, one of those is picked as before. Only teams which
-        aren't stale count, as a stale team's match is an old copy.
+        there is to say. Two in play, or two kicking off together, go by the box's order. With
+        none but BBC's, one of those is picked as before. Only teams which aren't stale count, as
+        a stale team's match is an old copy.
 
     Raises:
         FootballUnavailable: If no team which isn't stale has a match today but one which is stale
@@ -777,6 +778,7 @@ def _team_playing(reading: Reading, now: datetime) -> Optional[Team]:
     with_match = [team for team in fresh if team.now is not None]
 
     def from_bbc(team: Team) -> bool:
+        """Whether the team's match is from BBC Sport, whose matches never have line-ups."""
         return team.now.id.startswith("bbc:")
 
     playing = [team for team in with_match if _in_play(team.now)]
@@ -815,14 +817,15 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
 
     Returns:
         {"success": True, "message": the words} - including where ESPN found nothing by the
-        name asked for, which is said, and including an overview which names the followed teams
-        it can't get while saying the rest. {"success": False, "message": what to say} where football
-        can't be got: CANT_GET, also for any answer of the wrong shape (logged at warning level),
-        for an overview where every followed team is stale, and for line-ups with no team named
-        where a team which is stale may be the one playing (see _team_playing);
+        name asked for, which is said, including an overview which names the followed teams
+        it can't get while saying the rest, and including line-ups with no team named where no
+        team is followed, which say so ("No teams are followed."), as the overview does.
+        {"success": False, "message": what to say} where football can't be got: CANT_GET, also
+        for any answer of the wrong shape (logged at warning level), for an overview where every
+        followed team is stale, and for line-ups with no team named where a team which is stale
+        may be the one playing (see _team_playing);
         or what Football says of Home Assistant not being reached, or not set up; or that the
-        team or competition isn't a name. Line-ups with no team named where no team is followed
-        say so ("No teams are followed."), as the overview does.
+        team or competition isn't a name.
     """
     if not all(isinstance(given, (str, type(None))) for given in (team, competition)):
         return {"success": False, "message": NOT_A_NAME}
