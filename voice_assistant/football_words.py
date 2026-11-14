@@ -510,6 +510,11 @@ def _names(side: Dict, key: str) -> List[str]:
     return names
 
 
+def _possessive(name: str) -> str:
+    """A name as it owns something: "Liverpool's", but "Wolves'" - a name ending in s takes the apostrophe alone."""
+    return f"{name}'" if name.endswith(("s", "S")) else f"{name}'s"
+
+
 def _said_side(side: Dict) -> Tuple[Set[str], str]:
     """
     Says one side's line-up, which is only listed once it is out.
@@ -518,8 +523,8 @@ def _said_side(side: Dict) -> Tuple[Set[str], str]:
         side: One of an answer's "sides": team, team_name, formation, starters and bench.
 
     Returns:
-        The names the side is known by (its short name and its full one), so that it can be told
-        from the other; and the words, e.g. "Liverpool's starting eleven (4-2-3-1): Alisson,
+        The names the side is known by (its short name and its full one), so that it can be
+        placed in the match; and the words, e.g. "Liverpool's starting eleven (4-2-3-1): Alisson,
         Frimpong and so on. Bench: Mamardashvili and Gomez.", with no brackets where there is
         no formation and "none listed" for an empty bench.
 
@@ -536,32 +541,55 @@ def _said_side(side: Dict) -> Tuple[Set[str], str]:
     if not starters:
         raise ValueError(f"a side is only listed once its line-up is out, but {name} has no starters")
     shape = f" ({formation})" if formation else ""
-    return {short, name}, f"{name}'s starting eleven{shape}: {_and_list(starters)}. Bench: {_and_list(bench) or 'none listed'}."
+    bench_said = _and_list(bench) or "none listed"
+    return {short, name}, f"{_possessive(name)} starting eleven{shape}: {_and_list(starters)}. Bench: {bench_said}."
 
 
-def _asked_is_home(match: Match, team: Dict, names: Set[str]) -> bool:
+def _asked_is_home(match: Match, team: Dict) -> bool:
     """
     Works out which side of a match is the team asked about.
 
     Args:
         match: The team's match.
         team: The answer's team, for its id.
-        names: The names the team is called by (its name and its full name).
 
     Returns:
-        Whether it is the home side. Told by name first, and by id where neither side has a name it is called by.
+        Whether it is the home side, by the team's id against the match's.
 
     Raises:
         KeyError: If the team has no id.
         TypeError: If the id isn't text.
-        ValueError: If neither side of the match is the team.
+        ValueError: If the id is on neither side of the match, which is then not the team's.
     """
-    if match.home in names or match.away in names:
-        return match.home in names
     team_id = _field(team, "id", str)
     if team_id not in (match.home_id, match.away_id):
-        raise ValueError(f"{match.home} v {match.away} isn't a match of the team {sorted(names)} asked about")
+        raise ValueError(f"{match.home} v {match.away} isn't a match of the team with the id {team_id}")
     return team_id == match.home_id
+
+
+def _is_home_side(names: Set[str], found: Dict) -> bool:
+    """
+    Works out which side of a match a line-up is, from the names it is known by.
+
+    Args:
+        names: The names _said_side gave: the side's short name and its full one.
+        found: The match as Home Assistant gave it, as Match.from_home keeps only the full name
+            of a side, and the side is named as the match names it, in either form.
+
+    Returns:
+        Whether it is the home side.
+
+    Raises:
+        KeyError: If the match lacks a side's name.
+        TypeError: If a name isn't text.
+        ValueError: If neither side of the match is called by any of them.
+    """
+    # A name which isn't there is None, which no side is called.
+    if names & {_field(found, "home", str), _field(found, "home_name", str, None)}:
+        return True
+    if names & {_field(found, "away", str), _field(found, "away_name", str, None)}:
+        return False
+    raise ValueError(f"{sorted(names)} is no side of the match")
 
 
 def said_lineups(answer: Dict, now: datetime) -> str:
@@ -575,42 +603,45 @@ def said_lineups(answer: Dict, now: datetime) -> str:
 
     Returns:
         Lines: the match, as said_match says it; each side whose line-up is out, the team
-        asked about first, with its formation, starting eleven and bench; then, for a match to
-        come or in play (and not from BBC Sport, which never has line-ups), which side's
-        line-up isn't out yet, or that none are and when they usually come. For a match which
-        is over, off or from BBC with no sides, that no line-ups are listed for it. LAG is the
-        last line if the match is in play. With no match, only that none is listed for the team.
+        asked about first, with its formation, starting eleven and bench; then, for a match
+        still to come (and not from BBC Sport, which never has line-ups), which side's line-up
+        isn't out yet, or that none are and when they usually come. For any other match - in
+        play, over, off or from BBC - that the line-up of a side which isn't listed isn't
+        listed, or that no line-ups are. LAG is the last line if the match is in play. With no
+        match, only that none is listed for the team.
 
     Raises:
         KeyError: If a key is missing from the answer, a side or the match.
         TypeError: If a value isn't of the type it should be.
-        ValueError: If the match or a side is of the wrong shape, or the match isn't the team's.
+        ValueError: If the match or a side is of the wrong shape, the match isn't the team's (its
+            id is on neither side), a side isn't a side of the match, or there are two for one.
     """
     _dict(answer, "an answer")
     team = _field(answer, "team", dict)
-    short = _field(team, "name", str)
-    name = _field(team, "full_name", str, None) or short
-    called = {short, name}
+    name = _field(team, "full_name", str, None) or _field(team, "name", str)
     # The sides are read before the match is looked for, so that ones of the wrong shape are refused either way.
     sides = [_said_side(side) for side in _field(answer, "sides", list, [])]
     found = _field(answer, "match", dict, None)
     if found is None:
         return f"No match is listed for {name}."
     match = Match.from_home(found)
+    asked_is_home = _asked_is_home(match, team)
+    listed = [(_is_home_side(names, found), said) for names, said in sides]
+    if len({at_home for at_home, _ in listed}) != len(listed):
+        raise ValueError(f"there are {len(listed)} line-ups for the two sides of {match.home} v {match.away}")
     # The team asked about comes first, whichever order the sides are in.
-    first = [said for names, said in sides if names & called]
-    second = [said for names, said in sides if not names & called]
-    lines = [said_match(match, now)] + first + second
+    lines = ([said_match(match, now)] + [said for at_home, said in listed if at_home == asked_is_home]
+             + [said for at_home, said in listed if at_home != asked_is_home])
 
-    if (_to_come(match) or _in_play(match)) and not match.id.startswith("bbc:"):
-        if not sides:
-            lines.append("Line-ups aren't out yet; they usually come about an hour before kick-off.")
-        elif len(sides) == 1:
-            # The side which isn't out is named as the match names it, which is its full name where it has one.
-            asked, other = (match.home, match.away) if _asked_is_home(match, team, called) else (match.away, match.home)
-            lines.append(f"{other if first else asked}'s line-up isn't out yet.")
-    elif not sides:
-        lines.append("No line-ups are listed for it.")
+    # Line-ups come out before kick-off, so only a match still to come is one they are waited for.
+    waiting = _to_come(match) and not match.id.startswith("bbc:")
+    if not listed:
+        lines.append("Line-ups aren't out yet; they usually come about an hour before kick-off." if waiting
+                     else "No line-ups are listed for it.")
+    elif len(listed) == 1:
+        # The side which isn't listed is named as the match names it, which is its full name where it has one.
+        missing = match.away if listed[0][0] else match.home
+        lines.append(f"{_possessive(missing)} line-up isn't {'out yet' if waiting else 'listed'}.")
     return "\n".join(_with_lag(lines, [match]))
 
 
@@ -718,15 +749,26 @@ def _team_playing(reading: Reading, now: datetime) -> Optional[Team]:
         now: The current time, aware and local, for which day is today.
 
     Returns:
-        The team whose match is in play; else the one whose match kicks off today, the earliest
-        first; or None with neither. A stale team is neither, as its match is an old copy.
+        The team whose match is in play; else the one whose match is still to come today, the
+        earliest first, as its line-up is the one which is about to come out; else the one
+        whose match was today and is over, the earliest first; or None where no team has a
+        match today. Only teams which aren't stale count, as a stale team's match is an old copy.
+
+    Raises:
+        FootballUnavailable: If no team which isn't stale has a match today but one which is stale
+            may have, so that nobody playing can't be said.
     """
-    fresh = [team for team in reading.teams if team.now is not None and not team.stale]
-    playing = [team for team in fresh if _in_play(team.now)]
+    fresh = [team for team in reading.teams if not team.stale]
+    with_match = [team for team in fresh if team.now is not None]
+    playing = [team for team in with_match if _in_play(team.now)]
     if playing:
         return playing[0]
-    today = [team for team in fresh if team.now.kickoff.astimezone().date() == now.astimezone().date()]
-    return min(today, key=lambda team: team.now.kickoff, default=None)
+    today = [team for team in with_match if team.now.kickoff.astimezone().date() == now.astimezone().date()]
+    if today:
+        return min(today, key=lambda team: (not _to_come(team.now), team.now.kickoff))
+    if len(fresh) < len(reading.teams):
+        raise _cant_get("a followed team's matches are an old copy", logging.WARNING)
+    return None
 
 
 def describe(football: Football, team=None, competition=None, about=None, date=None, days=None,
@@ -767,7 +809,8 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
             playing = _team_playing(football.read(), now)
             if playing is None:
                 return {"success": True, "message": NO_LINEUP_TEAM}
-            team = playing.name
+            # By the entry of the box which found it, the one name Home Assistant is known to find it by.
+            team = playing.asked or playing.name
         if not team and not competition:
             reading = football.read()
             # Said whole, so a line from an old copy would pass for a current one: any stops it all.
