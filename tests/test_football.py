@@ -468,6 +468,19 @@ def test_home_assistant_not_being_reached_is_said_as_nova_says_it_elsewhere(fail
     assert str(caught.value) == said
 
 
+def test_a_football_command_home_assistant_hasnt_got_is_said_as_football_not_being_set_up():
+    # Home Assistant answers 400 for a service it doesn't have, or one which can't return a response, which is
+    # football not being set up there - as the overview says of a sensor it hasn't got - not "a problem with that".
+    failure = requests.HTTPError("400", response=SimpleNamespace(status_code=400))
+    with pytest.raises(FootballUnavailable) as caught:
+        _football(FakeAsking(failure)).ask("team", "Arsenal")
+    assert str(caught.value) == NOT_SET_UP
+    # So is a follow, which asks first, and nothing is written.
+    home = FakeHome({FOOTBALL_TEAMS: _sensor([])}, box="Stevenage", answer=failure)
+    assert _football(home).follow("Arsenal") == {"success": False, "message": NOT_SET_UP}
+    assert home.written == []
+
+
 # Following and unfollowing: the teams box is what is written, and the sensor is what shows it took.
 
 def _stevenage_and_liverpool():

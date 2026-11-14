@@ -588,8 +588,9 @@ class Football:
 
         Raises:
             FootballUnavailable: Whose text is CANT_GET if the answer is old, has an error, isn't
-                shaped as an answer, can't be read or didn't come in time - or what to say, as
-                HomeAssistant.failure_message has it, if Home Assistant couldn't be asked at all.
+                shaped as an answer, can't be read or didn't come in time; NOT_SET_UP if Home
+                Assistant answered 400, as it does for a football command it hasn't got - or what to
+                say, as HomeAssistant.failure_message has it, if Home Assistant couldn't be asked at all.
         """
         try:
             answer = self._home.football_ask(what, name, date or "", 1 if days is None else days)
@@ -602,6 +603,10 @@ class Football:
             raise _cant_get(f"Home Assistant's answer couldn't be read: {e!r}", logging.WARNING) from e
         except requests.RequestException as e:
             logger.warning(f"Football couldn't be asked of Home Assistant: {e!r}")
+            # Home Assistant answers 400 for a service it hasn't got (or one which can't return a response), which
+            # is football not being set up there, as a missing sensor is for the overview.
+            if getattr(getattr(e, "response", None), "status_code", None) == 400:
+                raise FootballUnavailable(NOT_SET_UP) from e
             raise FootballUnavailable(HomeAssistant.failure_message(e)) from e
         if not isinstance(answer, dict):
             raise _cant_get(f"Home Assistant's answer isn't a dict: {answer!r}", logging.WARNING)
