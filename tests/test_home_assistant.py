@@ -1169,7 +1169,14 @@ def test_an_answer_which_cant_be_read_is_refused(make_home, response):
         home.football_ask("team", "Arsenal")
 
 
-def test_only_the_four_questions_are_asked(make_home):
+def test_the_football_command_asks_for_lineups(make_home):
+    home = make_home({ASK: _answer('{"team": {"id": "364"}, "stale": false}')})
+    assert home.football_ask("lineups", "Liverpool") == {"team": {"id": "364"}, "stale": False}
+    assert home._session.requests == [
+        ("POST", ASK, {"json": {"what": "lineups", "name": "Liverpool", "date": "", "days": 1}})]
+
+
+def test_only_the_five_questions_are_asked(make_home):
     home = make_home({})
     with pytest.raises(ValueError):
         home.football_ask("weather", "Arsenal")

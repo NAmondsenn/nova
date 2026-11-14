@@ -581,7 +581,7 @@ class Football:
         answer - any team or competition - and checks that the answer can be trusted.
 
         Args:
-            what: The question: "team", "competition", "table" or "left".
+            what: The question: "team", "competition", "table", "left" or "lineups".
             name: The team or competition asked about.
             date: The first day, as YYYYMMDD, or None for today.
             days: How many days from it, or None for one.

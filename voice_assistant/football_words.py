@@ -15,12 +15,12 @@ no scorers, no result worked out from a score, no phase they don't know.
 import logging
 import re
 from datetime import date, datetime
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from voice_assistant.clock import spoken_clock_time
 # The underscored names are football.py's own checks and error, used here for the answers too.
 from voice_assistant.football import (
-    CANT_GET, Football, FootballUnavailable, Match, Reading, _cant_get, _field, _is_whole)
+    CANT_GET, Football, FootballUnavailable, Match, Reading, Team, _cant_get, _field, _is_whole)
 from voice_assistant.google_calendar import _ordinal, spoken_day
 
 logger = logging.getLogger(__name__)
@@ -30,6 +30,9 @@ LAG = "Live scores can be up to a minute behind the match."
 
 # What is said when the team or competition asked about isn't a name, as the model can give anything.
 NOT_A_NAME = "I didn't catch which team or competition."
+
+# What is said when line-ups are asked for with no team named and none of the followed teams has a match today.
+NO_LINEUP_TEAM = "None of the followed teams is playing today. Name a team for its line-up."
 
 # How each phase of a match which has started is said. "off" (postponed, abandoned, cancelled)
 # is said another way, and a phase which isn't here is one Home Assistant's side has added since:
@@ -486,6 +489,131 @@ def said_left(answer: Dict, now: datetime) -> str:
     return "\n".join(_with_lag([said] + [_asked_line(match, now) for match in matches], matches))
 
 
+def _names(side: Dict, key: str) -> List[str]:
+    """
+    Reads a list of players' names from a side of a line-up.
+
+    Args:
+        side: The side.
+        key: The key of the list: "starters" or "bench".
+
+    Returns:
+        The names, in the order Home Assistant gave them.
+
+    Raises:
+        KeyError: If the list is missing.
+        TypeError: If it isn't a list of names.
+    """
+    names = _field(side, key, list)
+    if not all(isinstance(name, str) and name for name in names):
+        raise TypeError(f"{key} should be a list of names, not {names!r}")
+    return names
+
+
+def _said_side(side: Dict) -> Tuple[Set[str], str]:
+    """
+    Says one side's line-up, which is only listed once it is out.
+
+    Args:
+        side: One of an answer's "sides": team, team_name, formation, starters and bench.
+
+    Returns:
+        The names the side is known by (its short name and its full one), so that it can be told
+        from the other; and the words, e.g. "Liverpool's starting eleven (4-2-3-1): Alisson,
+        Frimpong and so on. Bench: Mamardashvili and Gomez.", with no brackets where there is
+        no formation and "none listed" for an empty bench.
+
+    Raises:
+        KeyError: If a key is missing.
+        TypeError: If a value isn't of the type it should be.
+        ValueError: If the side has no starters, as a side is only listed with a line-up out.
+    """
+    _dict(side, "a side")
+    short = _field(side, "team", str)
+    name = _field(side, "team_name", str, None) or short
+    formation = _field(side, "formation", str, None)
+    starters, bench = _names(side, "starters"), _names(side, "bench")
+    if not starters:
+        raise ValueError(f"a side is only listed once its line-up is out, but {name} has no starters")
+    shape = f" ({formation})" if formation else ""
+    return {short, name}, f"{name}'s starting eleven{shape}: {_and_list(starters)}. Bench: {_and_list(bench) or 'none listed'}."
+
+
+def _asked_is_home(match: Match, team: Dict, names: Set[str]) -> bool:
+    """
+    Works out which side of a match is the team asked about.
+
+    Args:
+        match: The team's match.
+        team: The answer's team, for its id.
+        names: The names the team is called by (its name and its full name).
+
+    Returns:
+        Whether it is the home side. Told by name first, and by id where neither side has a name it is called by.
+
+    Raises:
+        KeyError: If the team has no id.
+        TypeError: If the id isn't text.
+        ValueError: If neither side of the match is the team.
+    """
+    if match.home in names or match.away in names:
+        return match.home in names
+    team_id = _field(team, "id", str)
+    if team_id not in (match.home_id, match.away_id):
+        raise ValueError(f"{match.home} v {match.away} isn't a match of the team {sorted(names)} asked about")
+    return team_id == match.home_id
+
+
+def said_lineups(answer: Dict, now: datetime) -> str:
+    """
+    Says what football_ask answered for a team's line-ups.
+
+    Args:
+        answer: The answer, with the team, its match and the sides whose line-up is out as the
+            Contract has them. Its stale, error and unknown are the caller's to deal with before this.
+        now: The current time, aware and local.
+
+    Returns:
+        Lines: the match, as said_match says it; each side whose line-up is out, the team
+        asked about first, with its formation, starting eleven and bench; then, for a match to
+        come or in play (and not from BBC Sport, which never has line-ups), which side's
+        line-up isn't out yet, or that none are and when they usually come. For a match which
+        is over, off or from BBC with no sides, that no line-ups are listed for it. LAG is the
+        last line if the match is in play. With no match, only that none is listed for the team.
+
+    Raises:
+        KeyError: If a key is missing from the answer, a side or the match.
+        TypeError: If a value isn't of the type it should be.
+        ValueError: If the match or a side is of the wrong shape, or the match isn't the team's.
+    """
+    _dict(answer, "an answer")
+    team = _field(answer, "team", dict)
+    short = _field(team, "name", str)
+    name = _field(team, "full_name", str, None) or short
+    called = {short, name}
+    # The sides are read before the match is looked for, so that ones of the wrong shape are refused either way.
+    sides = [_said_side(side) for side in _field(answer, "sides", list, [])]
+    found = _field(answer, "match", dict, None)
+    if found is None:
+        return f"No match is listed for {name}."
+    match = Match.from_home(found)
+    # The team asked about comes first, whichever order the sides are in.
+    first = [said for names, said in sides if names & called]
+    second = [said for names, said in sides if not names & called]
+    lines = [said_match(match, now)] + first + second
+
+    if (_to_come(match) or _in_play(match)) and not match.id.startswith("bbc:"):
+        if not sides:
+            lines.append("Line-ups aren't out yet; they usually come about an hour before kick-off.")
+        elif len(sides) == 1:
+            # The side which isn't out is named as the match names it, which is its full name where it has one.
+            asked, other = (match.home, match.away) if _asked_is_home(match, team, called) else (match.away, match.home)
+            lines.append(f"{other if first else asked}'s line-up isn't out yet.")
+    elif not sides:
+        lines.append("No line-ups are listed for it.")
+    return "\n".join(_with_lag(lines, [match]))
+
+
 def _asked_days(given) -> int:
     """
     Reads how many days the model asked for, which may be a number in any form.
@@ -527,6 +655,11 @@ def _asked_date(given) -> Optional[str]:
     return text.replace("-", "")
 
 
+def _kind(about: object) -> str:
+    """What the model asked about, in lower case without spaces round it - or "" where it isn't text."""
+    return about.strip().lower() if isinstance(about, str) else ""
+
+
 def _question(team: str, competition: str, about: object) -> Tuple[str, str]:
     """
     Picks which question to ask Home Assistant, and of whom.
@@ -534,17 +667,18 @@ def _question(team: str, competition: str, about: object) -> Tuple[str, str]:
     Args:
         team: The team asked about, or "" for none.
         competition: The competition asked about, or "" for none. Not both blank.
-        about: "matches", "table" or "left" - or anything, which is taken for matches.
+        about: "matches", "table", "left" or "lineups" - or anything, which is taken for matches.
 
     Returns:
         The question, one of football_ask's, and the name to ask it of. A competition wins over
         a team, and a table or who is left is only a question of a competition: a team alone is
-        asked about as a team, whatever else is said of it.
+        asked about as a team, or for its line-ups if that is what is asked for, whatever else
+        is said of it. The line-ups of a competition are its matches.
     """
+    kind = _kind(about)
     if competition:
-        kind = about.strip().lower() if isinstance(about, str) else ""
         return (kind if kind in ("table", "left") else "competition"), competition
-    return "team", team
+    return ("lineups" if kind == "lineups" else "team"), team
 
 
 def _said_answer(what: str, answer: Dict, now: datetime) -> str:
@@ -572,7 +706,27 @@ def _said_answer(what: str, answer: Dict, now: datetime) -> str:
         return f"ESPN, where Home Assistant's football comes from, found nothing called {_and_list(unknown)}."
     if what == "table":
         return said_table(answer)
-    return {"team": said_team, "competition": said_competition, "left": said_left}[what](answer, now)
+    return {"team": said_team, "competition": said_competition, "left": said_left, "lineups": said_lineups}[what](answer, now)
+
+
+def _team_playing(reading: Reading, now: datetime) -> Optional[Team]:
+    """
+    Picks the followed team whose line-up is most likely asked for with no team named.
+
+    Args:
+        reading: What the sensor said, which Football.read() gave.
+        now: The current time, aware and local, for which day is today.
+
+    Returns:
+        The team whose match is in play; else the one whose match kicks off today, the earliest
+        first; or None with neither. A stale team is neither, as its match is an old copy.
+    """
+    fresh = [team for team in reading.teams if team.now is not None and not team.stale]
+    playing = [team for team in fresh if _in_play(team.now)]
+    if playing:
+        return playing[0]
+    today = [team for team in fresh if team.now.kickoff.astimezone().date() == now.astimezone().date()]
+    return min(today, key=lambda team: team.now.kickoff, default=None)
 
 
 def describe(football: Football, team=None, competition=None, about=None, date=None, days=None,
@@ -587,8 +741,9 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
         team: The team asked about. With no team and no competition, the followed teams are
             what is said.
         competition: The league or cup asked about, which wins over a team.
-        about: "table" or "left" with a competition - its table or who is still in it; any
-            other value, its matches.
+        about: "table" or "left" with a competition - its table or who is still in it; "lineups"
+            with a team - its line-ups, or with none the followed team playing now or today;
+            any other value, its matches.
         date: The first day of a competition's matches, as YYYY-MM-DD, or none for today.
         days: How many days from it, or none for one.
         now: The current time, aware and local, which the words are built for. Defaults to the
@@ -607,6 +762,12 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
     if now is None:
         now = datetime.now().astimezone()
     try:
+        if not team and not competition and _kind(about) == "lineups":
+            # Line-ups asked for with no team are for the followed team playing, in the place of the overview below.
+            playing = _team_playing(football.read(), now)
+            if playing is None:
+                return {"success": True, "message": NO_LINEUP_TEAM}
+            team = playing.name
         if not team and not competition:
             reading = football.read()
             # Said whole, so a line from an old copy would pass for a current one: any stops it all.

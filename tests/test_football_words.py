@@ -11,7 +11,8 @@ import requests
 from voice_assistant import football_words
 from voice_assistant.football import Football, Match, Reading, Team
 from voice_assistant.football_words import (
-    LAG, describe, said_competition, said_followed, said_left, said_match, said_table, said_team)
+    LAG, NO_LINEUP_TEAM, describe, said_competition, said_followed, said_left, said_lineups, said_match, said_table,
+    said_team)
 from voice_assistant.home_assistant import FOOTBALL_TEAMS
 
 # An instant well away from any change of clock, so that a test passes in whichever time zone it runs.
@@ -82,12 +83,23 @@ def _left_answer(name="Carabao Cup", **fields):
     return answer
 
 
+def _lineups_answer(**fields):
+    """A football_ask answer for a team's line-ups, as the Contract has it, with no match unless a test gives one."""
+    return {"team": {"id": "364", "name": "Liverpool", "followed": True}, "stale": False, **fields}
+
+
 # Match days used below, in the same week as 13 November 2026 (a Friday) or a few weeks off.
 LIVE = {"id": "9", "state": "in", "phase": "second_half", "clock": "67'", "home": "Liverpool", "away": "Man Utd",
         "away_name": "Manchester United", "home_score": 2, "away_score": 1}
 SUNDAY_AWAY = {"id": "10", "kickoff": "2026-11-22T16:30:00+00:00", "home": "Arsenal", "away": "Liverpool"}
 PALACE_LOSS = {"id": "8", "state": "post", "phase": "full_time", "clock": "FT", "kickoff": "2026-11-08T16:30:00+00:00",
                "home": "Crystal Palace", "away": "Liverpool", "home_score": 1, "away_score": 3, "winner": "away"}
+
+AT = datetime(2026, 11, 13, 12, 0)
+LIVERPOOL_SIDE = {"team": "Liverpool", "formation": "4-2-3-1", "starters": ["Alisson", "Frimpong", "Konate", "Van Dijk",
+                  "Kerkez", "Gravenberch", "Mac Allister", "Salah", "Szoboszlai", "Gakpo", "Isak"], "bench": ["Mamardashvili", "Gomez"]}
+ARSENAL_SIDE = {"team": "Arsenal", "starters": ["Raya", "White", "Saliba", "Gabriel", "Calafiori", "Rice", "Zubimendi",
+                "Odegaard", "Saka", "Martinelli", "Gyokeres"], "bench": []}
 
 
 def test_a_match_to_come(london):
@@ -485,6 +497,68 @@ def test_an_answer_of_the_wrong_shape_is_refused(london, changes):
         said_left(_left_answer(**changes), AT)
 
 
+def test_both_sides(london):
+    lines = said_lineups(_lineups_answer(match=_found_match(**SUNDAY_AWAY), sides=[ARSENAL_SIDE, LIVERPOOL_SIDE]),
+                         AT.astimezone()).split("\n")
+    assert len(lines) == 3
+    assert lines[0] == said_match(_m(**SUNDAY_AWAY), AT.astimezone())
+    # The team asked about comes first, whatever order the answer has
+    assert lines[1] == ("Liverpool's starting eleven (4-2-3-1): Alisson, Frimpong, Konate, Van Dijk, Kerkez, "
+                        "Gravenberch, Mac Allister, Salah, Szoboszlai, Gakpo and Isak. Bench: Mamardashvili and Gomez.")
+    assert lines[2].startswith("Arsenal's starting eleven: Raya,")
+    assert lines[2].endswith("Bench: none listed.")
+
+
+def test_one_side_out(london):
+    said = said_lineups(_lineups_answer(match=_found_match(**SUNDAY_AWAY), sides=[LIVERPOOL_SIDE]), AT.astimezone())
+    assert said.split("\n")[-1] == "Arsenal's line-up isn't out yet."
+
+
+def test_the_other_side_out_and_not_the_team_asked_about(london):
+    lines = said_lineups(_lineups_answer(match=_found_match(**SUNDAY_AWAY), sides=[ARSENAL_SIDE]), AT.astimezone()).split("\n")
+    assert len(lines) == 3
+    assert lines[1].startswith("Arsenal's starting eleven: Raya,")
+    assert lines[2] == "Liverpool's line-up isn't out yet."
+
+
+def test_none_out_yet(london):
+    said = said_lineups(_lineups_answer(match=_found_match(**SUNDAY_AWAY)), AT.astimezone())
+    assert said.split("\n")[-1] == "Line-ups aren't out yet; they usually come about an hour before kick-off."
+
+
+@pytest.mark.parametrize("match", [PALACE_LOSS, {"id": "bbc:4412", "slug": "bbc:eng.5", "kickoff": "2026-11-22T16:30:00+00:00"},
+                                   {"state": "pre", "phase": "off", "clock": "Postponed"}],
+                         ids=["a match over", "a match from BBC", "a match which is off"])
+def test_no_lineups_for_a_match_over_or_from_bbc(london, match):
+    said = said_lineups(_lineups_answer(match=_found_match(**match)), AT.astimezone())
+    assert said.split("\n")[-1] == "No line-ups are listed for it."
+    assert "isn't out yet" not in said and "aren't out yet" not in said
+
+
+def test_the_sides_are_said_by_their_full_names(london):
+    match = _found_match(**{**LIVE, "state": "pre", "phase": None, "home_score": None, "away_score": None})
+    team = {"id": "360", "name": "Man Utd", "full_name": "Manchester United", "followed": True}
+    united = {**ARSENAL_SIDE, "team": "Man Utd", "team_name": "Manchester United", "formation": "3-4-3"}
+    lines = said_lineups(_lineups_answer(team=team, match=match, sides=[LIVERPOOL_SIDE, united]), AT.astimezone()).split("\n")
+    assert lines[1].startswith("Manchester United's starting eleven (3-4-3): Raya,")
+    assert lines[2].startswith("Liverpool's starting eleven (4-2-3-1): Alisson,")
+    # Where one side is out, the other is named as the match names it
+    lines = said_lineups(_lineups_answer(team=team, match=match, sides=[LIVERPOOL_SIDE]), AT.astimezone()).split("\n")
+    assert lines[-1] == "Manchester United's line-up isn't out yet."
+
+
+def test_a_match_in_play_ends_with_the_warning(london):
+    said = said_lineups(_lineups_answer(match=_found_match(**LIVE), sides=[LIVERPOOL_SIDE, ARSENAL_SIDE]), AT.astimezone())
+    assert said.split("\n")[-1] == LAG
+    assert LAG not in said_lineups(_lineups_answer(match=_found_match(**SUNDAY_AWAY), sides=[LIVERPOOL_SIDE]), AT.astimezone())
+
+
+def test_no_match_at_all(london):
+    assert said_lineups(_lineups_answer(), AT.astimezone()) == "No match is listed for Liverpool."
+    team = {"id": "364", "name": "Liverpool", "full_name": "Liverpool FC", "followed": True}
+    assert said_lineups(_lineups_answer(team=team), AT.astimezone()) == "No match is listed for Liverpool FC."
+
+
 class FakeHome:
     """
     Gives the sensor as Home Assistant does and answers football_ask() with what a test sets - or raises
@@ -580,6 +654,7 @@ def test_a_team_is_asked_of_home_assistant(london):
     ({"competition": "Carabao Cup", "about": "matches"}, ("competition", "Carabao Cup", "", 1)),
     ({"team": "Liverpool", "about": "matches"}, ("team", "Liverpool", "", 1)),
     ({"team": "Liverpool", "about": "left"}, ("team", "Liverpool", "", 1)),
+    ({"team": "Liverpool", "about": " Lineups "}, ("lineups", "Liverpool", "", 1)),
     ({"competition": "Premier League", "about": " Table "}, ("table", "Premier League", "", 1)),
     ({"competition": "Premier League", "about": "standings"}, ("competition", "Premier League", "", 1)),
     ({"team": "  Liverpool ", "competition": "  "}, ("team", "Liverpool", "", 1)),
@@ -630,11 +705,11 @@ def test_names_espn_doesnt_know_are_all_said_and_no_words_are_built_for_them(lon
     def refused(*_):
         raise AssertionError("said_* was called for an answer which found nothing")
 
-    for name in ("said_team", "said_competition", "said_table", "said_left"):
+    for name in ("said_team", "said_competition", "said_table", "said_left", "said_lineups"):
         monkeypatch.setattr(football_words, name, refused)
     answer = {"unknown": ["Arsnal", "Chelsee"], "stale": False}
     for given in ({"team": "Arsnal"}, {"competition": "x"}, {"competition": "x", "about": "table"},
-                  {"competition": "x", "about": "left"}):
+                  {"competition": "x", "about": "left"}, {"team": "Arsnal", "about": "lineups"}):
         assert _said(FakeHome(answer=answer), **given) == {
             "success": True,
             "message": "ESPN, where Home Assistant's football comes from, found nothing called Arsnal and Chelsee."}
@@ -707,3 +782,88 @@ def test_it_is_said_for_the_time_now_unless_a_time_is_given(london):
     answer = _team_answer(next=[_found_match(kickoff=kickoff)])
     said = describe(_football(FakeHome(answer=answer)), team="Liverpool")
     assert said["success"] and "Liverpool v Arsenal, Premier League, today at" in said["message"]
+
+
+def test_lineups_are_asked_of_home_assistant(london):
+    answer = _lineups_answer(match=_found_match(**SUNDAY_AWAY), sides=[LIVERPOOL_SIDE])
+    home = FakeHome(answer=answer)
+    said = describe(_football(home), team="Liverpool", about="lineups", now=AT.astimezone())
+    assert said == {"success": True, "message": said_lineups(answer, AT.astimezone())}
+    assert home.asked == [("lineups", "Liverpool", "", 1)]
+
+
+@pytest.mark.parametrize("teams", [
+    [_team("395", "Stevenage"), _team("364", "Liverpool", next=[_found_match(kickoff="2026-11-21T15:00:00+00:00")])],
+    [_team("364", "Liverpool", now=_found_match(kickoff="2026-11-14T15:00:00+00:00"))],
+    [_team("364", "Liverpool", now=_found_match(**LIVE), stale=True)],
+    [],
+], ids=["no match today", "a match tomorrow", "a stale team playing", "no teams"])
+def test_lineups_with_no_team_and_nobody_playing(london, teams):
+    home = FakeHome(teams)
+    assert _said(home, about="lineups") == {"success": True, "message": NO_LINEUP_TEAM}
+    assert home.asked == []
+
+
+def test_lineups_with_no_team_ask_for_the_team_playing(london):
+    # Liverpool is asked for though Stevenage comes first in the box, and though Stevenage is the one with a match later today.
+    teams = [_team("395", "Stevenage", now=_found_match(kickoff="2026-11-13T19:45:00+00:00", home="Stevenage", away="Wigan")),
+             _team("364", "Liverpool", now=_found_match(**LIVE))]
+    answer = _lineups_answer(match=_found_match(**LIVE), sides=[LIVERPOOL_SIDE])
+    home = FakeHome(teams, answer=answer)
+    assert _said(home, about="lineups") == {"success": True, "message": said_lineups(answer, AT.astimezone())}
+    assert home.asked == [("lineups", "Liverpool", "", 1)]
+
+
+def test_lineups_with_no_team_ask_for_the_team_kicking_off_first_today(london):
+    teams = [_team("395", "Stevenage", now=_found_match(kickoff="2026-11-13T19:45:00+00:00", home="Stevenage", away="Wigan")),
+             _team("364", "Liverpool", now=_found_match(kickoff="2026-11-13T15:00:00+00:00"))]
+    home = FakeHome(teams, answer=_lineups_answer(match=_found_match()))
+    assert _said(home, about="lineups")["success"]
+    assert home.asked == [("lineups", "Liverpool", "", 1)]
+
+
+def test_today_is_by_the_local_clock(london):
+    # British Summer Time is an hour ahead of UTC: 23:30 UTC on 12 June is 00:30 on the 13th here, and 23:30 UTC on the 13th is the 14th.
+    summer = datetime(2026, 6, 13, 12, 0).astimezone()
+    after_midnight = _team("364", "Liverpool", now=_found_match(kickoff="2026-06-12T23:30:00+00:00"))
+    next_day = _team("395", "Stevenage", now=_found_match(kickoff="2026-06-13T23:30:00+00:00"))
+    home = FakeHome([next_day, after_midnight], answer=_lineups_answer(match=_found_match()))
+    describe(_football(home), about="lineups", now=summer)
+    assert home.asked == [("lineups", "Liverpool", "", 1)]
+    home = FakeHome([next_day])
+    assert describe(_football(home), about="lineups", now=summer) == {"success": True, "message": NO_LINEUP_TEAM}
+    assert home.asked == []
+
+
+@pytest.mark.parametrize("failure, said", [
+    (requests.ConnectionError("refused"), "I can't reach Home Assistant right now."),
+    (requests.HTTPError("404", response=SimpleNamespace(status_code=404)), "Football isn't set up in Home Assistant."),
+])
+def test_lineups_with_no_team_say_why_the_sensor_cant_be_read(london, failure, said):
+    home = FakeHome()
+    home.sensor = failure
+    assert _said(home, about="lineups") == {"success": False, "message": said}
+    assert _said(FakeHome(["Liverpool"]), about="lineups") == NOT_GOT
+
+
+def test_lineups_of_a_competition_is_its_matches(london):
+    home = FakeHome(answer={"stale": False, "unknown": ["x"]})
+    _said(home, competition="Premier League", about="lineups")
+    _said(home, team="Liverpool", competition="Premier League", about=" Lineups ")
+    assert home.asked == [("competition", "Premier League", "", 1), ("competition", "Premier League", "", 1)]
+
+
+@pytest.mark.parametrize("changes", [{"sides": "Liverpool"}, {"sides": [{"team": "Liverpool", "starters": [7], "bench": []}]},
+                                     {"sides": [{"team": "Liverpool", "starters": []}]}, {"match": "today"},
+                                     {"sides": [{"team": "Liverpool", "starters": [], "bench": []}]},
+                                     {"sides": [{"team": "Liverpool", "starters": ["Alisson"], "bench": "Gomez"}]},
+                                     {"sides": ["Liverpool"]}, {"sides": [{"starters": ["Alisson"], "bench": []}]},
+                                     {"sides": [LIVERPOOL_SIDE], "match": {"id": "1"}},
+                                     {"sides": [{**LIVERPOOL_SIDE, "team": "Wolves"}], "match": _found_match(home="Arsenal", away="Chelsea",
+                                                                                                           home_id="1", away_id="2")}],
+                         ids=["sides not a list", "a starter not a name", "no bench", "match not a match", "no starters",
+                              "bench not a list", "a side not a dict", "a side with no name", "match lacking keys",
+                              "the team isn't in its match"])
+def test_a_lineups_answer_of_the_wrong_shape_is_refused(london, changes):
+    answer = _lineups_answer(**{"match": _found_match(**SUNDAY_AWAY), **changes})
+    assert _said(FakeHome(answer=answer), team="Liverpool", about="lineups") == NOT_GOT
