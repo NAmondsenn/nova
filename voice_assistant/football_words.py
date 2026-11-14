@@ -14,6 +14,7 @@ no scorers, no result worked out from a score, no phase they don't know.
 
 import logging
 import re
+from dataclasses import replace
 from datetime import date, datetime
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
@@ -248,19 +249,24 @@ def _other_than(matches: Sequence[Match], current: Optional[Match]) -> List[Matc
     return [match for match in matches if current is None or match.id != current.id]
 
 
-def said_followed(reading: Reading, now: datetime) -> str:
+def said_followed(reading: Reading, now: datetime, cant_get: Sequence[str] = ()) -> str:
     """
     Says what each followed team is doing: its match today (or in play), its next fixture and its last result.
 
     Args:
-        reading: What the sensor said, which Football.read() gave. Whether its teams are stale
-            is the caller's to decide before this.
+        reading: What the sensor said, which Football.read() gave, with only the teams which
+            aren't stale: whether a team is stale is the caller's to decide before this, and
+            no line is said of one which is.
         now: The current time, aware and local.
+        cant_get: The names of the teams the caller left out of the reading because they are
+            stale. Never given with a reading of no teams, which would say "No teams are followed."
+            while some are.
 
     Returns:
         One line for each team, starting with its name, e.g. "Stevenage: no fixtures listed.";
-        LAG as a last line if any match is in play; and, before that, that only some of the
-        teams are shown if Home Assistant left some out. "No teams are followed." with none.
+        then, if Home Assistant left some teams out, that only some are shown; then, if cant_get
+        has names, that they can't be got ("I can't get South Shields right now."); and LAG as
+        the last line if any match is in play. "No teams are followed." with none.
 
     Raises:
         KeyError: If the odds of a match lack a chance.
@@ -286,6 +292,8 @@ def said_followed(reading: Reading, now: datetime) -> str:
         lines.append(f"{team.name}: " + " ".join(parts))
     if reading.trimmed:
         lines.append("Home Assistant is showing only some of the followed teams.")
+    if cant_get:
+        lines.append(f"I can't get {_and_list(cant_get)} right now.")
     return "\n".join(_with_lag(lines, shown))
 
 
@@ -781,7 +789,8 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
     Args:
         football: Football, for the sensor of the followed teams and for questions.
         team: The team asked about. With no team and no competition, the followed teams are
-            what is said.
+            what is said: those which aren't stale in full, and those which are only by name, as
+            ones which can't be got.
         competition: The league or cup asked about, which wins over a team.
         about: "table" or "left" with a competition - its table or who is still in it; "lineups"
             with a team - its line-ups, or with none the followed team playing now or today;
@@ -793,8 +802,10 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
 
     Returns:
         {"success": True, "message": the words} - including where ESPN found nothing by the
-        name asked for, which is said. {"success": False, "message": what to say} where football
-        can't be got: CANT_GET, also for any answer of the wrong shape (logged at warning level);
+        name asked for, which is said, and including an overview which names the followed teams
+        it can't get while saying the rest. {"success": False, "message": what to say} where football
+        can't be got: CANT_GET, also for any answer of the wrong shape (logged at warning level) and
+        for an overview where every followed team is stale;
         or what Football says of Home Assistant not being reached, or not set up; or that the
         team or competition isn't a name.
     """
@@ -813,10 +824,12 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
             team = playing.asked or playing.name
         if not team and not competition:
             reading = football.read()
-            # Said whole, so a line from an old copy would pass for a current one: any stops it all.
-            if any(followed.stale for followed in reading.teams):
+            fresh = tuple(followed for followed in reading.teams if not followed.stale)
+            stale = [followed.name for followed in reading.teams if followed.stale]
+            # No line of a stale team is said, as it would pass for a current one: only that it can't be got.
+            if stale and not fresh:
                 raise _cant_get("a followed team's matches are an old copy", logging.WARNING)
-            return {"success": True, "message": said_followed(reading, now)}
+            return {"success": True, "message": said_followed(replace(reading, teams=fresh), now, stale)}
         what, name = _question(team, competition, about)
         answer = football.ask(what, name, _asked_date(date), _asked_days(days))
         return {"success": True, "message": _said_answer(what, answer, now)}

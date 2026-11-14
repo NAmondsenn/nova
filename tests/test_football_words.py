@@ -673,9 +673,60 @@ def test_asked_of_nobody_with_no_teams_followed_says_so(london):
     assert _said(FakeHome([])) == {"success": True, "message": "No teams are followed."}
 
 
-def test_one_stale_team_stops_the_overview(london):
-    home = FakeHome([_team("395", "Stevenage", stale=True), _team("364", "Liverpool")], stale=True)
-    assert _said(home) == NOT_GOT
+CANT_GET_SHIELDS = "I can't get South Shields right now."
+
+
+def test_the_overview_names_a_team_it_cant_get(london):
+    AT = datetime(2026, 11, 13, 12, 0).astimezone()
+    liverpool = _team("364", "Liverpool", now=_found_match(**LIVE))
+    # The stale team's match is an old copy, so nothing of it is said, only that it can't be got.
+    shields = _team("396", "South Shields", stale=True, now=_found_match(
+        id="21", home="South Shields", away="Gateshead", league="Northern Premier League"))
+    home = FakeHome([liverpool, shields], stale=True)
+    said = _said(home)
+    assert said["success"] is True
+    # The fresh team is said as the overview says it, and the line goes before the warning, which stays last.
+    fresh = said_followed(_reading(liverpool), AT).split("\n")
+    assert fresh[-1] == LAG
+    assert said["message"].split("\n") == fresh[:-1] + [CANT_GET_SHIELDS, LAG]
+    assert "Gateshead" not in said["message"] and "South Shields:" not in said["message"]
+    assert home.asked == []
+
+
+def test_the_overview_names_each_team_it_cant_get_as_its_last_line_with_nothing_in_play(london):
+    AT = datetime(2026, 11, 13, 12, 0).astimezone()
+    liverpool = _team("364", "Liverpool", next=[_found_match(**SUNDAY_AWAY)])
+    home = FakeHome([_team("395", "Stevenage", stale=True), liverpool, _team("396", "South Shields", stale=True)])
+    said = _said(home)
+    assert said == {"success": True, "message": said_followed(_reading(liverpool), AT)
+                    + "\nI can't get Stevenage and South Shields right now."}
+
+
+def test_the_overview_names_the_stale_team_though_the_fresh_one_has_nothing_listed(london):
+    # A fresh team with nothing listed is still a team, so this is not "No teams are followed."
+    home = FakeHome([_team("395", "Stevenage"), _team("396", "South Shields", stale=True)])
+    assert _said(home) == {"success": True, "message": f"Stevenage: no fixtures listed.\n{CANT_GET_SHIELDS}"}
+
+
+def test_the_overview_says_what_is_left_out_first_then_the_team_it_cant_get_then_the_warning(london):
+    sentence = "Home Assistant is showing only some of the followed teams."
+    home = FakeHome([_team("364", "Liverpool", now=_found_match(**LIVE)), _team("396", "South Shields", stale=True)],
+                    trimmed=True)
+    assert _said(home)["message"].split("\n")[-3:] == [sentence, CANT_GET_SHIELDS, LAG]
+
+
+@pytest.mark.parametrize("teams, sensor", [
+    ([_team("395", "Stevenage", stale=True), _team("364", "Liverpool", stale=True)], {}),
+    ([_team("364", "Liverpool", stale=True)], {}),
+    # An older Home Assistant doesn't mark teams, so with the sensor stale all of them are.
+    ([_team("395", "Stevenage"), _team("364", "Liverpool")], {"stale": True}),
+], ids=["every team stale", "the only team stale", "a stale sensor which marks no team"])
+def test_the_overview_with_every_team_stale(london, caplog, teams, sensor):
+    home = FakeHome(teams, **sensor)
+    with caplog.at_level(logging.WARNING, logger="voice_assistant.football"):
+        assert _said(home) == NOT_GOT
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]
+    assert home.asked == []
 
 
 def test_a_sensor_which_is_stale_with_no_team_marked_stops_the_overview(london):
