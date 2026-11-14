@@ -1035,8 +1035,16 @@ def test_lineups_with_no_team_say_why_the_sensor_cant_be_read(london, failure, s
 def test_lineups_of_a_competition_is_its_matches(london):
     home = FakeHome(answer={"stale": False, "unknown": ["x"]})
     _said(home, competition="Premier League", about="lineups")
-    _said(home, team="Liverpool", competition="Premier League", about=" Lineups ")
-    assert home.asked == [("competition", "Premier League", "", 1), ("competition", "Premier League", "", 1)]
+    assert home.asked == [("competition", "Premier League", "", 1)]
+
+
+def test_lineups_of_a_team_are_asked_of_it_whatever_competition_is_given(london):
+    # "Who's starting for Liverpool in the Champions League tonight?" is about the team, and a team's line-ups are asked
+    # of it, where its table or who is left are only a competition's.
+    home = FakeHome(answer={"stale": False, "unknown": ["x"]})
+    _said(home, team="Liverpool", competition="UEFA Champions League", about=" Lineups ")
+    _said(home, team="Liverpool", competition="UEFA Champions League", about="left")
+    assert home.asked == [("lineups", "Liverpool", "", 1), ("left", "UEFA Champions League", "", 1)]
 
 
 @pytest.mark.parametrize("changes", [

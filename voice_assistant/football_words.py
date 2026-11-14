@@ -708,15 +708,18 @@ def _question(team: str, competition: str, about: object) -> Tuple[str, str]:
         about: "matches", "table", "left" or "lineups" - or anything, which is taken for matches.
 
     Returns:
-        The question, one of football_ask's, and the name to ask it of. A competition wins over
-        a team, and a table or who is left is only a question of a competition: a team alone is
-        asked about as a team, or for its line-ups if that is what is asked for, whatever else
-        is said of it. The line-ups of a competition are its matches.
+        The question, one of football_ask's, and the name to ask it of. A team's line-ups are
+        asked of the team, whatever competition is given with it, as they are the team's match.
+        Otherwise a competition wins over a team, and a table or who is left is only a question
+        of a competition: a team alone is asked about as a team, whatever else is said of it.
+        The line-ups of a competition alone are its matches.
     """
     kind = _kind(about)
+    if team and kind == "lineups":
+        return "lineups", team
     if competition:
         return (kind if kind in ("table", "left") else "competition"), competition
-    return ("lineups" if kind == "lineups" else "team"), team
+    return "team", team
 
 
 def _said_answer(what: str, answer: Dict, now: datetime) -> str:
@@ -790,10 +793,11 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
         team: The team asked about. With no team and no competition, the followed teams are
             what is said: those which aren't stale in full, and those which are only by name, as
             ones which can't be got.
-        competition: The league or cup asked about, which wins over a team.
+        competition: The league or cup asked about, which wins over a team, except for line-ups.
         about: "table" or "left" with a competition - its table or who is still in it; "lineups"
-            with a team - its line-ups, or with none the followed team playing now or today;
-            any other value, its matches.
+            with a team - its line-ups, whatever competition is given with it - or with neither a
+            team nor a competition the followed team playing now or today; any other value, its
+            matches.
         date: The first day of a competition's matches, as YYYY-MM-DD, or none for today.
         days: How many days from it, or none for one.
         now: The current time, aware and local, which the words are built for. Defaults to the

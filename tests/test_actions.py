@@ -1054,12 +1054,22 @@ def test_get_football_is_read_by_claude_and_names_the_followed_teams(monkeypatch
 
 def test_get_football_offers_lineups():
     schema = {tool["name"]: tool for tool in ActionExecutor(football=SimpleNamespace(names=list)).tool_schemas()}["get_football"]
+    description = schema["description"]
     about = schema["input_schema"]["properties"]["about"]
     assert about["enum"] == ["matches", "table", "left", "lineups"]
-    assert "starting eleven" in about["description"] and "followed team playing now or today" in about["description"]
-    assert "line-ups" in schema["description"] and "starting 11" in schema["description"]
+    assert "starting eleven" in about["description"]
+    assert "line-ups" in description and "starting 11" in description
+    # With a team named, even one of the user's own; with none, the followed team playing now or today.
+    assert ("'lineups' with the team named, even one of the user's own; with neither a team nor a competition, "
+            "the followed team playing now or today") in about["description"]
+    assert "ask about the user's own teams in general" in description
+    assert "leave both out for the user's own teams" not in description
+    # Claude is to reply with the side asked for, not to put it in the team.
+    assert "Reply with the side asked for, or both" in about["description"]
+    # Line-ups are only ever said from what Home Assistant gave, as the rest are.
+    assert "fixtures, scores, results, tables and line-ups only from that, never from memory" in description
     # Scorers are still what it hasn't got, but line-ups are no longer.
-    missing = schema["description"].split("hasn't got", 1)[1].split(".", 1)[0]
+    missing = description.split("hasn't got", 1)[1].split(".", 1)[0]
     assert "scorers" in missing and "line-ups" not in missing
 
 

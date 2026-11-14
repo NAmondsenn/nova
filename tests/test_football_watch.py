@@ -93,7 +93,13 @@ def test_a_goal_in_a_bbc_match_is_announced():
     bbc = dict(id="bbc:abc", league="National League North", home="Worksop Town", home_id="bbc:worksop",
                away="South Shields", away_id="18312")
     _, seen = _events(None, _match("in", "first_half", 0, 0, **bbc), followed=("18312",))
-    said, _ = _events(seen, _match("in", "first_half", 0, 1, **bbc), followed=("18312",))
+    said, seen = _events(seen, _match("in", "first_half", 0, 1, **bbc), followed=("18312",))
+    assert said == [("goals", "Goal for South Shields. Worksop Town 0, South Shields 1.")]
+    # A BBC label nobody has seen leaves the phase out: goals are still said, with or without one before it.
+    said, _ = _events(seen, _match("in", None, 1, 1, **bbc), followed=("18312",))
+    assert said == [("goals", "Goal for Worksop Town. Worksop Town 1, South Shields 1.")]
+    _, seen = _events(None, _match("in", None, 0, 0, **bbc), followed=("18312",))
+    said, _ = _events(seen, _match("in", None, 0, 1, **bbc), followed=("18312",))
     assert said == [("goals", "Goal for South Shields. Worksop Town 0, South Shields 1.")]
 
 
