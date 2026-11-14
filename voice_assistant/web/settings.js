@@ -28,6 +28,25 @@ const HOME_EVERY = 15000;
 // The batteries change slowly, and every look asks Home Assistant, so once a minute.
 const BATTERIES_EVERY = 60000;
 
+// The followed teams change only when one is followed or removed, here or in Home
+// Assistant, and every look asks it, so once a minute too.
+const FOOTBALL_EVERY = 60000;
+
+// How long after a team is followed or removed the teams are asked for again, in
+// milliseconds: Home Assistant runs its sensor again about five seconds after its box
+// changes, and until then the sensor still shows the team as it was.
+const FOOTBALL_SETTLES = 6000;
+
+// The kinds of announcement a followed team has a switch for, as the brain names them
+// and as the page labels them, in the order they are said in a match.
+const FOOTBALL_SWITCHES = [
+  ["starting", "Starting"],
+  ["goals", "Goals"],
+  ["half_time", "Half time"],
+  ["second_half", "Second half"],
+  ["full_time", "Full time"],
+];
+
 // The calendars' sign-in changes only when it's done here or removed in Google, and
 // Nova reads Google's list of them every five minutes at most, so once a minute too.
 const CALENDARS_EVERY = 60000;
@@ -67,7 +86,7 @@ const TYPED = new Set(["text", "password", "number", "time", "url", "search", "e
 // The forms always on show, which empty themselves once sent - so anything in one which
 // differs from how the page drew it is half done, wherever the focus has gone since: a
 // time picked for an alarm, then its Repeats tapped, say.
-const ALWAYS_SHOWN = ["add-alarm", "add-satellite", "add-display", "play-something"];
+const ALWAYS_SHOWN = ["add-alarm", "add-satellite", "add-display", "play-something", "follow-team"];
 
 // The colours offered as swatches on a light which can be set to one, as a hue in
 // degrees and a saturation in percent.
@@ -170,6 +189,9 @@ let home = null;
 
 // What /api/batteries last said.
 let batteries = null;
+
+// What /api/football last said.
+let football = null;
 
 // What /api/calendars said last.
 let calendars = null;
@@ -505,6 +527,7 @@ async function live() {
     loadMusic();
     loadHome();
     loadBatteries();
+    loadFootball();
     loadCalendars();
     loadHomeChoices();
   }
@@ -1837,6 +1860,102 @@ function batteryRow(device) {
   return row;
 }
 
+// Football
+
+async function loadFootball() {
+  try {
+    const response = answered(await fetchWithin("/api/football"));
+    if (!response.ok) return;
+    football = await response.json();
+  } catch (error) {
+    return;
+  }
+  showFootball(football);
+}
+
+// Sends a change to the followed teams - a switch, a team followed or one removed. The
+// rows are drawn again whatever the data says, as a switch which failed to save is still
+// showing what wasn't saved - and again once Home Assistant's sensor has caught up, or a
+// removed team would stay shown until the next look.
+function changeFootball(path, body) {
+  return change(path, body, () => {
+    delete drawn.football;
+    setTimeout(loadFootball, FOOTBALL_SETTLES);
+    return loadFootball();
+  });
+}
+
+function showFootball(state) {
+  const list = document.getElementById("football");
+  const follow = document.getElementById("follow-team");
+  if (!state.available) {
+    follow.hidden = true;
+    drawIfChanged("football", state.message, () => list.replaceChildren(emptyRow(state.message)));
+    return;
+  }
+  follow.hidden = false;
+  drawIfChanged("football", [state.teams, state.unknown, state.trimmed], () => {
+    // Not while a switch or button is held down: the row drawn again under the pointer
+    // loses the click, if it's slow enough to land just after the list was read.
+    if (list.querySelector(":active")) return false;
+    const rows = state.teams.map(footballRow);
+    if (!rows.length) rows.push(emptyRow("No teams are followed yet."));
+    // Entries in Home Assistant's box which it found no team by, so a bad one can be cleared.
+    rows.push(...state.unknown.map(unknownTeamRow));
+    if (state.trimmed) rows.push(emptyRow("Home Assistant is showing only some of your teams."));
+    list.replaceChildren(...rows);
+  });
+}
+
+// A followed team: its name, a switch for each kind of announcement, and a way to stop
+// following it.
+function footballRow(team) {
+  const row = element("li");
+  const top = element("div", undefined, "top");
+  const what = element("span", undefined, "what");
+  what.append(element("span", team.name, "name"));
+  // Under the name, as what Home Assistant shows of the team is an old copy.
+  if (team.stale) what.append(element("span", "Can't be read just now", "sub"));
+  top.append(icon("i-football"), what);
+  row.append(top);
+
+  const switches = element("div", undefined, "switches");
+  for (const [kind, label] of FOOTBALL_SWITCHES) {
+    const id = `football-${kind}-${team.id}`;
+    const field = element("div", undefined, "choice");
+    const name = element("label", label);
+    name.htmlFor = id;
+    const box = element("input");
+    Object.assign(box, { type: "checkbox", id, checked: team.switches[kind] });
+    box.setAttribute("role", "switch");
+    box.addEventListener("change", () => changeFootball("/api/football", { id: team.id, kind, on: box.checked }));
+    field.append(name, box);
+    switches.append(field);
+  }
+  row.append(switches);
+
+  const remove = element("button", "Remove", "button quiet");
+  remove.type = "button";
+  remove.setAttribute("aria-label", `Remove ${team.name}`);
+  remove.addEventListener("click", () => changeFootball("/api/football/unfollow", { name: team.name }));
+  row.append(remove);
+  return row;
+}
+
+// An entry in Home Assistant's box which it found no team by - typed there, say, and
+// spelt wrongly - with a way to clear it. The entry is whatever was typed, so as text.
+function unknownTeamRow(entry) {
+  const row = element("li");
+  const top = element("div", undefined, "top");
+  const remove = element("button", "Remove", "button quiet");
+  remove.type = "button";
+  remove.setAttribute("aria-label", `Remove ${entry}`);
+  remove.addEventListener("click", () => changeFootball("/api/football/unfollow", { name: entry }));
+  top.append(element("span", `Home Assistant couldn't find ${entry}`, "what"), remove);
+  row.append(top);
+  return row;
+}
+
 // How a colour looks at full brightness, for a light's icon and swatches.
 function colourOf(hue, saturation) {
   return `hsl(${hue}, 100%, ${100 - saturation / 2}%)`;
@@ -2804,10 +2923,28 @@ document.addEventListener("DOMContentLoaded", () => {
   every(MUSIC_EVERY, loadMusic);
   every(HOME_EVERY, loadHome);
   every(BATTERIES_EVERY, loadBatteries);
+  every(FOOTBALL_EVERY, loadFootball);
   every(CALENDARS_EVERY, loadCalendars);
   every(HOME_CHOICES_EVERY, loadHomeChoices);
   document.getElementById("also-send-box").addEventListener("change", (event) =>
     changeBattery("/api/batteries/also", { on: event.target.checked }));
+  // Home Assistant has to look the team up, which can take up to half a minute, so the
+  // button is off until it has answered. The name stays in the box if it didn't work, to
+  // be put right.
+  document.getElementById("follow-team").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const field = document.getElementById("follow-name");
+    const button = event.target.querySelector("button");
+    const name = field.value.trim();
+    if (!name) return;
+    button.disabled = true;
+    try {
+      const result = await changeFootball("/api/football/follow", { name });
+      if (result.success) field.value = "";
+    } finally {
+      button.disabled = false;
+    }
+  });
   // Each of the above waits, locked, until this says the page may be shown.
   checkLogin();
 });

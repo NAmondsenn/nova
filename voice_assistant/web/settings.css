@@ -1515,6 +1515,15 @@ input[type="range"].warmth::-moz-range-progress { background: transparent; }
   justify-self: start;
 }
 
+/* A followed team's switches are laid out as the batteries' two are, in as many columns as
+   fit at least 150px wide - each 44px tall, as the batteries' choices are. */
+
+.football .switches {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 0 16px;
+}
+
 /* The clock displays: each a column of its name and buttons, then its satellite, its
    brightness and its time before going home - as a battery is, 44px tall for a thumb. */
 

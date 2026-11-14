@@ -1527,6 +1527,14 @@ def test_the_pages_script_and_style_are_served_with_its_safety_headers(served, p
         assert body.index(b"if (latest === sent) return;") < body.index(b"const wait = sentAt + spacing - Date.now();")
         # Stop stays hidden until Nova has answered it.
         assert b"!stoppable || stopping" in body
+        # The Football section is asked for every so often, and each switch, follow and remove goes
+        # through the one function which then draws the teams again.
+        assert b'every(FOOTBALL_EVERY, loadFootball);' in body
+        assert b'changeFootball("/api/football", { id: team.id, kind, on: box.checked })' in body
+        assert b'changeFootball("/api/football/follow", { name })' in body
+        assert b'changeFootball("/api/football/unfollow", { name: team.name })' in body
+        # Its form, list and icon are on the page.
+        assert b'id="football"' in html and b'id="follow-team"' in html and b'id="i-football"' in html
 
 
 def test_the_page_has_a_login_form_and_log_out_buttons(served):
