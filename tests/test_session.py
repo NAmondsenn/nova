@@ -1895,8 +1895,8 @@ def _stand_in_brain(session):
 def _the_brain_says(session, message):
     """
     What Brain._say_battery and Brain._alert return with this real session as the default
-    satellite's - they need nothing else of a brain, and it's imported here since the
-    session mustn't need it.
+    satellite's - they need nothing else of a brain than that and its own way of
+    announcing, which _stand_in_brain gives the stand-in.
     """
     from voice_assistant.brain import Brain
     from voice_assistant.ntfy import Alert

@@ -2929,9 +2929,9 @@ document.addEventListener("DOMContentLoaded", () => {
   every(HOME_CHOICES_EVERY, loadHomeChoices);
   document.getElementById("also-send-box").addEventListener("change", (event) =>
     changeBattery("/api/batteries/also", { on: event.target.checked }));
-  // Home Assistant has to look the team up, which can take up to half a minute, so the
-  // button is off until it has answered. The name stays in the box if it didn't work, to
-  // be put right.
+  // Home Assistant has to look the team up, which is usually a few seconds and can take up
+  // to about a minute, so the button is off until it has answered. The name stays in the box
+  // if it didn't work, to be put right.
   document.getElementById("follow-team").addEventListener("submit", async (event) => {
     event.preventDefault();
     const field = document.getElementById("follow-name");

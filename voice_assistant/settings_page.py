@@ -1673,7 +1673,7 @@ class SettingsPage:
     def follow_football(self, name, who: str) -> Dict:
         """
         Follows a team, as saying so would - see Football.follow, which asks Home Assistant
-        what it makes of the name and waits for it to show the team, up to half a minute.
+        what it makes of the name and waits for it to show the team, up to about a minute.
         _saving isn't held for that: nothing of Nova's own is saved, and Football keeps
         two follows from writing over each other itself, so every other change on the page
         would otherwise wait for Home Assistant.
