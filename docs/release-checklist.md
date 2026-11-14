@@ -84,7 +84,7 @@ With Navidrome, and SoulSync set up (its address under Settings, its key under K
 24f. "Hey Nova, is Liverpool playing?" - Nova answers it, and the brain's log shows nothing sent to Assist for it.
 24g. With Home Assistant's football sensor made unavailable (or its script renamed - the file `football.py` in Home Assistant's scripts folder, not the shell command's entry) for six minutes: "Hey Nova, what's the score?", naming no team, gets "I can't get football right now."; with the script renamed, "Hey Nova, when do Liverpool play next?" gets it too. And nothing is announced. (With the shell command's entry renamed instead, that question gets "Football isn't set up in Home Assistant.", as Home Assistant no longer has the command.)
 25a. "Hey Nova, what's the starting 11 for Liverpool?" within an hour of a Liverpool kick-off: their starting eleven and bench, and the other side's if asked. Earlier in the day: when the match is, and that line-ups usually come about an hour before.
-25b. "Hey Nova, when do South Shields play next?" - their next match, whatever the competition, and a National League North match among their fixtures (from BBC Sport), not only cup ties.
+25b. "Hey Nova, when do South Shields play next?" - their next match, whatever the competition, and a league match among their fixtures (from BBC Sport, which names the league itself, e.g. "National League N / S"), not only cup ties.
 25c. During a South Shields league match: the card shows the score and the minute, and a goal is announced.
 25d. On a day with no followed match today or tomorrow but one within 14 days, the card shows that match. England's next match shows only once it is within 14 days.
 

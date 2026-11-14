@@ -941,11 +941,18 @@ def test_lineups_are_asked_of_home_assistant(london):
 @pytest.mark.parametrize("teams", [
     [_team("395", "Stevenage"), _team("364", "Liverpool", next=[_found_match(kickoff="2026-11-21T15:00:00+00:00")])],
     [_team("364", "Liverpool", now=_found_match(kickoff="2026-11-14T15:00:00+00:00"))],
-    [],
-], ids=["no match today", "a match tomorrow", "no teams"])
+], ids=["no match today", "a match tomorrow"])
 def test_lineups_with_no_team_and_nobody_playing(london, teams):
     home = FakeHome(teams)
     assert _said(home, about="lineups") == {"success": True, "message": NO_LINEUP_TEAM}
+    assert home.asked == []
+
+
+def test_lineups_with_no_team_and_no_team_followed_say_so_as_the_overview_does(london):
+    # Nobody is followed, which is not that none of them is playing.
+    home = FakeHome([])
+    assert _said(home, about="lineups") == {"success": True, "message": "No teams are followed."}
+    assert _said(FakeHome([])) == _said(home, about="lineups")
     assert home.asked == []
 
 

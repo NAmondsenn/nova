@@ -1,6 +1,7 @@
 """
 Football Words Module
-The text Claude answers football questions from, from decisions 4 and 5 of docs/decisions/0014.
+The text Claude answers football questions from, from decisions 4 and 5 of docs/decisions/0014, and decisions 3
+and 7 to 9 of docs/decisions/0015 (a match from BBC Sport, line-ups, the overview and its stale teams, no source named).
 
 Nova gives Claude plain text built from what Home Assistant returned, not Home Assistant's
 JSON: the full names, the kick-off as a local day and time, the ground, the odds and who
@@ -44,8 +45,8 @@ _PHASE_WORDS = {
 }
 _OFF = "off"
 
-# Only in these phases is ESPN's clock a minute ("67'"). In the others it is a word for the card
-# ("HT"), which isn't said as the phase is.
+# Only in these phases is the source's clock (ESPN's, or BBC's label) a minute ("67'"). In the others it is
+# a word for the card ("HT"), which isn't said as the phase is.
 _MINUTE_PHASES = ("first_half", "second_half", "extra_time")
 
 
@@ -816,10 +817,12 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
         {"success": True, "message": the words} - including where ESPN found nothing by the
         name asked for, which is said, and including an overview which names the followed teams
         it can't get while saying the rest. {"success": False, "message": what to say} where football
-        can't be got: CANT_GET, also for any answer of the wrong shape (logged at warning level) and
-        for an overview where every followed team is stale;
+        can't be got: CANT_GET, also for any answer of the wrong shape (logged at warning level),
+        for an overview where every followed team is stale, and for line-ups with no team named
+        where a team which is stale may be the one playing (see _team_playing);
         or what Football says of Home Assistant not being reached, or not set up; or that the
-        team or competition isn't a name.
+        team or competition isn't a name. Line-ups with no team named where no team is followed
+        say so ("No teams are followed."), as the overview does.
     """
     if not all(isinstance(given, (str, type(None))) for given in (team, competition)):
         return {"success": False, "message": NOT_A_NAME}
@@ -829,7 +832,11 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
     try:
         if not team and not competition and _kind(about) == "lineups":
             # Line-ups asked for with no team are for the followed team playing, in the place of the overview below.
-            playing = _team_playing(football.read(), now)
+            reading = football.read()
+            if not reading.teams:
+                # Nobody is followed, which is not that none of them is playing: said as the overview says it.
+                return {"success": True, "message": said_followed(reading, now)}
+            playing = _team_playing(reading, now)
             if playing is None:
                 return {"success": True, "message": NO_LINEUP_TEAM}
             # By the entry of the box which found it, the one name Home Assistant is known to find it by.
