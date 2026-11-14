@@ -298,7 +298,7 @@ def test_a_team_in_full(london):
         "Playing now: Liverpool 2, Manchester United 1, Premier League, in play, second half, 67'.",
         "Next: Arsenal v Liverpool, Premier League, on Sunday the 22nd of November at 4:30 PM, at Emirates Stadium in London. "
         "Bookmakers' odds from DraftKings, as percentages: Arsenal 30, draw 25, Liverpool 45.",
-        "Later: Everton v Liverpool, Premier League, on Saturday the 28th of November at 3:00 PM. ESPN lists no odds for it.",
+        "Later: Everton v Liverpool, Premier League, on Saturday the 28th of November at 3:00 PM. No odds are listed for it.",
         "Last: Crystal Palace 1, Liverpool 3, Premier League, on Sunday the 8th of November. Liverpool won.",
         "Premier League: 4th of 20, played 10, won 5, drawn 3, lost 2, goal difference 4, 18 points.",
         LAG,
@@ -319,10 +319,9 @@ def test_a_team_with_nothing_listed_says_so(london):
     assert LAG not in said_team(_team_answer(), AT)
 
 
-def test_a_team_espn_doesnt_cover(london):
+def test_a_team_home_assistant_doesnt_cover(london):
     AT = datetime(2026, 11, 13, 12, 0).astimezone()
-    note = ("ESPN, where Home Assistant's football comes from, doesn't seem to cover the league South Shields play in, "
-            "so only their cup ties show.")
+    note = "Home Assistant's football doesn't seem to cover the league South Shields play in, so only their cup ties show."
     south_shields = {"id": "1", "name": "South Shields", "followed": True}
     assert note in said_team(_team_answer(team=south_shields), AT).split("\n")
     # The note is only for a team with no table, no match today and no fixture to come: any one of them and it isn't said.
@@ -353,12 +352,34 @@ def test_no_odds_listed(london):
     AT = datetime(2026, 11, 13, 12, 0).astimezone()
     said = said_team(_team_answer(next=[_found_match(**SUNDAY_AWAY)]), AT)
     assert said.split("\n")[1] == (
-        "Next: Arsenal v Liverpool, Premier League, on Sunday the 22nd of November at 4:30 PM. ESPN lists no odds for it.")
+        "Next: Arsenal v Liverpool, Premier League, on Sunday the 22nd of November at 4:30 PM. No odds are listed for it.")
     # A match which isn't to come, or which is off, has no odds to list; nor has one with odds.
     done = said_team(_team_answer(last=[_found_match(**PALACE_LOSS)], next=[_found_match(**{**SUNDAY_AWAY, "phase": "off"})]), AT)
     assert "odds" not in done
     listed = {**SUNDAY_AWAY, "odds": {"home": 30, "draw": 25, "away": 45, "source": "DraftKings"}}
-    assert "no odds" not in said_team(_team_answer(next=[_found_match(**listed)]), AT)
+    assert "No odds are listed" not in said_team(_team_answer(next=[_found_match(**listed)]), AT)
+
+
+def test_a_bbc_match_is_read_and_said(london):
+    AT = datetime(2026, 11, 13, 12, 0).astimezone()
+    # As the Contract has one from BBC Sport: its own ids and slug, the followed side by its ESPN id, no ground and no odds.
+    found = _found_match(id="bbc:abc", slug="bbc:national-league-north", league="National League North", home="Worksop Town",
+                         home_id="bbc:x", away="South Shields", away_id="18312", kickoff="2026-11-21T15:00:00+00:00")
+    match = Match.from_home(found)
+    assert (match.id, match.home_id, match.away_id, match.venue, match.odds) == ("bbc:abc", "bbc:x", "18312", None, None)
+    assert said_match(match, AT) == "Worksop Town v South Shields, National League North, on Saturday the 21st of November at 3:00 PM."
+    # A match to come says that no odds are listed, as one of ESPN's with none does.
+    south_shields = {"id": "18312", "name": "South Shields", "followed": True}
+    assert said_team(_team_answer(team=south_shields, next=[found]), AT).split("\n")[1] == (
+        "Next: Worksop Town v South Shields, National League North, on Saturday the 21st of November at 3:00 PM. "
+        "No odds are listed for it.")
+    # In play and over, it is said by the score, as any other is.
+    live = _m(**{**found, "kickoff": "2026-11-13T11:00:00+00:00", "state": "in", "phase": "second_half", "clock": "67'",
+                 "home_score": 0, "away_score": 1})
+    assert said_match(live, AT) == "Worksop Town 0, South Shields 1, National League North, in play, second half, 67'."
+    over = _m(**{**found, "kickoff": "2026-11-07T15:00:00+00:00", "state": "post", "phase": "full_time", "clock": "FT",
+                 "home_score": 0, "away_score": 2, "winner": "away"})
+    assert said_match(over, AT) == "Worksop Town 0, South Shields 2, National League North, on Saturday the 7th of November. South Shields won."
 
 
 def test_a_competitions_days(london):
@@ -373,7 +394,7 @@ def test_a_competitions_days(london):
         "Real Madrid v Arsenal, UEFA Champions League, on Tuesday the 24th of November at 8:00 PM, at Santiago Bernabeu in Madrid. "
         "Bookmakers' odds from DraftKings, as percentages: Real Madrid 40, draw 25, Arsenal 35.",
         "Bayern Munich v Manchester City, UEFA Champions League, on Wednesday the 25th of November at 8:00 PM. "
-        "ESPN lists no odds for it.",
+        "No odds are listed for it.",
         "Days with matches: Tuesday the 24th of November, Wednesday the 25th of November.",
     ]
     # Some left out by Home Assistant, which is said after the days, as they are all of them.
@@ -393,7 +414,7 @@ def test_a_cup_says_its_round(london):
     answer = _competition_answer([match], days=["20261202"], competition={"slug": "eng.league_cup", "name": "Carabao Cup", "round": "Quarterfinals"})
     assert said_competition(answer, AT).split("\n") == [
         "The Carabao Cup is at the Quarterfinals.",
-        "Liverpool v Arsenal, Carabao Cup, on Wednesday the 2nd of December at 8:00 PM. ESPN lists no odds for it.",
+        "Liverpool v Arsenal, Carabao Cup, on Wednesday the 2nd of December at 8:00 PM. No odds are listed for it.",
         "Days with matches: Wednesday the 2nd of December.",
     ]
 
@@ -487,7 +508,7 @@ def test_whos_left_lists_the_matches_of_the_round(london):
     assert said_left(answer, AT).split("\n") == [
         "Still in the Carabao Cup: Arsenal and Liverpool.",
         "Liverpool 2, Manchester United 1, Carabao Cup, in play, second half, 67'.",
-        "Arsenal v Liverpool, Carabao Cup, on Sunday the 22nd of November at 4:30 PM. ESPN lists no odds for it.",
+        "Arsenal v Liverpool, Carabao Cup, on Sunday the 22nd of November at 4:30 PM. No odds are listed for it.",
         LAG,
     ]
 

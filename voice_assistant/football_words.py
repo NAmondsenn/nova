@@ -229,14 +229,14 @@ def _asked_line(match: Match, now: datetime) -> str:
         now: The current time, aware and local.
 
     Returns:
-        What said_match says, with " ESPN lists no odds for it." after it for a match to come with no odds.
+        What said_match says, with " No odds are listed for it." after it for a match to come with no odds.
 
     Raises:
         KeyError: If the odds of the match lack a chance.
         TypeError: If any of them isn't a whole number.
     """
     said = said_match(match, now)
-    return f"{said} ESPN lists no odds for it." if _to_come(match) and not match.odds else said
+    return f"{said} No odds are listed for it." if _to_come(match) and not match.odds else said
 
 
 def _with_lag(lines: List[str], matches: Sequence[Match]) -> List[str]:
@@ -334,8 +334,8 @@ def said_team(answer: Dict, now: datetime) -> str:
     Returns:
         Lines: the team's full name, its match today, its next fixtures, its last results and
         its place in each table, with what there is none of said so. Where it has no table, no
-        match today and no fixture to come, that ESPN doesn't seem to cover its league, so that
-        only its cup ties show. A match to come has its odds, or that ESPN lists none. LAG
+        match today and no fixture to come, that Home Assistant's football doesn't seem to cover its
+        league, so that only its cup ties show. A match to come has its odds, or that none are listed. LAG
         is the last line if a match is in play.
 
     Raises:
@@ -365,8 +365,7 @@ def said_team(answer: Dict, now: datetime) -> str:
     if not tables:
         lines.append("No league table listed.")
     if not current and not upcoming and not tables:
-        lines.append(f"ESPN, where Home Assistant's football comes from, doesn't seem to cover the league {name} play in, "
-                     "so only their cup ties show.")
+        lines.append(f"Home Assistant's football doesn't seem to cover the league {name} play in, so only their cup ties show.")
     return "\n".join(_with_lag(lines, ([current] if current else []) + upcoming + results))
 
 

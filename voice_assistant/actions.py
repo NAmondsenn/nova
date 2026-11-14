@@ -1082,20 +1082,22 @@ class ActionExecutor:
     # Only ever read, by Claude, to answer from - see football_words.describe, which says what came
     # of the question in words, or that football can't be got.
     @tool(
-        "Read football from Home Assistant: fixtures, live scores, results, tables, who's left in a cup, the ground "
-        "and bookmakers' odds - for 'what's the Liverpool score?', 'when do Arsenal play next?', 'did Stevenage win?', "
-        "'is the Champions League on next week?', 'where are Liverpool in the table?' or 'who's left in the Carabao "
-        "Cup?'. Give the team or the competition asked about, putting right a name that was clearly misheard; leave "
-        "both out for the user's own teams. You get what Home Assistant has, to reply from. Answer fixtures, scores, "
-        "results and tables only from that, never from memory, and if it hasn't got something - scorers, line-ups - "
-        "say Home Assistant's football doesn't have it. Say how far behind a live score may be only if asked how "
-        "fresh it is.",
+        "Read football from Home Assistant: fixtures, live scores, results, tables, who's left in a cup, line-ups, "
+        "the ground and bookmakers' odds - for 'what's the Liverpool score?', 'when do Arsenal play next?', 'did "
+        "Stevenage win?', 'is the Champions League on next week?', 'where are Liverpool in the table?', 'what's the "
+        "starting 11 for Liverpool?' or 'who's left in the Carabao Cup?'. Give the team or the competition asked "
+        "about, putting right a name that was clearly misheard; leave both out for the user's own teams. You get "
+        "what Home Assistant has, to reply from. Answer fixtures, scores, results and tables only from that, never "
+        "from memory, and if it hasn't got something - scorers - say Home Assistant's football doesn't have it. Say "
+        "how far behind a live score may be only if asked how fresh it is.",
         needs="football",
         reads=True,
         team={"type": "string", "description": "The team asked about, e.g. 'Liverpool' or 'Bayern Munich'."},
         competition={"type": "string", "description": "The league or cup asked about, e.g. 'Premier League' or 'Carabao Cup'."},
-        about={"type": "string", "enum": ["matches", "table", "left"],
-               "description": "'table' for a league table, 'left' for who is still in a cup, else 'matches'."},
+        about={"type": "string", "enum": ["matches", "table", "left", "lineups"],
+               "description": "'table' for a league table, 'left' for who is still in a cup, 'lineups' with a team for its "
+                              "starting eleven and bench; say the side asked for, or both. With no team, 'lineups' is for "
+                              "the followed team playing now or today. Else 'matches'."},
         date={"type": "string", "description": "The first day of a competition's matches, as YYYY-MM-DD. Leave out for today."},
         days={"type": "integer", "description": "How many days from it, 1 to 31. Leave out for one day."},
     )

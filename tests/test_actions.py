@@ -1052,6 +1052,17 @@ def test_get_football_is_read_by_claude_and_names_the_followed_teams(monkeypatch
     assert ActionExecutor().execute(Action("get_football")).say == "Football needs Home Assistant."
 
 
+def test_get_football_offers_lineups():
+    schema = {tool["name"]: tool for tool in ActionExecutor(football=SimpleNamespace(names=list)).tool_schemas()}["get_football"]
+    about = schema["input_schema"]["properties"]["about"]
+    assert about["enum"] == ["matches", "table", "left", "lineups"]
+    assert "starting eleven" in about["description"] and "followed team playing now or today" in about["description"]
+    assert "line-ups" in schema["description"] and "starting 11" in schema["description"]
+    # Scorers are still what it hasn't got, but line-ups are no longer.
+    missing = schema["description"].split("hasn't got", 1)[1].split(".", 1)[0]
+    assert "scorers" in missing and "line-ups" not in missing
+
+
 def test_get_football_hands_everything_it_was_given_to_the_words(monkeypatch):
     from voice_assistant import actions as actions_module
 

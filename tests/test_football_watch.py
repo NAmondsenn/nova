@@ -88,6 +88,15 @@ def test_goals():
     assert said == [("goals", "Goal ruled out. Notts County 2, Stevenage 1.")]
 
 
+def test_a_goal_in_a_bbc_match_is_announced():
+    # A match from BBC Sport, as Nova reads it: its own ids and league, with the followed team by its ESPN id.
+    bbc = dict(id="bbc:abc", league="National League North", home="Worksop Town", home_id="bbc:worksop",
+               away="South Shields", away_id="18312")
+    _, seen = _events(None, _match("in", "first_half", 0, 0, **bbc), followed=("18312",))
+    said, _ = _events(seen, _match("in", "first_half", 0, 1, **bbc), followed=("18312",))
+    assert said == [("goals", "Goal for South Shields. Worksop Town 0, South Shields 1.")]
+
+
 def test_a_goal_in_the_same_look_as_one_ruled_out_is_said_as_the_goal():
     _, seen = _events(None, _match("in", "second_half", 1, 0))
     assert _events(seen, _match("in", "second_half", 0, 1))[0] == [("goals", "Goal for Stevenage. Notts County 0, Stevenage 1.")]
