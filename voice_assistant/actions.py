@@ -29,6 +29,7 @@ from voice_assistant.batteries import HOME_FAILURES, find, said
 from voice_assistant.devices import AppDevice, ring_call, said_as, where
 from voice_assistant.football import NO_TEAM
 from voice_assistant.football_words import describe as describe_football
+from voice_assistant.listening_words import describe as describe_listening
 from voice_assistant.google_calendar import named_by_address
 from voice_assistant.home_assistant import CANT_REACH, HomeAssistant, NotAllowed
 from voice_assistant.lists import NO_ANSWER, names_list
@@ -54,6 +55,7 @@ UNAVAILABLE = {
     "calendar": "The calendar isn't set up yet.",
     "downloads": "Downloading music isn't set up.",
     "football": "Football needs Home Assistant.",
+    "listening": "Listening stats need SoulSync.",
 }
 
 # The most days of calendar read at once - a fortnight is already a lot to listen to -
@@ -267,7 +269,7 @@ class ActionExecutor:
 
     def __init__(self, music=None, clock=None, volume=None, weather=None, home=None, memory=None, ntfy=None,
                  satellite: Optional[str] = None, batteries=None, lists=None, pc=None, calendar=None,
-                 downloads=None, football=None):
+                 downloads=None, football=None, listening=None):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -292,6 +294,9 @@ class ActionExecutor:
                 none. It says itself when SoulSync isn't set up.
             football: Football, for the followed teams and any football question, or None if
                 Home Assistant isn't set up.
+            listening: Listening, for what the user has listened to, from SoulSync's stats, or
+                None if there isn't one. It says itself when SoulSync isn't set up or can't be
+                read.
         """
         self.music = music
         self.clock = clock
@@ -307,6 +312,7 @@ class ActionExecutor:
         self.calendar = calendar
         self.downloads = downloads
         self.football = football
+        self.listening = listening
         # What was last asked, and what the assistant said - or the last alert, and
         # all of it - for "send that to my phone". Kept up to date by the Conversation.
         self.last_answer: Optional[Tuple[str, str]] = None
@@ -1105,6 +1111,30 @@ class ActionExecutor:
     )
     def get_football(self, team=None, competition=None, about=None, date=None, days=None):
         return describe_football(self.football, team=team, competition=competition, about=about, date=date, days=days)
+
+    # Only ever read, by Claude, to answer from - see listening_words.describe, which says what the
+    # latest snapshot of SoulSync's stats holds in words, or why there isn't one. It never waits on
+    # SoulSync.
+    @tool(
+        "Read what the user has listened to, from SoulSync's stats: how much, their top artists, songs, albums and "
+        "genres, and when they listen - for 'what have I listened to most this week?', 'who's my top artist this "
+        "year?', 'how much music did I play this month?' or 'when do I listen?'. The periods are rolling, not the "
+        "calendar: 'week' is the last 7 days, 'month' the last 30 days, 'year' the last 12 months and 'all' is all "
+        "time, so say it as that if it matters. You get the facts to reply from. Answer only from them, briefly, "
+        "in a sentence or two: never from memory, and never a figure which isn't there. It can't answer for a "
+        "calendar month, such as October, or for today: say so, and offer the last 30 days or the last 7 days "
+        "instead.",
+        needs="listening",
+        reads=True,
+        period={"type": "string", "enum": ["week", "month", "year", "all"],
+                "description": "The last 7 days ('week', the default), the last 30 days, the last 12 months or all time."},
+        about={"type": "string", "enum": ["summary", "artists", "songs", "albums", "genres", "when"],
+               "description": "'summary' (the default) for plays, time listened, change and top artists; 'artists', "
+                              "'songs' or 'albums' for the top five; 'genres' for the top three; 'when' for the "
+                              "busiest day and hour, and the longest streak."},
+    )
+    def get_listening(self, period=None, about=None):
+        return describe_listening(self.listening, period, about)
 
     # Changes Home Assistant's teams box through Football, which says what came of it - as it does
     # for the settings page, so both go the same way.

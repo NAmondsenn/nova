@@ -1032,7 +1032,7 @@ def test_home_status_is_only_offered_with_home_assistant():
     assert "home_status" not in offered(ActionExecutor())
     assert ActionExecutor().execute(Action("home_status", {"about": "sunset"})).say == "Home Assistant isn't set up yet."
     # These are the tools whose answers go back to Claude rather than being said.
-    assert ActionExecutor().read_tools() == ["downloads_waiting", "home_status", "get_football"]
+    assert ActionExecutor().read_tools() == ["downloads_waiting", "home_status", "get_football", "get_listening"]
 
 
 def test_get_football_is_read_by_claude_and_names_the_followed_teams(monkeypatch):
@@ -1650,3 +1650,31 @@ def test_a_result_said_later_is_neither_said_nor_chimed_now():
     # A failure is still said.
     failed = ActionResult.from_reply({"success": False, "message": "SoulSync isn't answering.", "later": True})
     assert confirm([failed]) == ([], ["SoulSync isn't answering."])
+
+
+def test_tool_listed_only_with_listening():
+    offered = {tool["name"]: tool for tool in ActionExecutor(listening=object()).tool_schemas()}
+    schema = offered["get_listening"]
+    description = schema["description"]
+    # It says the windows roll, and that today and a calendar month can't be answered.
+    assert "rolling" in description and "last 7 days" in description
+    assert "today" in description and "calendar month" in description
+    assert schema["input_schema"]["properties"]["period"]["enum"] == ["week", "month", "year", "all"]
+    assert schema["input_schema"]["properties"]["about"]["enum"] == ["summary", "artists", "songs", "albums", "genres", "when"]
+    assert schema["input_schema"]["required"] == []
+    assert "get_listening" not in {tool["name"] for tool in ActionExecutor().tool_schemas()}
+    assert ActionExecutor().execute(Action("get_listening")).say == "Listening stats need SoulSync."
+
+
+def test_get_listening_hands_what_it_was_given_to_the_words(monkeypatch):
+    from voice_assistant import actions as actions_module
+
+    given = []
+    monkeypatch.setattr(actions_module, "describe_listening", lambda listening, period, about: given.append(
+        (listening, period, about)) or {"success": True, "message": "A week of facts."})
+    listening = object()
+    executor = ActionExecutor(listening=listening)
+    result = executor.execute(Action("get_listening", {"period": "month", "about": "songs", "stray": 1}, from_model=True))
+    assert (result.ok, result.say) == (True, "A week of facts.")
+    executor.execute(Action("get_listening", {}, from_model=True))
+    assert given == [(listening, "month", "songs"), (listening, None, None)]

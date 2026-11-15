@@ -41,6 +41,7 @@ from voice_assistant.football_watch import FootballChoices, FootballWatcher, use
 from voice_assistant.google_calendar import READ_FAILURES, GoogleCalendar
 from voice_assistant.ha_registry import REGISTRY_TIMEOUT, HomeRegistry, HomeSocket
 from voice_assistant.home_assistant import HomeAssistant
+from voice_assistant.listening import Listening
 from voice_assistant.lists import Lists
 from voice_assistant.logging_setup import TRANSCRIPT
 from voice_assistant.media_watch import MediaWatcher
@@ -351,6 +352,10 @@ class Brain:
         self.football = Football(self.home, self._football_settings) if self.home else None
         # What it says by itself of a followed team's match, from that same reading. Started by run().
         self.football_watcher = self._make_football_watcher() if self.home else None
+        # What SoulSync knows of what the user has listened to, kept as one snapshot which the voice tool
+        # (and what is built on it) answers from, so a question never waits on SoulSync. Made even with
+        # no SoulSync set up, as it then says so itself. Started by run().
+        self.listening = Listening(config, os.getenv("SOULSYNC_API_KEY"))
         # What's playing, for each satellite's wake word in its own room - see media_watch.py
         # and Session.playing_here. Started by run().
         self.media = MediaWatcher(self.home, on_change=self._send_states) if self.home else None
@@ -1635,6 +1640,7 @@ class Brain:
             self.batteries.start()
         if self.football_watcher:
             self.football_watcher.start()
+        self.listening.start()
         if self.media:
             self.media.start()
         if self.registry:
@@ -1699,7 +1705,7 @@ class Brain:
         """
         Closes everything down in order - the clock, so nothing else starts ringing,
         and the downloads, so nothing more is said of them, then the batteries, the football
-        watcher, what's playing, the usage device, ntfy, the settings page and the clock
+        watcher, the listening stats, what's playing, the usage device, ntfy, the settings page and the clock
         displays' server and feed, then every satellite's session, so its device in Home
         Assistant and its music stop - and then the Piper process kept waiting for the next
         thing to say.
@@ -1715,6 +1721,7 @@ class Brain:
             self.batteries.stop()
         if self.football_watcher:
             self.football_watcher.stop()
+        self.listening.stop()
         if self.media:
             self.media.stop()
         if self.registry:

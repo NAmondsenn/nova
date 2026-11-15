@@ -42,6 +42,7 @@ from voice_assistant.football import Football
 from voice_assistant.football_watch import FootballChoices, FootballWatcher
 from voice_assistant.google_calendar import GoogleCalendar
 from voice_assistant.ha_registry import HomeRegistry
+from voice_assistant.listening import Listening
 from voice_assistant.media_watch import MediaWatcher
 from voice_assistant.ntfy import Alert
 from voice_assistant.recording import RATE
@@ -249,10 +250,10 @@ def make_brain(tmp_path, monkeypatch, make_config, passwords):
     # has ended, and every session with it - each satellite's own thread forgets its
     # session as the brain lets it go. One a test put in by hand has no such thread.
     for brain in made:
-        listening = getattr(brain, "listening", None)
-        if listening is not None:
-            listening.join(5)
-            assert not listening.is_alive(), "The thread which listened for satellites outlived stop()"
+        serving_thread = getattr(brain, "serving_thread", None)
+        if serving_thread is not None:
+            serving_thread.join(5)
+            assert not serving_thread.is_alive(), "The thread which listened for satellites outlived stop()"
             assert wait_for(lambda: not brain.sessions), f"stop() left sessions: {sorted(brain.sessions)}"
 
 
@@ -263,8 +264,8 @@ def brain(make_brain):
 
 def serving(brain):
     """Has the brain listen for satellites, on a thread of its own, as run() does on the main one."""
-    brain.listening = threading.Thread(target=brain.serve, daemon=True)
-    brain.listening.start()
+    brain.serving_thread = threading.Thread(target=brain.serve, daemon=True)
+    brain.serving_thread.start()
     assert wait_for(lambda: brain.port)
 
 
@@ -2749,6 +2750,33 @@ def test_the_football_thread_runs_while_the_brain_does_and_stops_with_it(make_br
     assert running == [True]
     assert not any(thread.name == "football" for thread in threading.enumerate())
     assert brain.football_watcher._thread is None
+
+
+def test_the_listening_stats_are_read_while_the_brain_runs_and_stop_with_it(make_brain):
+    # Made with or without Home Assistant, as it says itself when SoulSync isn't set up.
+    brain = make_brain()
+    assert isinstance(brain.listening, Listening)
+    assert brain.listening._thread is None
+    # Nothing here may reach a real SoulSync.
+    refreshed = threading.Event()
+    brain.listening.refresh = refreshed.set
+    running = []
+
+    def serve():
+        # It reads as soon as it starts, so a thread which is there but never reads is found out.
+        running.append(refreshed.wait(5) and any(thread.name == "listening" and thread.is_alive()
+                                                 for thread in threading.enumerate()))
+
+    brain.serve = serve
+    brain.run()
+    assert running == [True]
+    assert not any(thread.name == "listening" for thread in threading.enumerate())
+    assert brain.listening._thread is None
+
+
+def test_the_listening_stats_are_given_the_soulsync_key(make_brain, monkeypatch):
+    monkeypatch.setenv("SOULSYNC_API_KEY", "made-up-key")
+    assert make_brain().listening._key == "made-up-key"
 
 
 def test_the_registry_is_read_while_the_brain_runs_and_stops_with_it(make_brain, home_assistant_token):
