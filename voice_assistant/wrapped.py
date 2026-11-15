@@ -551,8 +551,9 @@ class WrappedWatcher:
             return
         try:
             snapshot = self._listening.require()
-        except ListeningUnavailable as e:
-            logger.info(f"No Wrapped made yet, listening isn't available: {e}")
+        except ListeningUnavailable:
+            # Not why: that can be SoulSync's own words, and those are never logged.
+            logger.info("No Wrapped made yet, listening isn't available")
             return
         # Made now or made late, the numbers must hold the whole month: Listening keeps its last good snapshot
         # however old, so this is the watcher's to check. Tried again at the next look.

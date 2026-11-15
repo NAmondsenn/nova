@@ -373,6 +373,16 @@ def test_retries_after_failure(setup):
     assert setup.store.keys() == ["2026", "2026-11"] and len(setup.ntfy.sent) == 2
 
 
+def test_soulsyncs_own_words_are_never_logged(setup, caplog):
+    # Why listening isn't available can be SoulSync's free text, which can hold anything, so it isn't logged.
+    setup.listening.fail = ListeningUnavailable("SoulSync said: Artist One the-key.")
+    with caplog.at_level("INFO", logger="voice_assistant.wrapped"):
+        setup.watcher.look()
+    assert setup.store.keys() == []
+    assert "listening isn't available" in caplog.text
+    assert "Artist One" not in caplog.text and "the-key" not in caplog.text
+
+
 def test_a_snapshot_from_before_the_months_last_rebuild_isnt_used(setup):
     # SoulSync's last rebuild of the month is at 00:30 at the latest, and Nova reads it by 00:35.
     assert wrapped_module.SNAPSHOT_READY_AFTER == timedelta(minutes=35)
