@@ -53,17 +53,17 @@ def _with(**changes):
 
 
 def test_summary_week():
-    # The brief's figures: 596 plays against 445 before is 34% more, and 132,360,000 ms is 36 hours 46 minutes.
-    listening = _with(overview={"total_plays": 596, "total_time_ms": 132_360_000, "unique_artists": 14},
-                      previous={"total_plays": 445, "total_time_ms": 1, "unique_artists": 1})
+    # Made-up figures: 600 plays against 400 before is 50% more, and 37,800,000 ms is 10 hours 30 minutes.
+    listening = _with(overview={"total_plays": 600, "total_time_ms": 37_800_000, "unique_artists": 14},
+                      previous={"total_plays": 400, "total_time_ms": 1, "unique_artists": 1})
     result = describe(listening, None, None)
     assert result["success"] is True
     message = result["message"]
     assert "the last 7 days" in message
-    assert "596 plays" in message
-    assert "36 hours 46 minutes" in message
+    assert "600 plays" in message
+    assert "10 hours 30 minutes" in message
     assert "14 artists" in message
-    assert "up 34%" in message
+    assert "up 50%" in message
     # The first three artists, in order, with their plays, and no more.
     assert message.index("Artist One (30 plays)") < message.index("Artist Two (26 plays)") < message.index("Artist Three (22 plays)")
     assert "Artist Four" not in message
