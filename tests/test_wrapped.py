@@ -9,7 +9,8 @@ import os
 import re
 import threading
 import time
-from datetime import datetime
+from dataclasses import replace
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -220,16 +221,19 @@ def test_store_keeps_24_months_and_every_year(tmp_path):
 # The watcher
 
 class FakeListening:
-    def __init__(self, snapshot=None):
+    def __init__(self, snapshot=None, now=lambda: 0.0):
         self.snapshot = snapshot or _snapshot()
         self.fail = None
         self.asked = 0
+        # When the snapshot was taken, or None for just now, as the test's clock has it.
+        self.at = None
+        self._now = now
 
     def require(self):
         self.asked += 1
         if self.fail:
             raise self.fail
-        return self.snapshot
+        return replace(self.snapshot, at=self._now() if self.at is None else self.at)
 
 
 class FakeNtfy:
@@ -255,7 +259,9 @@ class Setup:
     """A watcher over a store in the test's folder, with a clock the test sets."""
 
     def __init__(self, tmp_path, at=DECEMBER, **settings):
-        self.listening = FakeListening()
+        # Its snapshot, unless a test says otherwise, is Nova's read just after the month's last rebuild.
+        self.listening = FakeListening(
+            now=lambda: max(self.at, self.at.replace(day=1, hour=0, minute=40)).timestamp())
         self.ntfy = FakeNtfy()
         self.store = WrappedStore(str(tmp_path / "wrapped"))
         self.settings = dict(SETTINGS, **settings)
@@ -339,6 +345,50 @@ def test_retries_after_failure(setup):
     setup.at = datetime(2026, 12, 1, 1, 10)
     setup.watcher.look()
     assert setup.store.keys() == ["2026", "2026-11"] and len(setup.ntfy.sent) == 2
+
+
+def test_a_snapshot_from_before_the_months_last_rebuild_isnt_used(setup):
+    # SoulSync's last rebuild of the month is at 00:30 at the latest, and Nova reads it by 00:35.
+    assert wrapped_module.SNAPSHOT_READY_AFTER == timedelta(minutes=35)
+    setup.listening.at = datetime(2026, 11, 28, 12, 0).timestamp()
+    for hour, minute in ((0, 10), (3, 0)):
+        setup.at = datetime(2026, 12, 1, hour, minute)
+        setup.watcher.look()
+        assert setup.store.keys() == [] and setup.ntfy.sent == []
+    assert setup.listening.asked == 2
+    # Once Nova has read SoulSync again, the next look makes it.
+    setup.listening.at = datetime(2026, 12, 1, 3, 20).timestamp()
+    setup.at = datetime(2026, 12, 1, 4, 0)
+    setup.watcher.look()
+    assert setup.store.keys() == ["2026", "2026-11"] and len(setup.ntfy.sent) == 2
+
+
+def test_the_snapshot_must_be_from_after_00_35_on_the_1st(setup):
+    setup.listening.at = datetime(2026, 11, 30, 23, 50).timestamp()
+    setup.at = datetime(2026, 12, 1, 0, 10)
+    setup.watcher.look()
+    assert setup.store.keys() == []
+    setup.listening.at = datetime(2026, 12, 1, 0, 34, 59).timestamp()
+    setup.watcher.look()
+    assert setup.store.keys() == []
+    setup.listening.at = datetime(2026, 12, 1, 0, 40).timestamp()
+    setup.at = datetime(2026, 12, 1, 1, 5)
+    setup.watcher.look()
+    assert setup.store.keys() == ["2026", "2026-11"]
+
+
+def test_a_snapshot_with_no_time_isnt_used(setup):
+    setup.listening.snapshot = replace(setup.listening.snapshot, at=None)
+    setup.listening.require = lambda: setup.listening.snapshot
+    setup.watcher.look()
+    assert setup.store.keys() == []
+
+
+def test_made_late_from_a_fresh_snapshot(setup):
+    setup.at = datetime(2026, 12, 9, 12, 0)
+    setup.listening.at = datetime(2026, 12, 9, 11, 40).timestamp()
+    setup.watcher.look()
+    assert setup.store.keys() == ["2026", "2026-11"]
 
 
 def test_a_failure_to_make_is_tried_again_and_never_ends_the_look(setup, monkeypatch):
@@ -439,9 +489,9 @@ def test_a_notification_which_failed_is_sent_again_at_the_next_look_and_after_a_
     assert len(setup.ntfy.sent) == 4
 
 
-def test_made_at_five_past_midnight_in_quiet_hours_is_told_at_the_first_look_outside_them(setup):
+def test_made_in_quiet_hours_is_told_at_the_first_look_outside_them(setup):
     setup.ntfy.night = True
-    setup.at = datetime(2026, 12, 1, 0, 5)
+    setup.at = datetime(2026, 12, 1, 0, 50)
     setup.watcher.look()
     assert setup.store.keys() == ["2026", "2026-11"] and setup.ntfy.sent == []
     assert setup.store.load("2026-11")["told"] is False
@@ -460,7 +510,7 @@ def test_made_at_five_past_midnight_in_quiet_hours_is_told_at_the_first_look_out
 
 def test_a_restart_between_making_it_and_telling_still_tells_once(setup):
     setup.ntfy.night = True
-    setup.at = datetime(2026, 12, 1, 0, 5)
+    setup.at = datetime(2026, 12, 1, 0, 50)
     setup.watcher.look()
     setup.ntfy.night = False
     setup.at = datetime(2026, 12, 1, 8, 0)

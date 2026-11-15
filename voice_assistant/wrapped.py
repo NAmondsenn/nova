@@ -54,6 +54,12 @@ MONTH_DAYS = 30
 # of the month it has just ended is in.
 FIRST_LOOK = (0, 5)
 
+# How long after midnight on the 1st the listening snapshot must have been taken for a Wrapped to be made
+# from it. SoulSync rebuilds its stats every 30 minutes, so its last rebuild with the month's final plays
+# is by 00:30, and Nova reads them as often, so the read after that is by 00:35 at the latest. A snapshot
+# from before would miss the end of the month, or, if SoulSync was down, be days old.
+SNAPSHOT_READY_AFTER = timedelta(minutes=35)
+
 # Said in the notification, as strftime's would be in the system's language.
 MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
                "October", "November", "December"]
@@ -504,6 +510,12 @@ class WrappedWatcher:
             snapshot = self._listening.require()
         except ListeningUnavailable as e:
             logger.info(f"No Wrapped made yet, listening isn't available: {e}")
+            return
+        # Made now or made late, the numbers must hold the whole month: Listening keeps its last good snapshot
+        # however old, so this is the watcher's to check. Tried again at the next look.
+        ready = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0) + SNAPSHOT_READY_AFTER
+        if snapshot.at is None or datetime.fromtimestamp(snapshot.at) < ready:
+            logger.info("No Wrapped made yet, the listening stats are from before the month's last rebuild")
             return
         for kind, key in due:
             try:
