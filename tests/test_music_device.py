@@ -270,18 +270,22 @@ def _replaced(snapshot, **changes):
 
 
 def test_no_snapshot_yet(started, listening):
+    # Until SoulSync has been read, nothing of the stats is sent: what the broker kept from before a restart,
+    # pictures and all, stays on the Music view rather than being blanked while SoulSync is down.
     device, client = started
     listening.current = Snapshot(problem="I haven't got your listening stats from SoulSync yet.")
     client.connects()
+    device.publish_state()
     sent = client.latest()
-    for window in WINDOWS:
-        assert sent[f"{BASE}/plays_{window}"] == "None"
-        assert sent[f"{BASE}/artist_{window}_1"] == b""
-    assert sent[f"{BASE}/library"] == "None"
-    attributes = _attributes(client, "library")
-    assert attributes["refreshed"] is None and attributes["problem"].startswith("I haven't got")
-    assert attributes["disk_bytes"] is None and attributes["formats"] is None
-    assert sent[f"{BASE}/availability"] == "online"
+    assert not [topic for topic in sent if topic.startswith(f"{BASE}/") and topic != f"{BASE}/availability"]
+    assert sent[f"{BASE}/availability"] == "online" and len(client.sent(DISCOVERY)) == 1
+
+    # The first read is sent whole.
+    listening.current = _snapshot()
+    device.publish_state()
+    sent = client.latest()
+    assert sent[f"{BASE}/plays_7d"] == "120" and sent[f"{BASE}/library"] == "800"
+    assert sent[f"{BASE}/artist_7d_1"] == b"\xff\xd8jpeg\x01"
 
 
 def test_the_problem_is_shown_beside_the_last_good_stats(started, listening):

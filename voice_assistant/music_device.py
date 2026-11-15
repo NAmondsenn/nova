@@ -241,6 +241,10 @@ class MusicDevice(NovaDevice):
         # Only read: snapshot() gives the latest one at once, and never asks SoulSync, which this
         # runs too often to do.
         snapshot = self.listening.snapshot()
+        if snapshot.at is None:
+            # Not read yet, as after every restart: nothing is sent, so the stats and pictures the broker kept
+            # stay on the Music view, rather than being blanked until SoulSync answers.
+            return {}
         state = {}
         for window, _, _ in WINDOWS:
             data = snapshot.windows.get(window)
