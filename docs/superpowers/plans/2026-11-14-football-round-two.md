@@ -17,6 +17,7 @@ Round one's Contract stands as it is. This round adds three things.
 - A match from BBC Sport has an `id` and a `slug` beginning `bbc:`. Of its two sides, the followed team's carries the team's ESPN id; the other's begins `bbc:`. It never has `venue` or `odds`.
 - `shell_command.football_ask` takes `what` = `lineups`, with `name` the team. The answer: `team` (`id`, `name`, `full_name`?, `followed`), `match`? (the team's match in play; else its next if it kicks off within 24 hours; else its last if that was within the last 24 hours; else its next), `sides`? (each `team` (short name), `team_name`?, `formation`?, `starters` (names, in ESPN's order), `bench` (names)), with `stale`, `error` and `unknown` as every answer has them. `sides` holds only the sides whose line-up is out.
 - The sensor's `rows` are today's and tomorrow's matches, then each team's next match within the card's days.
+- The sensor has `checked`, the moment of the script's run (ISO, UTC). It changes at every run, so Home Assistant writes the sensor each minute and its `last_reported` is when the script last answered: Home Assistant writes a command-line sensor only when something in it changes.
 
 ## Global Constraints
 

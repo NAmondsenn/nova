@@ -348,7 +348,8 @@ class Reading:
         unknown: The entries in the box which ESPN found no team by.
         trimmed: Whether Home Assistant left some teams out to keep the sensor small.
         reported: When Home Assistant last wrote the sensor, in epoch seconds - later at each run of
-            its script, so what tells a reading from the same one looked at again. Always there in
+            its script (whose checked attribute changes every time, so Home Assistant writes it), so
+            what tells a reading from the same one looked at again. Always there in
             one which read() gave; None only in one built by hand, which then can't be told apart.
     """
 
@@ -874,8 +875,9 @@ class Football:
             raise _cant_get(f"the sensor is {state}")
         if "error" in attributes:
             raise _cant_get(f"the sensor has an error: {attributes['error']!r}")
-        # last_reported is when Home Assistant last heard from the script, even when nothing changed,
-        # so it's the age of the reading; older versions only have last_updated.
+        # The sensor's checked changes at every run of its script, so Home Assistant writes the sensor each
+        # time and last_reported (last_updated on older versions) is when the script last answered. Without
+        # checked, Home Assistant writes only a change, and a quiet stretch would read as old.
         reported = _instant(sensor.get("last_reported") or sensor.get("last_updated")).timestamp()
         age = self._now() - reported
         if age > stale_after:
