@@ -43,6 +43,7 @@ from voice_assistant.football_watch import FootballChoices, FootballWatcher
 from voice_assistant.google_calendar import GoogleCalendar
 from voice_assistant.ha_registry import HomeRegistry
 from voice_assistant.listening import Listening
+from voice_assistant.wrapped import WrappedStore, WrappedWatcher
 from voice_assistant.media_watch import MediaWatcher
 from voice_assistant.music_device import MusicDevice
 from voice_assistant.ntfy import Alert
@@ -2773,6 +2774,33 @@ def test_the_listening_stats_are_read_while_the_brain_runs_and_stop_with_it(make
     assert running == [True]
     assert not any(thread.name == "listening" for thread in threading.enumerate())
     assert brain.listening._thread is None
+
+
+def test_the_wrapped_is_kept_in_the_data_folder_and_made_while_the_brain_runs(make_brain, tmp_path):
+    brain = make_brain(wrapped={"enabled": True, "monthly": True, "yearly_month": 12, "link": ""})
+    assert isinstance(brain.wrapped_store, WrappedStore) and isinstance(brain.wrapped_watcher, WrappedWatcher)
+    brain.wrapped_store.save({"key": "2026-11"}, [(b"x", "image/png")])
+    assert os.path.exists(tmp_path / "wrapped" / "2026-11.json")
+    # The watcher is given the listening stats, ntfy's phone and the settings as they are now.
+    assert brain.wrapped_watcher._listening is brain.listening and brain.wrapped_watcher._ntfy is brain.ntfy
+    assert brain.wrapped_watcher._settings()["yearly_month"] == 12
+    brain.apply_settings({("wrapped", "yearly_month"): 11})
+    assert brain.wrapped_watcher._settings()["yearly_month"] == 11
+    assert brain.wrapped_watcher._thread is None
+    looked = threading.Event()
+    brain.wrapped_watcher.look = looked.set
+    running = []
+
+    def serve():
+        # It looks as soon as it starts, so a thread which is there but never looks is found out.
+        running.append(looked.wait(5) and any(thread.name == "wrapped" and thread.is_alive()
+                                              for thread in threading.enumerate()))
+
+    brain.serve = serve
+    brain.run()
+    assert running == [True]
+    assert not any(thread.name == "wrapped" for thread in threading.enumerate())
+    assert brain.wrapped_watcher._thread is None
 
 
 def test_the_listening_stats_are_given_the_soulsync_key(make_brain, monkeypatch):

@@ -1981,6 +1981,37 @@ def test_the_spending_alert_and_claudes_prices_are_on_the_page_and_used_straight
     assert page.save_settings({"usage.daily_limit": 0}, LOGIN)["success"]
 
 
+def test_the_wrapped_settings_are_on_the_page_and_used_straight_away(files):
+    page, running = _running(files)
+    shown = {setting["key"]: setting for setting in page.state()["settings"]}
+    labels = {
+        "wrapped.enabled": "Make a Wrapped of your listening",
+        "wrapped.monthly": "A smaller one each month",
+        "wrapped.yearly_month": "Month the yearly one is ready, on the 1st (12 for December)",
+        "wrapped.link": "This page's address, for the link in Wrapped's notification",
+    }
+    for key, label in labels.items():
+        assert shown[key]["label"] == label and shown[key]["used"] == NOW, key
+    assert (shown["wrapped.enabled"]["kind"], shown["wrapped.enabled"]["value"]) == ("yes/no", True)
+    assert (shown["wrapped.monthly"]["kind"], shown["wrapped.monthly"]["value"]) == ("yes/no", True)
+    assert (shown["wrapped.yearly_month"]["value"], shown["wrapped.yearly_month"]["min"],
+            shown["wrapped.yearly_month"]["max"], shown["wrapped.yearly_month"]["whole"]) == (12, 1, 12, True)
+    # The repo is public, so the address is his to give, not config.yaml's.
+    assert shown["wrapped.link"]["value"] == ""
+
+    result = page.save_settings({"wrapped.enabled": False, "wrapped.monthly": False, "wrapped.yearly_month": 11,
+                                 "wrapped.link": "https://nova.example.com"}, LOGIN)
+    assert result == {"success": True, "message": "Saved. It's used straight away.", "restart_needed": False}
+    assert running.section("wrapped") == {"enabled": False, "monthly": False, "yearly_month": 11,
+                                          "link": "https://nova.example.com"}
+    # No month 13, and no link which isn't an address.
+    assert not page.save_settings({"wrapped.yearly_month": 13}, LOGIN)["success"]
+    assert not page.save_settings({"wrapped.yearly_month": 0}, LOGIN)["success"]
+    assert not page.save_settings({"wrapped.link": "nova.example.com"}, LOGIN)["success"]
+    assert running.section("wrapped")["yearly_month"] == 11
+    assert page.save_settings({"wrapped.link": ""}, LOGIN)["success"]
+
+
 def test_every_setting_on_the_page_has_a_group_of_its_own(files):
     # One under no group is shown under Other, as the spending alert and Claude's prices
     # were, rather than with the settings it goes with.

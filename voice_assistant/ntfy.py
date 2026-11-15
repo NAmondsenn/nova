@@ -198,7 +198,7 @@ class Ntfy:
 
     # Sending
 
-    def send(self, topic: str, message: str, title: str = "", priority: int = 0) -> bool:
+    def send(self, topic: str, message: str, title: str = "", priority: int = 0, click: str = "") -> bool:
         """
         Sends a message to one of the user's topics, tagged as Nova's.
 
@@ -207,6 +207,7 @@ class Ntfy:
             message: What it says.
             title: A few words saying what it is.
             priority: ntfy's 1 to 5, or 0 for its default.
+            click: An address the phone opens when the notification is tapped, or nothing for none.
 
         Returns:
             Whether the server took it.
@@ -221,6 +222,8 @@ class Ntfy:
             body["title"] = title
         if priority:
             body["priority"] = priority
+        if click:
+            body["click"] = click
         try:
             response = self._session.post(self.url, json=body, headers=self._headers, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
@@ -230,9 +233,9 @@ class Ntfy:
         logger.info(f"Sent to {topic}: '{title or message}'", extra=TRANSCRIPT)
         return True
 
-    def send_soon(self, topic: str, message: str, title: str = "", priority: int = 0):
+    def send_soon(self, topic: str, message: str, title: str = "", priority: int = 0, click: str = ""):
         """Sends a message on a thread of its own, for something which mustn't wait on the server."""
-        threading.Thread(target=self.send, args=(topic, message, title, priority), name="ntfy-send",
+        threading.Thread(target=self.send, args=(topic, message, title, priority, click), name="ntfy-send",
                          daemon=True).start()
 
     # Listening

@@ -298,6 +298,8 @@ IN_AND_OUT = {
     ("usage", "input_price"): ([0, 0.1, 1000], [-1, 1001, True]),
     ("usage", "output_price"): ([0, 0.5, 1000], [-1, 1001, True]),
     ("usage", "search_price"): ([0, 10, 1000], [-1, 1001, True]),
+    ("wrapped", "yearly_month"): ([1, 11, 12], [0, 13, 11.5, True]),
+    ("wrapped", "link"): (["https://nova.example.com", ""], ["nova.example.com", "ftp://nova.example.com"]),
 }
 
 

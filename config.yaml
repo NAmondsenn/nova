@@ -305,6 +305,20 @@ football:
   # settings page, and read at each look, so a change is used straight away.
   kickoff_minutes: 15
 
+wrapped:
+  # A Wrapped of your listening, made from SoulSync's stats and kept on the brain - see
+  # voice_assistant/wrapped.py. Nova checks once an hour, and ntfy's phone topic is told when one is
+  # ready. All of it is on the settings page, and used straight away.
+  enabled: true
+  # A smaller one for each month, made on the 1st from the last 30 days.
+  monthly: true
+  # The month the yearly one is made, on the 1st: 12 is December, from the last 12 months.
+  yearly_month: 12
+  # The settings page's address through NPM, e.g. "https://nova.example.com", for the link in the
+  # notification, which opens the Wrapped. Empty sends no link. Left empty here because this
+  # file is public: set it on the settings page.
+  link: ""
+
 mqtt:
   # Home Assistant's MQTT broker - the Mosquitto add-on - through which Nova is a
   # device of its own in Home Assistant, with its controls and its room there. See

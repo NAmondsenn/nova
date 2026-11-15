@@ -60,6 +60,7 @@ from voice_assistant.text_to_speech import TextToSpeech
 from voice_assistant.usage import UsageLog
 from voice_assistant.usage_device import UsageDevice
 from voice_assistant.weather import Weather
+from voice_assistant.wrapped import WrappedStore, WrappedWatcher
 
 logger = logging.getLogger(__name__)
 
@@ -357,6 +358,13 @@ class Brain:
         # (and what is built on it) answers from, so a question never waits on SoulSync. Made even with
         # no SoulSync set up, as it then says so itself. Started by run().
         self.listening = Listening(config, os.getenv("SOULSYNC_API_KEY"))
+        # The Wrapped of each month and year, saved as made (see wrapped.py): the store is what the Wrapped
+        # page and "what's my Wrapped" read, and the watcher makes each when it's due and tells the phone -
+        # through ntfy's phone topic, as the spending alert does. Made with or without ntfy, as the Wrapped
+        # is made either way. Started by run().
+        self.wrapped_store = WrappedStore(os.path.join(paths.DATA_DIR, "wrapped"))
+        self.wrapped_watcher = WrappedWatcher(self.listening, self.wrapped_store, self.ntfy,
+                                              lambda: self.config.section("wrapped"))
         # The brain's second device in Home Assistant, showing that snapshot - or None with no MQTT
         # broker set. Made here as it needs the listening stats. Started by run().
         self.music_device = MusicDevice.from_config(config, os.getenv("MQTT_PASSWORD"), self.listening)
@@ -1647,6 +1655,7 @@ class Brain:
         if self.football_watcher:
             self.football_watcher.start()
         self.listening.start()
+        self.wrapped_watcher.start()
         if self.media:
             self.media.start()
         if self.registry:
@@ -1727,6 +1736,7 @@ class Brain:
             self.batteries.stop()
         if self.football_watcher:
             self.football_watcher.stop()
+        self.wrapped_watcher.stop()
         self.listening.stop()
         if self.media:
             self.media.stop()

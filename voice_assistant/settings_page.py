@@ -132,6 +132,10 @@ EDITABLE = [
     ("usage", "input_price", "Claude's price per million input tokens, in dollars", "now"),
     ("usage", "output_price", "Claude's price per million output tokens, in dollars", "now"),
     ("usage", "search_price", "Claude's price per 1,000 web searches, in dollars", "now"),
+    ("wrapped", "enabled", "Make a Wrapped of your listening", "now"),
+    ("wrapped", "monthly", "A smaller one each month", "now"),
+    ("wrapped", "yearly_month", "Month the yearly one is ready, on the 1st (12 for December)", "now"),
+    ("wrapped", "link", "This page's address, for the link in Wrapped's notification", "now"),
 ]
 # How the page says which each is.
 NOW = "Used straight away"
