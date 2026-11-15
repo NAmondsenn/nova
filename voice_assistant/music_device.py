@@ -199,8 +199,15 @@ class MusicDevice(NovaDevice):
         if self._connected and self._types != self._announced_types:
             self._announce()
 
-    def _window_state(self, key: str, window: Dict) -> Tuple[str, Dict]:
-        """A plays sensor's state, and its attributes, from one window ("7d", ...) of the snapshot."""
+    def _window_state(self, key: str, window: Dict, pictures: List[bytes]) -> Tuple[str, Dict]:
+        """
+        A plays sensor's state, and its attributes, from one window ("7d", ...) of the snapshot.
+
+        Args:
+            key: The window's key, "7d" and so on.
+            window: SoulSync's answer for it.
+            pictures: Each of its first PICTURES_OF top artists' picture as its image sends it, b"" for none.
+        """
         figures = _figures(window.get("overview"))
         previous = window.get("previous")
         change = _change(figures, _figures(previous) if isinstance(previous, dict) else {})
@@ -213,6 +220,10 @@ class MusicDevice(NovaDevice):
             "clock": {"grid": clock.get("grid"), "peak": clock.get("peak")}, "rhythm": window.get("rhythm"),
             "genres": (window.get("genres") or [])[:GENRES_OF],
         }
+        # Home Assistant gives an image an address whether it has a picture or not, so the Music view is
+        # told which have one, and shows a plain disc for the rest rather than a broken picture.
+        for artist, picture in zip(attributes["top_artists"], pictures):
+            artist["picture"] = bool(picture)
         attributes, size = _fit(attributes)
         # Sent as they are even then - the recorder, which would drop them, is told to leave them out -
         # but said once, with only the window and the size: never anything of what he listens to.
@@ -233,19 +244,21 @@ class MusicDevice(NovaDevice):
         state = {}
         for window, _, _ in WINDOWS:
             data = snapshot.windows.get(window)
-            value, attributes = self._window_state(window, data) if isinstance(data, dict) else (UNKNOWN, {})
-            control = f"plays_{window}"
-            state[self._topics[control]] = value
-            state[f"{self._topics[control]}/attributes"] = json.dumps(attributes)
             artists = (data or {}).get("top_artists") or []
+            sent = []
             for n in range(1, PICTURES_OF + 1):
                 control = f"artist_{window}_{n}"
                 url = artists[n - 1].get("image_url") if n <= len(artists) else None
                 picture = snapshot.pictures.get(url) if url else None
                 # Nothing is sent as an empty payload, so Home Assistant shows none rather than a stale one.
-                state[self._topics[control]] = picture[0] if picture else b""
+                sent.append(picture[0] if picture else b"")
+                state[self._topics[control]] = sent[-1]
                 if picture:
                     self._types[control] = picture[1] or DEFAULT_TYPE
+            value, attributes = self._window_state(window, data, sent) if isinstance(data, dict) else (UNKNOWN, {})
+            control = f"plays_{window}"
+            state[self._topics[control]] = value
+            state[f"{self._topics[control]}/attributes"] = json.dumps(attributes)
 
         health, disk = snapshot.health or {}, snapshot.disk or {}
         duration = health.get("total_duration_ms")

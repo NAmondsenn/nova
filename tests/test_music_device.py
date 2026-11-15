@@ -151,7 +151,7 @@ def test_state_from_snapshot(started):
     attributes = _attributes(client, "plays_7d")
     # total_time_ms is 120 * 220000, so 440 minutes.
     assert (attributes["minutes"], attributes["artists"], attributes["albums"], attributes["tracks"]) == (440, 7, 18, 60)
-    assert attributes["top_artists"][0] == {"name": "Artist 1", "plays": 99}
+    assert attributes["top_artists"][0] == {"name": "Artist 1", "plays": 99, "picture": True}
     assert attributes["top_albums"][0] == {"name": "Album 1", "artist": "Artist 1", "plays": 49}
     assert attributes["top_tracks"][0] == {"name": "Song 1", "artist": "Artist 1", "plays": 19}
     assert len(attributes["top_artists"]) == len(attributes["top_albums"]) == len(attributes["top_tracks"]) == 10
@@ -227,6 +227,22 @@ def test_an_artist_with_no_picture_sends_an_empty_one_so_home_assistant_shows_no
     device.publish_state()
     assert client.latest()[f"{BASE}/artist_30d_2"] == b""
     assert client.latest()[f"{BASE}/artist_30d_3"] != b""
+
+
+def test_the_top_five_artists_say_whether_they_have_a_picture(started, listening):
+    # Home Assistant gives an image entity an address whether or not it has a picture, so the Music view
+    # needs telling which have one to show a plain disc for the rest.
+    device, client = started
+    pictures = dict(listening.current.pictures)
+    del pictures["/cover/artist-2"]
+    pictures["/cover/artist-3"] = (b"", "image/jpeg")
+    listening.current = _replaced(listening.current, pictures=pictures)
+    client.connects()
+    artists = _attributes(client, "plays_30d")["top_artists"]
+    assert [artist.get("picture") for artist in artists[:5]] == [True, False, False, True, True]
+    # Only the first five have an image to show, so only they say.
+    assert all("picture" not in artist for artist in artists[5:])
+    assert client.latest()[f"{BASE}/artist_30d_3"] == b""
 
 
 def test_a_picture_of_another_type_is_announced_again(started, listening):
