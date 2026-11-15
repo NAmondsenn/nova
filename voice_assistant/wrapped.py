@@ -80,6 +80,9 @@ MINUTES_ALONE = 119
 # A Wrapped's name: "2026" for a year, "2026-11" for a month. Digits only, so it can't be a path.
 _KEY = re.compile(r"[0-9]{4}(-[0-9]{2})?")
 
+# A month in SoulSync's year, e.g. "2026-11".
+_MONTH = re.compile(r"[0-9]{4}-[0-9]{2}")
+
 
 def valid_key(key) -> bool:
     """Whether something is a Wrapped's name - which is all that is ever made into a file name."""
@@ -186,6 +189,31 @@ def _hour(hour) -> Optional[int]:
     return hour if isinstance(hour, int) and not isinstance(hour, bool) and 0 <= hour <= 23 else None
 
 
+def _months_before(months, now: datetime) -> List[Dict]:
+    """
+    The year's months which are over by now, oldest first, as the story shows them.
+
+    SoulSync's year runs to the day it is read, so made on the 1st it holds the hour or so of the
+    month just begun, and it lists them newest first. A month is placed by its "month", e.g.
+    "2026-11": one without a month that can be read can't be placed, so it is left out.
+    """
+    current = f"{now.year}-{now.month:02d}"
+    kept = [month for month in map(_dict, _list(months))
+            if isinstance(month.get("month"), str) and _MONTH.fullmatch(month["month"])
+            and 1 <= int(month["month"][5:]) <= 12 and month["month"] < current]
+    return [{"label": month.get("label"), "minutes": month.get("minutes"), "top_artist": month.get("top_artist")}
+            for month in sorted(kept, key=lambda month: month["month"])]
+
+
+def _ended_by(end, now: datetime):
+    """The year's last day, no later than the last day of the month before now's. Anything not a date is kept as it is."""
+    last = _last_of_previous_month(now)
+    try:
+        return last.isoformat() if date.fromisoformat(end) > last else end
+    except (TypeError, ValueError):
+        return end
+
+
 def make_with_pictures(snapshot, kind: str, now: datetime) -> Optional[Tuple[Dict, List[Tuple[bytes, str]]]]:
     """
     Makes a Wrapped, and the pictures it shows, from the listening snapshot.
@@ -216,7 +244,9 @@ def make_with_pictures(snapshot, kind: str, now: datetime) -> Optional[Tuple[Dic
         peak_hour = _hour(_dict(year.get("top_hour")).get("hour"))
         wrapped = {
             "key": year_key(now), "kind": kind, "made": now.isoformat(timespec="seconds"),
-            "period": {"start": period.get("start"), "end": period.get("end")},
+            "period": {"start": period.get("start"), "end": _ended_by(period.get("end"), now)},
+            # SoulSync's totals run to the day it was read, so they hold the plays of the month just begun
+            # too: an hour or so of a year's, and there's nothing to take them away by.
             "minutes": totals.get("minutes"), "plays": totals.get("plays"), "artists": totals.get("artists"),
             "albums": totals.get("albums"), "tracks": totals.get("tracks"),
             "active_days": totals.get("active_days"),
@@ -226,8 +256,7 @@ def make_with_pictures(snapshot, kind: str, now: datetime) -> Optional[Tuple[Dic
             "top_genre": _top_genre(window), "time_of_day": time_of_day(peak_hour), "peak_hour": peak_hour,
             "longest_streak": _dict(window.get("rhythm")).get("longest_streak"),
             "busiest_day": _busiest_day(year.get("peak_day")),
-            "months": [{"label": month.get("label"), "minutes": month.get("minutes"),
-                        "top_artist": month.get("top_artist")} for month in map(_dict, _list(year.get("months")))],
+            "months": _months_before(year.get("months"), now),
             "discoveries": _artists(year.get("discoveries"), "plays", pictures),
         }
         return wrapped, pictures.saved
@@ -269,7 +298,8 @@ def make(snapshot, kind: str, now: datetime) -> Optional[Dict]:
         albums, tracks, active_days, top_artists (name, plays, and picture - the number of its
         saved picture, or None), top_tracks and top_albums (name, artist, plays), top_genre
         (name, percentage), time_of_day, peak_hour, longest_streak and busiest_day (date, plays).
-        A year's has months (label, minutes, top_artist) and discoveries as top_artists is, too.
+        A year's has months (label, minutes, top_artist), the ones over by now, oldest first, and
+        discoveries as top_artists is, too.
         None if the period had no plays.
     """
     made = make_with_pictures(snapshot, kind, now)

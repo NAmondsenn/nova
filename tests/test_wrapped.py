@@ -65,8 +65,9 @@ def test_make_year_from_fixture():
     assert len(wrapped["top_tracks"]) == len(wrapped["top_albums"]) == 5
     assert len(wrapped["discoveries"]) == 5
     assert wrapped["discoveries"][0] == {"name": "Artist Seven", "plays": 20, "picture": 1}
-    assert wrapped["months"] == [{"label": "Nov 2026", "minutes": 900, "top_artist": "Artist One"},
-                                 {"label": "Oct 2026", "minutes": 700, "top_artist": None}]
+    # Oldest first, as the story goes through the year.
+    assert wrapped["months"] == [{"label": "Oct 2026", "minutes": 700, "top_artist": None},
+                                 {"label": "Nov 2026", "minutes": 900, "top_artist": "Artist One"}]
     # The 12 months' genres and rhythm, and the year's own peak hour and day.
     assert wrapped["top_genre"] == {"name": "Pop", "percentage": 58.3}
     assert wrapped["peak_hour"] == 18 and wrapped["time_of_day"] == "an evening listener"
@@ -113,6 +114,30 @@ def test_make_month_covers_last_30_days():
     assert late["key"] == "2026-11" and late["period"] == {"start": "2026-11-09", "end": "2026-12-08"}
     # And in January it is December's, of the year before.
     assert make(snapshot, "month", datetime(2027, 1, 1, 0, 10))["key"] == "2026-12"
+
+
+def test_a_year_made_on_the_1st_leaves_out_the_month_just_begun_and_goes_oldest_first():
+    # As SoulSync answers just after midnight on 1 December: its period ends today, and its months come
+    # newest first with the hour of December so far at the head.
+    snapshot = _snapshot()
+    snapshot.year["period"]["end"] = "2026-12-01"
+    snapshot.year["months"] = [
+        {"label": "Dec 2026", "month": "2026-12", "minutes": 20, "plays": 6, "top_artist": "Artist Nine"},
+        {"label": "Nov 2026", "month": "2026-11", "minutes": 900, "plays": 300, "top_artist": "Artist One"},
+        {"label": "Sep 2026", "month": "2026-09", "minutes": 500, "plays": 150, "top_artist": "Artist Two"},
+        {"label": "Oct 2026", "month": "2026-10", "minutes": 700, "plays": 250, "top_artist": None},
+        # One with no month, or one which isn't a month, can't be placed, so it is left out.
+        {"label": "Mystery", "minutes": 10, "plays": 3, "top_artist": None},
+        {"label": "Mystery", "month": "Nov", "minutes": 10, "plays": 3, "top_artist": None},
+        {"label": "Mystery", "month": "2026-13", "minutes": 10, "plays": 3, "top_artist": None},
+        "not a month"]
+    wrapped = make(snapshot, "year", DECEMBER)
+    assert [month["label"] for month in wrapped["months"]] == ["Sep 2026", "Oct 2026", "Nov 2026"]
+    assert wrapped["period"] == {"start": "2025-12-01", "end": "2026-11-30"}
+    # Made late, in a later month, every month from then on is left out too.
+    late = make(snapshot, "year", datetime(2026, 11, 3, 9, 0))
+    assert [month["label"] for month in late["months"]] == ["Sep 2026", "Oct 2026"]
+    assert late["period"]["end"] == "2026-10-31"
 
 
 def test_the_year_is_named_for_the_year_it_covers():
