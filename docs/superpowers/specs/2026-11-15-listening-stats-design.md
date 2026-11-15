@@ -1,6 +1,6 @@
 # Listening stats and Wrapped
 
-15 November 2026. Draft for his approval; asked for from the car with two SoulSync screenshots, so the calls marked "my call" are mine and his to change.
+15 November 2026. Approved by him the same day; asked for from the car with two SoulSync screenshots, so the calls marked "my call" are mine.
 
 ## Why
 
@@ -57,10 +57,12 @@ Success: he can ask Nova "who have I listened to most this month?" and get a sho
 - **Pictures on the Wrapped page** come through Nova, as the clock display's covers do.
 - **Away from home:** works, as his phone runs Tailscale always-on with AdGuard's DNS, so the lab's own DNS names resolve anywhere (vault network.md).
 
-## Open for him
+## His answers (15 Nov)
 
-1. **Spotify history before 11 Oct.** Without it, the 2026 Wrapped covers 11 Oct to 30 Nov only. Option: request his "Extended streaming history" from Spotify's privacy page (takes up to 30 days, so it has to be asked for now to be in time), upload it to ListenBrainz (a free scrobble service, which accepts Spotify exports), and let SoulSync import it through its existing ListenBrainz import. That puts his listening on a third-party service; his call.
-2. **SoulSync's own "Your Year".** It already exists (the button on his screenshot). If he's happy with it, part 3 shrinks to a link and a notification. I recommend building Nova's own on the same data: monthly recaps, saved copies, spoken, his look, and a notification when it's ready.
+He approved the design: "okay to everything and do which you think is best for the wrapped".
+
+1. **History before 11 Oct:** "its already on a scrobble service". Navidrome scrobbles to Last.fm (its `LastFMSessionKey` is set and `scrobble_buffer` is empty), and Spotify may have scrobbled there before it. SoulSync has a Last.fm import (`core/listening_import/lastfm.py`) that dedupes against what it has by title, artist and time within 10 seconds; SoulSync's own history comes from Navidrome's scrobbles, whose times are what Navidrome sends Last.fm, so the overlap since 11 Oct should match rather than double. He enters his Last.fm username and API key on SoulSync's settings page himself (no keys in chat), then runs its import. Check after: plays for a week since 11 Oct must be the same before and after the import.
+2. **Wrapped:** Nova's own, as recommended (my call, which he handed over).
 
 ## Constraints
 
@@ -76,6 +78,6 @@ Success: he can ask Nova "who have I listened to most this month?" and get a sho
 1. Nova: the SoulSync stats reader and the listening-stats tool for Claude.
 2. Nova: the "Nova music" HA device (sensors and artist pictures); then the Music view on both dashboards (`ha-dashboard` repo).
 3. Nova: Wrapped page, monthly and yearly making, ntfy, settings page controls, "what's my Wrapped".
-4. If he says yes to open item 1: his Spotify request, then the ListenBrainz import check.
+4. His Last.fm import in SoulSync, then the no-double-counting check (any time; the Wrapped reads whatever history SoulSync has on 1 December).
 
 Each task Opus-reviewed, one commit per fix, a regression test that fails on the old code; branch `listening-stats` from `main` b9c969d.
