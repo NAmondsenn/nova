@@ -139,27 +139,34 @@ class Listening:
             soulsync = SoulSync.from_config(self._config, self._key)
             if soulsync is None:
                 # Nothing to log: not using SoulSync is a choice, and from_config says if only half is set.
-                self._fail(NOT_SET_UP, log=False)
+                self._fail(NOT_SET_UP)
                 return
             fresh = self._read_everything(soulsync)
         except _ShapeChanged:
-            self._fail(SHAPE_CHANGED)
+            self._fail(SHAPE_CHANGED, "its stats changed shape")
         except SoulSyncError as e:
-            self._fail(e.reason or FAILED)
+            self._fail(e.reason or FAILED, "SoulSync gave an error")
         except Exception:
             # A bug, with its traceback: it must not end the thread, nor leave a half-made snapshot.
             logger.exception("Reading the listening stats failed")
-            self._fail(FAILED, log=False)
+            self._fail(FAILED)
         else:
             if self._snapshot is None or self._problem:
                 logger.info("SoulSync's listening stats were read")
             self._problem = None
             self._snapshot = fresh
 
-    def _fail(self, problem: str, log: bool = True) -> None:
-        """Records why a refresh failed, keeping the last good snapshot with the reason beside it."""
-        if log:
-            logger.warning(f"Listening stats not refreshed: {problem}")
+    def _fail(self, problem: str, kind: Optional[str] = None) -> None:
+        """
+        Records why a refresh failed, keeping the last good snapshot with the reason beside it.
+
+        Args:
+            problem: The sentence to say. It can hold SoulSync's own words, so it is never logged.
+            kind: What kind of failure to log, in words of ours - SoulSync's own error line says
+                the rest - or None to log nothing.
+        """
+        if kind:
+            logger.warning(f"Listening stats not refreshed: {kind}")
         self._problem = problem
         if self._snapshot is not None:
             self._snapshot = replace(self._snapshot, problem=problem)

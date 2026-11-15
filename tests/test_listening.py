@@ -223,6 +223,15 @@ def test_refresh_logs_one_line_for_a_failure_without_any_names(listening, http, 
     assert "the-key" not in caplog.text
 
 
+def test_soulsyncs_own_words_are_said_but_never_logged(listening, http, caplog):
+    # Its error text is free text, which a :latest SoulSync can fill with anything, so only the kind is logged.
+    http.disk = {"success": False, "error": "Artist One the-key"}
+    listening.refresh()
+    assert listening.snapshot().problem == "SoulSync said: Artist One the-key."
+    assert "Artist One" not in caplog.text and "the-key" not in caplog.text
+    assert [r.name for r in caplog.records if r.levelname == "WARNING"] == ["voice_assistant.listening"]
+
+
 @pytest.mark.parametrize("break_it", [
     lambda http: http.cached["7d"].pop("overview"),
     lambda http: http.cached["all"].pop("top_artists"),
