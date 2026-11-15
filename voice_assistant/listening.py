@@ -111,6 +111,8 @@ class Listening:
         self._snapshot: Optional[Snapshot] = None
         # Why no refresh has worked yet, when none has.
         self._problem: Optional[str] = None
+        # Which half of SoulSync's setup was last warned to be missing, so it's said once, not every refresh.
+        self._half_warned: Optional[str] = None
         self._stopping = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -136,11 +138,10 @@ class Listening:
         once, the old snapshot is kept, and the reason is recorded as its problem. Raises nothing.
         """
         try:
-            soulsync = SoulSync.from_config(self._config, self._key)
-            if soulsync is None:
-                # Nothing to log: not using SoulSync is a choice, and from_config says if only half is set.
+            if not self._set_up():
                 self._fail(NOT_SET_UP)
                 return
+            soulsync = SoulSync.from_config(self._config, self._key)
             fresh = self._read_everything(soulsync)
         except _ShapeChanged:
             self._fail(SHAPE_CHANGED, "its stats changed shape")
@@ -155,6 +156,18 @@ class Listening:
                 logger.info("SoulSync's listening stats were read")
             self._problem = None
             self._snapshot = fresh
+
+    def _set_up(self) -> bool:
+        """
+        Whether SoulSync has both an address and a key. Not using it is a choice, so neither is nothing
+        to log, but only one is a mistake, warned of once until it changes.
+        """
+        url, key = (self._config.section("soulsync").get("url") or "").strip(), (self._key or "").strip()
+        half = "soulsync.url" if url and not key else "the key" if key and not url else None
+        if half and half != self._half_warned:
+            logger.warning(f"Listening stats need both soulsync.url and SOULSYNC_API_KEY, and only {half} is set")
+        self._half_warned = half
+        return bool(url and key)
 
     def _fail(self, problem: str, kind: Optional[str] = None) -> None:
         """

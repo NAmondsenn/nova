@@ -279,6 +279,40 @@ def test_not_set_up_is_said_not_raised(http, config):
     assert http.fetched == []
 
 
+def test_half_set_up_is_warned_of_once_for_each_half_in_words_of_listening(http, config, caplog):
+    config.url = ""
+    listening = Listening(config, "the-key")
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            listening.refresh()
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings == ["Listening stats need both soulsync.url and SOULSYNC_API_KEY, and only the key is set"]
+    assert "isn't set up" in listening.snapshot().problem and http.fetched == []
+
+    # Set up whole, then half the other way, it's a new case, so it is said again, once.
+    caplog.clear()
+    config.url = URL
+    listening.refresh()
+    listening = Listening(config, "")
+    with caplog.at_level("WARNING"):
+        listening.refresh()
+        listening.refresh()
+    assert [r.getMessage() for r in caplog.records if r.levelname == "WARNING"] == [
+        "Listening stats need both soulsync.url and SOULSYNC_API_KEY, and only soulsync.url is set"]
+
+
+def test_a_half_set_up_which_comes_back_is_warned_of_again(http, config, caplog):
+    config.url = ""
+    listening = Listening(config, "the-key")
+    with caplog.at_level("WARNING"):
+        listening.refresh()
+        config.url = URL
+        listening.refresh()
+        config.url = ""
+        listening.refresh()
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 2
+
+
 def test_new_address_used(listening, http, config):
     listening.refresh()
     assert all(url.startswith(URL) for url, _ in http.fetched)
