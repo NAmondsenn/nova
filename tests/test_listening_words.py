@@ -170,11 +170,23 @@ def test_genres_are_the_top_three_with_percentages():
 
 
 def test_when_uses_peak_and_streak():
-    # The fixture's peak is weekday 4 (Monday is 0) at 18:00, the longest streak 7 days, the busiest day 30 plays.
+    # The fixture's peak is weekday 4 (Thursday, as SoulSync counts from Sunday) at 18:00, the longest streak
+    # 7 days, the busiest day 30 plays.
     message = describe(_listening(), "week", "when")["message"]
-    assert "Fridays" in message and "6pm" in message
+    assert "Thursdays" in message and "6pm" in message
     assert "longest streak is 7 days" in message
     assert "Friday the 13th of November" in message and "30 plays" in message
+
+
+def test_weekdays_count_from_sunday_as_soulsync_does():
+    # SoulSync's clock is SQLite's strftime('%w'): 0 is Sunday, 1 Monday ... 6 Saturday.
+    def said(weekday):
+        clock = {"peak": {"weekday": weekday, "hour": 9, "plays": 3}}
+        return describe(_with(clock=clock, rhythm={}), "week", "when")["message"]
+
+    for weekday, name in enumerate(("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")):
+        assert f"most on {name}s" in said(weekday)
+    assert "Saturdays" not in said(7) and "Sundays" not in said(7)
 
 
 def test_hours_are_said_as_a_person_would():
@@ -182,7 +194,7 @@ def test_hours_are_said_as_a_person_would():
         clock = {"peak": {"weekday": 0, "hour": hour, "plays": 3}}
         return describe(_with(clock=clock, rhythm={}), "week", "when")["message"]
 
-    assert "Mondays" in said(0) and "midnight" in said(0)
+    assert "Sundays" in said(0) and "midnight" in said(0)
     assert "9am" in said(9)
     assert "midday" in said(12)
     assert "11pm" in said(23)

@@ -38,8 +38,9 @@ TOP_GENRES = 3
 # What the period before a window is called, for "up 34% on the 7 days before".
 BEFORE_WORDS = {"7d": "the 7 days before", "30d": "the 30 days before", "12m": "the 12 months before"}
 
-# The days of SoulSync's week grid, Monday first as the grid is.
-_WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+# The days of SoulSync's week grid and clock.peak.weekday, which count as SQLite's strftime('%w') does:
+# 0 is Sunday, 1 Monday ... 6 Saturday (not Python's weekday(), where Monday is 0). Hours are local time.
+_WEEKDAYS = ("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
 
 # What is said when the period or the sort of answer asked for isn't one of those offered, as the
 # model can give anything.
