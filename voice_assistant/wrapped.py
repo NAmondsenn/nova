@@ -334,6 +334,16 @@ class WrappedStore:
         except (OSError, ValueError):
             return None
 
+    def mark_told(self, key):
+        """
+        Notes that the phone was told of a Wrapped: its "told" becomes true, the rest and its pictures
+        as they were, written atomically. Nothing is done for one which isn't there.
+        """
+        with self._lock:
+            wrapped = self.load(key)
+            if wrapped is not None:
+                storage.save_json(self._path(key), {**wrapped, "told": True})
+
     def keys(self) -> List[str]:
         """The keys of the Wrappeds which can be read, newest first: a year before its months."""
         try:
@@ -409,7 +419,8 @@ class WrappedWatcher:
     and in the month the user chose, the year's. A due one which isn't in the store is made, saved
     and the phone told. Each is made once, in the month it is due in - a look later in the month,
     after Nova was off at midnight, still makes it - and a month which went by without one is not
-    made after.
+    made after. Whether the phone has been told is kept in the saved Wrapped, so a restart neither
+    loses a notification which waited or was refused nor sends one twice.
     """
 
     def __init__(self, listening, store: WrappedStore, ntfy, settings: Callable[[], Dict],
@@ -419,8 +430,9 @@ class WrappedWatcher:
             listening: Gives the snapshot to make from: its require() raises ListeningUnavailable
                 until SoulSync has been read, when the look is tried again an hour later.
             store: Where they are kept.
-            ntfy: Tells the phone - its phone topic and send(topic, message, title, click=) - or None
-                with no ntfy, when the Wrapped is made and nobody told.
+            ntfy: Tells the phone - its phone topic, quiet() for the user's night and
+                send(topic, message, title, click=) - or None with no ntfy, when the Wrapped is made
+                and nobody told.
             settings: Gives the wrapped section of the settings as they are now, read at each look
                 so that a change on the settings page is used straight away: enabled, monthly,
                 yearly_month and link.
@@ -431,9 +443,6 @@ class WrappedWatcher:
         self._ntfy = ntfy
         self._settings = settings
         self._clock = clock
-        # Keys saved whose notification didn't get through: sent again at the next look. Not kept
-        # past a restart, which would otherwise have to know what was sent.
-        self._untold: Dict[str, str] = {}
         self._stopping = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -459,7 +468,11 @@ class WrappedWatcher:
             self._stopping.wait(LOOK_EVERY)
 
     def look(self):
-        """One look: makes whichever Wrapped is due and not yet made, and tells the phone of each."""
+        """
+        One look: makes whichever Wrapped is due and not yet made, then tells the phone of each of this
+        month's which it hasn't been told of - which isn't done at night, so one made just after
+        midnight waits for the first look outside quiet hours.
+        """
         # The local time as the system's zone has it - the 1st is the user's, not UTC's.
         now = datetime.fromtimestamp(self._clock())
         settings = _dict(self._settings())
@@ -467,13 +480,24 @@ class WrappedWatcher:
             return
         if now.day == 1 and (now.hour, now.minute) < FIRST_LOOK:
             return
-        self._tell_untold()
-        due = []
+        wanted = []
         if settings.get("monthly", True) is not False:
-            due.append(("month", month_key(now)))
+            wanted.append(("month", month_key(now)))
         if self._yearly_month(settings) == now.month:
-            due.append(("year", year_key(now)))
-        due = [(kind, key) for kind, key in due if self._store.load(key) is None]
+            wanted.append(("year", year_key(now)))
+        self._make([(kind, key) for kind, key in wanted if self._store.load(key) is None], now)
+        # Only this month's: one from an earlier month which was never told of is stale news.
+        for _, key in wanted:
+            wrapped = self._store.load(key)
+            # Only a Wrapped which says it wasn't told of: one with no note was made before there was one.
+            if wrapped is not None and wrapped.get("told") is False:
+                try:
+                    self._tell(key, settings)
+                except Exception:
+                    logger.exception(f"Telling the phone of the Wrapped {key} failed, will try again")
+
+    def _make(self, due: List[Tuple[str, str]], now: datetime):
+        """Makes and saves each Wrapped in due, as not yet told of. One not made is tried again at the next look."""
         if not due:
             return
         try:
@@ -487,13 +511,11 @@ class WrappedWatcher:
                 if made is None:
                     logger.info(f"No Wrapped for {key}: there were no plays")
                     continue
-                self._store.save(*made)
+                wrapped, pictures = made
+                self._store.save({**wrapped, "told": False}, pictures)
                 logger.info(f"Made the {kind}'s Wrapped {key}")
             except Exception:
                 logger.exception(f"Making the Wrapped {key} failed, will try again")
-                continue
-            self._untold[key] = self._message(key)
-            self._tell_untold([key])
 
     @staticmethod
     def _yearly_month(settings: Dict) -> Optional[int]:
@@ -505,22 +527,24 @@ class WrappedWatcher:
         what = MONTH_NAMES[int(key[5:]) - 1] if len(key) > 4 and 1 <= int(key[5:]) <= 12 else key[:4]
         return f"Your {what} Wrapped is ready."
 
-    def _tell_untold(self, keys: Optional[List[str]] = None):
+    def _tell(self, key: str, settings: Dict):
         """
-        Tells the phone of Wrapped not yet told of, leaving those which don't get through for the next look.
-
-        Args:
-            keys: Which to tell of, or None for every one.
+        Tells the phone a Wrapped is ready, and notes in the store that it has been, so that it is told
+        once, whatever restarts. Left for the next look if there is nowhere to tell, it is night, or ntfy
+        doesn't take it.
         """
         # Read once, so a topic cleared on the settings page meanwhile is never sent to as "".
         phone = getattr(self._ntfy, "phone", "") if self._ntfy else ""
-        link = _dict(self._settings()).get("link")
+        if not phone:
+            # With no ntfy, or no topic for the phone, there's nowhere to say it: a topic set later
+            # in the month is told then.
+            logger.info(f"The Wrapped {key} is ready, with no phone topic to tell")
+            return
+        if self._ntfy.quiet():
+            logger.info(f"The Wrapped {key} is ready, and will be told of once it isn't night")
+            return
+        link = settings.get("link")
         link = link.strip().rstrip("/") if isinstance(link, str) else ""
-        for key in list(self._untold) if keys is None else keys:
-            message = self._untold[key]
-            if not phone:
-                # With no ntfy, or no topic for the phone, there's nowhere to say it.
-                logger.info(f"The Wrapped {key} is ready, with no phone topic to tell")
-                del self._untold[key]
-            elif self._ntfy.send(phone, message, title="Wrapped", click=f"{link}/wrapped?key={key}" if link else ""):
-                del self._untold[key]
+        click = f"{link}/wrapped?key={key}" if link else ""
+        if self._ntfy.send(phone, self._message(key), title="Wrapped", click=click):
+            self._store.mark_told(key)

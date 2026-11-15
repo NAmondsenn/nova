@@ -237,6 +237,11 @@ class FakeNtfy:
         self.phone = phone
         self.sent = []
         self.works = True
+        # Whether it is the user's night, as the settings page sets it.
+        self.night = False
+
+    def quiet(self):
+        return self.night
 
     def send(self, topic, message, title="", priority=0, click=""):
         self.sent.append({"topic": topic, "message": message, "title": title, "click": click})
@@ -418,16 +423,73 @@ def test_no_link_no_click(setup):
     assert setup.messages() == [("Your November Wrapped is ready.", ""), ("Your 2026 Wrapped is ready.", "")]
 
 
-def test_a_notification_which_failed_is_sent_again_at_the_next_look(setup):
+def test_a_notification_which_failed_is_sent_again_at_the_next_look_and_after_a_restart(setup):
     setup.ntfy.works = False
     setup.watcher.look()
     assert len(setup.ntfy.sent) == 2
+    # Still untold, as the file says, so a restart doesn't lose it.
+    assert setup.store.load("2026-11")["told"] is False
     setup.ntfy.works = True
     setup.at = datetime(2026, 12, 1, 1, 10)
-    setup.watcher.look()
+    setup.new().look()
     assert len(setup.ntfy.sent) == 4 and setup.ntfy.sent[2:] == setup.ntfy.sent[:2]
+    assert setup.store.load("2026-11")["told"] is True and setup.store.load("2026")["told"] is True
     setup.watcher.look()
+    setup.new().look()
     assert len(setup.ntfy.sent) == 4
+
+
+def test_made_at_five_past_midnight_in_quiet_hours_is_told_at_the_first_look_outside_them(setup):
+    setup.ntfy.night = True
+    setup.at = datetime(2026, 12, 1, 0, 5)
+    setup.watcher.look()
+    assert setup.store.keys() == ["2026", "2026-11"] and setup.ntfy.sent == []
+    assert setup.store.load("2026-11")["told"] is False
+    setup.at = datetime(2026, 12, 1, 3, 5)
+    setup.watcher.look()
+    assert setup.ntfy.sent == []
+    setup.ntfy.night = False
+    setup.at = datetime(2026, 12, 1, 8, 0)
+    setup.watcher.look()
+    assert [message for message, _ in setup.messages()] == ["Your November Wrapped is ready.",
+                                                            "Your 2026 Wrapped is ready."]
+    setup.at = datetime(2026, 12, 1, 9, 0)
+    setup.watcher.look()
+    assert len(setup.ntfy.sent) == 2
+
+
+def test_a_restart_between_making_it_and_telling_still_tells_once(setup):
+    setup.ntfy.night = True
+    setup.at = datetime(2026, 12, 1, 0, 5)
+    setup.watcher.look()
+    setup.ntfy.night = False
+    setup.at = datetime(2026, 12, 1, 8, 0)
+    restarted = setup.new()
+    restarted.look()
+    assert len(setup.ntfy.sent) == 2
+    setup.new().look()
+    assert len(setup.ntfy.sent) == 2
+
+
+def test_an_untold_one_from_an_earlier_month_is_left_alone(setup):
+    setup.store.save({"key": "2026-10", "kind": "month", "plays": 1, "told": False}, [])
+    # And one this month's from before there was a told field is taken as told.
+    setup.store.save({"key": "2026-11", "kind": "month", "plays": 1}, [])
+    setup.at = datetime(2026, 12, 9, 12, 0)
+    setup.watcher.look()
+    assert [message for message, _ in setup.messages()] == ["Your 2026 Wrapped is ready."]
+    assert setup.store.load("2026-10")["told"] is False
+
+
+def test_what_the_store_says_of_being_told_is_kept_with_the_rest(setup):
+    setup.store.save({"key": "2026-11", "kind": "month", "plays": 7, "told": False}, [(b"x", "image/png")])
+    setup.store.mark_told("2026-11")
+    assert setup.store.load("2026-11") == {"key": "2026-11", "kind": "month", "plays": 7, "told": True}
+    assert setup.store.picture("2026-11", 0) == (b"x", "image/png")
+    # One which isn't there, or isn't a key, is left alone.
+    setup.store.mark_told("2026-10")
+    setup.store.mark_told("../x")
+    assert setup.store.keys() == ["2026-11"]
 
 
 def test_the_thread_looks_at_once_and_stops(setup):
