@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from voice_assistant import wrapped as wrapped_module
+from voice_assistant.actions import Action, ActionExecutor
 from voice_assistant.listening import Snapshot, ListeningUnavailable
 from voice_assistant.wrapped import WrappedStore, WrappedWatcher, make, make_with_pictures, time_of_day
 
@@ -572,3 +573,72 @@ def test_a_look_which_fails_doesnt_end_the_thread(setup, monkeypatch):
         assert len(looks) >= 3
     finally:
         setup.watcher.stop()
+
+
+# Nova reading it out
+
+def _saved_store(tmp_path):
+    """The store with November's Wrapped and the year's, made from the fixtures, and October's, older."""
+    store = WrappedStore(str(tmp_path / "wrapped"))
+    october = dict(make(_snapshot(), "month", datetime(2026, 11, 1, 0, 10)), top_artists=[
+        {"name": "Artist Nine", "plays": 12, "picture": None}])
+    store.save(october, [])
+    store.save(make(_snapshot(), "month", DECEMBER), [])
+    store.save(make(_snapshot(), "year", DECEMBER), [])
+    return store
+
+
+def _ask_for(store, **params):
+    return ActionExecutor(wrapped=store).execute(Action("get_wrapped", params, from_model=True))
+
+
+def test_get_wrapped_says_top_artist(tmp_path):
+    store = _saved_store(tmp_path)
+    # The newest is the year's.
+    said = _ask_for(store)
+    assert said.ok
+    assert said.say.startswith("Your 2026 Wrapped, for 1 December 2025 to 15 November 2026.")
+    assert "Top artist: Artist One, with 200 plays." in said.say
+    assert "Top song: Song A by Artist One, with 40 plays." in said.say
+    assert "You listened for 3,000 minutes, about 50 hours, in 900 plays." in said.say
+    assert "You're an evening listener: you listen most around 6pm." in said.say
+    assert "Busiest day: Friday 13 November, with 30 plays." in said.say
+    assert "Artists you found this year: Artist Seven, Artist Eight" in said.say
+    # The month's, newest first, by "month" or by its key.
+    month = _ask_for(store, which="month")
+    assert month.say.startswith("Your November 2026 Wrapped, for 1 November to 30 November 2026.")
+    assert "Top artist: Artist One, with 30 plays." in month.say and "You're a night owl" in month.say
+    assert "You listened for 440 minutes, about 7 hours, in 480 plays." in month.say
+    assert "Top genre: Jazz, 70% of your plays." in month.say and "Longest streak: 9 days in a row." in month.say
+    assert _ask_for(store, which="2026-11").say == month.say
+    assert _ask_for(store, which="year").say == said.say
+    assert "Top artist: Artist Nine, with 12 plays." in _ask_for(store, which="2026-10").say
+    # One there isn't, and what isn't one.
+    assert _ask_for(store, which="2025-11").say == "There's no Wrapped for November 2025."
+    assert _ask_for(store, which="2025").say == "There's no Wrapped for 2025."
+    for which in ("../x", "last week", 7):
+        assert not _ask_for(store, which=which).ok
+    # Claude answers from it, rather than it being said.
+    assert "get_wrapped" in ActionExecutor().read_tools()
+    offered = {tool["name"]: tool for tool in ActionExecutor(wrapped=store).tool_schemas()}
+    assert "four or five sentences" in offered["get_wrapped"]["description"]
+    assert offered["get_wrapped"]["input_schema"]["required"] == []
+
+
+def test_get_wrapped_minutes_under_two_hours_are_only_minutes(tmp_path):
+    store = WrappedStore(str(tmp_path / "wrapped"))
+    store.save({"key": "2026-11", "kind": "month", "minutes": 95, "plays": 30}, [])
+    assert "You listened for 95 minutes, in 30 plays." in _ask_for(store).say
+
+
+def test_get_wrapped_none_yet(tmp_path):
+    store = WrappedStore(str(tmp_path / "wrapped"))
+    for which in (None, "year", "month", "2026-11"):
+        said = _ask_for(store, which=which)
+        assert (said.ok, said.say) == (False, "Your first Wrapped is made on the 1st of next month.")
+    # Only monthly ones so far.
+    store.save(make(_snapshot(), "month", DECEMBER), [])
+    assert _ask_for(store, which="year").say == "There's no yearly Wrapped yet."
+    # Not offered without the store.
+    assert "get_wrapped" not in {tool["name"] for tool in ActionExecutor().tool_schemas()}
+    assert ActionExecutor().execute(Action("get_wrapped")).say == "Wrapped isn't set up."

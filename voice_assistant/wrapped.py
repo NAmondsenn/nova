@@ -14,7 +14,7 @@ with the month before's last day, which is why a monthly one is named for that m
 
 make is pure: it is given the snapshot and the time, reads no clock, and says the same in
 any time zone. WrappedStore keeps them; WrappedWatcher, a thread, makes each when its time
-comes.
+comes; describe puts a saved one in words for Nova to read out.
 
 His listening is never logged: a failure says what went wrong, never an artist or a song.
 """
@@ -30,6 +30,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from voice_assistant import storage
 from voice_assistant.listening import ListeningUnavailable
+from voice_assistant.listening_words import _hour_said
 
 # Logger setup
 logger = logging.getLogger(__name__)
@@ -63,6 +64,18 @@ SNAPSHOT_READY_AFTER = timedelta(minutes=35)
 # Said in the notification, as strftime's would be in the system's language.
 MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
                "October", "November", "December"]
+
+# The days of the week, for a busiest day as it is said, as strftime's would be in the system's language.
+DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+# What describe says when there's no Wrapped to read out.
+NONE_YET = "Your first Wrapped is made on the 1st of next month."
+NO_YEAR_YET = "There's no yearly Wrapped yet."
+NO_MONTH_YET = "There's no monthly Wrapped yet."
+NOT_A_WHICH = "I can read out your newest Wrapped, the year's, the month's, or one by its year or month."
+
+# The most minutes said as minutes alone: from two hours, about how many hours is said too.
+MINUTES_ALONE = 119
 
 # A Wrapped's name: "2026" for a year, "2026-11" for a month. Digits only, so it can't be a path.
 _KEY = re.compile(r"[0-9]{4}(-[0-9]{2})?")
@@ -560,3 +573,134 @@ class WrappedWatcher:
         click = f"{link}/wrapped?key={key}" if link else ""
         if self._ntfy.send(phone, self._message(key), title="Wrapped", click=click):
             self._store.mark_told(key)
+
+
+def _name(key: str) -> str:
+    """A Wrapped's key as it is said: "2026", or "November 2026" for "2026-11"."""
+    month = int(key[5:]) if len(key) > 4 else 0
+    return f"{MONTH_NAMES[month - 1]} {key[:4]}" if 1 <= month <= 12 else key
+
+
+def describe(store: WrappedStore, which=None) -> Dict:
+    """
+    Says what a saved Wrapped holds, for Claude to read a short version of it out from.
+
+    Args:
+        store: The saved Wrappeds.
+        which: "year" for the newest yearly one, "month" for the newest monthly one, a key such
+            as "2026" or "2026-10", or None for the newest of all. Claude can give anything.
+
+    Returns:
+        {"success": True, "message": the facts}, or {"success": False, "message": a sentence to
+        say} if there's no such Wrapped - or none at all yet - or which isn't one of those.
+    """
+    keys = store.keys()
+    if not keys:
+        return {"success": False, "message": NONE_YET}
+    if which is None or which == "":
+        key = keys[0]
+    elif which in ("year", "month"):
+        found = [key for key in keys if (len(key) == 4) == (which == "year")]
+        if not found:
+            return {"success": False, "message": NO_YEAR_YET if which == "year" else NO_MONTH_YET}
+        key = found[0]
+    elif valid_key(which):
+        key = which
+    else:
+        return {"success": False, "message": NOT_A_WHICH}
+    wrapped = store.load(key)
+    if wrapped is None:
+        return {"success": False, "message": f"There's no Wrapped for {_name(key)}."}
+    return {"success": True, "message": " ".join(_facts(wrapped, key))}
+
+
+def _facts(wrapped: Dict, key: str) -> List[str]:
+    """Each fact of a Wrapped as a sentence, each only if the Wrapped has it."""
+    period = _period(_dict(wrapped.get("period")))
+    said = [f"Your {_name(key)} Wrapped" + (f", for {period}." if period else ".")]
+    minutes, plays = wrapped.get("minutes"), wrapped.get("plays")
+    if _number(minutes):
+        said.append(f"You listened for {_minutes(round(minutes))}" + (f", in {_many(plays, 'play')}." if _whole(plays) else "."))
+    artists = _named(wrapped.get("top_artists"))
+    if artists:
+        said.append(f"Top artist: {_with_plays(artists[0])}.")
+        if len(artists) > 1:
+            said.append(f"After them: {_listed([artist['name'] for artist in artists[1:]])}.")
+    for what, entries in (("song", wrapped.get("top_tracks")), ("album", wrapped.get("top_albums"))):
+        top = _named(entries)
+        if top:
+            said.append(f"Top {what}: {_with_plays(top[0], by=True)}.")
+    listener, hour = wrapped.get("time_of_day"), _hour(wrapped.get("peak_hour"))
+    if isinstance(listener, str) and hour is not None:
+        said.append(f"You're {listener}: you listen most around {_hour_said(hour)}.")
+    genre = _dict(wrapped.get("top_genre"))
+    if isinstance(genre.get("name"), str) and _number(genre.get("percentage")):
+        said.append(f"Top genre: {genre['name']}, {round(genre['percentage'])}% of your plays.")
+    streak = wrapped.get("longest_streak")
+    if _whole(streak) and streak > 0:
+        said.append(f"Longest streak: {_many(streak, 'day')} in a row.")
+    busiest = _dict(wrapped.get("busiest_day"))
+    day = _date(busiest.get("date"))
+    if day is not None and _whole(busiest.get("plays")):
+        said.append(f"Busiest day: {DAY_NAMES[day.weekday()]} {day.day} {MONTH_NAMES[day.month - 1]}, "
+                    f"with {_many(busiest['plays'], 'play')}.")
+    found = _named(wrapped.get("discoveries"))
+    if found:
+        said.append(f"Artists you found this year: {_listed([artist['name'] for artist in found])}.")
+    counts = [_many(wrapped[what], what[:-1]) for what in ("artists", "albums", "tracks") if _whole(wrapped.get(what))]
+    if counts:
+        said.append(f"In all: {_listed(counts)}.")
+    return said
+
+
+def _period(period: Dict) -> Optional[str]:
+    """A Wrapped's dates as they are said: "1 November to 30 November 2026", the year only once if it's the same."""
+    start, end = _date(period.get("start")), _date(period.get("end"))
+    if start is None or end is None:
+        return None
+    first = f"{start.day} {MONTH_NAMES[start.month - 1]}" + (f" {start.year}" if start.year != end.year else "")
+    return f"{first} to {end.day} {MONTH_NAMES[end.month - 1]} {end.year}"
+
+
+def _minutes(minutes: int) -> str:
+    """Minutes as said in a Wrapped: "95 minutes", or from two hours "12,400 minutes, about 207 hours"."""
+    said = _many(minutes, "minute")
+    return said if minutes <= MINUTES_ALONE else f"{said}, about {_many(round(minutes / 60), 'hour')}"
+
+
+def _named(entries) -> List[Dict]:
+    """The entries of a Wrapped's list which have a name."""
+    return [entry for entry in map(_dict, _list(entries)) if isinstance(entry.get("name"), str) and entry["name"]]
+
+
+def _with_plays(entry: Dict, by: bool = False) -> str:
+    """An artist, song or album as said: "Song A by Artist One, with 40 plays", each part only if it's there."""
+    artist = entry.get("artist")
+    said = entry["name"] + (f" by {artist}" if by and isinstance(artist, str) and artist else "")
+    return said + (f", with {_many(entry['plays'], 'play')}" if _whole(entry.get("plays")) else "")
+
+
+def _listed(things: List[str]) -> str:
+    """Things as a list is said: "A", "A and B", "A, B and C"."""
+    return things[0] if len(things) == 1 else ", ".join(things[:-1]) + " and " + things[-1]
+
+
+def _many(number: int, what: str) -> str:
+    """A number of something, with its thousands marked: "1 play", "12,400 minutes"."""
+    return f"{number:,} {what}" + ("" if number == 1 else "s")
+
+
+def _whole(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _date(value) -> Optional[date]:
+    """A day as the Wrapped has it, "2026-11-13", or None if it isn't one."""
+    try:
+        return date.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        return None

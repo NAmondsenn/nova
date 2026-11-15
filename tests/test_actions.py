@@ -1032,7 +1032,8 @@ def test_home_status_is_only_offered_with_home_assistant():
     assert "home_status" not in offered(ActionExecutor())
     assert ActionExecutor().execute(Action("home_status", {"about": "sunset"})).say == "Home Assistant isn't set up yet."
     # These are the tools whose answers go back to Claude rather than being said.
-    assert ActionExecutor().read_tools() == ["downloads_waiting", "home_status", "get_football", "get_listening"]
+    assert ActionExecutor().read_tools() == ["downloads_waiting", "home_status", "get_football", "get_listening",
+                                            "get_wrapped"]
 
 
 def test_get_football_is_read_by_claude_and_names_the_followed_teams(monkeypatch):

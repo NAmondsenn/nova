@@ -30,6 +30,7 @@ from voice_assistant.devices import AppDevice, ring_call, said_as, where
 from voice_assistant.football import NO_TEAM
 from voice_assistant.football_words import describe as describe_football
 from voice_assistant.listening_words import describe as describe_listening
+from voice_assistant.wrapped import describe as describe_wrapped
 from voice_assistant.google_calendar import named_by_address
 from voice_assistant.home_assistant import CANT_REACH, HomeAssistant, NotAllowed
 from voice_assistant.lists import NO_ANSWER, names_list
@@ -56,6 +57,7 @@ UNAVAILABLE = {
     "downloads": "Downloading music isn't set up.",
     "football": "Football needs Home Assistant.",
     "listening": "Listening stats need SoulSync.",
+    "wrapped": "Wrapped isn't set up.",
 }
 
 # The most days of calendar read at once - a fortnight is already a lot to listen to -
@@ -269,7 +271,7 @@ class ActionExecutor:
 
     def __init__(self, music=None, clock=None, volume=None, weather=None, home=None, memory=None, ntfy=None,
                  satellite: Optional[str] = None, batteries=None, lists=None, pc=None, calendar=None,
-                 downloads=None, football=None, listening=None):
+                 downloads=None, football=None, listening=None, wrapped=None):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -297,6 +299,7 @@ class ActionExecutor:
             listening: Listening, for what the user has listened to, from SoulSync's stats, or
                 None if there isn't one. It says itself when SoulSync isn't set up or can't be
                 read.
+            wrapped: WrappedStore, the saved Wrappeds, or None if there isn't one.
         """
         self.music = music
         self.clock = clock
@@ -313,6 +316,7 @@ class ActionExecutor:
         self.downloads = downloads
         self.football = football
         self.listening = listening
+        self.wrapped = wrapped
         # What was last asked, and what the assistant said - or the last alert, and
         # all of it - for "send that to my phone". Kept up to date by the Conversation.
         self.last_answer: Optional[Tuple[str, str]] = None
@@ -1135,6 +1139,23 @@ class ActionExecutor:
     )
     def get_listening(self, period=None, about=None):
         return describe_listening(self.listening, period, about)
+
+    # Only ever read, by Claude, to answer from - see wrapped.describe, which says what a saved Wrapped
+    # holds in words, or that there isn't one yet.
+    @tool(
+        "Read the user's Wrapped, the recap of their listening Nova makes each month and each year, for 'what's my "
+        "Wrapped?', 'what was my 2026 Wrapped?' or 'what was my October Wrapped?'. You get the facts to reply from. "
+        "Reply in four or five sentences: the top artist, the top song, the minutes listened, when they listen, and "
+        "one more fact you choose. Answer only from the facts, never from memory, and never a figure which isn't "
+        "there.",
+        needs="wrapped",
+        reads=True,
+        which={"type": "string",
+               "description": "'year' for the newest yearly Wrapped, 'month' for the newest monthly one, or a year or "
+                              "month as '2026' or '2026-10'. Leave out for the newest of all."},
+    )
+    def get_wrapped(self, which=None):
+        return describe_wrapped(self.wrapped, which)
 
     # Changes Home Assistant's teams box through Football, which says what came of it - as it does
     # for the settings page, so both go the same way.

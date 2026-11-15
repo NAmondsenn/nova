@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#04060e">
+  <title>Wrapped</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="preload" href="Outfit.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="wrapped.css">
+  <script src="wrapped.js" defer></script>
+</head>
+<!-- The user's Wrapped as a story, one card at a time - see voice_assistant/wrapped.py. The cards
+     are made by wrapped.js from /api/wrapped; until then, or instead, the message says why not. -->
+<body>
+  <main class="story" id="story" hidden>
+    <!-- A segment for each card, filled up to the one shown. -->
+    <div class="bars" id="bars" aria-hidden="true"></div>
+    <div class="cards" id="cards" aria-live="polite"></div>
+    <!-- The left and right halves of the story, under the cards, which let taps through to them. -->
+    <button type="button" class="side back" id="back" aria-label="Back"></button>
+    <button type="button" class="side next" id="next" aria-label="Next"></button>
+  </main>
+
+  <div class="message" id="message">
+    <p class="kicker">Wrapped</p>
+    <p class="said" id="said">Unwrapping...</p>
+    <a class="link" id="message-link" href="/" hidden></a>
+  </div>
+</body>
+</html>
