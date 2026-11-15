@@ -44,6 +44,7 @@ from voice_assistant.google_calendar import GoogleCalendar
 from voice_assistant.ha_registry import HomeRegistry
 from voice_assistant.listening import Listening
 from voice_assistant.media_watch import MediaWatcher
+from voice_assistant.music_device import MusicDevice
 from voice_assistant.ntfy import Alert
 from voice_assistant.recording import RATE
 from voice_assistant.remote import RemoteSatellite
@@ -3054,17 +3055,26 @@ def test_with_an_mqtt_host_the_usage_device_shows_the_brains_log(make_brain):
     assert isinstance(brain.usage_device, UsageDevice) and brain.usage_device.usage is brain.usage
 
 
+def test_without_an_mqtt_host_there_is_no_music_device(make_brain):
+    assert make_brain(usage=USAGE).music_device is None
+
+
+def test_with_an_mqtt_host_the_music_device_shows_the_listening_stats(make_brain):
+    brain = make_brain(usage=USAGE, mqtt={"host": "10.10.0.50", "port": 1883, "username": "nova"})
+    assert isinstance(brain.music_device, MusicDevice) and brain.music_device.listening is brain.listening
+
+
 class Device:
     """Stands in for the usage device, noting that it was started and stopped."""
 
-    def __init__(self, closed):
-        self.closed = closed
+    def __init__(self, closed, name="usage"):
+        self.closed, self.name = closed, name
 
     def start(self):
-        self.closed.append("usage started")
+        self.closed.append(f"{self.name} started")
 
     def stop(self):
-        self.closed.append("usage stopped")
+        self.closed.append(f"{self.name} stopped")
 
 
 def test_the_usage_device_starts_and_stops_with_the_brain(stopping):
@@ -3073,3 +3083,11 @@ def test_the_usage_device_starts_and_stops_with_the_brain(stopping):
     with pytest.raises(SystemExit):
         stopping.run()
     assert stopping.closed == ["usage started", "clock", "usage stopped", "bedroom", "tts"]
+
+
+def test_the_music_device_starts_and_stops_with_the_brain(stopping):
+    stopping.music_device = Device(stopping.closed, "music")
+    stopping.serve = stopping.shutdown
+    with pytest.raises(SystemExit):
+        stopping.run()
+    assert stopping.closed == ["music started", "clock", "music stopped", "bedroom", "tts"]

@@ -46,6 +46,7 @@ from voice_assistant.lists import Lists
 from voice_assistant.logging_setup import TRANSCRIPT
 from voice_assistant.media_watch import MediaWatcher
 from voice_assistant.memory import Memory
+from voice_assistant.music_device import MusicDevice
 from voice_assistant.ntfy import RETOPIC, Ntfy
 from voice_assistant.pc import PCPower
 from voice_assistant.protocol import ProtocolError, Refused, admit
@@ -356,6 +357,9 @@ class Brain:
         # (and what is built on it) answers from, so a question never waits on SoulSync. Made even with
         # no SoulSync set up, as it then says so itself. Started by run().
         self.listening = Listening(config, os.getenv("SOULSYNC_API_KEY"))
+        # The brain's second device in Home Assistant, showing that snapshot - or None with no MQTT
+        # broker set. Made here as it needs the listening stats. Started by run().
+        self.music_device = MusicDevice.from_config(config, os.getenv("MQTT_PASSWORD"), self.listening)
         # What's playing, for each satellite's wake word in its own room - see media_watch.py
         # and Session.playing_here. Started by run().
         self.media = MediaWatcher(self.home, on_change=self._send_states) if self.home else None
@@ -1631,6 +1635,8 @@ class Brain:
             self.ntfy.start()
         if self.usage_device:
             self.usage_device.start()
+        if self.music_device:
+            self.music_device.start()
         if self.settings_page:
             self.settings_page.start()
         if self.display_server and self.display_server.start():
@@ -1728,6 +1734,8 @@ class Brain:
             self.registry.stop()
         if self.usage_device:
             self.usage_device.stop()
+        if self.music_device:
+            self.music_device.stop()
         if self.ntfy:
             self.ntfy.stop()
         if self.settings_page:
