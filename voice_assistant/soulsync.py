@@ -19,6 +19,7 @@ import difflib
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 import requests
 
@@ -39,6 +40,12 @@ SEARCH_TIMEOUT = 30
 # Seconds to wait for its MCP tools: find_album searches MusicBrainz, beyond the
 # local network, before it answers.
 MCP_TIMEOUT = 30
+
+# The most bytes of a picture that is taken, and the kinds of picture that are: a
+# stats picture is for a phone's screen, so half a megabyte is plenty, and anything
+# else - a page, an SVG, which can hold a script - is not a picture to pass on.
+PICTURE_MOST = 512 * 1024
+PICTURE_TYPES = ("image/jpeg", "image/png", "image/webp")
 
 # How many songs a search is asked for: enough for pick_track to find the one asked
 # for past the live and demo versions. "Gary Numan - M.E." found the studio one,
@@ -411,6 +418,37 @@ class SoulSync:
         except ValueError:
             return response.status_code, None
 
+    def _get(self, path: str, timeout: float, params: Dict) -> Tuple[int, Any]:
+        """
+        One read from SoulSync: a GET with query parameters, as its stats are asked for.
+        Everything else is as _send has it, including the errors and what is logged.
+
+        Args:
+            path: Where on SoulSync, e.g. "/api/stats/cached".
+            timeout: Seconds to wait for its answer.
+            params: The query, e.g. {"range": "7d"}.
+
+        Returns:
+            The status code, and the JSON SoulSync answered with - None if it wasn't JSON.
+
+        Raises:
+            SoulSyncError: If SoulSync couldn't be reached.
+        """
+        try:
+            if not network.online():
+                raise requests.ConnectionError("No network connection")
+            response = self._session.get(f"{self.url}{path}", params=params, timeout=timeout)
+        except requests.RequestException as e:
+            # Only the kind of error, never the error itself, which can hold the
+            # request - and with it the key.
+            logger.error(f"SoulSync request failed: {type(e).__name__}")
+            raise SoulSyncError(NOT_ANSWERING if isinstance(e, (requests.ConnectionError, requests.Timeout))
+                                else None) from None
+        try:
+            return response.status_code, response.json()
+        except ValueError:
+            return response.status_code, None
+
     @staticmethod
     def _read(status: int, answer: Any) -> Dict:
         """
@@ -468,6 +506,76 @@ class SoulSync:
             raise SoulSyncError(_said(text) if text else None)
         content = result.get("structuredContent")
         return content if isinstance(content, dict) else {}
+
+    # What the listening stats read
+
+    def stats(self, path: str, **params) -> Dict:
+        """
+        One of SoulSync's stats answers, which its own Stats page is drawn from.
+
+        Args:
+            path: Where on SoulSync, e.g. "/api/stats/cached".
+            params: The query, e.g. range="7d".
+
+        Returns:
+            What it answered, as _read has it.
+
+        Raises:
+            SoulSyncError: If SoulSync couldn't be asked, or answered with an error.
+        """
+        return self._read(*self._get(path, REQUEST_TIMEOUT, params))
+
+    def _is_mine(self, url: str) -> bool:
+        """Whether an absolute address is SoulSync's own: the same scheme, host and port as its address."""
+        theirs, mine = urlsplit(url), urlsplit(self.url)
+        ports = {"http": 80, "https": 443}
+        return (theirs.scheme == mine.scheme and theirs.hostname is not None and theirs.hostname == mine.hostname
+                and (theirs.port or ports.get(theirs.scheme)) == (mine.port or ports.get(mine.scheme)))
+
+    def picture(self, url: str) -> Optional[Tuple[bytes, str]]:
+        """
+        A picture from the stats - an artist's, as SoulSync's page shows it - fetched
+        with the key, which SoulSync wants for a picture too. The stats give its address
+        as a path on SoulSync, "/api/navidrome/cover/<id>", as recorded on 15 November.
+
+        It is taken only from SoulSync itself, as a path or as an absolute address with
+        its scheme, host and port, so a stats answer can't make Nova send its key
+        anywhere else; it is never followed to another address; and only a JPEG, PNG or
+        WebP of PICTURE_MOST bytes or fewer is passed on.
+
+        Args:
+            url: The picture's address as the stats give it.
+
+        Returns:
+            The picture's bytes and content type, or None if it isn't SoulSync's, isn't
+            there, isn't a picture or is too big. Never raises: a picture missing leaves
+            the stats as they are.
+        """
+        try:
+            if isinstance(url, str) and url.startswith("/") and not url.startswith("//"):
+                url = f"{self.url}{url}"
+            elif not isinstance(url, str) or not self._is_mine(url):
+                return None
+            if not network.online():
+                return None
+            # Not followed on a redirect, which could lead anywhere the key should not go.
+            response = self._session.get(url, timeout=REQUEST_TIMEOUT, stream=True, allow_redirects=False)
+            try:
+                kind = str(response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                if response.status_code != 200 or kind not in PICTURE_TYPES:
+                    return None
+                content = b""
+                for chunk in response.iter_content(64 * 1024):
+                    content += chunk
+                    if len(content) > PICTURE_MOST:
+                        return None
+                return content, kind
+            finally:
+                response.close()
+        except Exception as e:
+            # Only the kind of error, as for a request: the address could hold the key's place.
+            logger.warning(f"A SoulSync picture couldn't be fetched: {type(e).__name__}")
+            return None
 
     # What the assistant asks for
 

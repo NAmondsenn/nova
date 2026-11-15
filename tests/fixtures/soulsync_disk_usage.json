@@ -1,0 +1,14 @@
+{
+  "success": true,
+  "has_data": true,
+  "total_bytes": 9900000000,
+  "tracks_with_size": 790,
+  "tracks_without_size": 10,
+  "by_format": {
+    "flac": 7000000000,
+    "m4a": 500000000,
+    "mp3": 2000000000,
+    "ogg": 200000000,
+    "opus": 200000000
+  }
+}
