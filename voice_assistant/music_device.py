@@ -88,13 +88,22 @@ def _top(entries) -> List[Dict]:
     return top
 
 
-def _fit(attributes: Dict) -> Dict:
-    """The attributes, with the timeline cut from its oldest end until they're small enough to keep."""
+def _fit(attributes: Dict) -> Tuple[Dict, int]:
+    """
+    The attributes, with the timeline cut from its oldest end until they're small enough to keep.
+
+    Returns:
+        The attributes, and their size in bytes - still over ATTRIBUTES_LIMIT if they're too big
+        with no timeline at all, which is left as it is.
+    """
     timeline = attributes.get("timeline") or []
-    while timeline and len(json.dumps(attributes).encode()) > ATTRIBUTES_LIMIT:
-        timeline = timeline[len(timeline) // 2:]
+    size = len(json.dumps(attributes).encode())
+    while timeline and size > ATTRIBUTES_LIMIT:
+        # Rounded up, so a timeline of one is emptied rather than left as it was.
+        timeline = timeline[(len(timeline) + 1) // 2:]
         attributes = {**attributes, "timeline": timeline}
-    return attributes
+        size = len(json.dumps(attributes).encode())
+    return attributes, size
 
 
 class MusicDevice(NovaDevice):
@@ -128,6 +137,8 @@ class MusicDevice(NovaDevice):
         # Each image's content type as the latest picture of it says, which is what's announced.
         self._types = {control: DEFAULT_TYPE for control in self._images}
         self._announced_types = dict(self._types)
+        # The windows whose attributes are too big even without a timeline, so each is logged once.
+        self._oversize = set()
 
     @classmethod
     def from_config(cls, config, password: Optional[str], listening: Listening) -> Optional["MusicDevice"]:
@@ -188,8 +199,8 @@ class MusicDevice(NovaDevice):
         if self._connected and self._types != self._announced_types:
             self._announce()
 
-    def _window_state(self, window: Dict) -> Tuple[str, Dict]:
-        """A plays sensor's state, and its attributes, from one window of the snapshot."""
+    def _window_state(self, key: str, window: Dict) -> Tuple[str, Dict]:
+        """A plays sensor's state, and its attributes, from one window ("7d", ...) of the snapshot."""
         figures = _figures(window.get("overview"))
         previous = window.get("previous")
         change = _change(figures, _figures(previous) if isinstance(previous, dict) else {})
@@ -202,8 +213,17 @@ class MusicDevice(NovaDevice):
             "clock": {"grid": clock.get("grid"), "peak": clock.get("peak")}, "rhythm": window.get("rhythm"),
             "genres": (window.get("genres") or [])[:GENRES_OF],
         }
+        attributes, size = _fit(attributes)
+        # Sent as they are even then - the recorder, which would drop them, is told to leave them out -
+        # but said once, with only the window and the size: never anything of what he listens to.
+        if size <= ATTRIBUTES_LIMIT:
+            self._oversize.discard(key)
+        elif key not in self._oversize:
+            self._oversize.add(key)
+            logger.warning(f"The {key} listening stats are {size} bytes in Home Assistant even without "
+                           "the timeline, over its 16 KB for attributes")
         plays = figures["plays"]
-        return (UNKNOWN if plays is None else str(plays)), _fit(attributes)
+        return (UNKNOWN if plays is None else str(plays)), attributes
 
     def _state(self) -> Dict[str, object]:
         """What each state topic, each one's attributes and each image's picture should say now."""
@@ -213,7 +233,7 @@ class MusicDevice(NovaDevice):
         state = {}
         for window, _, _ in WINDOWS:
             data = snapshot.windows.get(window)
-            value, attributes = self._window_state(data) if isinstance(data, dict) else (UNKNOWN, {})
+            value, attributes = self._window_state(window, data) if isinstance(data, dict) else (UNKNOWN, {})
             control = f"plays_{window}"
             state[self._topics[control]] = value
             state[f"{self._topics[control]}/attributes"] = json.dumps(attributes)

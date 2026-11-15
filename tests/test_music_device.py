@@ -8,12 +8,13 @@ and the listening stats.
 """
 
 import json
+import threading
 from datetime import datetime
 
 import pytest
 
 from test_ha_device import FakeClient
-from voice_assistant import ha_device
+from voice_assistant import ha_device, music_device
 from voice_assistant.listening import Snapshot
 from voice_assistant.music_device import MusicDevice
 
@@ -289,6 +290,31 @@ def test_attributes_under_16kb(started, listening):
     # The newest days are the ones which stay.
     timeline = _attributes(client, "plays_7d")["timeline"]
     assert timeline and timeline[-1]["plays"] == 1199
+
+
+def test_attributes_too_big_without_the_timeline_still_publish(started, listening, caplog):
+    device, client = started
+    # A rhythm which alone is over the limit, as a changed SoulSync could give, with a timeline of three.
+    window = listening.current.windows["7d"]
+    window["rhythm"] = {"days": [{"date": f"2026-11-{n % 28 + 1:02d}", "plays": n, "note": "x" * 20}
+                                 for n in range(500)]}
+    window["timeline"] = window["timeline"][:3]
+
+    # In a thread with a timeout, so the old code, which never ended, fails rather than hangs the run.
+    result = []
+    thread = threading.Thread(target=lambda: result.append(device._state()), daemon=True)
+    with caplog.at_level("WARNING", logger=music_device.__name__):
+        thread.start()
+        thread.join(5)
+        assert not thread.is_alive()
+        device._state()
+    state = result[0]
+    attributes = json.loads(state[f"{BASE}/plays_7d/attributes"])
+    assert attributes["timeline"] == [] and len(attributes["rhythm"]["days"]) == 500
+    assert state[f"{BASE}/plays_7d"] == "120"
+    # Said once for the window, whatever it was asked twice, and with nothing of what's listened to.
+    warnings = [r.getMessage() for r in caplog.records if r.name == music_device.__name__]
+    assert len(warnings) == 1 and "7d" in warnings[0] and "Artist" not in warnings[0]
 
 
 def test_the_snapshot_is_left_as_it_was(started, listening):
