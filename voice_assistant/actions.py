@@ -68,7 +68,7 @@ NO_NEW_MUSIC_PLAYLIST = "No new-music playlist is set. It goes in Settings, unde
 NEW_MUSIC_NOT_ON_SPOTIFY = "New music plays from Navidrome, and Spotify is your music player right now."
 
 # How many days back "what's new" may look, and looks without being told: a month at most, as
-# Navidrome's list of the newest albums only goes so far - and how many artists it names.
+# a longer look reads ever more of Navidrome's newest albums - and how many artists it names.
 MOST_NEW_DAYS = 31
 DEFAULT_NEW_DAYS = 7
 MOST_NEW_ARTISTS = 5
@@ -620,7 +620,7 @@ class ActionExecutor:
         if library is None:
             return {"success": False, "message": "Navidrome isn't set up yet."}
         try:
-            albums = library.newest_albums(time.time() - days * 86400)
+            albums, whole = library.newest_albums(time.time() - days * 86400)
         except (requests.RequestException, NavidromeError, ValueError) as e:
             return {"success": False, "message": NavidromeLibrary._failure_message(e)}
         span = "day" if days == 1 else f"{days} days"
@@ -634,8 +634,9 @@ class ActionExecutor:
         named = top[:MOST_NEW_ARTISTS]
         who = f" Most songs: {', '.join(named[:-1])} and {named[-1]}." if len(named) > 1 else (
             f" Most songs: {named[0]}." if named else "")
+        # More than Navidrome was read for is only a lower bound.
         return {"success": True,
-                "message": (f"{len(albums)} album{'' if len(albums) == 1 else 's'} and "
+                "message": (f"{'' if whole else 'At least '}{len(albums)} album{'' if len(albums) == 1 else 's'} and "
                             f"{total} song{'' if total == 1 else 's'} have come "
                             f"into your library in the last {span}.{who}")}
 

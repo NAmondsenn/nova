@@ -63,9 +63,11 @@ WRONG_LOGIN = 40
 # which only an admin may start.
 NOT_AUTHORISED = 50
 
-# How many of the newest albums are asked for to see which came in lately: far more than
-# arrive in a month.
+# How many of the newest albums are asked for at a time to see which came in lately, and
+# how many such pages at most: 4,000 albums, far more than arrive in a month. Past that,
+# what's found is said to be "at least" what came.
 NEWEST_ALBUMS = 200
+NEWEST_PAGES = 20
 
 # The fractional seconds of a time Navidrome writes - nine digits - which are dropped, as a
 # second either way makes no difference to when an album came in.
@@ -414,29 +416,43 @@ class NavidromeLibrary:
                  "albumArtist": album.get("artist") or ""}
                 for album in albums for track in self._album_songs(album["id"])]
 
-    def newest_albums(self, since: float) -> List[Dict]:
+    def newest_albums(self, since: float) -> Tuple[List[Dict], bool]:
         """
-        The albums which came into Navidrome at or after a time, newest first.
+        The albums which came into Navidrome at or after a time, newest first, read a
+        page of NEWEST_ALBUMS at a time until a page reaches back past the time, or
+        runs out, or NEWEST_PAGES have been read.
 
         Args:
             since: The time, in seconds since the epoch.
 
         Returns:
-            Each album's name, artist and songCount. An album with no readable
-            created time isn't counted, as there's no saying when it came.
+            Each album's id, name, artist and songCount - and whether that's all of
+            them: False if NEWEST_PAGES of them came in, when there may be more. An
+            album with no readable created time isn't counted, as there's no saying
+            when it came.
 
         Raises:
             requests.RequestException: If Navidrome couldn't be reached.
             NavidromeError: If it answered with an error.
         """
-        albums = self._call("getAlbumList2", type="newest", size=NEWEST_ALBUMS).get("albumList2", {}).get("album") or []
         found = []
-        for album in albums:
-            arrived = _arrived(album)
-            if arrived is not None and arrived >= since:
-                found.append({"name": album.get("name") or "", "artist": album.get("artist") or "",
-                              "songCount": album.get("songCount") or 0})
-        return found
+        for page in range(NEWEST_PAGES):
+            albums = self._call("getAlbumList2", type="newest", size=NEWEST_ALBUMS,
+                                offset=page * NEWEST_ALBUMS).get("albumList2", {}).get("album") or []
+            older = False
+            # The whole page is read, not only up to the first older album, in case one is a little out of order.
+            for album in albums:
+                arrived = _arrived(album)
+                if arrived is None:
+                    continue
+                if arrived < since:
+                    older = True
+                    continue
+                found.append({"id": album.get("id"), "name": album.get("name") or "",
+                              "artist": album.get("artist") or "", "songCount": album.get("songCount") or 0})
+            if older or len(albums) < NEWEST_ALBUMS:
+                return found, True
+        return found, False
 
     def start_scan(self) -> bool:
         """

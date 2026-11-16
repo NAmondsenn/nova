@@ -1844,16 +1844,17 @@ def test_find_new_music_with_no_playlist_set(make_executor, make_config):
 class FakeNewestLibrary:
     """Stands in for NavidromeLibrary's newest_albums, noting the time it was asked from."""
 
-    def __init__(self, albums=(), error=None):
+    def __init__(self, albums=(), error=None, whole=True):
         self.albums = list(albums)
         self.error = error
+        self.whole = whole
         self.asked = []
 
     def newest_albums(self, since):
         self.asked.append(since)
         if self.error:
             raise self.error
-        return list(self.albums)
+        return list(self.albums), self.whole
 
 
 def _whats_new(make_executor, library, days=None, now=1_800_000_000.0, monkeypatch=None):
@@ -1883,6 +1884,13 @@ def test_whats_new_says_one_album_in_the_singular(make_executor, monkeypatch):
     result = _whats_new(make_executor, FakeNewestLibrary([album("Band A", 1)]), days=1, monkeypatch=monkeypatch)
     # Two things counted together have come, however few of each.
     assert result.say == "1 album and 1 song have come into your library in the last day. Most songs: Band A."
+
+
+def test_whats_new_says_at_least_when_there_were_more_than_were_read(make_executor, monkeypatch):
+    library = FakeNewestLibrary([album("Band A", 10), album("Band B", 4)], whole=False)
+    result = _whats_new(make_executor, library, days=31, monkeypatch=monkeypatch)
+    assert result.say == ("At least 2 albums and 14 songs have come into your library in the last 31 days. "
+                          "Most songs: Band A and Band B.")
 
 
 def test_whats_new_none(make_executor, monkeypatch):
