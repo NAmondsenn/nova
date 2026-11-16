@@ -2016,8 +2016,10 @@ def test_the_wrapped_settings_are_on_the_page_and_used_straight_away(files):
 def test_the_new_music_settings_are_on_the_page_and_used_straight_away(files):
     page, running = _running(files)
     shown = {setting["key"]: setting for setting in page.state()["settings"]}
-    assert shown["new_music.follow_top_artists"]["label"] == \
-        "How many of your top artists to follow for new releases (0 for none)"
+    # Followed once a month, so a change after this month's is used at next month's.
+    assert shown["new_music.follow_top_artists"]["label"] == (
+        "How many of your top artists to follow for new releases, once a month (0 for none; a change is used at the "
+        "next following)")
     assert shown["new_music.playlist"]["label"] == "Playlist for 'find me something new', which Nova makes each morning"
     assert shown["new_music.days"]["label"] == "Days of new music it holds"
     assert shown["new_music.follow_top_artists"]["used"] == NOW and shown["new_music.playlist"]["used"] == NOW

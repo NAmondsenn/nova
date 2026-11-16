@@ -320,11 +320,12 @@ wrapped:
   link: ""
 
 new_music:
-  # New music for you, which SoulSync finds and downloads. Both are on the settings page, and used
-  # straight away.
+  # New music for you, which SoulSync finds and downloads. All three are on the settings page.
   # How many of your top artists of the last 12 months Nova follows on SoulSync's watchlist, so their
   # new releases download - see voice_assistant/following.py. Done once a month, from 3 in the
   # morning, and only ever adding: an artist you stop playing stays followed. 0 switches it off.
+  # A change is used at the next following: this month's if it isn't done yet, or else next
+  # month's, as a month's following is done once - so a rise after it waits for next month.
   follow_top_artists: 25
   # The playlist "find me something new" plays, which Nova makes in Navidrome and replaces each
   # morning from 6 with the songs that came into the library in the last `days` days, newest

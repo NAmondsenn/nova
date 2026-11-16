@@ -80,9 +80,10 @@ class FollowWatcher:
                 or None while it isn't set up.
             store_path: The record of the month done and any artist still to take off again,
                 following.json in the data folder.
-            settings: Gives the new_music section of the settings as they are now, read at each look so
-                that a change on the settings page is used straight away: follow_top_artists, how many of
-                the top artists to follow, 0 for none.
+            settings: Gives the new_music section of the settings as they are now, read at each look:
+                follow_top_artists, how many of the top artists to follow, 0 for none. A change on the
+                settings page is used at the next following - this month's if it isn't done yet, or else
+                next month's, so a rise after this month's waits for next month.
             clock: Gives the current epoch time, only replaced by the tests.
         """
         self._listening = listening
