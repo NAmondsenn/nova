@@ -264,8 +264,12 @@ def _asked_line(match: Match, now: datetime) -> str:
 
 
 def _has_started(match: Match) -> bool:
-    """Whether a match is in play or over, which is the only time anything has happened in it."""
-    return match.state in ("in", "post")
+    """
+    Whether a match is in play or over, which is the only time anything has happened in it: a match which is off
+    (postponed, abandoned or cancelled) isn't, whatever state Home Assistant gives it, so it has no events, notes or
+    scorers said.
+    """
+    return match.state in ("in", "post") and not _is_off(match)
 
 
 def _scorers_unlisted(match: Match) -> bool:

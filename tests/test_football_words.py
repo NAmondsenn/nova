@@ -1051,6 +1051,27 @@ def test_a_match_report_of_a_match_which_has_not_started_says_no_notes(london):
         "Note at 41': Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area.")
 
 
+@pytest.mark.parametrize("state", ["in", "post"])
+def test_a_match_report_of_a_match_which_is_off_says_no_events_or_notes(london, state):
+    AT = _after_the_match()
+    # Called off after kick-off, with what Home Assistant had of it: nothing happened in it which is said.
+    off = _found_match(**{**SPAIN_ENGLAND, "state": state, "phase": "off", "clock": "Abandoned", "winner": None})
+    assert off["events"] and said_events(_m(**off)) == []
+    assert said_match_report(_match_answer(match=off, notes=[PENALTY_CONCEDED, VAR_NOTE]), AT) == said_match(_m(**off), AT)
+    # Nor are its scorers said not to be listed, with goals on its score and none of them listed.
+    bare = {**off, "events": []}
+    assert said_match_report(_match_answer(match=bare, notes=[PENALTY_CONCEDED]), AT) == said_match(_m(**bare), AT)
+
+
+@pytest.mark.parametrize("state", ["in", "post"])
+def test_a_round_up_of_a_match_which_is_off_says_the_match_alone(london, state):
+    AT = _after_the_match()
+    off = {**SPAIN_ENGLAND, "state": state, "phase": "off", "clock": "Abandoned", "winner": None}
+    for events in (SPAIN_ENGLAND["events"], []):
+        found = _found_match(**{**off, "events": events})
+        assert said_competition(_competition_answer([found], days=["20261115"]), AT).split("\n")[0] == said_match(_m(**found), AT)
+
+
 def test_a_match_report_of_a_match_in_play_ends_with_the_warning(london):
     live = {**SPAIN_ENGLAND, "state": "in", "phase": "second_half", "clock": "66'", "home_score": 1, "away_score": 3,
             "winner": None, "events": SPAIN_ENGLAND["events"][:5]}
