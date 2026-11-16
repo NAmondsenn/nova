@@ -321,10 +321,46 @@ def test_a_read_tools_answer_goes_back_to_claude():
         {"role": "assistant", "content": asking.content},
         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": SUNSET}]}]
     assert (result["response"], result["actions"], result["success"]) == ("Sunset's at 5:52 PM.", [], True)
-    # Only the final reply is kept, as for any other turn.
+    # The read is kept with what it gave, apart from the tools run - see _earlier_messages.
     assert (llm.history[-1]["assistant"], llm.history[-1]["tools"]) == ("Sunset's at 5:52 PM.", [])
+    assert llm.history[-1]["reads"] == [("home_status", {"about": "sunset"}, SUNSET)]
     # Tools may still be called in the round after a read.
     assert "tool_choice" not in second
+
+
+def test_a_read_is_shown_to_the_model_next_time_as_read():
+    # Kept as the reply alone, the scorers a read of the football had given looked to the
+    # model like ones it had made up: asked about another match next, it told the user it
+    # had given them without checking Home Assistant, and not to rely on them.
+    llm = _reader()
+    llm.client = FakeClient([_reply("", _tool("home_status", use_id="t1", about="sunset")),
+                             _reply("Sunset's at 5:52 PM.")])
+    llm.process_query("when's sunset?", read=lambda action: SUNSET)
+    llm.client = FakeClient(_reply("You're welcome."))
+    llm.process_query("thanks")
+    sent = llm.client.requests[0]["messages"]
+    assert sent[0] == {"role": "user", "content": "when's sunset?"}
+    asked, answered = sent[1]["content"], sent[2]["content"]
+    assert [(use["type"], use["name"], use["input"]) for use in asked] == [("tool_use", "home_status", {"about": "sunset"})]
+    assert answered == [{"type": "tool_result", "tool_use_id": asked[0]["id"], "content": SUNSET}]
+    assert sent[3] == {"role": "assistant", "content": "Sunset's at 5:52 PM."}
+
+
+def test_a_read_then_a_tool_are_shown_in_the_order_they_were_called():
+    llm = _reader()
+    llm.client = FakeClient([_reply("", _tool("home_status", use_id="t1", about="desk lamp")),
+                             _reply("Okay.", _tool("set_lights", use_id="t2", on=False, light="light.desk_lamp"))])
+    llm.process_query("if the desk lamp's on, turn it off", read=lambda action: "Desk lamp: on")
+    llm.client = FakeClient(_reply("You're welcome."))
+    llm.process_query("thanks")
+    sent = llm.client.requests[0]["messages"]
+    assert [message["role"] for message in sent[:6]] == ["user", "assistant", "user", "assistant", "user", "assistant"]
+    assert [use["name"] for use in sent[1]["content"]] == ["home_status"]
+    assert [result["content"] for result in sent[2]["content"]] == ["Desk lamp: on"]
+    assert [block.get("name") for block in sent[3]["content"]] == [None, "set_lights"]
+    assert [result["content"] for result in sent[4]["content"]] == ["Done."]
+    ids = [use["id"] for use in sent[1]["content"] + sent[3]["content"] if use["type"] == "tool_use"]
+    assert len(set(ids)) == 2
 
 
 def test_two_reads_at_once_are_each_answered_in_turn():

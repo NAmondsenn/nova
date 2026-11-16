@@ -261,7 +261,9 @@ class LLMHandler:
         "Okay." with the calls, each tool's answer, then what was actually said. Kept
         as text alone, the weather a tool had fetched looked to the model like figures
         it had made up - asked next to "send the weather report to my phone", it said
-        so out loud, and fetched it all again.
+        so out loud, and fetched it all again. Its reads come first, with what each
+        gave: kept out, the scorers a read of the football had given looked made up
+        too, and Claude told the user not to rely on them.
 
         Args:
             number: Which exchange it is, to keep the calls' ids apart.
@@ -271,6 +273,14 @@ class LLMHandler:
             The messages, in order.
         """
         messages = [{"role": "user", "content": turn["user"]}]
+        reads = turn.get("reads") or []
+        if reads:
+            uses = [{"type": "tool_use", "id": f"toolu_read_{number}_{index}", "name": name, "input": params}
+                    for index, (name, params, _) in enumerate(reads)]
+            messages.append({"role": "assistant", "content": uses})
+            messages.append({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": use["id"], "content": answer or "Done."}
+                for use, (_, _, answer) in zip(uses, reads)]})
         tools = turn.get("tools") or []
         if tools:
             uses = [{"type": "tool_use", "id": f"toolu_earlier_{number}_{index}", "name": name, "input": params}
@@ -577,6 +587,7 @@ class LLMHandler:
             # - is dropped below, as asking again after it could have the timer asked for
             # a second time.
             pauses = 0
+            read_so_far = []
             while True:
                 uses = [block for block in response.content if getattr(block, "type", None) == "tool_use"]
                 if any(use.name == NOT_FOR_ME["name"] for use in uses):
@@ -590,7 +601,9 @@ class LLMHandler:
                       and all(use.name in self.read_tools for use in uses)):
                     reads += 1
                     messages.append({"role": "assistant", "content": response.content})
-                    messages.append({"role": "user", "content": [self._read(use, read) for use in uses]})
+                    answers = [self._read(use, read) for use in uses]
+                    messages.append({"role": "user", "content": answers})
+                    read_so_far += [(use.name, dict(use.input), answer["content"]) for use, answer in zip(uses, answers)]
                 else:
                     break
                 # The last round may call no tool, so Claude says what it found in words.
@@ -683,10 +696,11 @@ class LLMHandler:
                 response_text = "Okay."
 
             # The tools it called, and its own text with them, are kept too, so the next
-            # request can show them as called - see _earlier_messages.
+            # request can show them as called - see _earlier_messages. So are its reads,
+            # with what each gave.
             self.history.append({"user": text, "assistant": response_text, "at": time.monotonic(),
                                  "tools": [(action.tool, dict(action.params)) for action in actions],
-                                 "model_text": response_text})
+                                 "model_text": response_text, "reads": read_so_far})
 
             # A download the user's words didn't ask for is only offered, by Nova's own
             # offer_download, which only asks - for a plain yes, as pc_power only asks. After
