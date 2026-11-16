@@ -34,6 +34,7 @@ from voice_assistant.wrapped import describe as describe_wrapped
 from voice_assistant.google_calendar import named_by_address
 from voice_assistant.home_assistant import CANT_REACH, HomeAssistant, NotAllowed
 from voice_assistant.lists import NO_ANSWER, names_list
+from voice_assistant.navidrome import NavidromeError, NavidromeLibrary
 
 # Logger setup
 logger = logging.getLogger(__name__)
@@ -59,6 +60,18 @@ UNAVAILABLE = {
     "listening": "Listening stats need SoulSync.",
     "wrapped": "Wrapped isn't set up.",
 }
+
+# What's said when the new-music playlist isn't there - before SoulSync's first Monday night
+# run - or isn't set, and when Spotify, which has none of it, is the player.
+NEW_MUSIC_MISSING = "Your new-music playlist isn't in Navidrome yet; SoulSync makes it on Monday nights."
+NO_NEW_MUSIC_PLAYLIST = "No new-music playlist is set. It goes in Settings, under Music."
+NEW_MUSIC_NOT_ON_SPOTIFY = "New music plays from Navidrome, and Spotify is your music player right now."
+
+# How many days back "what's new" may look, and looks without being told: a month at most, as
+# Navidrome's list of the newest albums only goes so far - and how many artists it names.
+MOST_NEW_DAYS = 31
+DEFAULT_NEW_DAYS = 7
+MOST_NEW_ARTISTS = 5
 
 # The most days of calendar read at once - a fortnight is already a lot to listen to -
 # and the most "next" times said at once.
@@ -271,7 +284,7 @@ class ActionExecutor:
 
     def __init__(self, music=None, clock=None, volume=None, weather=None, home=None, memory=None, ntfy=None,
                  satellite: Optional[str] = None, batteries=None, lists=None, pc=None, calendar=None,
-                 downloads=None, football=None, listening=None, wrapped=None):
+                 downloads=None, football=None, listening=None, wrapped=None, config=None):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -300,6 +313,8 @@ class ActionExecutor:
                 None if there isn't one. It says itself when SoulSync isn't set up or can't be
                 read.
             wrapped: WrappedStore, the saved Wrappeds, or None if there isn't one.
+            config: Configs loaded from config.yaml, for the settings a tool reads as they are
+                at each call - new_music.playlist.
         """
         self.music = music
         self.clock = clock
@@ -317,6 +332,7 @@ class ActionExecutor:
         self.football = football
         self.listening = listening
         self.wrapped = wrapped
+        self.config = config
         # What was last asked, and what the assistant said - or the last alert, and
         # all of it - for "send that to my phone". Kept up to date by the Conversation.
         self.last_answer: Optional[Tuple[str, str]] = None
@@ -558,6 +574,69 @@ class ActionExecutor:
     )
     def downloads_waiting(self):
         return {"success": True, "message": self.downloads.describe_waiting()}
+
+    @tool(
+        "Play the user's new music, a playlist of music they haven't heard which Nova's SoulSync makes each week, "
+        "for 'find me something new', 'play me something new' or 'new music'. Use play_music for a song or artist "
+        "they name, and whats_new to say what has come into the library lately rather than play it.",
+        needs="music",
+    )
+    def find_new_music(self):
+        playlist = ((self.config.section("new_music") if self.config else {}).get("playlist") or "").strip()
+        if not playlist:
+            return {"success": False, "message": NO_NEW_MUSIC_PLAYLIST}
+        # Only Navidrome has it: SoulSync makes the playlist there, and Spotify's own aren't asked for.
+        if getattr(self.music, "name", None) != "Navidrome":
+            return {"success": False, "message": NEW_MUSIC_NOT_ON_SPOTIFY}
+        reply = self._music_offline() or self.music.play_playlist(playlist)
+        # Not there yet, which isn't the same as Navidrome not answering - that says so itself.
+        if reply.get("missing"):
+            return {"success": False, "message": NEW_MUSIC_MISSING}
+        return reply
+
+    # Only ever read, by Claude, to answer from. It looks in Navidrome as a download does.
+    @tool(
+        "Read what has come into the user's music library lately, for 'what's new this week?', 'what new music "
+        "have I got?' or 'what came in this month?': how many albums and songs, and the artists with the most. "
+        "You get the facts to reply from; answer only from them, in a sentence or two. To play new music "
+        "instead, use find_new_music.",
+        needs="downloads",
+        reads=True,
+        days={"type": "integer", "minimum": 1, "maximum": MOST_NEW_DAYS,
+              "description": f"How many days back to look, from 1 to {MOST_NEW_DAYS}: 7 (the default) for this week, "
+                             "30 for this month."},
+    )
+    def whats_new(self, days=None):
+        try:
+            days = max(1, min(MOST_NEW_DAYS, int(days)))
+        except (TypeError, ValueError):
+            days = DEFAULT_NEW_DAYS
+        return self._new_in_library(days)
+
+    def _new_in_library(self, days: int) -> Dict:
+        """What came into Navidrome in the last days, as whats_new says it."""
+        library = self.downloads.library()
+        if library is None:
+            return {"success": False, "message": "Navidrome isn't set up yet."}
+        try:
+            albums = library.newest_albums(time.time() - days * 86400)
+        except (requests.RequestException, NavidromeError, ValueError) as e:
+            return {"success": False, "message": NavidromeLibrary._failure_message(e)}
+        span = "day" if days == 1 else f"{days} days"
+        if not albums:
+            return {"success": True, "message": f"Nothing new has come into your library in the last {span}."}
+        songs: Dict[str, int] = {}
+        for found in albums:
+            songs[found["artist"]] = songs.get(found["artist"], 0) + found["songCount"]
+        total = sum(songs.values())
+        top = sorted((artist for artist in songs if artist), key=lambda artist: (-songs[artist], artist.lower()))
+        named = top[:MOST_NEW_ARTISTS]
+        who = f" Most songs: {', '.join(named[:-1])} and {named[-1]}." if len(named) > 1 else (
+            f" Most songs: {named[0]}." if named else "")
+        return {"success": True,
+                "message": (f"{len(albums)} album{'' if len(albums) == 1 else 's'} and "
+                            f"{total} song{'' if total == 1 else 's'} {'has' if total == 1 else 'have'} come "
+                            f"into your library in the last {span}.{who}")}
 
     @tool(
         "Pause, skip, go back a track, start the current track again, or report what is "

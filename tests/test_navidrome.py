@@ -13,6 +13,7 @@ import shutil
 import threading
 import time
 import wave
+from datetime import datetime, timezone
 
 import pytest
 import requests
@@ -512,6 +513,34 @@ def test_no_album_is_no_tracks(make_library):
     library = make_library({"search3": {"searchResult3": {}}})
     assert library.find_album_tracks("Rumours", "Fleetwood Mac") == []
     assert [endpoint for endpoint, _ in library._session.requests] == ["search3", "search3"]
+
+
+def test_newest_albums_since(make_library):
+    # Newest first, as Navidrome lists them, with the fractional seconds and Z it writes - and one a
+    # little before the cut off, which isn't kept. Offsets are the same moment wherever the clock is.
+    since = datetime(2026, 11, 9, 12, 0, tzinfo=timezone.utc).timestamp()
+    library = make_library({"getAlbumList2": {"albumList2": {"album": [
+        {"id": "a1", "name": "Blue Hours", "artist": "Band One", "songCount": 10, "created": "2026-11-15T20:01:02.123456789Z"},
+        {"id": "a2", "name": "Low Tide", "artist": "Band Two", "songCount": 8, "created": "2026-11-09T12:00:00Z"},
+        {"id": "a3", "name": "Plain Sight", "artist": "Band Two", "songCount": 6, "created": "2026-11-09T13:30:00+01:00"},
+        {"id": "a4", "name": "Old News", "artist": "Band Three", "songCount": 12, "created": "2026-11-09T11:59:59Z"},
+        {"id": "a5", "name": "No Date", "artist": "Band Four", "songCount": 3}]}}})
+    found = library.newest_albums(since)
+    assert [(album["name"], album["artist"], album["songCount"]) for album in found] == [
+        ("Blue Hours", "Band One", 10), ("Low Tide", "Band Two", 8), ("Plain Sight", "Band Two", 6)]
+    endpoint, asked = library._session.requests[0]
+    assert (endpoint, asked["type"], asked["size"]) == ("getAlbumList2", "newest", 200)
+
+
+def test_newest_albums_with_none_in_the_library(make_library):
+    assert make_library({"getAlbumList2": {"albumList2": {}}}).newest_albums(0) == []
+
+
+def test_a_playlist_which_isnt_there_is_marked_missing(make_player):
+    player = make_player({"getPlaylists": {"playlists": {"playlist": [{"id": "p1", "name": "Chill"}]}}})
+    result = player.play_playlist("Discovery Shuffle")
+    assert result["success"] is False and result["missing"] is True
+    assert result["message"] == "I couldn't find a playlist called Discovery Shuffle."
 
 
 def test_a_scan_is_asked_for_and_a_refusal_is_logged(make_library, caplog):

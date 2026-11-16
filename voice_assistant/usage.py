@@ -72,7 +72,8 @@ SEARCH = "Web search"
 # newly added tool still shows up, just not under a heading of its own until it's added.
 KINDS: Dict[str, str] = {
     **dict.fromkeys(
-        ("play_music", "play_playlist", "download_music", "control_playback", "repeat", "shuffle"), MUSIC),
+        ("play_music", "play_playlist", "find_new_music", "download_music", "control_playback", "repeat", "shuffle"),
+        MUSIC),
     **dict.fromkeys(
         ("set_lights", "run_home_script", "home_status", "get_batteries", "find_device", "pc_power",
          "set_volume"), DEVICES),

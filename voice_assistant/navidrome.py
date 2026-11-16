@@ -21,6 +21,7 @@ import secrets
 import subprocess
 import threading
 import unicodedata
+from datetime import datetime, timezone
 from typing import Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
@@ -61,6 +62,14 @@ WRONG_LOGIN = 40
 # Its error code for a user who isn't allowed to do what was asked - a scan, say,
 # which only an admin may start.
 NOT_AUTHORISED = 50
+
+# How many of the newest albums are asked for to see which came in lately: far more than
+# arrive in a month.
+NEWEST_ALBUMS = 200
+
+# The fractional seconds of a time Navidrome writes - nine digits - which are dropped, as a
+# second either way makes no difference to when an album came in.
+FRACTION = re.compile(r"(\.\d+)")
 
 # How big a cover is asked for, in pixels a side, for the settings page.
 COVER_SIZE = 300
@@ -258,6 +267,20 @@ def _asked_for(item: Dict, name_key: str, title: str, artist: Optional[str]) -> 
     return version is None or version in CLEAN_VERSIONS or _names_version(title, version)
 
 
+def _arrived(album: Dict) -> Optional[float]:
+    """
+    When an album came into Navidrome, in seconds since the epoch, from its created time
+    - e.g. "2026-11-15T20:01:02.123456789Z" - or None if it hasn't one, or can't be read.
+    A time without an offset is taken for UTC, which is how Navidrome writes them.
+    """
+    try:
+        text = FRACTION.sub("", str(album.get("created") or "")).replace("Z", "+00:00")
+        arrived = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return (arrived if arrived.tzinfo else arrived.replace(tzinfo=timezone.utc)).timestamp()
+
+
 class NavidromeLibrary:
     """Asks Navidrome what it holds, and to scan for more - without playing any of it."""
 
@@ -390,6 +413,30 @@ class NavidromeLibrary:
         return [{**track, "album": album.get("name") or "", "albumId": album["id"],
                  "albumArtist": album.get("artist") or ""}
                 for album in albums for track in self._album_songs(album["id"])]
+
+    def newest_albums(self, since: float) -> List[Dict]:
+        """
+        The albums which came into Navidrome at or after a time, newest first.
+
+        Args:
+            since: The time, in seconds since the epoch.
+
+        Returns:
+            Each album's name, artist and songCount. An album with no readable
+            created time isn't counted, as there's no saying when it came.
+
+        Raises:
+            requests.RequestException: If Navidrome couldn't be reached.
+            NavidromeError: If it answered with an error.
+        """
+        albums = self._call("getAlbumList2", type="newest", size=NEWEST_ALBUMS).get("albumList2", {}).get("album") or []
+        found = []
+        for album in albums:
+            arrived = _arrived(album)
+            if arrived is not None and arrived >= since:
+                found.append({"name": album.get("name") or "", "artist": album.get("artist") or "",
+                              "songCount": album.get("songCount") or 0})
+        return found
 
     def start_scan(self) -> bool:
         """
@@ -609,7 +656,8 @@ class NavidromePlayer(NavidromeLibrary):
         except (requests.RequestException, NavidromeError, ValueError) as e:
             return {"success": False, "message": self._failure_message(e)}
         if not songs:
-            return {"success": False, "message": f"I couldn't find a playlist called {name}."}
+            # Navidrome hasn't got it, which isn't the same as not being able to ask.
+            return {"success": False, "message": f"I couldn't find a playlist called {name}.", "missing": True}
         self._start(songs[:MOST_SONGS])
         return {"success": True, "message": f"Playing {said}"}
 

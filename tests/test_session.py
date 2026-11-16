@@ -1877,6 +1877,11 @@ def test_a_sessions_actions_download_through_the_brain(brain, make_session):
     assert make_session().actions.downloads is brain.downloads
 
 
+def test_a_sessions_actions_read_the_settings_as_they_are_then(brain, make_session):
+    # So "find me something new" plays the playlist the settings page names at the time.
+    assert make_session().actions.config is brain.config
+
+
 def test_a_sessions_claude_records_into_the_brains_usage_log(brain, make_session):
     # One log for the brain, so what every satellite's calls cost is added up together.
     brain.usage = object()

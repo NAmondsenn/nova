@@ -335,6 +335,14 @@ class Downloads:
         settings = self.config.section("navidrome")
         return NavidromeLibrary(settings["url"].strip(), settings["username"].strip(), os.getenv("NAVIDROME_PASSWORD"))
 
+    def library(self) -> Optional[NavidromeLibrary]:
+        """
+        A NavidromeLibrary to look in from the settings as they are now - a new one for each
+        caller, as a requests session isn't safe to share between threads - or None if
+        Navidrome isn't set up. For "what's new", which reads Navidrome as a download does.
+        """
+        return self._library()
+
     def problem(self) -> Optional[str]:
         """
         What stops a download being asked for, as it's said.
