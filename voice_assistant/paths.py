@@ -41,6 +41,7 @@ LOGS_DIR = os.path.join(DATA_DIR, "logs")
 SPOTIFY_TOKEN_FILE = os.path.join(DATA_DIR, "spotify_token.json")
 GOOGLE_TOKEN_FILE = os.path.join(DATA_DIR, "google_token.json")
 PAGE_LOGINS_FILE = os.path.join(DATA_DIR, "page_logins.json")
+CLEAN_SONGS_FILE = os.path.join(DATA_DIR, "clean_songs.json")
 
 
 def make_folders():
