@@ -61,9 +61,9 @@ UNAVAILABLE = {
     "wrapped": "Wrapped isn't set up.",
 }
 
-# What's said when the new-music playlist isn't there - before SoulSync's first Monday night
-# run - or isn't set, and when Spotify, which has none of it, is the player.
-NEW_MUSIC_MISSING = "Your new-music playlist isn't in Navidrome yet; SoulSync makes it on Monday nights."
+# What's said when the new-music playlist isn't there - before Nova's first morning making it,
+# see new_music.py - or isn't set, and when Spotify, which has none of it, is the player.
+NEW_MUSIC_MISSING = "Your new-music playlist isn't made yet; Nova makes it each morning from what's arrived."
 NO_NEW_MUSIC_PLAYLIST = "No new-music playlist is set. It goes in Settings, under Music."
 NEW_MUSIC_NOT_ON_SPOTIFY = "New music plays from Navidrome, and Spotify is your music player right now."
 
@@ -576,8 +576,8 @@ class ActionExecutor:
         return {"success": True, "message": self.downloads.describe_waiting()}
 
     @tool(
-        "Play the user's new music, a playlist of music they haven't heard which Nova's SoulSync makes each week, "
-        "for 'find me something new', 'play me something new' or 'new music'. Use play_music for a song or artist "
+        "Play the user's new music, a playlist Nova makes each morning of the songs which came into their library "
+        "lately, for 'find me something new', 'play me something new' or 'new music'. Use play_music for a song or artist "
         "they name, and whats_new to say what has come into the library lately rather than play it.",
         needs="music",
     )
@@ -585,7 +585,7 @@ class ActionExecutor:
         playlist = ((self.config.section("new_music") if self.config else {}).get("playlist") or "").strip()
         if not playlist:
             return {"success": False, "message": NO_NEW_MUSIC_PLAYLIST}
-        # Only Navidrome has it: SoulSync makes the playlist there, and Spotify's own aren't asked for. Only
+        # Only Navidrome has it: Nova makes the playlist there, and Spotify's own aren't asked for. Only
         # one of exactly this name plays, never a near miss, which would be taken for the new music.
         if getattr(self.music, "name", None) != "Navidrome":
             return {"success": False, "message": NEW_MUSIC_NOT_ON_SPOTIFY}

@@ -144,7 +144,8 @@ EDITABLE = [
     ("wrapped", "link", "This page's address, for the link in Wrapped's notification", "now"),
     ("new_music", "follow_top_artists", "How many of your top artists to follow for new releases (0 for none)",
      "now"),
-    ("new_music", "playlist", "Playlist for 'find me something new'", "now"),
+    ("new_music", "playlist", "Playlist for 'find me something new', which Nova makes each morning", "now"),
+    ("new_music", "days", "Days of new music it holds", "now"),
 ]
 # How the page says which each is.
 NOW = "Used straight away"

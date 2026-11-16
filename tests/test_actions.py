@@ -1813,7 +1813,7 @@ def test_new_music_playlist_missing(make_executor, make_config):
     config = make_config(new_music={"playlist": "Discovery Shuffle"})
     result = make_executor(FakePlaylistPlayer(), config=config).execute(FIND_NEW)
     assert (result.ok, result.say) == (
-        False, "Your new-music playlist isn't in Navidrome yet; SoulSync makes it on Monday nights.")
+        False, "Your new-music playlist isn't made yet; Nova makes it each morning from what's arrived.")
 
 
 def test_new_music_playlist_not_found_is_only_said_when_navidrome_answered(make_executor, make_config):

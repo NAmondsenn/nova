@@ -326,8 +326,14 @@ new_music:
   # new releases download - see voice_assistant/following.py. Done once a month, from 3 in the
   # morning, and only ever adding: an artist you stop playing stays followed. 0 switches it off.
   follow_top_artists: 25
-  # The playlist "find me something new" plays: one SoulSync makes and refreshes each week.
-  playlist: "Discovery Shuffle"
+  # The playlist "find me something new" plays, which Nova makes in Navidrome and replaces each
+  # morning from 6 with the songs that came into the library in the last `days` days, newest
+  # first, up to 500 - see voice_assistant/new_music.py. Nova's own: it only ever changes one of
+  # this name belonging to the Navidrome user it signs in as, and makes it public so your own
+  # user sees it. A new name is made the next morning; the old one is left for you to delete.
+  playlist: "New Music"
+  # How many days back the playlist reaches, from 1 to 60. Used at the next morning's making.
+  days: 14
 
 mqtt:
   # Home Assistant's MQTT broker - the Mosquitto add-on - through which Nova is a

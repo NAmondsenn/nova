@@ -339,7 +339,8 @@ class Downloads:
         """
         A NavidromeLibrary to look in from the settings as they are now - a new one for each
         caller, as a requests session isn't safe to share between threads - or None if
-        Navidrome isn't set up. For "what's new", which reads Navidrome as a download does.
+        Navidrome isn't set up. For "what's new", which reads Navidrome as a download does, and
+        for the new-music playlist (see new_music.py).
         """
         return self._library()
 

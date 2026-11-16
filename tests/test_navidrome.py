@@ -538,6 +538,18 @@ def test_the_new_music_playlist_is_only_ever_the_exact_name(make_player):
         "liked songs", exact=True)["missing"] is True
 
 
+def test_the_new_music_playlist_nova_makes_comes_before_anothers_of_the_name(make_player):
+    # Another user's public one of the same name is listed first, as Navidrome may: Nova's own plays.
+    answers = {
+        "getPlaylists": {"playlists": {"playlist": [{"id": "p1", "name": "New Music", "owner": "someone"},
+                                                    {"id": "p2", "name": "New Music", "owner": "Nova"}]}},
+        "getPlaylist": lambda params: {"playlist": {"entry": SONGS if params["id"] == "p2" else []}},
+    }
+    player = make_player(answers)
+    assert player.play_playlist("New Music", exact=True)["success"] is True
+    assert [asked["id"] for endpoint, asked in player._session.requests if endpoint == "getPlaylist"] == ["p2"]
+
+
 def test_newest_albums_since(make_library):
     # Newest first, as Navidrome lists them, with the fractional seconds and Z it writes - and one a
     # little before the cut off, which isn't kept. Offsets are the same moment wherever the clock is.

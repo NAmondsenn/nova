@@ -302,6 +302,7 @@ IN_AND_OUT = {
     ("wrapped", "link"): (["https://nova.example.com", ""], ["nova.example.com", "ftp://nova.example.com"]),
     # 0 is no following.
     ("new_music", "follow_top_artists"): ([0, 25, 50], [-1, 51, 2.5, True]),
+    ("new_music", "days"): ([1, 14, 60], [0, 61, 2.5, True]),
 }
 
 
@@ -339,7 +340,8 @@ def test_the_repositorys_config_has_the_download_settings(tmp_path):
 
 def test_the_repositorys_config_has_the_new_music_settings(tmp_path):
     new_music = Config(path=str(tmp_path / "none.yaml")).section("new_music")
-    assert new_music == {"follow_top_artists": 25, "playlist": "Discovery Shuffle"}
+    # Nova's own playlist of what arrived in the last fortnight, as SoulSync's discovery playlists never reach Navidrome.
+    assert new_music == {"follow_top_artists": 25, "playlist": "New Music", "days": 14}
     assert limit_problem("new_music", "follow_top_artists", 51) == "should be a whole number from 0 to 50"
     # Any name, as it's a playlist's in Navidrome.
     assert limit_problem("new_music", "playlist", "Daily Mix 1") is None

@@ -108,6 +108,8 @@ LIMITS: Dict[Tuple[str, str], Limit] = {
     # 0 is no following. Over 50 reaches artists played a handful of times a year, whose every release
     # would download.
     ("new_music", "follow_top_artists"): Limit("number", 0, 50, True),
+    # Two months of arrivals is already more than the playlist's 500 songs most weeks.
+    ("new_music", "days"): Limit("number", 1, 60, True),
 }
 
 _TIME = re.compile(r"([01]\d|2[0-3]):[0-5]\d")

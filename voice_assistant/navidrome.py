@@ -73,6 +73,10 @@ NEWEST_PAGES = 20
 # second either way makes no difference to when an album came in.
 FRACTION = re.compile(r"(\.\d+)")
 
+# How many songs a playlist Nova makes is given in one request, so the request's address,
+# which lists each song's id, stays well short of what a server or proxy in front of it takes.
+PLAYLIST_SONGS_AT_ONCE = 100
+
 # How big a cover is asked for, in pixels a side, for the settings page.
 COVER_SIZE = 300
 
@@ -269,14 +273,14 @@ def _asked_for(item: Dict, name_key: str, title: str, artist: Optional[str]) -> 
     return version is None or version in CLEAN_VERSIONS or _names_version(title, version)
 
 
-def _arrived(album: Dict) -> Optional[float]:
+def _arrived(item: Dict) -> Optional[float]:
     """
-    When an album came into Navidrome, in seconds since the epoch, from its created time
-    - e.g. "2026-11-15T20:01:02.123456789Z" - or None if it hasn't one, or can't be read.
+    When an album or a song came into Navidrome, in seconds since the epoch, from its created
+    time - e.g. "2026-11-15T20:01:02.123456789Z" - or None if it hasn't one, or can't be read.
     A time without an offset is taken for UTC, which is how Navidrome writes them.
     """
     try:
-        text = FRACTION.sub("", str(album.get("created") or "")).replace("Z", "+00:00")
+        text = FRACTION.sub("", str(item.get("created") or "")).replace("Z", "+00:00")
         arrived = datetime.fromisoformat(text)
     except ValueError:
         return None
@@ -284,7 +288,10 @@ def _arrived(album: Dict) -> Optional[float]:
 
 
 class NavidromeLibrary:
-    """Asks Navidrome what it holds, and to scan for more - without playing any of it."""
+    """
+    Asks Navidrome what it holds, and to scan for more - without playing any of it - and
+    keeps the one playlist Nova makes there (see new_music.py).
+    """
 
     def __init__(self, url: str, username: str, password: str):
         """
@@ -454,6 +461,83 @@ class NavidromeLibrary:
                 return found, True
         return found, False
 
+    def arrived_songs(self, since: float, most: int) -> List[str]:
+        """
+        The songs which came into Navidrome at or after a time: those of the albums
+        newest_albums finds, newest album first, each album's in its own order.
+
+        Args:
+            since: The time, in seconds since the epoch.
+            most: How many songs at most - the newest.
+
+        Returns:
+            The songs' ids. A song with a created time of its own before the time is
+            left out, being an older song of an album which has had more added since.
+
+        Raises:
+            requests.RequestException: If Navidrome couldn't be reached.
+            NavidromeError: If it answered with an error.
+        """
+        songs = []
+        for album in self.newest_albums(since)[0]:
+            for song in self._album_songs(album["id"]):
+                arrived = _arrived(song)
+                if song.get("id") and (arrived is None or arrived >= since):
+                    songs.append(song["id"])
+                if len(songs) >= most:
+                    return songs
+        return songs
+
+    def own_playlist(self, name: str) -> Optional[Dict]:
+        """
+        The playlist of just this name, however it's cased or punctuated, which belongs to
+        the user Nova signs in as - never another user's, even one Navidrome would let an
+        admin change - or None if there isn't one.
+
+        Raises:
+            requests.RequestException: If Navidrome couldn't be reached.
+            NavidromeError: If it answered with an error.
+        """
+        wanted = normalise(name)
+        playlists = self._call("getPlaylists").get("playlists", {}).get("playlist") or []
+        return next((playlist for playlist in playlists if wanted and normalise(playlist.get("name") or "") == wanted
+                     and str(playlist.get("owner") or "").casefold() == self.username.casefold()), None)
+
+    def replace_playlist(self, name: str, song_ids: List[str]) -> bool:
+        """
+        Makes the playlist of this name, Nova's own, hold just these songs, in this order:
+        made if there isn't one, its songs replaced if there is. Either way it's made
+        public, so whichever Navidrome user listens sees it. No other playlist is touched.
+
+        Args:
+            name: The playlist's name.
+            song_ids: The songs, at least one.
+
+        Returns:
+            Whether the playlist was there already.
+
+        Raises:
+            requests.RequestException: If Navidrome couldn't be reached.
+            NavidromeError: If it answered with an error - part way, the playlist may
+                hold only some of the songs until it's made again.
+        """
+        first, rest = song_ids[:PLAYLIST_SONGS_AT_ONCE], song_ids[PLAYLIST_SONGS_AT_ONCE:]
+        playlist = self.own_playlist(name)
+        if playlist:
+            # Given a playlist's id, Navidrome's createPlaylist replaces its songs with those given.
+            self._call("createPlaylist", playlistId=playlist["id"], songId=first)
+            playlist_id = playlist["id"]
+        else:
+            made = self._call("createPlaylist", name=name, songId=first).get("playlist") or {}
+            # A server too old to say what it made is asked for it by name.
+            playlist_id = made.get("id") or (self.own_playlist(name) or {}).get("id")
+            if not playlist_id:
+                raise NavidromeError("the playlist made wasn't found")
+        for start in range(0, len(rest), PLAYLIST_SONGS_AT_ONCE):
+            self._call("updatePlaylist", playlistId=playlist_id, songIdToAdd=rest[start:start + PLAYLIST_SONGS_AT_ONCE])
+        self._call("updatePlaylist", playlistId=playlist_id, public="true")
+        return bool(playlist)
+
     def start_scan(self) -> bool:
         """
         Asks Navidrome to scan its folders for new music, which it does in its own time.
@@ -593,15 +677,17 @@ class NavidromePlayer(NavidromeLibrary):
             name: The playlist's name.
             exact: Whether only a playlist of just this name will do, however it's cased or
                 punctuated, and never the starred songs - for a name from the settings, which
-                is the playlist itself, not a spoken guess at one.
+                is the playlist itself, not a spoken guess at one. Nova's own of the name comes
+                before another user's, as it's the one Nova makes (see new_music.py).
         """
         if not exact and means_liked_songs(name):
             return self._liked_songs()
         playlists = self._call("getPlaylists").get("playlists", {}).get("playlist") or []
         if exact:
             wanted = normalise(name)
-            playlist = wanted and next((found for found in playlists if normalise(found.get("name", "")) == wanted),
-                                       None)
+            named = [found for found in playlists if wanted and normalise(found.get("name", "")) == wanted]
+            playlist = next((found for found in named if str(found.get("owner") or "").casefold()
+                             == self.username.casefold()), named[0] if named else None)
         else:
             wanted = distinctive(name)
             playlist = wanted and best([{**playlist, "distinctive": distinctive(playlist.get("name", ""))}

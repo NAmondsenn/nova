@@ -47,6 +47,8 @@ from voice_assistant.listening import Listening
 from voice_assistant.wrapped import WrappedStore, WrappedWatcher
 from voice_assistant.media_watch import MediaWatcher
 from voice_assistant.music_device import MusicDevice
+from voice_assistant.navidrome import NavidromeLibrary
+from voice_assistant.new_music import NewMusicPlaylist
 from voice_assistant.ntfy import Alert
 from voice_assistant.recording import RATE
 from voice_assistant.remote import RemoteSatellite
@@ -2835,6 +2837,36 @@ def test_the_top_artists_are_followed_while_the_brain_runs(make_brain, tmp_path,
     assert running == [True]
     assert not any(thread.name == "following" for thread in threading.enumerate())
     assert watcher._thread is None
+
+
+def test_the_new_music_playlist_is_kept_while_the_brain_runs(make_brain, tmp_path, monkeypatch):
+    monkeypatch.setenv("NAVIDROME_PASSWORD", "made-up-password")
+    brain = make_brain(new_music={"follow_top_artists": 25, "playlist": "New Music", "days": 14},
+                       navidrome={"url": "http://navidrome.local:4533", "username": "nova"})
+    keeper = brain.new_music_playlist
+    # Given a record in the data folder, Navidrome as set up now, and the settings as they are now.
+    assert isinstance(keeper, NewMusicPlaylist) and keeper._path == str(tmp_path / "new_music.json")
+    library = keeper._library()
+    assert isinstance(library, NavidromeLibrary) and (library.url, library.username) == ("http://navidrome.local:4533",
+                                                                                         "nova")
+    brain.apply_settings({("navidrome", "url"): ""})
+    assert keeper._library() is None
+    brain.apply_settings({("new_music", "days"): 30})
+    assert keeper._settings()["days"] == 30
+    assert keeper._thread is None
+    looked = threading.Event()
+    keeper.look = looked.set
+    running = []
+
+    def serve():
+        running.append(looked.wait(5) and any(thread.name == "new-music" and thread.is_alive()
+                                              for thread in threading.enumerate()))
+
+    brain.serve = serve
+    brain.run()
+    assert running == [True]
+    assert not any(thread.name == "new-music" for thread in threading.enumerate())
+    assert keeper._thread is None
 
 
 def test_the_listening_stats_are_given_the_soulsync_key(make_brain, monkeypatch):

@@ -2018,16 +2018,22 @@ def test_the_new_music_settings_are_on_the_page_and_used_straight_away(files):
     shown = {setting["key"]: setting for setting in page.state()["settings"]}
     assert shown["new_music.follow_top_artists"]["label"] == \
         "How many of your top artists to follow for new releases (0 for none)"
-    assert shown["new_music.playlist"]["label"] == "Playlist for 'find me something new'"
+    assert shown["new_music.playlist"]["label"] == "Playlist for 'find me something new', which Nova makes each morning"
+    assert shown["new_music.days"]["label"] == "Days of new music it holds"
     assert shown["new_music.follow_top_artists"]["used"] == NOW and shown["new_music.playlist"]["used"] == NOW
+    assert (shown["new_music.days"]["value"], shown["new_music.days"]["min"], shown["new_music.days"]["max"],
+            shown["new_music.days"]["whole"], shown["new_music.days"]["used"]) == (14, 1, 60, True, NOW)
     assert (shown["new_music.follow_top_artists"]["value"], shown["new_music.follow_top_artists"]["min"],
             shown["new_music.follow_top_artists"]["max"], shown["new_music.follow_top_artists"]["whole"]) == (25, 0, 50,
                                                                                                            True)
-    assert shown["new_music.playlist"]["value"] == "Discovery Shuffle"
+    assert shown["new_music.playlist"]["value"] == "New Music"
 
-    result = page.save_settings({"new_music.follow_top_artists": 0, "new_music.playlist": "Hidden Gems"}, LOGIN)
+    result = page.save_settings({"new_music.follow_top_artists": 0, "new_music.playlist": "Fresh In",
+                                 "new_music.days": 30}, LOGIN)
     assert result == {"success": True, "message": "Saved. It's used straight away.", "restart_needed": False}
-    assert running.section("new_music") == {"follow_top_artists": 0, "playlist": "Hidden Gems"}
+    assert running.section("new_music") == {"follow_top_artists": 0, "playlist": "Fresh In", "days": 30}
+    for wrong in (0, 61, 2.5):
+        assert not page.save_settings({"new_music.days": wrong}, LOGIN)["success"], wrong
     # A whole number from 0, switching the following off, to 50.
     for wrong in (-1, 51, 2.5):
         assert not page.save_settings({"new_music.follow_top_artists": wrong}, LOGIN)["success"], wrong
