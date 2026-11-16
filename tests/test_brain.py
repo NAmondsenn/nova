@@ -1938,15 +1938,26 @@ def test_the_brain_stops_its_downloads_before_its_satellites(stopping):
     assert stopping.closed == ["clock", "downloads", "listener", "bedroom", "tts"]
 
 
-def test_the_brain_carries_on_saved_swaps_as_it_starts(stopping, monkeypatch):
+def test_the_brain_stops_its_library_check_before_its_downloads_and_the_listening_worker(stopping):
+    # Told first, so it never starts a swap the stopping Swapper would only save and drop;
+    # the song it's on, cut short as the worker closes, is heard again at the next start.
+    stopping.clean_check = Recorder("clean_check", stopping.closed)
+    stopping.downloads = Recorder("downloads", stopping.closed)
+    stopping.listener = Recorder("listener", stopping.closed)
+    stopping._clean_up()
+    assert stopping.closed == ["clock", "clean_check", "downloads", "listener", "bedroom", "tts"]
+
+
+def test_the_brain_carries_on_saved_swaps_and_then_the_library_check_as_it_starts(stopping, monkeypatch):
     started = []
-    monkeypatch.setattr(stopping.downloads, "resume_swaps", lambda: started.append(True))
+    monkeypatch.setattr(stopping.downloads, "resume_swaps", lambda: started.append("swaps"))
+    monkeypatch.setattr(stopping.clean_check, "resume", lambda: started.append("check"))
     stopping.serve = stopping.shutdown
 
     with pytest.raises(SystemExit):
         stopping.run()
 
-    assert started == [True]
+    assert started == ["swaps", "check"]
 
 
 def test_the_brain_needs_none_of_the_satellites_audio_libraries(monkeypatch):
@@ -2863,6 +2874,12 @@ def test_the_downloads_hear_and_swap_through_one_store_worker_and_library(brain,
     assert brain.clean_store.path == str(tmp_path / "clean_songs.json")
     assert brain.ears._library is brain.swapper._library
     assert brain.swapper._say == brain._say_download
+
+
+def test_the_library_check_hears_and_swaps_through_the_same_ones(brain):
+    check = brain.clean_check
+    assert check._ears is brain.ears and check._swapper is brain.swapper and check._store is brain.clean_store
+    assert check._library is brain.ears._library and check._folder is brain.swapper._folder
 
 
 def test_a_download_message_is_said_on_the_satellite_that_asked(brain, connect):

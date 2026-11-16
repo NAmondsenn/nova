@@ -31,6 +31,7 @@ import numpy as np
 from voice_assistant import logging_setup, paths, protocol, storage, watchdog
 from voice_assistant.batteries import BatteryChoices, BatteryWatcher
 from voice_assistant.choices import ChoiceStore
+from voice_assistant.clean_check import CleanCheck
 from voice_assistant.clean_store import CleanStore
 from voice_assistant.clean_swap import Ears, Swapper, listening_library
 from voice_assistant.clock import Clock, spoken_clock_time
@@ -407,12 +408,18 @@ class Brain:
         self.clean_store = CleanStore(os.path.join(paths.DATA_DIR, "clean_songs.json"))
         self.listener = Listener(os.path.join(paths.PROJECT_DIRECTORY, config.section("backend").get("model") or ""))
         heard_through = listening_library(config)
+
+        def music_folder() -> MusicFolder:
+            return MusicFolder((config.section("clean_check").get("music_folder") or "").strip())
+
         self.ears = Ears(config, heard_through, self.listener, Lyrics, self.clean_store)
         self.swapper = Swapper(
-            config, self.ears, lambda: MusicFolder((config.section("clean_check").get("music_folder") or "").strip()),
-            lambda: SoulSync.from_config(config, os.getenv("SOULSYNC_API_KEY")),
+            config, self.ears, music_folder, lambda: SoulSync.from_config(config, os.getenv("SOULSYNC_API_KEY")),
             lambda: SoulSyncAdmin.from_config(config, os.getenv("SOULSYNC_ADMIN_PASSWORD")),
             heard_through, self.clean_store, say=self._say_download)
+        # The settings page's "Check library": every song heard in the background, the
+        # clean ones swapped quietly - see clean_check.py.
+        self.clean_check = CleanCheck(self.ears, self.swapper, self.clean_store, heard_through, music_folder)
         # Music fetched through SoulSync, each download said on the satellite which asked
         # for it - see downloads.py. One for every satellite, so the same song asked for
         # on two is only requested once.
@@ -1661,6 +1668,8 @@ class Brain:
         self.clock.start()
         # Swaps a restart came in the middle of, carried on - or their songs put back.
         self.downloads.resume_swaps()
+        # And a library check a restart came in the middle of, from the song it was on.
+        self.clean_check.resume()
         # Alerts are only said from now on, once there's everything to say them with.
         if self.ntfy:
             self.ntfy.start()
@@ -1742,7 +1751,7 @@ class Brain:
     def _clean_up(self):
         """
         Closes everything down in order - the clock, so nothing else starts ringing,
-        and the downloads, so nothing more is said of them, and the worker songs are
+        the library check, and the downloads, so nothing more is said of them, and the worker songs are
         heard in, then the batteries, the football
         watcher, the listening stats, what's playing, the usage device, ntfy, the settings page and the clock
         displays' server and feed, then every satellite's session, so its device in Home
@@ -1751,6 +1760,10 @@ class Brain:
         """
         self.running = False
         self.clock.stop()
+        # Before the downloads stop the Swapper, so the check never starts a swap which would
+        # only be saved and dropped; the song it's on, cut short as the worker closes, is
+        # heard again at the next start.
+        self.clean_check.close()
         # Before the satellites are let go, so a download which lands meanwhile isn't
         # sent to the phone because the satellite which asked has just gone. A message
         # already being said as this runs may still go to the phone, as its satellite
