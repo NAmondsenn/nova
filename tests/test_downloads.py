@@ -217,6 +217,13 @@ class FakeSwapper:
         self.swaps = []
         self.stopped = False
         self.resumed = []
+        # What a resume waits for before it starts; the saved swaps it carries on; and what
+        # each waits for before it ends.
+        self.hold = threading.Event()
+        self.hold.set()
+        self.saved = []
+        self.release = threading.Event()
+        self.release.set()
 
     def swap(self, song, wanted, satellite, quiet):
         self.swaps.append((song["id"], wanted, satellite, quiet))
@@ -225,8 +232,13 @@ class FakeSwapper:
     def stop(self):
         self.stopped = True
 
-    def resume(self):
+    def resume(self, begin=None, end=None):
         self.resumed.append(threading.current_thread().name)
+        self.hold.wait(5)
+        for swap in self.saved:
+            begin(swap)
+            self.release.wait(5)
+            end(swap)
 
 
 def heard_clean(store, *tracks):
@@ -984,15 +996,59 @@ def test_stopping_stops_the_swaps_too(running, clock, swapper):
     assert swapper.stopped
 
 
-def test_saved_swaps_are_carried_on_once_on_a_thread_of_their_own(running, clock, swapper):
-    downloads = running(FakeSoulSync(), FakeLibrary(clock))
-
-    downloads.resume_swaps()
-    downloads.resume_swaps()
+def _resumes_ended():
     for thread in [thread for thread in threading.enumerate() if thread.name == "swap-resume"]:
         thread.join(5)
 
+
+def test_saved_swaps_are_carried_on_on_a_thread_of_their_own_one_resume_at_a_time(running, clock, swapper):
+    downloads = running(FakeSoulSync(), FakeLibrary(clock))
+    swapper.hold.clear()
+
+    downloads.resume_swaps()
+    downloads.resume_swaps()
+    swapper.hold.set()
+    _resumes_ended()
     assert swapper.resumed == ["swap-resume"]
+
+    # Once that one's over, another may run.
+    downloads.resume_swaps()
+    _resumes_ended()
+    assert swapper.resumed == ["swap-resume", "swap-resume"]
+
+
+def test_saved_swaps_are_carried_on_when_a_download_starts(running, clock, swapper):
+    # Not only as Nova starts: a swap left for later - the music folder away, say - goes on.
+    downloads = running(FakeSoulSync(), FakeLibrary(clock))
+
+    assert downloads.start(GOOBA_WANTED, "kitchen")
+    _resumes_ended()
+
+    assert swapper.resumed == ["swap-resume"]
+
+
+def test_a_downloads_swap_carried_on_is_waiting_while_it_runs(running, set_up, clock, swapper):
+    # A restart forgot the download's watch; its swap, carried on, is still getting the song.
+    swapper.saved = [{"key": "made-up", "title": "Endless", "artist": "Gunna", "named": "endless by Gunna",
+                      "quiet": False},
+                     {"key": "quiet", "title": "Dreams", "artist": "Fleetwood Mac", "named": "Dreams",
+                      "quiet": True}]
+    swapper.release.clear()
+    downloads = running(FakeSoulSync(), FakeLibrary(clock), set_up)
+    downloads.resume_swaps()
+    for _ in range(500):
+        if downloads.waiting():
+            break
+        threading.Event().wait(0.01)
+
+    assert downloads.download("Endless by Gunna", "track", "bedroom") == {
+        "success": True, "message": "I'm already getting Endless by Gunna."}
+    assert downloads.describe_waiting() == "endless by Gunna, asked for less than a minute ago."
+
+    swapper.release.set()
+    _resumes_ended()
+    # The library check's swaps aren't downloads, and every one is gone once over.
+    assert downloads.waiting() == []
 
 
 def test_stopping_says_one_download_for_one_and_nothing_with_none(running, clock, caplog):

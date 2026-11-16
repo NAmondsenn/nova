@@ -399,7 +399,10 @@ class Downloads:
         self._ears = ears
         self._swapper = swapper
         self._store = store
-        self._resumed = False
+        # Whether saved swaps are being carried on now, and the download each of those is
+        # waiting for, by the swap's key.
+        self._resuming = False
+        self._resumed: Dict[str, Wanted] = {}
         self._say = say
         self._soulsync = soulsync or (lambda: SoulSync.from_config(config, os.getenv("SOULSYNC_API_KEY")))
         self._library = library or self._own_library
@@ -613,6 +616,8 @@ class Downloads:
             self._waiting[wanted.key] = wanted
             self._asked_at[wanted.key] = self._now()
         threading.Thread(target=self._watch, args=(wanted, satellite), daemon=True, name="download").start()
+        # Anything left for later - the music folder away, say - is tried again now.
+        self.resume_swaps()
         return True
 
     def waiting(self) -> List[str]:
@@ -643,22 +648,52 @@ class Downloads:
 
     def resume_swaps(self):
         """
-        Carries on the swaps Nova was part way through when it last stopped, on a thread
-        of its own - once, as the brain starts.
+        Carries on the saved swaps not running now - those a restart came in the middle of,
+        or left for later - on a thread of its own: as the brain starts, and as each
+        download starts. Never two at once.
         """
         if self._swapper is None:
             return
         with self._lock:
-            if self._resumed:
+            if self._resuming or self._stopping.is_set():
                 return
-            self._resumed = True
+            self._resuming = True
         threading.Thread(target=self._resume_swaps, daemon=True, name="swap-resume").start()
 
     def _resume_swaps(self):
         try:
-            self._swapper.resume()
+            self._swapper.resume(begin=self._swap_carried_on, end=self._swap_over)
         except Exception:
-            logger.exception("Carrying on the swaps Nova was part way through failed")
+            logger.exception("Carrying on the saved swaps failed")
+        finally:
+            with self._lock:
+                self._resuming = False
+
+    def _swap_carried_on(self, swap: Dict):
+        """
+        Counts a download's swap, carried on after a restart forgot its watch, as waiting -
+        so "download X" says it's already being got, and "what's downloading?" names it.
+        The library check's swaps aren't downloads.
+        """
+        if swap.get("quiet", True) or not swap.get("title"):
+            return
+        wanted = Wanted(swap["title"], swap.get("artist"), "track")
+        with self._lock:
+            if wanted.key in self._waiting or self._stopping.is_set():
+                return
+            self._waiting[wanted.key] = wanted
+            self._asked_at[wanted.key] = self._now()
+            self._names[wanted.key] = swap.get("named") or wanted.name
+            self._resumed[swap.get("key")] = wanted
+
+    def _swap_over(self, swap: Dict):
+        """No longer counts a download's swap carried on as waiting, once it's over."""
+        with self._lock:
+            wanted = self._resumed.pop(swap.get("key"), None)
+            if wanted is not None and self._waiting.get(wanted.key) is wanted:
+                del self._waiting[wanted.key]
+                del self._asked_at[wanted.key]
+                self._names.pop(wanted.key, None)
 
     def stop(self):
         """

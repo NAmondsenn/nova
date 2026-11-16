@@ -71,7 +71,7 @@ STILL_LISTED = "Navidrome still lists it"
 NOT_IN_TIME = "SoulSync didn't bring another copy in time"
 NOT_SAVED = "Nova couldn't save the swap's progress"
 NAVIDROME_UNASKED = "Navidrome couldn't be asked"
-WENT_WRONG = "something went wrong part way, so Nova carries it on when it next starts"
+WENT_WRONG = "something went wrong part way, so Nova carries it on later"
 # A restart came between moving the copy and saving where it went: never guessed at.
 WHERE_NOT_SAVED = f"set aside, but where wasn't saved - look in {HELD}"
 
@@ -384,25 +384,32 @@ class Swapper:
             with self._running_lock:
                 self._running.discard(swap["key"])
 
-    def resume(self):
+    def resume(self, begin: Optional[Callable[[Dict], None]] = None,
+               end: Optional[Callable[[Dict], None]] = None):
         """
         Carries on each swap Nova was part way through when it stopped: one watching for a copy
         goes on watching while its time limit lasts, and is put back once it's past; one moved
         but not yet fetched for goes on, as does one about to set aside a later try's copy. One
         whose copy moved before where it went was saved puts back the copy set aside before it,
         if there is one, and says where to look. Without the music folder they're all left for
-        the next start, as nothing can be put back.
+        later, as nothing can be put back. Swaps running now are left alone.
+
+        Args:
+            begin: Told of each saved swap as it's carried on, e.g. for Downloads to count
+                a download's as still being got.
+            end: Told of it once it's over, or Nova stops.
         """
         with self._running_lock:
             saved = [swap for swap in self.store.swaps() if swap.get("key") not in self._running]
             self._running.update(swap.get("key") for swap in saved)
         try:
-            self._resume_all(saved)
+            self._resume_all(saved, begin, end)
         finally:
             with self._running_lock:
                 self._running.difference_update(swap.get("key") for swap in saved)
 
-    def _resume_all(self, saved: List[Dict]):
+    def _resume_all(self, saved: List[Dict], begin: Optional[Callable[[Dict], None]],
+                    end: Optional[Callable[[Dict], None]]):
         """Carries on the saved swaps given, one at a time - see resume."""
         if not saved:
             return
@@ -416,13 +423,26 @@ class Swapper:
         for swap in saved:
             if self._stopping.is_set():
                 return
+            self._told(begin, swap)
             try:
                 outcome = self._resume(swap, folder)
             except Exception:
                 # One swap's surprise mustn't keep the others from being carried on.
                 logger.exception(f"Carrying on the swap of {swap.get('name')} failed")
                 continue
+            finally:
+                self._told(end, swap)
             self._tell(swap, outcome)
+
+    @staticmethod
+    def _told(whom: Optional[Callable[[Dict], None]], swap: Dict):
+        """Tells resume's begin or end of a swap; what they do wrong is only logged."""
+        if whom is None:
+            return
+        try:
+            whom(swap)
+        except Exception:
+            logger.exception(f"Telling of the swap of {swap.get('name')} failed")
 
     def _resume(self, swap: Dict, folder: MusicFolder) -> Optional[Outcome]:
         """One saved swap, carried on or put back - None if it ended with nothing to say."""
@@ -489,7 +509,7 @@ class Swapper:
     def _carry_on(self, swap: Dict, parts: Parts) -> Outcome:
         """
         Runs a swap on from its saved step. Something unforeseen leaves it saved as it is, to
-        be carried on at the next start, rather than acted on half understood.
+        be carried on later, rather than acted on half understood.
         """
         try:
             return self._run(swap, parts)

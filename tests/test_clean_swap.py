@@ -875,6 +875,25 @@ def test_a_restart_past_the_limit_puts_the_song_back(make_swapper, music, store)
                                         "couldn't swap it: SoulSync didn't bring another copy in time.")]
 
 
+def test_each_swap_carried_on_is_told_of_as_it_begins_and_ends(make_swapper, music, store):
+    _stopped_while_watching(make_swapper)
+    [saved] = store.swaps()
+    swapper = make_swapper(clock=FakeTime(saved["asked_at"] + 700))
+    seen = []
+
+    swapper.resume(begin=lambda swap: seen.append(("begin", swap["key"], store.swaps() != [])),
+                   end=lambda swap: seen.append(("end", swap["key"], store.swaps() != [])))
+
+    assert seen == [("begin", saved["key"], True), ("end", saved["key"], False)]
+
+
+def test_swaps_left_for_later_arent_told_of(make_swapper, store, tmp_path):
+    _stopped_while_watching(make_swapper)
+    seen = []
+    make_swapper(folder=str(tmp_path / "not-mounted")).resume(begin=seen.append, end=seen.append)
+    assert seen == []
+
+
 def test_a_quiet_swap_carried_on_says_nothing(make_swapper, store):
     _stopped_while_watching(make_swapper, quiet=True)
     [saved] = store.swaps()
