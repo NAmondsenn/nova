@@ -87,6 +87,9 @@ With Navidrome, and SoulSync set up (its address under Settings, its key under K
 25b. "Hey Nova, when do South Shields play next?" - their next match, whatever the competition, and a league match among their fixtures (from BBC Sport, which names the league itself, e.g. "National League N / S"), not only cup ties.
 25c. During a South Shields league match: the card shows the score and the minute, and a goal is announced.
 25d. On a day with no followed match today or tomorrow but one within 14 days, the card shows that match. England's next match shows only once it is within 14 days.
+26a. "Hey Nova, what happened in the England match on Sunday?" - what happened, in order, each with its minute and, for a goal, the score after it; Anderson's red card; and the penalty conceded by Cubarsí, which is one of ESPN's notes ("Note at ..."). For Sunday 15 November that is Kane's penalty, Konsa, White, Anderson's red card, Oyarzabal's penalty and Williams, ending Spain 2, England 3. Nothing is called a mistake unless a note says what happened. For a later match, its own goals, cards and notes.
+26b. "Hey Nova, what happened in the Nations League on Sunday?" - every match of the day is a line with its score and then its scorers, with the minute of each, and its red cards.
+26c. A score is said as "Spain 2, England 3" or in words, never with the word "dash", in answers and in the announcement of full time. A shoot-out - ask about a match which went to penalties, or hear one announced - is said "on penalties, 4 to 3", never "4 dash 3".
 
 ## The manual scripts
 
