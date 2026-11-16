@@ -14,7 +14,7 @@
 
 Rounds one to three stand, with these additions.
 
-- `shell_command.football_ask` takes `against` (a team's name), for `what` = `match` only. The `match` answer, asked with `against`, carries `seasons` (an integer from 1 to 6: how many seasons were looked through), with `match` only where one was found; `unknown` lists `against` where that team isn't found. Asked with a `date`, `against` is not used.
+- `shell_command.football_ask` takes `against` (a team's name), for `what` = `match` only. The `match` answer, asked with `against`, carries `seasons` (an integer from 1 to 6: how many seasons were looked through) and `against` (the other team as found, shaped as `team` is: `id`, `name`, `full_name` where it differs, `followed`), with `match` only where one was found; `unknown` lists `against` where that team isn't found. Asked with a `date`, `against` is not used.
 
 ## Global Constraints
 

@@ -35,6 +35,6 @@ What a look on 16 November showed, all read-only:
 
 **The contract, round four.** Rounds one to three stand, with these additions, word for word the same in both plans:
 
-- `shell_command.football_ask` takes `against` (a team's name), for `what` = `match` only. The `match` answer, asked with `against`, carries `seasons` (an integer from 1 to 6: how many seasons were looked through), with `match` only where one was found; `unknown` lists `against` where that team isn't found. Asked with a `date`, `against` is not used.
+- `shell_command.football_ask` takes `against` (a team's name), for `what` = `match` only. The `match` answer, asked with `against`, carries `seasons` (an integer from 1 to 6: how many seasons were looked through) and `against` (the other team as found, shaped as `team` is: `id`, `name`, `full_name` where it differs, `followed`), with `match` only where one was found; `unknown` lists `against` where that team isn't found. Asked with a `date`, `against` is not used.
 
 **Not in this round.** Head-to-head records ("how many times have they won"); seasons further back than five; BBC Sport's older months.
