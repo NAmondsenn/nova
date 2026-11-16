@@ -42,6 +42,11 @@ KEEP_FOR = 86400
 # data was down, and a goal an hour old isn't news.
 GAP = 300
 
+# Seconds a lower score has to hold, from the first reading which showed it, before it is said to be a goal ruled
+# out. Two readings a minute apart can both carry one old copy of the match from ESPN, so a second look at the
+# score going down is no proof of it.
+RULED_OUT_AFTER = 120
+
 # The phases of a match which has started, as the Contract has them. One Home Assistant's side has
 # added since is one whose meaning isn't known, so it counts as none.
 _PHASES = ("first_half", "half_time", "second_half", "extra_time", "penalties", "full_time", "off")
@@ -328,11 +333,14 @@ def _goals(before: Dict, match: Match, reported: Optional[float]) -> Tuple[Optio
 
     A score which has gone down is not said at once, as it may be an old copy of the match
     which Home Assistant gave: the higher score is kept, and the lower one noted as waiting,
-    with when Home Assistant wrote the reading which showed it. If a later reading shows that
-    same lower score it is said, as a goal ruled out; if it shows anything else the note is
-    dropped and that reading is compared as usual. The same reading seen again confirms
-    nothing, as Nova looks more often than Home Assistant writes the sensor, so the second
-    look is usually the first one's reading and the old copy would be said to be a goal ruled out.
+    with when Home Assistant wrote the reading which first showed it. If a reading written
+    RULED_OUT_AFTER seconds or more after that one still shows that same lower score it is said,
+    as a goal ruled out; one in between which shows it changes nothing, so the time is always
+    counted from the first. If a reading shows anything else the note is dropped and that
+    reading is compared as usual. The same reading seen again confirms nothing, as Nova looks
+    more often than Home Assistant writes the sensor, so the second look is usually the first
+    one's reading; and nor does the next reading, a minute on, as two readings can both carry
+    the one old copy ESPN gave.
 
     Args:
         before: What was last seen of the match.
@@ -360,9 +368,10 @@ def _goals(before: Dict, match: Match, reported: Optional[float]) -> Tuple[Optio
         kept = {"home": before["home"], "away": before["away"]}
         waiting = before["waiting"]
         if waiting is not None and (waiting["home"], waiting["away"]) == (here["home"], here["away"]):
-            if reported is not None and reported > waiting["reported"]:
+            if reported is not None and reported - waiting["reported"] >= RULED_OUT_AFTER:
                 return Event("goals", f"Goal ruled out. {score}"), taken
-            # The reading it was first seen on, or one which can't be told from it: the note stays as it was.
+            # The reading it was first seen on, one too soon after it, or one of unknown time: the note stays as
+            # it was, with the first reading's time, which is what the two minutes are counted from.
             return None, {**kept, "waiting": waiting}
         return None, {**kept, "waiting": None if reported is None else {**here, "reported": reported}}
     return None, taken
@@ -435,7 +444,7 @@ def events(
     Said unprompted, a false or repeated announcement is worse than one missed, so a look
     which can't be trusted says nothing: an old copy of the match (an earlier state or phase
     than the record's, or no score where it had one) is passed over, the record keeping all
-    but the time of the look; a score which has gone down waits for a second reading (see _goals);
+    but the time of the look; a score which has gone down waits for a reading two minutes later (see _goals);
     and a look with no known phase doesn't take the record's away, however old the record. A match
     which is off says nothing, and one which comes back from off is taken as it stands.
 
@@ -446,8 +455,9 @@ def events(
         lead: Seconds before kick-off to say that it is starting from.
         followed: The ids of the followed teams in the match.
         reported: Epoch seconds when Home Assistant wrote the reading the match is from, which
-            is what tells a second reading from the first one seen again. Without it (None), a
-            score which has gone down is never said to be a goal ruled out.
+            is what tells a later reading from the first one seen again, and how long a score
+            which has gone down has held. Without it (None), a score which has gone down is never
+            said to be a goal ruled out.
 
     Returns:
         The events in the order to say them - goals first, then one of half time, the second

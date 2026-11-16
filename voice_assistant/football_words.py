@@ -4,7 +4,9 @@ The text Claude answers football questions from, from decisions 4 and 5 of docs/
 and 7 to 9 of docs/decisions/0015 (a match from BBC Sport, line-ups, the overview and its stale teams, no source named),
 and decisions 1 to 4 of docs/decisions/0016 (what happened in a match: its goals, penalties and red cards, asked
 about a team's match or a competition's day, and never a score said with a dash), and decisions 1 and 7 of
-docs/decisions/0018 (when two teams last played, and how far back it was looked for when they hadn't).
+docs/decisions/0018 (when two teams last played, and how far back it was looked for when they hadn't), and
+decisions 2 to 4 of docs/decisions/0019 (odds said only where Home Assistant looked for them, a national side's
+not-found line, and a team asked against itself).
 
 Nova gives Claude plain text built from what Home Assistant returned, not Home Assistant's
 JSON: the full names, the kick-off as a local day and time, the ground, the odds and who
@@ -263,22 +265,25 @@ def said_match(match: Match, now: datetime) -> str:
 
 def _asked_line(match: Match, now: datetime) -> str:
     """
-    Says a match from an answer to a question, which is where odds are given: with none listed
-    for a match to come, that is said, so that Claude doesn't guess at any.
+    Says a match from an answer to a question, which is where odds are given: where Home Assistant looked
+    them up for a match to come and ESPN lists none, that is said, so that Claude doesn't guess at any. A
+    match it never looked up (a later fixture) says nothing of its odds, and nor does one from a script
+    which doesn't say.
 
     Args:
         match: The match.
         now: The current time, aware and local.
 
     Returns:
-        What said_match says, with " No odds are listed for it." after it for a match to come with no odds.
+        What said_match says, with " No odds are listed for it." after it for a match to come which Home
+        Assistant says has none (its no_odds).
 
     Raises:
         KeyError: If the odds of the match lack a chance.
         TypeError: If any of them isn't a whole number.
     """
     said = said_match(match, now)
-    return f"{said} No odds are listed for it." if _to_come(match) and not match.odds else said
+    return f"{said} No odds are listed for it." if _to_come(match) and match.no_odds else said
 
 
 def _has_started(match: Match) -> bool:
@@ -538,8 +543,8 @@ def said_team(answer: Dict, now: datetime) -> str:
         Lines: the team's full name, its match today, its next fixtures, its last results and
         its place in each table, with what there is none of said so. Where it has no table, no
         match today and no fixture to come, that Home Assistant's football doesn't seem to cover its
-        league, so that only its cup ties show. A match to come has its odds, or that none are listed. LAG
-        is the last line if a match is in play.
+        league, so that only its cup ties show. A match to come has its odds, or that none are listed where Home
+        Assistant looked them up and found none. LAG is the last line if a match is in play.
 
     Raises:
         KeyError: If a key is missing from the answer, a match or a table row.
@@ -904,7 +909,7 @@ def _seasons_looked_through(answer: Dict) -> int:
     return seasons
 
 
-def _other_team_found(answer: Dict) -> str:
+def _other_team_found(answer: Dict) -> Tuple[str, Optional[str]]:
     """
     Reads the other team Home Assistant found for a match asked against it, which is not always the one
     named: its search may list another team of a like name first.
@@ -914,19 +919,44 @@ def _other_team_found(answer: Dict) -> str:
             its "team" is.
 
     Returns:
-        Its full name where it has one, else its name, as the team's own lines say a team. Its id isn't read,
-        so it may be any text, as that of a team only BBC Sport knows begins "bbc:".
+        Its full name where it has one, else its name, as the team's own lines say a team; and its id, or None
+        where it has none. The id may be any text, as that of a team only BBC Sport knows begins "bbc:".
 
     Raises:
         KeyError: If the answer has no "against", or the team no name.
-        TypeError: If either isn't of the type it should be.
+        TypeError: If either isn't of the type it should be, or the id isn't text.
         ValueError: If the team's name is empty.
     """
     found = _field(answer, "against", dict)
     name = _field(found, "full_name", str, None) or _field(found, "name", str)
     if not name:
         raise ValueError(f"against needs a name, not {found!r}")
-    return name
+    return name, _field(found, "id", str, None)
+
+
+def _same_team(team: Dict, name: str, against: str) -> str:
+    """
+    Says that a match was asked of a team against itself, as the two ids Home Assistant found are one: ESPN's
+    search lists "Liverpool FC" and "Liverpool" as one team, and Nova keeps no list of names to know that by.
+
+    Args:
+        team: The answer's team, which Home Assistant found for the team asked about.
+        name: The team's name as its own lines say it: its full name where it has one, else its name.
+        against: The other team as it was asked for.
+
+    Returns:
+        e.g. "Liverpool and Liverpool FC are the same team.": the team's own name, and the other team as it was
+        asked for. The full name goes first unless that is the other team as it was asked for, which would be
+        said twice, so the short one does; where the other team was asked for as every name the team has,
+        "Those are the same team, Manchester United."
+
+    Raises:
+        TypeError: If the team's full name or name isn't text.
+    """
+    for called in (_field(team, "full_name", str, None), _field(team, "name", str)):
+        if called and _name_key(called) != _name_key(against):
+            return f"{called} and {against} are the same team."
+    return f"Those are the same team, {name}."
 
 
 def said_match_report(answer: Dict, now: datetime, on_a_day: bool = False, against: str = "") -> str:
@@ -940,9 +970,9 @@ def said_match_report(answer: Dict, now: datetime, on_a_day: bool = False, again
         on_a_day: Whether a day was asked about, which only changes what is said where there is no match,
             as the answer doesn't carry the day.
         against: The other team as it was asked for, or "" for none - when the match was asked for as the
-            last time the team played them, which is never with a day. Only whether there is one matters:
-            the answer must then say how many seasons were looked through ("seasons") and the team it found
-            ("against"), which are what is said where there is no match.
+            last time the team played them, which is never with a day. The answer must then say how many
+            seasons were looked through ("seasons") and the team it found ("against"), which are what is said
+            where there is no match; and the name asked for is what is said of a team asked against itself.
 
     Returns:
         Lines: the match, as said_match says it; "Its scorers aren't listed." if it has goals on its score and
@@ -954,12 +984,15 @@ def said_match_report(answer: Dict, now: datetime, on_a_day: bool = False, again
         for the last time two teams played, "No match between Liverpool and Newcastle United is listed in the
         last 6 seasons." - never that they haven't played, only where Home Assistant looked, and naming the
         other team as Home Assistant found it, not as it was asked for. For a national side, whose one list has
-        no seasons in it (1), "in the results ESPN lists" is said for "in the last 1 seasons".
+        no seasons in it (1), "No match between England and Brazil is among ESPN's results for England." is said
+        for "is listed in the last 1 seasons". Where the two teams' ids are one, the team was asked against itself
+        under another name: only that they are the same team ("Liverpool and Liverpool FC are the same team."),
+        with nothing of a match, as a team has none against itself.
 
     Raises:
         KeyError: If a key is missing from the answer, the team, the match, an event or a note - or, with against,
             its seasons or the other team.
-        TypeError: If a value isn't of the type it should be.
+        TypeError: If a value isn't of the type it should be, or either team's id isn't text.
         ValueError: If the match, an event or a note is of the wrong shape, its seasons aren't from 1 to 6, or
             the other team has no name.
     """
@@ -969,12 +1002,17 @@ def said_match_report(answer: Dict, now: datetime, on_a_day: bool = False, again
     # The notes are read before the match is looked for, so that ones of the wrong shape are refused either way.
     notes = [_said_note(note) for note in _field(answer, "notes", list, [])]
     seasons = _seasons_looked_through(answer) if against else None
-    other = _other_team_found(answer) if against else None
+    other, other_id = _other_team_found(answer) if against else (None, None)
+    own_id = _field(team, "id", str, None) if against else None
+    if own_id and own_id == other_id:
+        # The two ids are one team, so whatever match is in the answer is the team's own and not one of two teams.
+        return _same_team(team, name, against)
     found = _field(answer, "match", dict, None)
     if found is None:
         if seasons is not None:
-            looked = "the results ESPN lists" if seasons == 1 else f"the last {seasons} seasons"
-            return f"No match between {name} and {other} is listed in {looked}."
+            # A national side's one list has no seasons in it, so what was looked through is ESPN's results for it.
+            looked = f"among ESPN's results for {name}" if seasons == 1 else f"listed in the last {seasons} seasons"
+            return f"No match between {name} and {other} is {looked}."
         return f"No match is listed for {name}{' on that day' if on_a_day else ''}."
     match = Match.from_home(found)
     # A match which hasn't started has nothing to note, as it has nothing which happened in it.

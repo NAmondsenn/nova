@@ -263,6 +263,9 @@ class Match:
         venue: Where it's played, e.g. "Anfield in Liverpool", or just the name with no city.
         odds: The bookmaker's chances as whole percentages ("home", "draw", "away") and its
             "source", or None. Only in answers to a question, and only before kick-off.
+        no_odds: Whether Home Assistant looked the odds up and ESPN lists none. False is only that
+            Home Assistant says nothing of it - a match from a team's schedule alone, or one asked
+            for before it said - so that nothing is said of its odds either way. Never with odds.
         events: What happened in it, in the order it happened: its goals, penalties, own goals, penalties
             missed and red cards. Only in answers to a question, and only once it has started; empty where
             Home Assistant gave none.
@@ -286,6 +289,7 @@ class Match:
     venue: Optional[str]
     odds: Optional[Dict]
     events: Tuple[MatchEvent, ...] = ()
+    no_odds: bool = False
 
     @classmethod
     def from_home(cls, found: Dict) -> "Match":
@@ -304,7 +308,8 @@ class Match:
             KeyError: If a key a match always has is missing, or an event lacks its minute, kind or side.
             TypeError: If a value isn't of the type it should be.
             ValueError: If the kick-off isn't a time with a time zone, or the state, the
-                winner, the shoot-out, or the kind or side of an event isn't one of the Contract's.
+                winner, the shoot-out, or the kind or side of an event isn't one of the Contract's,
+                or it has no_odds as well as odds.
         """
         if not isinstance(found, dict):
             raise TypeError(f"a match should be a dict, not {found!r}")
@@ -320,6 +325,9 @@ class Match:
                 raise ValueError(f"shootout should be two whole numbers, not {shootout!r}")
             shootout = (shootout[0], shootout[1])
         odds = _field(found, "odds", dict, None)
+        no_odds = _field(found, "no_odds", bool, False)
+        if no_odds and odds is not None:
+            raise ValueError("a match can't have odds and no_odds")
         events = tuple(MatchEvent.from_home(event) for event in _field(found, "events", list, []))
         return cls(
             id=_field(found, "id", str),
@@ -341,6 +349,7 @@ class Match:
             venue=_ground(found.get("venue")),
             odds=dict(odds) if odds is not None else None,
             events=events,
+            no_odds=no_odds,
         )
 
 

@@ -375,6 +375,27 @@ def test_a_match_with_nothing_more_to_say_has_nothing_more():
     assert (match.winner, match.shootout, match.extra_time, match.venue, match.odds) == (None, None, False, None, None)
 
 
+def test_a_match_says_whether_ESPN_listed_no_odds_for_it():
+    # Where Home Assistant looked the odds up and ESPN lists none, it says so: that is not the same as not looking.
+    assert Match.from_home(_found_match(no_odds=True)).no_odds is True
+    for left in (_found_match(), _found_match(no_odds=None), _found_match(no_odds=False)):
+        assert Match.from_home(left).no_odds is False
+    listed = Match.from_home(_found_match(odds={"home": 55, "draw": 23, "away": 22, "source": "DraftKings"}))
+    assert listed.no_odds is False and listed.odds["home"] == 55
+
+
+@pytest.mark.parametrize("no_odds", ["true", "yes", 1, 0, [True], {"no_odds": True}], ids=repr)
+def test_no_odds_of_the_wrong_type_is_refused(no_odds):
+    with pytest.raises(TypeError, match="no_odds"):
+        Match.from_home(_found_match(no_odds=no_odds))
+
+
+def test_no_odds_beside_odds_is_refused():
+    # A match with odds and with none listed is two things at once, so it is refused as any wrong shape is.
+    with pytest.raises(ValueError, match="no_odds"):
+        Match.from_home(_found_match(no_odds=True, odds={"home": 55, "draw": 23, "away": 22}))
+
+
 def test_a_match_has_its_events_in_the_order_they_happened():
     match = Match.from_home(_found_match(state="post", home_score=1, away_score=2, events=[
         {"minute": "45'", "kind": "penalty", "side": "away", "player": "Harry Kane"},

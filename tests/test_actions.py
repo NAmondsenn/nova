@@ -1108,6 +1108,18 @@ def test_get_football_offers_what_happened_in_a_match():
     assert "line-ups" in description and "never from memory" in description
 
 
+def test_get_football_asks_for_a_competition_as_it_is_properly_called():
+    schema = {tool["name"]: tool for tool in ActionExecutor(football=SimpleNamespace(names=list)).tool_schemas()}["get_football"]
+    description = schema["description"]
+    # ESPN calls the EFL Cup the Carabao Cup and the European Championship "EURO": Claude is to name one as it is properly
+    # called where it knows it, as Nova keeps no list of competitions to put it right.
+    assert ("Name a competition as it is properly called where you know it, such as the Carabao Cup for the EFL Cup."
+            in description)
+    # It stays with what the tool says of the team or competition asked about, which is where a name is given.
+    assert description.index("Name a competition as it is properly called") > description.index("Give the team or the competition asked about")
+    assert "putting right a name that was clearly misheard" in description
+
+
 def test_get_football_hands_everything_it_was_given_to_the_words(monkeypatch):
     from voice_assistant import actions as actions_module
 
