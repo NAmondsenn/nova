@@ -38,6 +38,9 @@ SENTENCE_TIMEOUT = 10.0
 # "Your 10 minute timer is done" every round until it's dismissed.
 RECENT_PHRASES = 8
 
+# A hyphen, the hyphens Unicode adds, an en dash or a minus sign, as Claude may write any.
+DASH = "[-‐‑–−]"
+
 
 def speakable(text: str) -> str:
     """
@@ -46,13 +49,19 @@ def speakable(text: str) -> str:
     zero five" - whether the time came from the clock or from Claude. "3:30 PM" it
     reads properly, so that's left alone. Claude's "12 AM" and "12 PM" become
     "midnight" and "noon", as Nova's own times are (see clock.spoken_clock_time).
+    And a dash between numbers it reads as "dash" - Claude's "England won 3-2"
+    came out as "three dash two", though it's told not to write one.
 
     Args:
         text: What's to be said.
 
     Returns:
-        e.g. "from 2 PM until 10 PM", "7 oh 5 AM", "the 6 o'clock one", "until midnight".
+        e.g. "from 2 PM until 10 PM", "7 oh 5 AM", "the 6 o'clock one", "until midnight",
+        "England won 3 to 2", "4 2 3 1".
     """
+    # A run of three or more is a formation; two numbers are a score or a range.
+    text = re.sub(rf"\b\d+(?:\s*{DASH}\s*\d+){{2,}}\b", lambda match: " ".join(re.split(rf"\s*{DASH}\s*", match.group())), text)
+    text = re.sub(rf"\b(\d+)\s*{DASH}\s*(\d+)\b", r"\1 to \2", text)
     # The full stop of "a.m." goes too, unless it also ends the sentence.
     text = re.sub(r"\b12(?::00)?\s*([AaPp])\.?\s?[Mm]\b(?:\.(?=\s+[a-z]))?",
                   lambda match: "midnight" if match.group(1) in "Aa" else "noon", text)

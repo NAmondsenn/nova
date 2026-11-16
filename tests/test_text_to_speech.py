@@ -270,6 +270,15 @@ def test_a_wav_can_still_be_written_for_trying_the_voice(tts, tmp_path):
     ("Lunch at 12:00 PM today.", "Lunch at noon today."),
     ("It's 12 a.m. now.", "It's midnight now."), ("Until 12 a.m.", "Until midnight."),
     ("It's 12:30 AM.", "It's 12:30 AM."), ("12 amps", "12 amps"),
+    # A dash between numbers Piper reads as "dash": Claude's "England won 3-2" was "three
+    # dash two", though told not to write one. Two numbers are a score or a range, a
+    # longer run a formation.
+    ("England won 3-2 away to Spain.", "England won 3 to 2 away to Spain."),
+    ("a 2–1 win", "a 2 to 1 win"), ("It finished 1 - 1.", "It finished 1 to 1."),
+    ("highs of 10-12 degrees", "highs of 10 to 12 degrees"), ("the 2025-26 season", "the 2025 to 26 season"),
+    ("They set up 4-2-3-1.", "They set up 4 2 3 1."),
+    # Words with a dash are left alone.
+    ("COVID-19 and Jay-Z", "COVID-19 and Jay-Z"), ("It's -3 degrees.", "It's -3 degrees."),
 ])
 def test_times_are_written_so_piper_reads_them_properly(written, said):
     from voice_assistant.text_to_speech import speakable
