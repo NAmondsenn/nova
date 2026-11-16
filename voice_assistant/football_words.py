@@ -1,7 +1,8 @@
 """
 Football Words Module
-The text Claude answers football questions from, from decisions 4 and 5 of docs/decisions/0014, and decisions 3
-and 7 to 9 of docs/decisions/0015 (a match from BBC Sport, line-ups, the overview and its stale teams, no source named).
+The text Claude answers football questions from, from decisions 4 and 5 of docs/decisions/0014, decisions 3
+and 7 to 9 of docs/decisions/0015 (a match from BBC Sport, line-ups, the overview and its stale teams, no source named),
+and decisions 1 to 4 of docs/decisions/0016 (what happened in a match: its goals, penalties and red cards).
 
 Nova gives Claude plain text built from what Home Assistant returned, not Home Assistant's
 JSON: the full names, the kick-off as a local day and time, the ground, the odds and who
@@ -10,7 +11,8 @@ part of football (see football.py, which reads what Home Assistant says and know
 can't be trusted); only describe asks it anything, through Football. A stale answer, one with
 an error or one which found nothing by the name asked for never gets to the said_ functions:
 describe deals with each first (see football.CANT_GET). The words say only what the data holds:
-no scorers, no result worked out from a score, no phase they don't know.
+goals, penalties and red cards only as Home Assistant lists them, no result worked out from a score, no phase
+they don't know.
 """
 
 import logging
@@ -22,7 +24,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 from voice_assistant.clock import spoken_clock_time
 # The underscored names are football.py's own checks and error, used here for the answers too.
 from voice_assistant.football import (
-    CANT_GET, Football, FootballUnavailable, Match, Reading, Team, _cant_get, _field, _is_whole)
+    CANT_GET, Football, FootballUnavailable, Match, MatchEvent, Reading, Team, _cant_get, _field, _is_whole)
 from voice_assistant.google_calendar import _ordinal, spoken_day
 
 logger = logging.getLogger(__name__)
@@ -44,6 +46,9 @@ _PHASE_WORDS = {
     "extra_time": "extra time", "penalties": "penalties", "full_time": "full time",
 }
 _OFF = "off"
+
+# The events which put a goal on the board, as the Contract has them. A penalty missed and a red card don't.
+_SCORING = ("goal", "penalty", "own_goal")
 
 # Only in these phases is the source's clock (ESPN's, or BBC's label) a minute ("67'"). In the others it is
 # a word for the card ("HT"), which isn't said as the phase is.
@@ -240,6 +245,141 @@ def _asked_line(match: Match, now: datetime) -> str:
     return f"{said} No odds are listed for it." if _to_come(match) and not match.odds else said
 
 
+def _has_started(match: Match) -> bool:
+    """Whether a match is in play or over, which is the only time anything has happened in it."""
+    return match.state in ("in", "post")
+
+
+def _side_name(match: Match, side: str) -> str:
+    """The name to say for a side of a match, as said_match names it: "home" or "away"."""
+    return match.home if side == "home" else match.away
+
+
+def _said_event(event: MatchEvent, match: Match) -> str:
+    """
+    Says one thing which happened in a match, without the score.
+
+    Args:
+        event: The event.
+        match: The match it was in, for the names of its sides.
+
+    Returns:
+        e.g. "45': a penalty for England, scored by Harry Kane.", "63': a red card for Elliot Anderson of England."
+        or "32': an own goal by C. Sykes, for Oxford City." Where the source named no player, the same
+        without one, e.g. "53': a goal for England." A penalty missed is for the side which took it:
+        "65': a penalty for Spain, missed by Mikel Oyarzabal."
+    """
+    team = _side_name(match, event.side)
+    who = event.player
+    if event.kind == "goal":
+        what = f"a goal for {team}" + (f", scored by {who}" if who else "")
+    elif event.kind == "penalty":
+        what = f"a penalty for {team}" + (f", scored by {who}" if who else "")
+    elif event.kind == "own_goal":
+        what = f"an own goal by {who}, for {team}" if who else f"an own goal for {team}"
+    elif event.kind == "penalty_missed":
+        what = f"a penalty for {team}, missed" + (f" by {who}" if who else "")
+    else:
+        what = f"a red card for {who} of {team}" if who else f"a red card for {team}"
+    return f"{event.minute}: {what}."
+
+
+def said_events(match: Match) -> List[str]:
+    """
+    Says what happened in a match, as Home Assistant lists it.
+
+    Args:
+        match: The match.
+
+    Returns:
+        One sentence for each event, in the order they happened - e.g. "45': a penalty for England, scored
+        by Harry Kane. Spain 0, England 1." - with the score after it for a goal, a penalty scored or an
+        own goal, worked out by counting them in order from nothing each. Where the last of those scores
+        isn't the match's own, or the match has no score, none is said, so that nothing false is: a list
+        which is short of a goal, or has one too many, can't say what the score was along the way. Empty
+        for a match which hasn't started, which has nothing to say, and for one with no events.
+    """
+    if not _has_started(match):
+        return []
+    home_goals = away_goals = 0
+    sentences: List[str] = []
+    scores: List[str] = []
+    for event in match.events:
+        scoring = event.kind in _SCORING
+        if scoring:
+            # The side an own goal counts for is the one given, so the score goes up for it as for any goal.
+            if event.side == "home":
+                home_goals += 1
+            else:
+                away_goals += 1
+        sentences.append(_said_event(event, match))
+        scores.append(f" {match.home} {home_goals}, {match.away} {away_goals}." if scoring else "")
+    if (home_goals, away_goals) != (match.home_score, match.away_score):
+        return sentences
+    return [sentence + score for sentence, score in zip(sentences, scores)]
+
+
+def _surname(player: str) -> str:
+    """A player's name for a round-up, without the first of his names where he has more than one: "Kane" for "Harry Kane"."""
+    words = player.split()
+    return " ".join(words[1:]) if len(words) > 1 else player
+
+
+def _goals_and_cards(match: Match) -> str:
+    """
+    Says a match's goals and red cards in a few words, for a round-up where each match is a line.
+
+    Args:
+        match: The match.
+
+    Returns:
+        e.g. "Goals: Kane 45' (pen), Konsa 53', White 57' for England; Oyarzabal 65' (pen), Williams 75' for Spain.
+        Red card: Anderson (England) 63'." The sides come in the order of their first goal, each goal a surname
+        and a minute, "(pen)" for a penalty and "(og)" for an own goal, which is listed under the side it counts for.
+        With no player named, only the minute is said. A penalty missed is no goal and isn't said. "" for a
+        match which hasn't started, and for one with neither a goal nor a red card.
+    """
+    if not _has_started(match):
+        return ""
+    goals: Dict[str, List[str]] = {}
+    cards: List[str] = []
+    for event in match.events:
+        if event.kind in _SCORING:
+            scorer = f"{_surname(event.player)} {event.minute}" if event.player else event.minute
+            mark = {"penalty": " (pen)", "own_goal": " (og)"}.get(event.kind, "")
+            goals.setdefault(event.side, []).append(scorer + mark)
+        elif event.kind == "red_card":
+            team = _side_name(match, event.side)
+            cards.append(f"{_surname(event.player)} ({team}) {event.minute}" if event.player else f"{team} {event.minute}")
+    parts = []
+    if goals:
+        parts.append("Goals: " + "; ".join(f"{', '.join(scored)} for {_side_name(match, side)}"
+                                           for side, scored in goals.items()) + ".")
+    if cards:
+        parts.append(("Red card: " if len(cards) == 1 else "Red cards: ") + ", ".join(cards) + ".")
+    return " ".join(parts)
+
+
+def _round_up_line(match: Match, now: datetime) -> str:
+    """
+    Says a match for a round-up: as _asked_line says it, with its goals and red cards after it on the same line.
+
+    Args:
+        match: The match.
+        now: The current time, aware and local.
+
+    Returns:
+        The line, which has nothing after the match for one with no goals or red cards, or not started.
+
+    Raises:
+        KeyError: If the odds of the match lack a chance.
+        TypeError: If any of them isn't a whole number.
+    """
+    line = _asked_line(match, now)
+    goals = _goals_and_cards(match)
+    return f"{line} {goals}" if goals else line
+
+
 def _with_lag(lines: List[str], matches: Sequence[Match]) -> List[str]:
     """Puts LAG as the last line if any of the matches is in play, as it is for no other answer."""
     return lines + [LAG] if any(_in_play(match) for match in matches) else lines
@@ -381,7 +521,8 @@ def said_competition(answer: Dict, now: datetime) -> str:
 
     Returns:
         A line naming the round of a cup if there is one; then, with matches, each on its own
-        line, the days with matches (all of them, even where some matches were left out), that
+        line - with its goals and red cards after it, once it has started (see _goals_and_cards) -
+        the days with matches (all of them, even where some matches were left out), that
         only some of the matches are listed if Home Assistant trimmed them, and LAG if a match
         is in play. With none, "No UEFA Champions League matches in those days."
 
@@ -402,7 +543,7 @@ def said_competition(answer: Dict, now: datetime) -> str:
         lines.append(f"{_the(name, capital=True)} is at the {stage}.")
     if not matches:
         return "\n".join(lines + [f"No {name} matches in those days."])
-    lines += [_asked_line(match, now) for match in matches]
+    lines += [_round_up_line(match, now) for match in matches]
     today = now.astimezone().date()
     days = [spoken_day(datetime.strptime(day, "%Y%m%d").date(), today) for day in _field(answer, "match_days", list, [])]
     if days:
@@ -651,6 +792,62 @@ def said_lineups(answer: Dict, now: datetime) -> str:
         missing = match.away if listed[0][0] else match.home
         lines.append(f"{_possessive(missing)} line-up isn't {'out yet' if waiting else 'listed'}.")
     return "\n".join(_with_lag(lines, [match]))
+
+
+def _said_note(found: Dict) -> str:
+    """
+    Says one of ESPN's notes on a match, as ESPN wrote it.
+
+    Args:
+        found: One of an answer's "notes": its minute and text.
+
+    Returns:
+        e.g. "Note at 41': Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area."
+
+    Raises:
+        KeyError: If the note lacks its minute or text.
+        TypeError: If it isn't a dict, or its minute or text isn't text.
+        ValueError: If its minute or text is empty.
+    """
+    _dict(found, "a note")
+    minute, text = _field(found, "minute", str), _field(found, "text", str)
+    if not minute or not text:
+        raise ValueError(f"a note needs a minute and a text, not {found!r}")
+    return f"Note at {minute}: {text}"
+
+
+def said_match_report(answer: Dict, now: datetime, on_a_day: bool = False) -> str:
+    """
+    Says what football_ask answered for what happened in a team's match.
+
+    Args:
+        answer: The answer, with the team, its match (with its events) and ESPN's notes on it, as the
+            Contract has them. Its stale, error and unknown are the caller's to deal with before this.
+        now: The current time, aware and local.
+        on_a_day: Whether a day was asked about, which only changes what is said where there is no match,
+            as the answer doesn't carry the day.
+
+    Returns:
+        Lines: the match, as said_match says it; what happened in it (see said_events); each of ESPN's notes
+        ("Note at 41': Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area."); and LAG
+        as the last line if the match is in play. With no match, only that none is listed for the team - on
+        that day, if one was asked about.
+
+    Raises:
+        KeyError: If a key is missing from the answer, the team, the match, an event or a note.
+        TypeError: If a value isn't of the type it should be.
+        ValueError: If the match, an event or a note is of the wrong shape.
+    """
+    _dict(answer, "an answer")
+    team = _field(answer, "team", dict)
+    name = _field(team, "full_name", str, None) or _field(team, "name", str)
+    # The notes are read before the match is looked for, so that ones of the wrong shape are refused either way.
+    notes = [_said_note(note) for note in _field(answer, "notes", list, [])]
+    found = _field(answer, "match", dict, None)
+    if found is None:
+        return f"No match is listed for {name}{' on that day' if on_a_day else ''}."
+    match = Match.from_home(found)
+    return "\n".join(_with_lag([said_match(match, now)] + said_events(match) + notes, [match]))
 
 
 def _asked_days(given) -> int:

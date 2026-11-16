@@ -8,7 +8,7 @@ import pytest
 import requests
 
 from voice_assistant.football import (
-    BOX_HOLDS, LOOK_TIMEOUT, NOT_SET_UP, WAIT_FOR_SENSOR, Football, FootballUnavailable, Match)
+    BOX_HOLDS, LOOK_TIMEOUT, NOT_SET_UP, WAIT_FOR_SENSOR, Football, FootballUnavailable, Match, MatchEvent)
 from voice_assistant.home_assistant import FOOTBALL_BOX, FOOTBALL_TEAMS, REQUEST_TIMEOUT
 
 # An instant well away from any change of clock, so that a test passes in whichever time zone it runs.
@@ -373,6 +373,55 @@ def test_a_match_with_nothing_more_to_say_has_nothing_more():
     match = Match.from_home(_found_match())
     assert (match.phase, match.clock, match.home_score, match.away_score) == (None, "", None, None)
     assert (match.winner, match.shootout, match.extra_time, match.venue, match.odds) == (None, None, False, None, None)
+
+
+def test_a_match_has_its_events_in_the_order_they_happened():
+    match = Match.from_home(_found_match(state="post", home_score=1, away_score=2, events=[
+        {"minute": "45'", "kind": "penalty", "side": "away", "player": "Harry Kane"},
+        {"minute": "63'", "kind": "red_card", "side": "away"},
+        {"minute": "90'+3'", "kind": "own_goal", "side": "home", "player": None},
+    ]))
+    assert match.events == (
+        MatchEvent("45'", "penalty", "away", "Harry Kane"),
+        MatchEvent("63'", "red_card", "away", None),
+        MatchEvent("90'+3'", "own_goal", "home", None),
+    )
+
+
+@pytest.mark.parametrize("kind", ["goal", "penalty", "own_goal", "penalty_missed", "red_card"])
+def test_each_kind_of_event_the_contract_has_is_read(kind):
+    match = Match.from_home(_found_match(events=[{"minute": "12'", "kind": kind, "side": "home", "player": "Harry Kane"}]))
+    assert match.events == (MatchEvent("12'", kind, "home", "Harry Kane"),)
+
+
+@pytest.mark.parametrize("events", [None, []])
+def test_a_match_with_no_events_has_none(events):
+    assert Match.from_home(_found_match(events=events)).events == ()
+    assert Match.from_home(_found_match()).events == ()
+
+
+@pytest.mark.parametrize("events", [
+    "goal", {"minute": "12'", "kind": "goal", "side": "home"}, ["goal"],
+    [{"kind": "goal", "side": "home"}], [{"minute": "12'", "side": "home"}], [{"minute": "12'", "kind": "goal"}],
+    [{"minute": 12, "kind": "goal", "side": "home"}], [{"minute": "", "kind": "goal", "side": "home"}],
+    [{"minute": "12'", "kind": None, "side": "home"}], [{"minute": "12'", "kind": "goal", "side": 1}],
+    [{"minute": "12'", "kind": "goal", "side": "home", "player": 9}],
+    [{"minute": "12'", "kind": "goal", "side": "home", "player": ["Harry Kane"]}],
+], ids=["not a list", "a dict", "an event not a dict", "no minute", "no kind", "no side", "minute not text",
+        "minute empty", "kind not text", "side not text", "player a number", "player a list"])
+def test_events_of_the_wrong_shape_are_refused(events):
+    with pytest.raises((KeyError, TypeError, ValueError)):
+        Match.from_home(_found_match(events=events))
+
+
+@pytest.mark.parametrize("change", [
+    {"kind": "yellow_card"}, {"kind": "Goal"}, {"kind": "penalty_saved"}, {"kind": ""},
+    {"side": "both"}, {"side": "Home"}, {"side": "England"}, {"side": ""},
+], ids=lambda change: next(iter(change)) + "=" + repr(next(iter(change.values()))))
+def test_an_event_of_a_kind_or_side_outside_the_contract_is_refused(change):
+    event = {"minute": "12'", "kind": "goal", "side": "home", **change}
+    with pytest.raises(ValueError):
+        Match.from_home(_found_match(events=[event]))
 
 
 def test_the_kick_off_is_the_same_instant_whichever_way_home_assistant_writes_it():
