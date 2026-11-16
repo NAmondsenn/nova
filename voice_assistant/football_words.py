@@ -1080,9 +1080,10 @@ def _said_answer(what: str, answer: Dict, now: datetime, on_a_day: bool = False,
 
     Raises:
         KeyError: If a key is missing from the answer, a match or a table row - or, for a match asked
-            against another team, its seasons.
+            against another team, its seasons or the other team found.
         TypeError: If a value isn't of the type it should be.
-        ValueError: If a match or a day is of the wrong shape, or seasons aren't from 1 to 6.
+        ValueError: If a match or a day is of the wrong shape, seasons aren't from 1 to 6, or the other
+            team found has no name.
     """
     unknown = answer.get("unknown")
     if unknown:
