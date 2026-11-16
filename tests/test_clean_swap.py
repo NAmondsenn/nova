@@ -984,6 +984,19 @@ def test_a_clean_copy_found_without_an_admin_profile_is_left_in_the_library(make
     assert store.swaps() == [] and store.listed("couldnt")[0]["reason"] == "SoulSync admin profile isn't set up"
 
 
+def test_swaps_left_for_later_are_logged_once_until_that_changes(make_swapper, store, music, tmp_path, caplog):
+    # Resumed as each download starts, so the same reason isn't logged every time.
+    caplog.set_level(logging.INFO)
+    _stopped_while_watching(make_swapper)
+    swapper = make_swapper(clock=FakeTime(T0 + 5000), folder=str(tmp_path / "not-mounted"))
+
+    swapper.resume()
+    swapper.resume()
+
+    assert caplog.text.count("1 swap left for later, as the music folder doesn't exist") == 1
+    assert "next start" not in caplog.text
+
+
 def test_a_swap_carried_on_part_way_without_an_admin_profile_is_put_back(make_swapper, music, store):
     # Set aside, but not yet forgotten: that needs the admin.
     put(music, f"{HELD}/{ENDLESS_REL}", read(music, ENDLESS_REL))

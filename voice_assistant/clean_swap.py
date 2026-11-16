@@ -336,6 +336,8 @@ class Swapper:
         # swaps on a thread of its own as Nova starts, when a download's may be under way.
         self._running: Set[str] = set()
         self._running_lock = threading.Lock()
+        # What was last logged of the swaps left for later, so it isn't logged again and again.
+        self._left_for_later: Optional[str] = None
 
     def stop(self):
         """Ends every swap at its next step, as Nova stops. Each is saved, to be carried on at the next start."""
@@ -416,9 +418,13 @@ class Swapper:
         folder = self._folder()
         problem = folder.usable() if folder is not None else "no music folder is set"
         if problem:
-            logger.warning(f"{len(saved)} swap{'' if len(saved) == 1 else 's'} left for Nova's next start, "
-                           f"as {problem}")
+            # Once until the reason changes: resume runs as each download starts.
+            left = f"{len(saved)} swap{'' if len(saved) == 1 else 's'} left for later, as {problem}"
+            if left != self._left_for_later:
+                logger.warning(left)
+                self._left_for_later = left
             return
+        self._left_for_later = None
         logger.info(f"Carrying on {len(saved)} swap{'' if len(saved) == 1 else 's'} Nova was part way through")
         for swap in saved:
             if self._stopping.is_set():
