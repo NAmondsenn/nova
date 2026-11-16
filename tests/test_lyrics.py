@@ -79,7 +79,8 @@ def test_navidromes_lyrics_come_first():
 
 
 def test_lrclib_is_searched_by_title_and_first_artist_when_navidrome_has_none():
-    lrclib = FakeLrclib(_found({"duration": 150.2, "plainLyrics": "shit"}))
+    lrclib = FakeLrclib(_found({"duration": 150.2, "plainLyrics": "shit", "trackName": "SICKO MODE",
+                                "artistName": "Travis Scott"}))
     library = FakeLibrary(None)
     song = {**ENDLESS, "title": "SICKO MODE", "artist": "Travis Scott • Drake",
             "artists": [{"id": "r2", "name": "Travis Scott"}, {"id": "r3", "name": "Drake"}]}
@@ -104,6 +105,29 @@ def test_the_lrclib_result_nearest_the_songs_length_is_taken():
     lrclib = FakeLrclib(_found({"duration": 158, "plainLyrics": "live"}, {"duration": 147, "plainLyrics": "album"},
                                {"duration": 120, "plainLyrics": "sped up"}))
     assert Lyrics(FakeLibrary(None), session=lrclib).for_song(ENDLESS) == ("album", "lrclib")
+
+
+def test_an_lrclib_result_with_another_title_isnt_taken_however_near_its_length():
+    lrclib = FakeLrclib(_found({"duration": 150, "plainLyrics": "summer words", "trackName": "Endless Summer"},
+                               {"duration": 156, "plainLyrics": "endless words"}))
+    assert Lyrics(FakeLibrary(None), session=lrclib).for_song(ENDLESS) == ("endless words", "lrclib")
+
+
+def test_an_lrclib_title_matches_without_its_brackets():
+    lrclib = FakeLrclib(_found({"duration": 240, "plainLyrics": "words", "trackName": "Gangsta's Paradise (feat. L.V.)",
+                                "artistName": "Coolio"}))
+    song = {"id": "g1", "title": "Gangsta’s Paradise [Remastered]", "artist": "Coolio", "duration": 241}
+    assert Lyrics(FakeLibrary(None), session=lrclib).for_song(song) == ("words", "lrclib")
+
+
+def test_an_lrclib_result_by_another_artist_isnt_taken():
+    lrclib = FakeLrclib(_found({"duration": 150, "plainLyrics": "a cover's words", "artistName": "Someone Else"}))
+    assert Lyrics(FakeLibrary(None), session=lrclib).for_song(ENDLESS) == (None, "none")
+
+
+def test_an_lrclib_artist_with_others_named_is_still_the_artist():
+    lrclib = FakeLrclib(_found({"duration": 150, "plainLyrics": "words", "artistName": "Gunna & Lil Baby"}))
+    assert Lyrics(FakeLibrary(None), session=lrclib).for_song(ENDLESS) == ("words", "lrclib")
 
 
 def test_an_lrclib_result_without_plain_lyrics_isnt_taken():

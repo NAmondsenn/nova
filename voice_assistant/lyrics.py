@@ -5,16 +5,18 @@ which it reads from the .lrc or .txt SoulSync saves beside a song, else LRCLIB's
 public lyrics library, searched by title and artist.
 
 The lyrics only say how many swears a song has, so a wrong song's lyrics would judge it
-wrongly: LRCLIB's are only taken from a song within LRCLIB_WINDOW seconds of its length.
+wrongly: LRCLIB's are only taken from a result with the song's title and artist, within
+LRCLIB_WINDOW seconds of its length.
 """
 
 import logging
+import re
 from typing import Dict, Optional, Tuple
 
 import requests
 
 from voice_assistant import network
-from voice_assistant.navidrome import NavidromeLibrary
+from voice_assistant.navidrome import BRACKETED, NavidromeLibrary, normalise
 
 # Logger setup
 logger = logging.getLogger(__name__)
@@ -28,6 +30,9 @@ LRCLIB_TIMEOUT = 15
 # same recording. Album and single versions differ by a second or two; a radio edit or a
 # live take is usually further off, and has other words.
 LRCLIB_WINDOW = 10
+
+# Apostrophes, straight and curly, as tags and LRCLIB each have them.
+APOSTROPHES = re.compile("['\u2019]")
 
 # LRCLIB asks every app to name itself and where it's from.
 USER_AGENT = "Nova (https://github.com/NAmondsenn/nova)"
@@ -71,20 +76,21 @@ class Lyrics:
 
     def _from_lrclib(self, song: Dict) -> Optional[str]:
         """
-        LRCLIB's lyrics for the result nearest the song's length, within LRCLIB_WINDOW
-        seconds - None where there's none, or LRCLIB couldn't be asked.
+        LRCLIB's lyrics for the result with the song's title and artist nearest its
+        length, within LRCLIB_WINDOW seconds - None where there's none, or LRCLIB
+        couldn't be asked.
         """
         length = song.get("duration")
         if not _is_number(length) or not network.online():
             return None
         # Its first artist alone: Navidrome joins several into one name - "Travis Scott •
         # Drake" - which LRCLIB has under "Travis Scott" alone.
-        artists = song.get("artists") or []
-        artist = (artists[0].get("name") if isinstance(artists[0], dict) else None) if artists else None
+        names = [entry.get("name") for entry in song.get("artists") or []
+                 if isinstance(entry, dict) and entry.get("name")]
+        artist = (names + [song.get("artist") or ""])[0]
+        title = song.get("title") or ""
         try:
-            response = self._session.get(LRCLIB_SEARCH,
-                                         params={"track_name": song.get("title") or "",
-                                                 "artist_name": artist or song.get("artist") or ""},
+            response = self._session.get(LRCLIB_SEARCH, params={"track_name": title, "artist_name": artist},
                                          headers={"User-Agent": USER_AGENT}, timeout=LRCLIB_TIMEOUT)
             response.raise_for_status()
             results = response.json()
@@ -94,12 +100,36 @@ class Lyrics:
         if not isinstance(results, list):
             return None
         near = [result for result in results
-                if isinstance(result, dict) and _is_number(result.get("duration"))
-                and abs(result["duration"] - length) <= LRCLIB_WINDOW
+                if isinstance(result, dict) and _same_song(result, title, artist)
+                and _is_number(result.get("duration")) and abs(result["duration"] - length) <= LRCLIB_WINDOW
                 and isinstance(result.get("plainLyrics"), str) and result["plainLyrics"].strip()]
         if not near:
             return None
         return min(near, key=lambda result: abs(result["duration"] - length))["plainLyrics"]
+
+
+def _same_song(result: Dict, title: str, artist: str) -> bool:
+    """
+    Whether an LRCLIB result is the song asked for by its names: the same title, or the
+    same once bracketed parts are off both - "Gangsta's Paradise (feat. L.V.)" for
+    "Gangsta's Paradise" - and an artist naming the song's first artist, as "Gunna & Lil
+    Baby" names "Gunna". LRCLIB's search also finds "Endless Summer" for "Endless".
+    """
+    found = result.get("trackName")
+    by = result.get("artistName")
+    if not isinstance(found, str) or not isinstance(by, str):
+        return False
+    same_title = (_plain(found) == _plain(title)
+                  or _plain(BRACKETED.sub(" ", found)) == _plain(BRACKETED.sub(" ", title)))
+    return same_title and _plain(artist) in _plain(by)
+
+
+def _plain(name: str) -> str:
+    """
+    A name as normalise has it, with apostrophes dropped first: normalise drops a curly
+    one but spaces a straight one, so "Gangsta’s" and "Gangsta's" would differ.
+    """
+    return normalise(APOSTROPHES.sub("", name))
 
 
 def _is_number(value) -> bool:

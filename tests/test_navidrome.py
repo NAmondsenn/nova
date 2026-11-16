@@ -979,7 +979,7 @@ def _lyrics_answer(*entries):
 def test_a_songs_lyrics_are_its_lines(make_library):
     library = make_library({"getLyricsBySongId": _lyrics_answer(["Oh my God", "", "what the fuck"])})
     assert library.lyrics("a1") == "Oh my God\n\nwhat the fuck"
-    assert library._session.requests[0] == ("getLyricsBySongId", library._session.requests[0][1])
+    assert library._session.requests[0][0] == "getLyricsBySongId"
     assert library._session.requests[0][1]["id"] == "a1"
 
 
@@ -997,6 +997,29 @@ def test_only_one_copy_of_a_songs_lyrics_is_read(make_library):
 ])
 def test_a_song_without_lyrics_has_none(make_library, answer):
     assert make_library({"getLyricsBySongId": answer}).lyrics("a1") is None
+
+
+@pytest.mark.parametrize("answer", [
+    {"lyricsList": ["not", "a", "dict"]},
+    {"lyricsList": {"structuredLyrics": {"line": []}}},
+    {"lyricsList": {"structuredLyrics": ["not a dict", {"line": "not a list"}]}},
+    {"lyricsList": {"structuredLyrics": [{"line": ["not a dict", {"value": 7}]}]}},
+])
+def test_a_malformed_lyrics_answer_is_no_lyrics(make_library, answer):
+    assert make_library({"getLyricsBySongId": answer}).lyrics("a1") is None
+
+
+def test_a_malformed_lyrics_answer_keeps_the_lines_it_can_read(make_library):
+    answer = {"lyricsList": {"structuredLyrics": [{"line": ["not a dict", {"value": "what the fuck"}]}]}}
+    assert make_library({"getLyricsBySongId": answer}).lyrics("a1") == "what the fuck"
+
+
+def test_a_wrong_password_asking_for_lyrics_is_an_error_not_no_lyrics(make_library):
+    refused = {"status": "failed", "error": {"code": WRONG_LOGIN, "message": "Wrong username or password"}}
+    library = make_library({"getLyricsBySongId": refused})
+    with pytest.raises(NavidromeError) as raised:
+        library.lyrics("a1")
+    assert raised.value.code == WRONG_LOGIN and "secret" not in str(raised.value)
 
 
 def test_lyrics_which_cant_be_asked_for_are_an_error_naming_no_token(make_library):

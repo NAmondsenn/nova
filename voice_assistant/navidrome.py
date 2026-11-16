@@ -543,20 +543,27 @@ class NavidromeLibrary:
         Returns:
             The lines of the first copy with any words, joined with newlines - one copy
             only, as a .lrc and a .txt beside the same song would count every swear
-            twice. None for a song with none, or one Navidrome refuses to say.
+            twice. None for a song with none, or one Navidrome refuses to say - "Song
+            not found", say.
 
         Raises:
-            NavidromeError: If Navidrome couldn't be asked. Its message never holds the
-                address or token.
+            NavidromeError: If Navidrome couldn't be asked, or refused the password. Its
+                message never holds the address or token.
         """
         try:
             body = self._call("getLyricsBySongId", id=song_id)
-        except NavidromeError:
-            return None
-        except (requests.RequestException, ValueError) as e:
+        except (requests.RequestException, NavidromeError, ValueError) as e:
+            # A wrong password isn't a song without lyrics: LRCLIB's would be taken
+            # instead, and the error said nowhere.
+            if isinstance(e, NavidromeError) and e.code != WRONG_LOGIN:
+                return None
             raise self._cant_ask("the lyrics", e) from None
-        for entry in (body.get("lyricsList") or {}).get("structuredLyrics") or []:
-            lines = [line.get("value") or "" for line in entry.get("line") or []]
+        found = body.get("lyricsList")
+        entries = found.get("structuredLyrics") if isinstance(found, dict) else None
+        for entry in entries if isinstance(entries, list) else []:
+            lines = entry.get("line") if isinstance(entry, dict) else None
+            lines = [line["value"] for line in (lines if isinstance(lines, list) else [])
+                     if isinstance(line, dict) and isinstance(line.get("value"), str)]
             if any(line.strip() for line in lines):
                 return "\n".join(lines)
         return None
