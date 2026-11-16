@@ -880,6 +880,35 @@ def test_a_songs_file_signs_in_again_when_the_token_has_run_out():
                                                                              "Bearer tok-2"]
 
 
+def test_two_songs_asked_for_at_once_with_a_stale_token_sign_in_again_once(monkeypatch):
+    # Listening and a swap share one library; Navidrome limits how often it can be signed in to.
+    native = FakeNative({"a1": _song_answer("A/a.mp3"), "b2": _song_answer("B/b.mp3")})
+    library = _native_library(native)
+    library.song_file("a1")
+    native.token = "tok-gone"
+    # Both threads are refused the stale token before either signs in again.
+    both_refused = threading.Barrier(2)
+    get = native.get
+
+    def get_together(url, headers=None, timeout=None, params=None):
+        answer = get(url, headers=headers, timeout=timeout, params=params)
+        if answer.status_code == 401:
+            both_refused.wait(5)
+        return answer
+
+    native.get = get_together
+    found = []
+    threads = [threading.Thread(target=lambda song=song: found.append(library.song_file(song)["path"]))
+               for song in ("a1", "b2")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+
+    assert sorted(found) == ["A/a.mp3", "B/b.mp3"]
+    assert native.signed_in == 2
+
+
 def test_a_songs_id_cant_reach_another_address():
     native = FakeNative({"..%2Fauth%2Flogin": _song_answer("A/a.mp3")})
     assert _native_library(native).song_file("../auth/login")["path"] == "A/a.mp3"

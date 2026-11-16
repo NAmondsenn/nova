@@ -277,8 +277,11 @@ class NavidromeLibrary:
         self.username = username
         self._password = password
         self._session = requests.Session()
-        # The native API's token, from signing in to it once - see song_file.
+        # The native API's token, from signing in to it once - see song_file - and the lock
+        # which lets only one thread sign in for a new one: listening and swapping share a
+        # library, and Navidrome limits how often it can be signed in to.
         self._native_token: Optional[str] = None
+        self._native_lock = threading.Lock()
 
     # Talking to Navidrome
 
@@ -456,6 +459,23 @@ class NavidromeLibrary:
         self._native_token = token
         return token
 
+    def _native_token_for(self, refused: Optional[str]) -> str:
+        """
+        The native API's token to ask with: the one kept, unless it's the one just refused,
+        when it's signed in for a new one - unless another thread already has.
+
+        Args:
+            refused: The token Navidrome just refused, or None.
+
+        Raises:
+            As _native_sign_in.
+        """
+        with self._native_lock:
+            if self._native_token and self._native_token != refused:
+                return self._native_token
+            self._native_token = None
+            return self._native_sign_in()
+
     def song_file(self, song_id: str) -> Dict:
         """
         Where a song's file really is, from Navidrome's own API. The Subsonic path is
@@ -485,13 +505,14 @@ class NavidromeLibrary:
             address = f"{self.url}/api/song/{quote(song_id, safe='')}"
             # A 401 is a token Navidrome no longer takes, so it's signed in again - once,
             # so a token it won't take even fresh is an error rather than a loop.
-            for fresh in (False, True):
-                token = self._native_sign_in() if fresh or not self._native_token else self._native_token
+            refused = None
+            for _ in range(2):
+                token = self._native_token_for(refused)
                 response = self._session.get(address, headers={"x-nd-authorization": f"Bearer {token}"},
                                              timeout=REQUEST_TIMEOUT)
                 if response.status_code != 401:
                     break
-                self._native_token = None
+                refused = token
             response.raise_for_status()
             song = response.json()
         except (requests.RequestException, NavidromeError, ValueError) as e:
