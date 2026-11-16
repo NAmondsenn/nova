@@ -210,16 +210,16 @@ def test_results(london):
     shootout = {"state": "post", "kickoff": "2026-11-10T19:00:00+00:00", "home": "Stevenage", "away": "Fulham U21",
                 "home_score": 2, "away_score": 2, "league": "EFL Trophy"}
     assert said_match(_m(**shootout, winner="home", shootout=[4, 3]), AT) == (
-        "Stevenage 2, Fulham U21 2, EFL Trophy, on Tuesday the 10th of November. Stevenage won 4-3 on penalties.")
+        "Stevenage 2, Fulham U21 2, EFL Trophy, on Tuesday the 10th of November. Stevenage won on penalties, 4 to 3.")
     assert said_match(_m(**shootout, winner="away", shootout=[3, 4]), AT) == (
-        "Stevenage 2, Fulham U21 2, EFL Trophy, on Tuesday the 10th of November. Fulham U21 won 4-3 on penalties.")
+        "Stevenage 2, Fulham U21 2, EFL Trophy, on Tuesday the 10th of November. Fulham U21 won on penalties, 4 to 3.")
     extra = {"state": "post", "kickoff": "2026-11-10T19:00:00+00:00", "home": "Plymouth Argyle", "away": "Stevenage",
              "home_score": 3, "away_score": 2, "league": "FA Cup", "extra_time": True}
     assert said_match(_m(**extra, winner="home"), AT) == (
         "Plymouth Argyle 3, Stevenage 2, FA Cup, on Tuesday the 10th of November, after extra time. Plymouth Argyle won.")
     # Extra time and then penalties are both said.
     assert said_match(_m(**{**extra, "home_score": 2}, winner="away", shootout=[2, 4]), AT) == (
-        "Plymouth Argyle 2, Stevenage 2, FA Cup, on Tuesday the 10th of November, after extra time. Stevenage won 4-2 on penalties.")
+        "Plymouth Argyle 2, Stevenage 2, FA Cup, on Tuesday the 10th of November, after extra time. Stevenage won on penalties, 4 to 2.")
 
 
 def test_a_result_is_only_said_from_what_home_assistant_gave(london):
@@ -403,7 +403,7 @@ def test_a_team_with_results_but_no_fixtures_says_both(london):
                        home_score=2, away_score=2, league="EFL Trophy", winner="home", shootout=[4, 3])
     assert said_followed(_reading(_team("395", "Stevenage", last=[cup])), AT) == (
         "Stevenage: no fixtures listed. "
-        "Last: Stevenage 2, Fulham U21 2, EFL Trophy, on Tuesday the 10th of November. Stevenage won 4-3 on penalties.")
+        "Last: Stevenage 2, Fulham U21 2, EFL Trophy, on Tuesday the 10th of November. Stevenage won on penalties, 4 to 3.")
 
 
 def test_the_overview_with_no_teams_and_with_some_left_out(london):
@@ -971,6 +971,78 @@ def test_a_match_report_of_the_wrong_shape_is_refused(london, changes):
             said_match_report(_match_answer(**changes), _after_the_match())
 
 
+@pytest.mark.parametrize("text, said", [
+    ("VAR Decision: No Goal France 1-0 Türkiye.", "VAR Decision: No Goal France 1 to 0 Türkiye."),
+    ("VAR Decision: No Goal France 2 - 1 Türkiye.", "VAR Decision: No Goal France 2 to 1 Türkiye."),
+    ("VAR Decision: No Goal France 1\u20130 Türkiye.", "VAR Decision: No Goal France 1 to 0 Türkiye."),
+    ("Own goal by Rodri (Spain). Spain 0-1 England, then 1-1.", "Own goal by Rodri (Spain). Spain 0 to 1 England, then 1 to 1."),
+    # Only a score between two numbers changes: a dash between words, in a name or after a space is left as it was.
+    ("Second yellow card - a long-range effort hit the post.", "Second yellow card - a long-range effort hit the post."),
+    ("VAR Decision: Goal cancelled - offside, 2-1 stays.", "VAR Decision: Goal cancelled - offside, 2 to 1 stays."),
+    ("Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area.",
+     "Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area."),
+], ids=["a plain dash", "a dash with spaces", "an en dash", "two scores", "dashes which aren't scores", "a score and a spaced dash",
+        "no score"])
+def test_a_score_in_a_note_is_said_with_to_and_nothing_else_in_the_note_changes(london, text, said):
+    answer = _match_answer(match=_found_match(**SPAIN_ENGLAND), notes=[{"minute": "90'+3'", "text": text}])
+    assert said_match_report(answer, _after_the_match()).split("\n")[-1] == f"Note at 90'+3': {said}"
+
+
+# A shoot-out after extra time at 2, 2, as it is won by the home side, by the away side, and with no winner named.
+SHOOTOUTS = [{"winner": "home", "shootout": [4, 3]}, {"winner": "away", "shootout": [3, 4]}, {"winner": None, "shootout": [3, 4]}]
+# What ESPN's notes say of a score, as the VAR ones do.
+SCORE_NOTES = [{"minute": "41'", "text": "VAR Decision: No Goal France 1-0 Türkiye."},
+               {"minute": "88'", "text": "Penalty saved. Spain 2 - 2 England, after 2\u20132 at half time."}]
+
+
+def _level_after_extra_time(**changes):
+    """Spain 2, England 2 after extra time, with the goals which make it so and a red card, as the Contract has them."""
+    return _found_match(**{**SPAIN_ENGLAND, "home_score": 2, "away_score": 2, "extra_time": True, "events": [
+        {"minute": "12'", "kind": "goal", "side": "home", "player": "Nico Williams"},
+        {"minute": "45'", "kind": "penalty", "side": "away", "player": "Harry Kane"},
+        {"minute": "63'", "kind": "red_card", "side": "away", "player": "Elliot Anderson"},
+        {"minute": "70'", "kind": "own_goal", "side": "away", "player": "Dani Carvajal"},
+        {"minute": "90'+3'", "kind": "penalty_missed", "side": "home", "player": "Mikel Oyarzabal"},
+        {"minute": "118'", "kind": "goal", "side": "home", "player": "Lamine Yamal"},
+    ], **changes})
+
+
+def test_no_sentence_nova_builds_has_a_score_as_digits_joined_by_a_dash(london):
+    AT = _after_the_match()
+    # A formation is no score, and is left out of the line-ups: round two says it as it is.
+    side = {"team": "Spain", "starters": ["Simón", "Carvajal"], "bench": ["Remiro"]}
+    spain = {"id": "164", "name": "Spain", "followed": False}
+    row = {"league": "UEFA Nations League", "group": "", "rank": 1, "of": 4, "played": 3, "won": 1, "drawn": 1, "lost": 1,
+           "gd": -2, "points": 4}
+    group = {"name": "UEFA Nations League", "rows": [{"rank": 1, "team": "Spain", "played": 3, "won": 1, "drawn": 1, "lost": 1,
+                                                        "gd": -2, "points": 4}]}
+    said = []
+    for shootout in SHOOTOUTS:
+        found = _level_after_extra_time(**shootout)
+        match = Match.from_home(found)
+        team = _team("164", "Spain", now=found, next=[found], last=[found])
+        said += [said_match(match, AT), *said_events(match),
+                 said_followed(_reading(team), AT),
+                 said_team(_team_answer(now=found, next=[found], last=[found], tables=[row]), AT),
+                 said_competition(_competition_answer([found], days=["20261115"]), AT),
+                 said_left(_left_answer(matches=[found], teams=["Spain", "England"]), AT),
+                 said_lineups(_lineups_answer(team=spain, match=found, sides=[side]), AT),
+                 said_match_report(_match_answer(match=found, notes=SCORE_NOTES), AT),
+                 said_table({"competition": {"name": "UEFA Nations League"}, "groups": [group]})]
+        # And through describe, which says each of them as Claude is given it.
+        for given, answer in (({"team": "Spain"}, _team_answer(now=found, last=[found])),
+                              ({"team": "Spain", "about": "lineups"}, _lineups_answer(team=spain, match=found, sides=[side])),
+                              ({"team": "Spain", "about": "match"}, _match_answer(match=found, notes=SCORE_NOTES)),
+                              ({"competition": "UEFA Nations League", "about": "match"}, _competition_answer([found]))):
+            said.append(_said(FakeHome(answer=answer), now=AT, **given)["message"])
+    assert any("France 1 to 0 Türkiye" in words for words in said)
+    assert not [words for words in said if re.search(r"\d\s*[-\u2010-\u2015\u2212]\s*\d", words)]
+    # The shoot-out is said in words, with its winner's penalties first.
+    assert "Spain won on penalties, 4 to 3." in said_match(Match.from_home(_level_after_extra_time(**SHOOTOUTS[0])), AT)
+    assert "England won on penalties, 4 to 3." in said_match(Match.from_home(_level_after_extra_time(**SHOOTOUTS[1])), AT)
+    assert "The penalty shootout finished Spain 3, England 4." in said_match(Match.from_home(_level_after_extra_time(**SHOOTOUTS[2])), AT)
+
+
 class FakeHome:
     """
     Gives the sensor as Home Assistant does and answers football_ask() with what a test sets - or raises
@@ -1131,6 +1203,15 @@ def test_a_team_is_asked_of_home_assistant(london):
     ({"team": "Liverpool", "about": "matches"}, ("team", "Liverpool", "", 1)),
     ({"team": "Liverpool", "about": "left"}, ("team", "Liverpool", "", 1)),
     ({"team": "Liverpool", "about": " Lineups "}, ("lineups", "Liverpool", "", 1)),
+    ({"team": "England", "about": "match"}, ("match", "England", "", 1)),
+    ({"team": "England", "about": " Match ", "date": "2026-11-15"}, ("match", "England", "20261115", 1)),
+    # A team's match is asked of the team whatever competition is given with it, as its line-ups are.
+    ({"team": "England", "competition": "UEFA Nations League", "about": "match"}, ("match", "England", "", 1)),
+    ({"team": "England", "competition": "UEFA Nations League", "about": "match", "date": "2026-11-15"},
+     ("match", "England", "20261115", 1)),
+    # A competition alone is its matches, with their goals, on the day given.
+    ({"competition": "Champions League", "about": "match", "date": "2026-11-15"}, ("competition", "Champions League", "20261115", 1)),
+    ({"competition": "Champions League", "about": "match"}, ("competition", "Champions League", "", 1)),
     ({"competition": "Premier League", "about": " Table "}, ("table", "Premier League", "", 1)),
     ({"competition": "Premier League", "about": "standings"}, ("competition", "Premier League", "", 1)),
     ({"team": "  Liverpool ", "competition": "  "}, ("team", "Liverpool", "", 1)),
@@ -1148,6 +1229,7 @@ def test_each_question_goes_to_the_right_ask(london, given, asked):
                    {"rank": 1, "team": "Arsenal", "played": 10, "won": 8, "drawn": 1, "lost": 1, "gd": 14, "points": 25}]}]},
      lambda answer, now: said_table(answer), "1. Arsenal, played 10, 25 points"),
     ("left", _left_answer(teams=["Arsenal", "Liverpool"]), said_left, "Still in the Carabao Cup: Arsenal and Liverpool."),
+    ("match", _competition_answer([_found_match(**SPAIN_ENGLAND)]), said_competition, "Goals: Harry Kane 45' (pen)"),
 ])
 def test_each_answer_is_said_by_its_own_words(london, about, answer, said_by, words):
     AT = datetime(2026, 11, 13, 12, 0).astimezone()
@@ -1181,11 +1263,12 @@ def test_names_espn_doesnt_know_are_all_said_and_no_words_are_built_for_them(lon
     def refused(*_):
         raise AssertionError("said_* was called for an answer which found nothing")
 
-    for name in ("said_team", "said_competition", "said_table", "said_left", "said_lineups"):
+    for name in ("said_team", "said_competition", "said_table", "said_left", "said_lineups", "said_match_report"):
         monkeypatch.setattr(football_words, name, refused)
     answer = {"unknown": ["Arsnal", "Chelsee"], "stale": False}
     for given in ({"team": "Arsnal"}, {"competition": "x"}, {"competition": "x", "about": "table"},
-                  {"competition": "x", "about": "left"}, {"team": "Arsnal", "about": "lineups"}):
+                  {"competition": "x", "about": "left"}, {"team": "Arsnal", "about": "lineups"},
+                  {"team": "Arsnal", "about": "match"}, {"competition": "x", "about": "match"}):
         assert _said(FakeHome(answer=answer), **given) == {
             "success": True,
             "message": "ESPN, where Home Assistant's football comes from, found nothing called Arsnal and Chelsee."}
@@ -1204,13 +1287,15 @@ def test_an_old_answer_is_old_even_if_it_found_nothing(london):
     ({"competition": "Premier League"}, _competition_answer([_found_match()], days=["next week"])),
     ({"competition": "Premier League"}, _competition_answer([_found_match(events=[{"minute": "45'", "kind": "yellow_card", "side": "home"}])])),
     ({"competition": "Premier League"}, _competition_answer([_found_match(events="goal")])),
+    ({"team": "England", "about": "match"}, _match_answer(notes="Penalty conceded")),
+    ({"team": "England", "about": "match"}, _match_answer(match=_found_match(events="goal"))),
     ({"competition": "Premier League", "about": "table"}, {"competition": {"name": "Premier League"}, "stale": False}),
     ({"competition": "Premier League", "about": "left"}, _left_answer(knockout="yes")),
     ({"competition": "Premier League", "about": "left"}, {"stale": False, "unknown": "Arsnal"}),
     ({"competition": "Premier League", "about": "left"}, {"stale": False, "unknown": [4]}),
 ], ids=["no team", "next not a list", "match lacking keys", "odds not numbers", "match state unknown", "day not a day",
-        "event kind unknown", "events not a list", "table with no groups", "knockout not a flag", "unknown not a list",
-        "unknown not names"])
+        "event kind unknown", "events not a list", "match notes not a list", "match events not a list", "table with no groups",
+        "knockout not a flag", "unknown not a list", "unknown not names"])
 def test_an_answer_of_the_wrong_shape_cant_be_got_and_is_logged(london, caplog, given, answer):
     with caplog.at_level(logging.WARNING, logger="voice_assistant.football_words"):
         assert _said(FakeHome(answer=answer), **given) == NOT_GOT
@@ -1471,3 +1556,152 @@ def test_lineups_of_a_team_are_asked_of_it_whatever_competition_is_given(london)
 def test_a_lineups_answer_of_the_wrong_shape_is_refused(london, changes):
     answer = _lineups_answer(**{"match": _found_match(**SUNDAY_AWAY), **changes})
     assert _said(FakeHome(answer=answer), team="Liverpool", about="lineups") == NOT_GOT
+
+
+def test_a_teams_match_is_asked_of_home_assistant_and_said_as_what_happened(london):
+    AT = _after_the_match()
+    answer = _match_answer(match=_found_match(**SPAIN_ENGLAND), notes=[PENALTY_CONCEDED])
+    home = FakeHome(answer=answer)
+    said = describe(_football(home), team="England", about="match", now=AT)
+    assert said == {"success": True, "message": said_match_report(answer, AT)}
+    assert said["message"].split("\n")[1] == "45': a penalty for England, scored by Harry Kane. Spain 0, England 1."
+    assert home.asked == [("match", "England", "", 1)]
+
+
+def test_a_teams_match_on_a_day_is_asked_for_that_day_and_no_match_says_so_of_the_day(london):
+    home = FakeHome(answer=_match_answer())
+    assert _said(home, team="England", about="match", date="2026-11-15") == {
+        "success": True, "message": "No match is listed for England on that day."}
+    assert home.asked == [("match", "England", "20261115", 1)]
+    # With no day asked for, it is only that none is listed; and text which isn't a day is no day, which Home Assistant isn't told of.
+    for given in (None, "Sunday", "15/11/2026"):
+        home = FakeHome(answer=_match_answer())
+        assert _said(home, team="England", about="match", date=given)["message"] == "No match is listed for England."
+        assert home.asked == [("match", "England", "", 1)]
+
+
+@pytest.mark.parametrize("teams", [
+    [_team("395", "Stevenage"), _team("364", "Liverpool", next=[_found_match(kickoff="2026-11-21T15:00:00+00:00")])],
+    [_team("364", "Liverpool", now=_found_match(kickoff="2026-11-14T15:00:00+00:00"))],
+], ids=["no match today", "a match tomorrow"])
+def test_a_match_with_no_team_and_nobody_playing_asks_which_team(london, teams):
+    home = FakeHome(teams)
+    assert _said(home, about="match") == {"success": True, "message": "Name a team for its match."}
+    assert home.asked == []
+
+
+def test_a_match_with_no_team_and_no_team_followed_says_so_as_the_overview_does(london):
+    # Nobody is followed, which is not that none of them is playing.
+    home = FakeHome([])
+    assert _said(home, about="match") == {"success": True, "message": "No teams are followed."}
+    assert home.asked == []
+
+
+@pytest.mark.parametrize("teams, sensor", [
+    ([_team("364", "Liverpool", now=_found_match(**LIVE), stale=True)], {}),
+    ([_team("364", "Liverpool", now=_found_match(**LIVE), stale=True), _team("395", "Stevenage")], {}),
+    ([_team("364", "Liverpool", stale=True), _team("395", "Stevenage", stale=True)], {}),
+    ([_team("364", "Liverpool", now=_found_match(**LIVE)), _team("395", "Stevenage")], {"stale": True}),
+], ids=["a stale team playing", "a stale team playing and a fresh one not", "every team stale",
+        "a stale sensor which marks no team"])
+def test_a_match_with_no_team_cant_say_nobody_is_playing_while_a_team_is_stale(london, caplog, teams, sensor):
+    home = FakeHome(teams, **sensor)
+    with caplog.at_level(logging.WARNING, logger="voice_assistant.football"):
+        assert _said(home, about="match") == NOT_GOT
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]
+    assert home.asked == []
+
+
+def test_a_match_with_no_team_asks_for_a_fresh_team_playing_though_another_is_stale(london):
+    teams = [_team("364", "Liverpool", now=_found_match(**LIVE), stale=True),
+             _team("395", "Stevenage", now=_stevenage_match())]
+    home = FakeHome(teams, answer=_match_answer())
+    assert _said(home, about="match")["success"]
+    assert home.asked == [("match", "Stevenage", "", 1)]
+
+
+def test_a_match_with_no_team_is_said_as_the_match_of_the_team_playing(london):
+    teams = [_team("395", "Stevenage", now=_stevenage_match()), _team("364", "Liverpool", now=_found_match(**LIVE))]
+    answer = _match_answer(team={"id": "364", "name": "Liverpool", "followed": True}, match=_found_match(**LIVE))
+    home = FakeHome(teams, answer=answer)
+    assert _said(home, about="match") == {"success": True, "message": said_match_report(answer, AT.astimezone())}
+    assert home.asked == [("match", "Liverpool", "", 1)]
+
+
+def test_a_match_with_no_team_asks_for_a_team_in_play_before_one_to_come(london):
+    teams = [_team("395", "Stevenage", now=_stevenage_match()), _team("364", "Liverpool", now=_found_match(**LIVE))]
+    home = FakeHome(teams, answer=_match_answer())
+    _said(home, now=datetime(2026, 11, 13, 14, 0).astimezone(), about="match")
+    assert home.asked == [("match", "Liverpool", "", 1)]
+
+
+def test_a_match_with_no_team_asks_for_the_team_kicking_off_first_today(london):
+    teams = [_team("395", "Stevenage", now=_stevenage_match(kickoff="2026-11-13T19:45:00+00:00")),
+             _team("364", "Liverpool", now=_found_match(kickoff="2026-11-13T15:00:00+00:00"))]
+    home = FakeHome(teams, answer=_match_answer())
+    _said(home, about="match")
+    assert home.asked == [("match", "Liverpool", "", 1)]
+
+
+def test_a_match_with_no_team_asks_for_a_match_still_to_come_before_one_over_and_the_earliest_over_first(london):
+    evening = datetime(2026, 11, 13, 18, 0).astimezone()
+    played = _team("395", "Stevenage", now=_stevenage_match(kickoff="2026-11-13T12:30:00+00:00", state="post"))
+    coming = _team("364", "Liverpool", now=_found_match(kickoff="2026-11-13T20:00:00+00:00"))
+    home = FakeHome([played, coming], answer=_match_answer())
+    _said(home, now=evening, about="match")
+    assert home.asked == [("match", "Liverpool", "", 1)]
+    # With none still to come, the one over today is asked for: of two, the one which kicked off first.
+    earlier = _team("364", "Liverpool", now=_found_match(kickoff="2026-11-13T10:00:00+00:00", state="post"))
+    home = FakeHome([played, earlier], answer=_match_answer())
+    _said(home, now=evening, about="match")
+    assert home.asked == [("match", "Liverpool", "", 1)]
+
+
+@pytest.mark.parametrize("state, phase", [("in", "first_half"), ("pre", None), ("post", "full_time")],
+                         ids=["in play", "to come today", "over today"])
+def test_a_match_with_no_team_doesnt_rank_a_match_from_bbc_last_as_it_has_events(london, state, phase):
+    # South Shields come first in the box and are in the same state at the same time: BBC's match is asked for, though
+    # for line-ups it is not, as it never has any.
+    mark = {"state": state, **({"phase": phase} if phase else {})}
+    teams = [_team("18312", "South Shields", now=_shields_match(**mark)), _team("395", "Stevenage", now=_stevenage_match(**mark))]
+    home = FakeHome(teams, answer=_match_answer())
+    assert _said(home, about="match")["success"]
+    assert home.asked == [("match", "South Shields", "", 1)]
+    home = FakeHome(teams, answer=_lineups_answer(match=_found_match()))
+    assert _said(home, about="lineups")["success"]
+    assert home.asked == [("lineups", "Stevenage", "", 1)]
+
+
+def test_a_match_with_no_team_asks_for_the_earlier_kick_off_whether_or_not_it_is_from_bbc(london):
+    teams = [_team("18312", "South Shields", now=_shields_match(kickoff="2026-11-13T12:30:00+00:00")),
+             _team("395", "Stevenage", now=_stevenage_match(kickoff="2026-11-13T19:45:00+00:00"))]
+    home = FakeHome(teams, answer=_match_answer())
+    _said(home, about="match")
+    assert home.asked == [("match", "South Shields", "", 1)]
+    home = FakeHome(list(reversed(teams)), answer=_match_answer())
+    _said(home, about="match")
+    assert home.asked == [("match", "South Shields", "", 1)]
+
+
+def test_a_match_with_no_team_asks_for_the_team_by_the_entry_of_the_box_which_found_it(london):
+    teams = [_team("360", "Man Utd", asked="Manchester United FC", now=_found_match(**LIVE))]
+    home = FakeHome(teams, answer=_match_answer())
+    _said(home, about="match")
+    assert home.asked == [("match", "Manchester United FC", "", 1)]
+
+
+def test_a_match_with_no_team_and_a_day_asks_for_that_day_of_the_team_playing(london):
+    home = FakeHome([_team("364", "Liverpool", now=_found_match(**LIVE))], answer=_match_answer())
+    assert _said(home, about="match", date="2026-11-12")["message"] == "No match is listed for England on that day."
+    assert home.asked == [("match", "Liverpool", "20261112", 1)]
+
+
+@pytest.mark.parametrize("failure, said", [
+    (requests.ConnectionError("refused"), "I can't reach Home Assistant right now."),
+    (requests.HTTPError("404", response=SimpleNamespace(status_code=404)), "Football isn't set up in Home Assistant."),
+])
+def test_a_match_with_no_team_says_why_the_sensor_cant_be_read(london, failure, said):
+    home = FakeHome()
+    home.sensor = failure
+    assert _said(home, about="match") == {"success": False, "message": said}
+    assert _said(FakeHome(["Liverpool"]), about="match") == NOT_GOT

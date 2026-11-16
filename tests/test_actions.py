@@ -1056,7 +1056,7 @@ def test_get_football_offers_lineups():
     schema = {tool["name"]: tool for tool in ActionExecutor(football=SimpleNamespace(names=list)).tool_schemas()}["get_football"]
     description = schema["description"]
     about = schema["input_schema"]["properties"]["about"]
-    assert about["enum"] == ["matches", "table", "left", "lineups"]
+    assert about["enum"] == ["matches", "table", "left", "lineups", "match"]
     assert "starting eleven" in about["description"]
     assert "line-ups" in description and "starting 11" in description
     # With a team named, even one of the user's own; with none, the followed team playing now or today.
@@ -1070,9 +1070,29 @@ def test_get_football_offers_lineups():
     # So are who is left in a cup, the ground and the odds: odds from memory would be a made-up figure.
     assert ("fixtures, scores, results, tables, line-ups, who is left, the ground and the odds only from that, "
             "never from memory") in description
-    # Scorers are still what it hasn't got, but line-ups are no longer.
+    # Neither scorers nor line-ups are what it hasn't got now: yellow cards are one thing it still hasn't.
     missing = description.split("hasn't got", 1)[1].split(".", 1)[0]
-    assert "scorers" in missing and "line-ups" not in missing
+    assert "yellow cards" in missing and "scorers" not in missing and "line-ups" not in missing
+
+
+def test_get_football_offers_what_happened_in_a_match():
+    schema = {tool["name"]: tool for tool in ActionExecutor(football=SimpleNamespace(names=list)).tool_schemas()}["get_football"]
+    description = schema["description"]
+    properties = schema["input_schema"]["properties"]
+    assert "match" in properties["about"]["enum"]
+    assert ("'match' for what happened in a team's match - its goals, penalties, red cards and ESPN's notes"
+            in properties["about"]["description"])
+    # It is asked with the team named, even one of the user's own, as line-ups are, and the day is the date.
+    assert "'match' is asked the same way, with the day in date if one was asked about" in properties["about"]["description"]
+    assert "the day of a team's match" in properties["date"]["description"]
+    # A round-up of a competition on a day is its matches with a date, not a team's match.
+    assert "'what happened in the Champions League yesterday?' is a competition with a date" in description
+    assert "what happened in a match" in description
+    # The speech reads digits joined by a dash as "dash".
+    assert ("Say a score as 'Spain 2, England 3' or in words, never as digits joined by a dash, which is read out as 'dash'."
+            in description)
+    # What round two added stays.
+    assert "line-ups" in description and "never from memory" in description
 
 
 def test_get_football_hands_everything_it_was_given_to_the_words(monkeypatch):

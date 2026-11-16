@@ -1176,7 +1176,14 @@ def test_the_football_command_asks_for_lineups(make_home):
         ("POST", ASK, {"json": {"what": "lineups", "name": "Liverpool", "date": "", "days": 1}})]
 
 
-def test_only_the_five_questions_are_asked(make_home):
+def test_the_football_command_asks_for_a_match(make_home):
+    home = make_home({ASK: _answer('{"team": {"id": "448"}, "stale": false}')})
+    assert home.football_ask("match", "England", "20261115") == {"team": {"id": "448"}, "stale": False}
+    assert home._session.requests == [
+        ("POST", ASK, {"json": {"what": "match", "name": "England", "date": "20261115", "days": 1}})]
+
+
+def test_only_the_six_questions_are_asked(make_home):
     home = make_home({})
     with pytest.raises(ValueError):
         home.football_ask("weather", "Arsenal")

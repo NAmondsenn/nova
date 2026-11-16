@@ -377,16 +377,18 @@ def _full_time(match: Match) -> str:
 
     Returns:
         The sentence. The winner of a shoot-out is named with its own score first, however the
-        sides were listed; one Home Assistant didn't name isn't worked out from the penalties.
+        sides were listed; one Home Assistant didn't name isn't worked out from the penalties. The
+        penalties are said in words ("won on penalties, 4 to 3"), as digits joined by a dash are
+        read out as "dash".
     """
     text = "Full time, after extra time." if match.extra_time else "Full time."
     text += " " + _score(match)
     if match.shootout:
         home_goals, away_goals = match.shootout
         if match.winner == "home":
-            text += f" {match.home} won {home_goals}-{away_goals} on penalties."
+            text += f" {match.home} won on penalties, {home_goals} to {away_goals}."
         elif match.winner == "away":
-            text += f" {match.away} won {away_goals}-{home_goals} on penalties."
+            text += f" {match.away} won on penalties, {away_goals} to {home_goals}."
         else:
             text += f" The penalty shootout finished {match.home} {home_goals}, {match.away} {away_goals}."
     return text

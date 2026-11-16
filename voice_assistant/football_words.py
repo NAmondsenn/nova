@@ -2,7 +2,8 @@
 Football Words Module
 The text Claude answers football questions from, from decisions 4 and 5 of docs/decisions/0014, decisions 3
 and 7 to 9 of docs/decisions/0015 (a match from BBC Sport, line-ups, the overview and its stale teams, no source named),
-and decisions 1 to 4 of docs/decisions/0016 (what happened in a match: its goals, penalties and red cards).
+and decisions 1 to 4 of docs/decisions/0016 (what happened in a match: its goals, penalties and red cards, asked
+about a team's match or a competition's day, and never a score said with a dash).
 
 Nova gives Claude plain text built from what Home Assistant returned, not Home Assistant's
 JSON: the full names, the kick-off as a local day and time, the ground, the odds and who
@@ -38,6 +39,9 @@ NOT_A_NAME = "I didn't catch which team or competition."
 # What is said when line-ups are asked for with no team named and none of the followed teams has a match today.
 NO_LINEUP_TEAM = "None of the followed teams is playing today. Name a team for its line-up."
 
+# What is said when a match is asked about with no team named and none of the followed teams has one today.
+NO_MATCH_TEAM = "Name a team for its match."
+
 # How each phase of a match which has started is said. "off" (postponed, abandoned, cancelled)
 # is said another way, and a phase which isn't here is one Home Assistant's side has added since:
 # it is left out, as what it means isn't known.
@@ -49,6 +53,10 @@ _OFF = "off"
 
 # The events which put a goal on the board, as the Contract has them. A penalty missed and a red card don't.
 _SCORING = ("goal", "penalty", "own_goal")
+
+# A score as ESPN's notes write it, "1-0": the dash between two numbers, whichever dash it is and with or without spaces
+# round it, which the speech reads out as "dash". Said as "1 to 0", with nothing else in the note changed.
+_SCORE_DASH = re.compile(r"(?<=\d)\s*[-\u2010-\u2015\u2212]\s*(?=\d)")
 
 # Only in these phases is the source's clock (ESPN's, or BBC's label) a minute ("67'"). In the others it is
 # a word for the card ("HT"), which isn't said as the phase is.
@@ -165,7 +173,8 @@ def _outcome(match: Match) -> str:
         match: A match which is over.
 
     Returns:
-        A sentence with a space in front, e.g. " Liverpool won.", or "" with nothing to say.
+        A sentence with a space in front, e.g. " Liverpool won.", or "" with nothing to say. A shoot-out
+        is said in words, " Liverpool won on penalties, 4 to 3.", as a score with a dash is read out as "dash".
     """
     winner = {"home": match.home, "away": match.away}.get(match.winner)
     if match.shootout:
@@ -174,7 +183,7 @@ def _outcome(match: Match) -> str:
             return f" The penalty shootout finished {match.home} {home_goals}, {match.away} {away_goals}."
         # The winner's penalties come first, however the sides were listed.
         won, lost = (home_goals, away_goals) if match.winner == "home" else (away_goals, home_goals)
-        return f" {winner} won {won}-{lost} on penalties."
+        return f" {winner} won on penalties, {won} to {lost}."
     if winner:
         return f" {winner} won."
     if match.home_score is not None and match.home_score == match.away_score:
@@ -798,7 +807,9 @@ def _said_note(found: Dict) -> str:
         found: One of an answer's "notes": its minute and text.
 
     Returns:
-        e.g. "Note at 41': Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area."
+        e.g. "Note at 41': Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area." Its text
+        is said as ESPN wrote it, but for a score written with a dash between two numbers, which is said with
+        "to" ("France 1-0 Türkiye" as "France 1 to 0 Türkiye"), as the speech would read the dash out.
 
     Raises:
         KeyError: If the note lacks its minute or text.
@@ -809,7 +820,7 @@ def _said_note(found: Dict) -> str:
     minute, text = _field(found, "minute", str), _field(found, "text", str)
     if not minute or not text:
         raise ValueError(f"a note needs a minute and a text, not {found!r}")
-    return f"Note at {minute}: {text}"
+    return f"Note at {minute}: {_SCORE_DASH.sub(' to ', text)}"
 
 
 def said_match_report(answer: Dict, now: datetime, on_a_day: bool = False) -> str:
@@ -900,24 +911,25 @@ def _question(team: str, competition: str, about: object) -> Tuple[str, str]:
     Args:
         team: The team asked about, or "" for none.
         competition: The competition asked about, or "" for none. Not both blank.
-        about: "matches", "table", "left" or "lineups" - or anything, which is taken for matches.
+        about: "matches", "table", "left", "lineups" or "match" - or anything, which is taken for matches.
 
     Returns:
-        The question, one of football_ask's, and the name to ask it of. A team's line-ups are
-        asked of the team, whatever competition is given with it, as they are of the team's match.
-        Otherwise a competition wins over a team, and a table or who is left is only a question
-        of a competition: a team alone is asked about as a team, whatever else is said of it.
-        The line-ups of a competition alone are its matches.
+        The question, one of football_ask's, and the name to ask it of. A team's line-ups, and what
+        happened in its match, are asked of the team, whatever competition is given with it, as they
+        are of the team's match. Otherwise a competition wins over a team, and a table or who is left
+        is only a question of a competition: a team alone is asked about as a team, whatever else is
+        said of it. The line-ups of a competition alone, and what happened in its matches, are its
+        matches, which come with their goals.
     """
     kind = _kind(about)
-    if team and kind == "lineups":
-        return "lineups", team
+    if team and kind in ("lineups", "match"):
+        return kind, team
     if competition:
         return (kind if kind in ("table", "left") else "competition"), competition
     return "team", team
 
 
-def _said_answer(what: str, answer: Dict, now: datetime) -> str:
+def _said_answer(what: str, answer: Dict, now: datetime, on_a_day: bool = False) -> str:
     """
     Puts an answer of Football.ask into words.
 
@@ -925,6 +937,7 @@ def _said_answer(what: str, answer: Dict, now: datetime) -> str:
         what: The question it answers.
         answer: The answer, not stale and with no error, but maybe one which found nothing.
         now: The current time, aware and local.
+        on_a_day: Whether a day was asked about, which only a team's match says, where it has none.
 
     Returns:
         What to say, which for an answer which found nothing by the name is that, without the
@@ -942,27 +955,31 @@ def _said_answer(what: str, answer: Dict, now: datetime) -> str:
         return f"ESPN, where Home Assistant's football comes from, found nothing called {_and_list(unknown)}."
     if what == "table":
         return said_table(answer)
+    if what == "match":
+        return said_match_report(answer, now, on_a_day)
     return {"team": said_team, "competition": said_competition, "left": said_left, "lineups": said_lineups}[what](answer, now)
 
 
-def _team_playing(reading: Reading, now: datetime) -> Optional[Team]:
+def _team_playing(reading: Reading, now: datetime, bbc_last: bool = True) -> Optional[Team]:
     """
-    Picks the followed team whose line-up is most likely asked for with no team named.
+    Picks the followed team whose line-up or match is most likely asked for with no team named.
 
     Args:
         reading: What the sensor said, which Football.read() gave.
         now: The current time, aware and local, for which day is today.
+        bbc_last: Whether a team whose match is from BBC Sport (its id begins "bbc:") comes after one
+            whose isn't. It does for a line-up, as BBC's matches never have any; it doesn't for what
+            happened in a match, as BBC's have events.
 
     Returns:
         The team whose match is in play; else the one whose match is still to come today, the
         earliest first, as its line-up is the one which is about to come out; else the one
         whose match was today and is over, the earliest first; or None where no team has a
-        match today. Within each of those, a team whose match is from BBC Sport (its id begins
-        "bbc:") comes after one whose isn't, however early its kick-off, as BBC's matches never
-        have line-ups: South Shields, first in the box, don't win over Stevenage, whose line-up
-        there is to say. Two in play, or two kicking off together, go by the box's order. With
-        none but BBC's, one of those is picked as before. Only teams which aren't stale count, as
-        a stale team's match is an old copy.
+        match today. Within each of those, with bbc_last, a team whose match is from BBC Sport comes
+        after one whose isn't, however early its kick-off: South Shields, first in the box, don't win
+        over Stevenage, whose line-up there is to say. Two in play, or two kicking off together, go by
+        the box's order. With none but BBC's, one of those is picked as before. Only teams which
+        aren't stale count, as a stale team's match is an old copy.
 
     Raises:
         FootballUnavailable: If no team which isn't stale has a match today but one which is stale
@@ -972,8 +989,8 @@ def _team_playing(reading: Reading, now: datetime) -> Optional[Team]:
     with_match = [team for team in fresh if team.now is not None]
 
     def from_bbc(team: Team) -> bool:
-        """Whether the team's match is from BBC Sport, whose matches never have line-ups."""
-        return team.now.id.startswith("bbc:")
+        """Whether the team's match is from BBC Sport and so is to rank last, as it has no line-ups."""
+        return bbc_last and team.now.id.startswith("bbc:")
 
     playing = [team for team in with_match if _in_play(team.now)]
     if playing:
@@ -999,12 +1016,16 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
         team: The team asked about. With no team and no competition, the followed teams are
             what is said: those which aren't stale in full, and those which are only by name, as
             ones which can't be got.
-        competition: The league or cup asked about, which wins over a team, except for line-ups.
+        competition: The league or cup asked about, which wins over a team, except for line-ups and
+            what happened in a team's match.
         about: "table" or "left" with a competition - its table or who is still in it; "lineups"
             with a team - its line-ups, whatever competition is given with it - or with neither a
-            team nor a competition the followed team playing now or today; any other value, its
+            team nor a competition the followed team playing now or today; "match" the same way - what
+            happened in the team's match, with its goals, penalties, red cards and ESPN's notes - but
+            with a competition alone its matches, which come with their goals; any other value, its
             matches.
-        date: The first day of a competition's matches, as YYYY-MM-DD, or none for today.
+        date: The first day of a competition's matches, or the day of a team's match, as YYYY-MM-DD,
+            or none for today (a team's match in play, else its last).
         days: How many days from it, or none for one.
         now: The current time, aware and local, which the words are built for. Defaults to the
             time now, so a test is the only one to give it.
@@ -1013,11 +1034,13 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
         {"success": True, "message": the words} - including where ESPN found nothing by the
         name asked for, which is said, including an overview which names the followed teams
         it can't get while saying the rest, and including line-ups with no team named where no
-        team is followed, which say so ("No teams are followed."), as the overview does.
+        team is followed, which say so ("No teams are followed."), as the overview does; and, for a
+        match with no team named, that a team is to be named where none of the followed teams has
+        a match today.
         {"success": False, "message": what to say} where football can't be got: CANT_GET, also
         for any answer of the wrong shape (logged at warning level), for an overview where every
-        followed team is stale, and for line-ups with no team named where a team which is stale
-        may be the one playing (see _team_playing);
+        followed team is stale, and for line-ups or a match with no team named where a team which
+        is stale may be the one playing (see _team_playing);
         or what Football says of Home Assistant not being reached, or not set up; or that the
         team or competition isn't a name.
     """
@@ -1027,15 +1050,18 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
     if now is None:
         now = datetime.now().astimezone()
     try:
-        if not team and not competition and _kind(about) == "lineups":
-            # Line-ups asked for with no team are for the followed team playing, in the place of the overview below.
+        if not team and not competition and _kind(about) in ("lineups", "match"):
+            # Line-ups, or what happened in a match, asked for with no team are for the followed team playing, in
+            # the place of the overview below.
             reading = football.read()
             if not reading.teams:
                 # Nobody is followed, which is not that none of them is playing: said as the overview says it.
                 return {"success": True, "message": said_followed(reading, now)}
-            playing = _team_playing(reading, now)
+            # A match from BBC Sport has events, though never line-ups, so only for line-ups does it come last.
+            lineups = _kind(about) == "lineups"
+            playing = _team_playing(reading, now, bbc_last=lineups)
             if playing is None:
-                return {"success": True, "message": NO_LINEUP_TEAM}
+                return {"success": True, "message": NO_LINEUP_TEAM if lineups else NO_MATCH_TEAM}
             # By the entry of the box which found it, the one name Home Assistant is known to find it by.
             team = playing.asked or playing.name
         if not team and not competition:
@@ -1047,8 +1073,10 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
                 raise _cant_get("a followed team's matches are an old copy", logging.WARNING)
             return {"success": True, "message": said_followed(replace(reading, teams=fresh), now, stale)}
         what, name = _question(team, competition, about)
-        answer = football.ask(what, name, _asked_date(date), _asked_days(days))
-        return {"success": True, "message": _said_answer(what, answer, now)}
+        asked_date = _asked_date(date)
+        answer = football.ask(what, name, asked_date, _asked_days(days))
+        # Only a day which was sent on is one asked about: text which isn't a day is none.
+        return {"success": True, "message": _said_answer(what, answer, now, on_a_day=bool(asked_date))}
     except FootballUnavailable as e:
         return {"success": False, "message": str(e)}
     except (KeyError, TypeError, ValueError) as e:
