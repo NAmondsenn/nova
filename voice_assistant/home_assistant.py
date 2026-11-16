@@ -128,6 +128,21 @@ ASK_TIMEOUT = 20
 FOOTBALL_QUESTIONS = ("team", "competition", "table", "left", "lineups", "match")
 FOOTBALL_NAME_LENGTH = 60
 
+
+def football_name(name: str) -> str:
+    """
+    Cuts a team's or competition's name down to what may go into a command line.
+
+    Args:
+        name: The name, as it was said.
+
+    Returns:
+        Its letters of any alphabet, digits, spaces and . & / - only, one space at a time and
+        at most FOOTBALL_NAME_LENGTH characters. Nothing, for a name with none of them.
+    """
+    kept = "".join(char for char in name if char.isalnum() or char.isspace() or char in ".&/-")
+    return " ".join(kept.split())[:FOOTBALL_NAME_LENGTH].rstrip()
+
 # How far "dim" and "brighten" move a light, in points of brightness. 30 is steps that
 # can be told apart across a room - 10 isn't - and a light at 40% takes two to go dark.
 DIM_STEP = 30
@@ -661,9 +676,9 @@ class HomeAssistant:
         """
         if what not in FOOTBALL_QUESTIONS:
             raise ValueError(f"{what!r} isn't something to ask about football")
-        data = {"what": what, "name": self._football_name(name),
+        data = {"what": what, "name": football_name(name),
                 "date": date if re.fullmatch(r"[0-9]{8}", date) else "", "days": max(1, min(31, days))}
-        other = self._football_name(against) if what == "match" else ""
+        other = football_name(against) if what == "match" else ""
         if other:
             data["against"] = other
         answer = self._call_service("shell_command", "football_ask", data, returns=True, timeout=ASK_TIMEOUT)
@@ -680,21 +695,6 @@ class HomeAssistant:
         if not isinstance(printed, dict):
             raise ValueError("Home Assistant's football command didn't print a JSON object")
         return printed
-
-    @staticmethod
-    def _football_name(name: str) -> str:
-        """
-        Cuts a team's or competition's name down to what may go into a command line.
-
-        Args:
-            name: The name, as it was said.
-
-        Returns:
-            Its letters of any alphabet, digits, spaces and . & / - only, one space at a time and
-            at most FOOTBALL_NAME_LENGTH characters.
-        """
-        kept = "".join(char for char in name if char.isalnum() or char.isspace() or char in ".&/-")
-        return " ".join(kept.split())[:FOOTBALL_NAME_LENGTH].rstrip()
 
     def set_football_teams(self, value: str) -> None:
         """

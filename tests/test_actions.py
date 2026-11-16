@@ -1129,7 +1129,13 @@ def test_get_football_offers_when_two_teams_last_played():
     assert against["type"] == "string"
     # The other team goes with 'match', for the last time the team played them, five seasons back.
     assert against["description"].startswith("The other team, for 'match': the last time the team played them, back five seasons.")
-    assert "date" in against["description"]
+    assert "a date wins over it" in against["description"]
+    # A competition given with it is left out, and only a match played or in play is found: one to come is the fixtures.
+    assert "a competition given with it is left out" in against["description"]
+    assert ("It finds only a match played or in play, never one to come: 'when do Liverpool play Newcastle next?' is the "
+            "team's fixtures, not against.") in against["description"]
+    # A day is looked for back through the seasons too, which is how the League Cup final of 2025 is found.
+    assert "A team's match on a day is looked for back through five seasons." in schema["input_schema"]["properties"]["date"]["description"]
     # "When did Liverpool last play Newcastle?" is a team's match against another, never its matches or the team alone.
     assert "'when did Liverpool last play Newcastle?'" in description
     assert ("'When did Liverpool last play Newcastle?' is 'match' with the team Liverpool and against Newcastle, "

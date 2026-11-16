@@ -1113,12 +1113,15 @@ class ActionExecutor:
                               "in play, else the one whose match is over, on the day (today when no date is given), "
                               "with the day in date if one was asked about."},
         date={"type": "string", "description": "The first day of a competition's matches, or the day of a team's match, as "
-                                                "YYYY-MM-DD. Leave out for today; a team's match is then the one in play, else its last."},
+                                                "YYYY-MM-DD. Leave out for today; a team's match is then the one in play, else its last. "
+                                                "A team's match on a day is looked for back through five seasons."},
         days={"type": "integer", "description": "How many days from it, 1 to 31. Leave out for one day."},
         against={"type": "string", "description": "The other team, for 'match': the last time the team played them, back "
                                                     "five seasons. 'When did Liverpool last play Newcastle?' is the team "
                                                     "Liverpool, about 'match', against Newcastle. Leave out for a team's own "
-                                                    "match; a date wins over it."},
+                                                    "match; a date wins over it, and a competition given with it is left out. "
+                                                    "It finds only a match played or in play, never one to come: 'when do "
+                                                    "Liverpool play Newcastle next?' is the team's fixtures, not against."},
     )
     def get_football(self, team=None, competition=None, about=None, date=None, days=None, against=None):
         return describe_football(self.football, team=team, competition=competition, about=about, date=date, days=days,
