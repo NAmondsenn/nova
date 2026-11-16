@@ -1036,8 +1036,9 @@ def said_match_report(answer: Dict, now: datetime, on_a_day: bool = False, again
         BBC Sport's results since August 2021."), and for a side only BBC Sport knows, whose id begins "bbc:", "... is
         among BBC Sport's results for South Shields since August 2021." Nothing of it is said of a match found or of a
         day. (A side only BBC Sport could know which Home Assistant never met is not in this answer at all: it is "unknown",
-        and _said_answer says it.) Where the two teams' ids are one, the team was asked against itself under another name: only that they are the same team ("Liverpool and Liverpool FC are the same team."),
-        with nothing of a match, as a team has none against itself.
+        and _said_answer says it.) Where the two teams' ids are one, the team was asked against itself under another
+        name: only that they are the same team ("Liverpool and Liverpool FC are the same team."), with nothing of a
+        match, as a team has none against itself.
 
     Raises:
         KeyError: If a key is missing from the answer, the team, the match, an event or a note - or, with against,

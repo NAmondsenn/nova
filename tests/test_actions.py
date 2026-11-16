@@ -1086,12 +1086,12 @@ def test_get_football_offers_what_happened_in_a_match():
     assert ("'match' for who scored or what happened in a team's match - its goals, penalties, red cards and ESPN's notes"
             in properties["about"]["description"])
     # It is asked with the team named, even one of the user's own; with none, it is the followed team whose match is in
-    # play, else over, on the day, which is the date (today when none is given): not the line-ups' way, which is the
-    # match about to start.
+    # play, else over, on the day, which is the date (today when none is given), or with no date the one just played:
+    # not the line-ups' way, which is the match about to start. A day asked about, last night's too, goes in date.
     assert ("'match' is asked with the team named too; with neither a team nor a competition it is the followed team "
             "whose match is in play, else the one whose match is over, on the day (today when no date is given), "
             "or with no date the one just played (last night's, until the next morning), "
-            "with the day in date if one was asked about") in properties["about"]["description"]
+            "with the day in date if one was asked about, last night's included.") in properties["about"]["description"]
     assert "asked the same way" not in properties["about"]["description"]
     assert "the day of a team's match" in properties["date"]["description"]
     # A round-up of a competition on a day is its matches with a date, not a team's match.

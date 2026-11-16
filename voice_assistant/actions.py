@@ -1212,7 +1212,7 @@ class ActionExecutor:
                               "named too; with neither a team nor a competition it is the followed team whose match is "
                               "in play, else the one whose match is over, on the day (today when no date is given), "
                               "or with no date the one just played (last night's, until the next morning), "
-                              "with the day in date if one was asked about."},
+                              "with the day in date if one was asked about, last night's included."},
         date={"type": "string", "description": "The first day of a competition's matches, or the day of a team's match, as "
                                                 "YYYY-MM-DD. Leave out for today; a team's match is then the one in play, else its last. "
                                                 "A team's match on a day is looked for back through five seasons."},
