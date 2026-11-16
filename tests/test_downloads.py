@@ -10,6 +10,7 @@ and no test waits out a poll.
 import functools
 import logging
 import threading
+from types import SimpleNamespace
 
 import pytest
 import requests
@@ -195,6 +196,8 @@ class FakeEars(Ears):
     HEARD = {"explicit": 5, "clean": 1, "unsure": 2}
 
     def __init__(self):
+        # Made as an Ears is, with nothing behind it: hear is the fake's own.
+        super().__init__(None, lambda: None, SimpleNamespace(lock=threading.RLock()), lambda library: None, None)
         self.kinds = {}
         self.heard = []
 
@@ -601,6 +604,7 @@ def test_a_song_had_only_clean_by_the_title_asked_for_and_soulsyncs_artist_is_re
     # Heard again first, in case its file changed since: never swapped unless it's still clean.
     ("explicit", None, "You've already got endless by Gunna."),
     ("unsure", None, "You've already got endless by Gunna, but I couldn't tell if it's the clean version."),
+    ("not_judged", None, "You've already got endless by Gunna, but I couldn't check it for a clean version."),
 ])
 def test_a_yes_to_the_explicit_one_swaps_the_copy_heard_clean(watching, clock, said, store, ears, swapper, heard,
                                                               swapped, outcome):
@@ -745,6 +749,18 @@ def test_each_track_of_an_album_is_heard_and_the_clean_ones_swapped_one_at_a_tim
                              ("r3", Wanted("The Chain", "Fleetwood Mac", "track"), "kitchen", False)]
     assert said[-1] == ("kitchen", "Rumours by Fleetwood Mac has been downloaded. 2 of its tracks came down clean, "
                                    "so I swapped them for the explicit ones.")
+
+
+@pytest.mark.parametrize("tagged, title", [("The Chain (Clean)", "The Chain"), ("The Chain - Radio Edit", "The Chain"),
+                                          ("The Chain [Clean Version] (feat. X)", "The Chain (feat. X)"),
+                                          ("The Chain (Live)", "The Chain (Live)")])
+def test_a_clean_album_track_is_swapped_without_its_clean_note(watching, clock, said, ears, swapper, tagged, title):
+    # SoulSync would never find an explicit "The Chain (Clean)", nor Navidrome list one.
+    tracks = [DREAMS, GO_YOUR_OWN_WAY, _track(3, tagged)]
+    ears.kinds["r3"] = "clean"
+    watching(FakeSoulSync(), FakeLibrary(clock, tracks=[[], tracks]))._watch(RUMOURS_WANTED, "kitchen")
+
+    assert swapper.swaps == [("r3", Wanted(title, "Fleetwood Mac", "track"), "kitchen", False)]
 
 
 def test_an_album_says_how_many_were_swapped_and_how_many_werent(watching, clock, said, ears, swapper):
@@ -1189,16 +1205,45 @@ def test_a_part_owned_album_asked_for_is_requested_and_lands(watching, set_up, c
 
 def test_an_album_had_only_clean_with_none_queued_isnt_said_to_be_got(watching, set_up, clock, said, store):
     # A yes to the explicit one, of which SoulSync queued nothing: all Navidrome has is
-    # clean, so "You've already got" it would be wrong.
+    # clean, so "You've already got" it would be wrong. Without a swapper, which would swap
+    # the clean tracks instead - see the next test.
     clean = [DREAMS, _track(5, "Gold Dust Woman")]
     heard_clean(store, clean[1])
     downloads = watching(FakeSoulSync(album=AlbumRequest(None, [], 11, 0)), FakeLibrary(clock, tracks=[clean]),
-                         set_up)
+                         set_up, swapping=False)
 
     assert downloads.request("Rumours by Fleetwood Mac", "album", "kitchen")["later"]
     assert _all_ended()
     assert said == [("kitchen", "I couldn't download Rumours by Fleetwood Mac. SoulSync says it already has "
                                 "every track, or is already getting them.")]
+
+
+@pytest.mark.parametrize("kinds, outcomes, message", [
+    ({"r5": "clean", "r6": "clean"}, {"r6": Outcome("only_clean")},
+     "Rumours by Fleetwood Mac has been downloaded. One of its tracks came down clean, so I swapped it for the "
+     "explicit one. One of its tracks only came down clean, so I've kept it."),
+    # Heard again first: tracks no longer clean aren't swapped, and with none, it's had.
+    ({"r5": "explicit", "r6": "explicit"}, {}, "You've already got Rumours by Fleetwood Mac."),
+])
+def test_a_yes_to_an_albums_explicit_tracks_swaps_each_track_heard_clean(watching, set_up, clock, said, store, ears,
+                                                                         swapper, kinds, outcomes, message):
+    # SoulSync would skip the tracks it has rows for, so each clean one is swapped instead.
+    clean = [DREAMS, _track(5, "Gold Dust Woman (Clean)"), _track(6, "Songbird")]
+    heard_clean(store, clean[1], clean[2])
+    ears.kinds.update(kinds)
+    swapper.outcomes.update(outcomes)
+    soulsync = FakeSoulSync(album=AlbumRequest(None, [], 11, 0))
+    downloads = watching(soulsync, FakeLibrary(clock, tracks=[clean]), set_up)
+
+    assert downloads.request("Rumours by Fleetwood Mac", "album", "kitchen")["later"]
+    assert _all_ended()
+
+    assert said == [("kitchen", "Rumours by Fleetwood Mac requested."), ("kitchen", message)]
+    assert soulsync.requested == [] and ears.heard == [("r5", True), ("r6", True)]
+    # One at a time, as songs, without the clean note in the title.
+    expected = [("r5", Wanted("Gold Dust Woman", "Fleetwood Mac", "track"), "kitchen", False),
+                ("r6", Wanted("Songbird", "Fleetwood Mac", "track"), "kitchen", False)]
+    assert swapper.swaps == (expected if kinds["r5"] == "clean" else [])
 
 
 def test_an_album_had_but_not_asked_for_in_words_is_only_said_to_be_got(watching, set_up, clock):

@@ -269,24 +269,33 @@ def _says_clean(part: str) -> bool:
     return any(_says_version(part, version) for version in CLEAN_VERSIONS)
 
 
-def _bare_title(title: str) -> str:
+def _without_clean_note(title: str) -> str:
     """
-    A track's title without any part saying it's a clean version, normalised, so a
-    clean copy and the explicit one count as one track: "Dreams (Clean)" and "Dreams
-    - Radio Edit" are "dreams", as Dreams is. Any other version is a track of its
-    own - a deluxe edition's "Dreams (Live)" is one more than Dreams - and "Dreams
-    (2004 Remaster)" keeps its remaster, which is no version at all.
+    A title without any part saying it's a clean version, as it's written otherwise:
+    "The Chain (Clean)" and "The Chain - Radio Edit" are "The Chain", and "The Chain
+    [Clean Version] (feat. X)" is "The Chain (feat. X)". Any other version stays - "The
+    Chain (Live)" is a take of its own - as does "Dreams (2004 Remaster)", which is no
+    version at all.
 
     The clean brackets go first, then a clean dashed part, read as version_of reads
     one: the other way round, "Dreams - Live at the Forum (Clean)" would have its
-    whole dashed part taken for a clean version, and merge with the studio Dreams.
+    whole dashed part taken for a clean version, and lose its "Live at the Forum".
     """
     title = BRACKETED.sub(lambda part: "" if _says_clean(part.group(1) or part.group(2) or "") else part.group(0),
                           title)
     dashed = DASH.split(title, 1)
     if len(dashed) == 2 and _says_clean(BRACKETED.sub("", dashed[1])):
         title = dashed[0]
-    return normalise(title)
+    return " ".join(title.split())
+
+
+def _bare_title(title: str) -> str:
+    """
+    A track's title without any part saying it's a clean version, normalised, so a
+    clean copy and the explicit one count as one track: "Dreams (Clean)" and "Dreams
+    - Radio Edit" are "dreams", as Dreams is. See _without_clean_note.
+    """
+    return normalise(_without_clean_note(title))
 
 
 def _album_tracks(request: AlbumRequest, new: List[Dict]) -> List[List[Dict]]:
@@ -728,6 +737,10 @@ class Downloads:
         try:
             if wanted.kind == "album":
                 had = self._had(library, wanted)
+                if had and self._swapper is not None and _as_had(wanted, had, self._heard_clean) is None:
+                    # Every album found has tracks heard clean - a yes to the explicit one.
+                    # SoulSync would skip the tracks it has rows for, so those are swapped.
+                    return self._swap_album_had(wanted, had, satellite)
                 request = soulsync.request_album(wanted.title, wanted.artist)
             else:
                 request = soulsync.find_song(wanted.title, wanted.artist)
@@ -960,14 +973,44 @@ class Downloads:
             return ""
         if outcome == "downloaded":
             return self._tell(satellite, f"You've already got {wanted.name}.")
-        if outcome in ("unsure", "not_judged") and verdict.kind != "clean":
+        if verdict.kind == "unsure":
             return self._tell(satellite, f"You've already got {wanted.name}, but I couldn't tell if it's the clean "
+                                         f"version.")
+        if verdict.kind == "not_judged":
+            # Section 5's "couldn't check it for a clean version", with nothing new downloaded.
+            return self._tell(satellite, f"You've already got {wanted.name}, but I couldn't check it for a clean "
                                          f"version.")
         if outcome == "couldnt":
             reason = (getattr(outcome, "reason", "") or "swapping isn't set up").strip().rstrip(".")
             return self._tell(satellite, f"I couldn't download {wanted.name}, so you've still got the clean version: "
                                          f"{reason}.")
         return self._tell(satellite, swap_said(wanted.name, outcome))
+
+    def _swap_album_had(self, wanted: Wanted, had: List[Dict], satellite: Optional[str]) -> str:
+        """
+        The explicit copies of an album's tracks Navidrome has only clean, got by swapping
+        each track heard clean, one at a time - each heard again first, as its file may have
+        changed since.
+
+        Args:
+            wanted: The album asked for.
+            had: Every track of it Navidrome has.
+            satellite: The satellite that asked, or None.
+
+        Returns:
+            The last message said, or "" if Nova stopped first.
+        """
+        self._tell(satellite, f"{wanted.name} requested.")
+        outcomes: Counter = Counter()
+        for track in [track for track in had if self._heard_clean(track)]:
+            outcome = self._heard_track([track], satellite)
+            if outcome == "stopped":
+                return ""
+            outcomes[outcome] += 1
+        if not set(outcomes) - {"downloaded"}:
+            # None of them clean after all.
+            return self._tell(satellite, f"You've already got {wanted.name}.")
+        return self._tell(satellite, _album_said(f"{wanted.name} has been downloaded.", outcomes))
 
     def _heard_album(self, lead: str, tracks: List[List[Dict]], satellite: Optional[str]) -> str:
         """
@@ -984,15 +1027,23 @@ class Downloads:
         """
         outcomes: Counter = Counter()
         for copies in tracks:
-            if self._stopping.is_set():
-                return ""
-            verdict, copy = self._hear(copies)
-            outcome = self._outcome(verdict, copy, Wanted(copy.get("title") or "", copy.get("artist") or None,
-                                                          "track"), satellite)
+            outcome = self._heard_track(copies, satellite)
             if outcome == "stopped":
                 return ""
             outcomes[outcome] += 1
         return _album_said(lead, outcomes)
+
+    def _heard_track(self, copies: List[Dict], satellite: Optional[str]) -> str:
+        """
+        How one track of an album ends, once heard - and swapped if it's clean, asked for
+        again as a song by its own title, without a clean note SoulSync would never find
+        an explicit copy under, and its own artist. "stopped" if Nova is stopping.
+        """
+        if self._stopping.is_set():
+            return "stopped"
+        verdict, copy = self._hear(copies)
+        swap_as = Wanted(_without_clean_note(copy.get("title") or ""), copy.get("artist") or None, "track")
+        return self._outcome(verdict, copy, swap_as, satellite)
 
     def _hear(self, copies: List[Dict]) -> Tuple[Verdict, Dict]:
         """
