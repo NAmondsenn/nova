@@ -106,6 +106,8 @@ NAVIDROME_ERRORS = (requests.RequestException, NavidromeError, ValueError)
 # decision 0019, section 3. A clean copy is never called downloaded.
 UNSURE = "{name} has been downloaded, but I couldn't tell if it's the clean version."
 NOT_CHECKED = "{name} has been downloaded, but I couldn't check it for a clean version."
+# Why an album's clean tracks couldn't be swapped, when every try for each came down clean.
+ONLY_CLEAN = "SoulSync only brought clean copies"
 
 
 def song_limit(config) -> float:
@@ -372,7 +374,7 @@ class Downloads:
                  library: Optional[Callable[[], Optional[NavidromeLibrary]]] = None,
                  now: Callable[[], float] = time.monotonic, wait: Optional[Callable[[float], bool]] = None,
                  ears: Optional["Ears"] = None, swapper: Optional["Swapper"] = None,
-                 store: Optional[CleanStore] = None):
+                 store: Optional[CleanStore] = None, wall: Callable[[], float] = time.time):
         """
         Args:
             config: Configs loaded from config.yaml. The time limits are read from it
@@ -394,11 +396,14 @@ class Downloads:
             swapper: Swaps a copy heard clean for an explicit one.
             store: What Nova has heard of each song, to tell what the library has only
                 clean.
+            wall: The wall clock a swap is saved by, to tell how long ago one carried on
+                after a restart was asked for.
         """
         self.config = config
         self._ears = ears
         self._swapper = swapper
         self._store = store
+        self._wall = wall
         # Whether saved swaps are being carried on now, and the download each of those is
         # waiting for, by the swap's key.
         self._resuming = False
@@ -682,7 +687,10 @@ class Downloads:
             if wanted.key in self._waiting or self._stopping.is_set():
                 return
             self._waiting[wanted.key] = wanted
-            self._asked_at[wanted.key] = self._now()
+            # On the time limits' clock, from when SoulSync was asked by the wall clock.
+            asked_at = swap.get("asked_at")
+            ago = max(0.0, self._wall() - asked_at) if isinstance(asked_at, (int, float)) else 0.0
+            self._asked_at[wanted.key] = self._now() - ago
             self._names[wanted.key] = swap.get("named") or wanted.name
             self._resumed[swap.get("key")] = wanted
 
@@ -1037,15 +1045,25 @@ class Downloads:
         """
         self._tell(satellite, f"{wanted.name} requested.")
         outcomes: Counter = Counter()
+        reasons: List[str] = []
         for track in [track for track in had if self._heard_clean(track)]:
             outcome = self._heard_track([track], satellite)
             if outcome == "stopped":
                 return ""
             outcomes[outcome] += 1
-        if not set(outcomes) - {"downloaded"}:
-            # None of them clean after all.
-            return self._tell(satellite, f"You've already got {wanted.name}.")
-        return self._tell(satellite, _album_said(f"{wanted.name} has been downloaded.", outcomes))
+            if outcome == "couldnt":
+                reasons.append((getattr(outcome, "reason", "") or "swapping isn't set up").strip().rstrip("."))
+        # "Downloaded" only once something was: with nothing swapped, the library is as
+        # clean as it was.
+        if outcomes["swapped"]:
+            lead = f"{wanted.name} has been downloaded."
+        elif outcomes["couldnt"] or outcomes["only_clean"]:
+            reason = reasons[0] if reasons else ONLY_CLEAN
+            lead = f"I couldn't download {wanted.name}, so you've still got the clean version: {reason}."
+        else:
+            # None of them clean after all, or none that could be judged.
+            lead = f"You've already got {wanted.name}."
+        return self._tell(satellite, _album_said(lead, outcomes))
 
     def _heard_album(self, lead: str, tracks: List[List[Dict]], satellite: Optional[str]) -> str:
         """

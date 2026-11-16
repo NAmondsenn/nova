@@ -326,10 +326,10 @@ def running(config, clock, said, ears, swapper, store):
     """
     made = []
 
-    def make(soulsync, library, settings=None):
+    def make(soulsync, library, settings=None, **more):
         downloads = Downloads(settings or config, lambda satellite, message: said.append((satellite, message)),
                               soulsync=lambda: soulsync, library=lambda: library, now=clock.now, ears=ears,
-                              swapper=swapper, store=store)
+                              swapper=swapper, store=store, **more)
         made.append(downloads)
         return downloads
 
@@ -1029,12 +1029,14 @@ def test_saved_swaps_are_carried_on_when_a_download_starts(running, clock, swapp
 
 def test_a_downloads_swap_carried_on_is_waiting_while_it_runs(running, set_up, clock, swapper):
     # A restart forgot the download's watch; its swap, carried on, is still getting the song.
+    # SoulSync was asked two and a half minutes ago, by the wall clock a swap is saved by.
     swapper.saved = [{"key": "made-up", "title": "Endless", "artist": "Gunna", "named": "endless by Gunna",
-                      "quiet": False},
+                      "quiet": False, "asked_at": 1_800_000_000.0},
                      {"key": "quiet", "title": "Dreams", "artist": "Fleetwood Mac", "named": "Dreams",
                       "quiet": True}]
     swapper.release.clear()
-    downloads = running(FakeSoulSync(), FakeLibrary(clock), set_up)
+    clock.time = 1000.0
+    downloads = running(FakeSoulSync(), FakeLibrary(clock), set_up, wall=lambda: 1_800_000_150.0)
     downloads.resume_swaps()
     for _ in range(500):
         if downloads.waiting():
@@ -1043,7 +1045,7 @@ def test_a_downloads_swap_carried_on_is_waiting_while_it_runs(running, set_up, c
 
     assert downloads.download("Endless by Gunna", "track", "bedroom") == {
         "success": True, "message": "I'm already getting Endless by Gunna."}
-    assert downloads.describe_waiting() == "endless by Gunna, asked for less than a minute ago."
+    assert downloads.describe_waiting() == "endless by Gunna, asked for 2 minutes ago."
 
     swapper.release.set()
     _resumes_ended()
@@ -1280,6 +1282,21 @@ def test_an_album_had_only_clean_with_none_queued_isnt_said_to_be_got(watching, 
      "explicit one. One of its tracks only came down clean, so I've kept it."),
     # Heard again first: tracks no longer clean aren't swapped, and with none, it's had.
     ({"r5": "explicit", "r6": "explicit"}, {}, "You've already got Rumours by Fleetwood Mac."),
+    # Nothing swapped is never "downloaded": the library is as clean as it was.
+    ({"r5": "clean", "r6": "clean"},
+     {"r5": Outcome("couldnt", "SoulSync admin profile isn't set up"),
+      "r6": Outcome("couldnt", "SoulSync admin profile isn't set up")},
+     "I couldn't download Rumours by Fleetwood Mac, so you've still got the clean version: SoulSync admin profile "
+     "isn't set up. 2 of its tracks came down clean, and I couldn't swap them."),
+    ({"r5": "clean", "r6": "clean"}, {"r5": Outcome("only_clean", "3 copies came down clean"),
+                                      "r6": Outcome("only_clean", "3 copies came down clean")},
+     "I couldn't download Rumours by Fleetwood Mac, so you've still got the clean version: SoulSync only brought "
+     "clean copies. 2 of its tracks only came down clean, so I've kept them."),
+    ({"r5": "unsure", "r6": "unsure"}, {},
+     "You've already got Rumours by Fleetwood Mac. I couldn't tell if 2 of its tracks are clean versions."),
+    ({"r5": "clean", "r6": "clean"}, {"r6": Outcome("couldnt", "Navidrome still lists it")},
+     "Rumours by Fleetwood Mac has been downloaded. One of its tracks came down clean, so I swapped it for the "
+     "explicit one. One of its tracks came down clean, and I couldn't swap it."),
 ])
 def test_a_yes_to_an_albums_explicit_tracks_swaps_each_track_heard_clean(watching, set_up, clock, said, store, ears,
                                                                          swapper, kinds, outcomes, message):
@@ -1300,6 +1317,7 @@ def test_a_yes_to_an_albums_explicit_tracks_swaps_each_track_heard_clean(watchin
     expected = [("r5", Wanted("Gold Dust Woman", "Fleetwood Mac", "track"), "kitchen", False),
                 ("r6", Wanted("Songbird", "Fleetwood Mac", "track"), "kitchen", False)]
     assert swapper.swaps == (expected if kinds["r5"] == "clean" else [])
+    assert "has been downloaded" not in message or "swapped it" in message
 
 
 def test_an_album_had_but_not_asked_for_in_words_is_only_said_to_be_got(watching, set_up, clock):
