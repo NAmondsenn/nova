@@ -475,8 +475,9 @@ class FakeAsking:
         self.answer = answer
         self.asked = []
 
-    def football_ask(self, what, name, date="", days=1):
-        self.asked.append((what, name, date, days))
+    def football_ask(self, what, name, date="", days=1, against=""):
+        # The other team is noted only when there is one, so that a question without it reads as it always did.
+        self.asked.append((what, name, date, days) + ((against,) if against else ()))
         if isinstance(self.answer, Exception):
             raise self.answer
         return self.answer
@@ -493,6 +494,38 @@ def test_a_question_with_no_date_or_days_is_asked_for_today_and_one_day():
     home = FakeAsking({"stale": False})
     _football(home).ask("team", "Arsenal")
     assert home.asked == [("team", "Arsenal", "", 1)]
+
+
+def test_the_other_team_is_asked_of_home_assistant_with_a_match():
+    home = FakeAsking({"team": {"id": "364", "name": "Liverpool"}, "seasons": 2, "stale": False})
+    answer = _football(home).ask("match", "Liverpool", against="Newcastle")
+    assert answer == {"team": {"id": "364", "name": "Liverpool"}, "seasons": 2, "stale": False}
+    assert home.asked == [("match", "Liverpool", "", 1, "Newcastle")]
+
+
+@pytest.mark.parametrize("against", [None, ""])
+def test_no_other_team_is_asked_as_before(against):
+    home = FakeAsking({"stale": False})
+    _football(home).ask("match", "Liverpool", "20250316", against=against)
+    assert home.asked == [("match", "Liverpool", "20250316", 1)]
+
+
+@pytest.mark.parametrize("answer", [
+    {"stale": True, "seasons": 6, "team": {}}, {"stale": False, "error": "OSError: down"},
+    {"stale": True, "unknown": ["Newcastel"]}, {"seasons": 6, "team": {}},
+], ids=["stale", "error", "stale and unknown", "no stale key"])
+def test_an_old_or_failed_answer_for_the_other_team_cant_be_got(answer):
+    with pytest.raises(FootballUnavailable) as caught:
+        _football(FakeAsking(answer)).ask("match", "Liverpool", against="Newcastle")
+    assert str(caught.value) == "I can't get football right now."
+
+
+def test_a_command_which_doesnt_know_the_other_team_cant_be_got():
+    # Home Assistant's command fails where its script is from before --against, as its error says.
+    failure = ValueError("Home Assistant's football command failed: 2, 'unrecognized arguments: --against=Newcastle'")
+    with pytest.raises(FootballUnavailable) as caught:
+        _football(FakeAsking(failure)).ask("match", "Liverpool", against="Newcastle")
+    assert str(caught.value) == "I can't get football right now."
 
 
 def test_a_name_espn_doesnt_know_is_an_answer_not_a_failure():

@@ -1115,11 +1115,42 @@ def test_get_football_hands_everything_it_was_given_to_the_words(monkeypatch):
         "success": False, "message": "I can't get football right now."})
     football = SimpleNamespace(names=list)
     result = ActionExecutor(football=football).execute(Action("get_football", {
-        "team": "Arsenal", "competition": "Premier League", "about": "table", "date": "2026-11-24", "days": 2, "mood": "keen"},
-        from_model=True))
+        "team": "Arsenal", "competition": "Premier League", "about": "table", "date": "2026-11-24", "days": 2,
+        "against": "Chelsea", "mood": "keen"}, from_model=True))
     assert (result.ok, result.say) == (False, "I can't get football right now.")
     assert given == [(football, {"team": "Arsenal", "competition": "Premier League", "about": "table",
-                                 "date": "2026-11-24", "days": 2})]
+                                 "date": "2026-11-24", "days": 2, "against": "Chelsea"})]
+
+
+def test_get_football_offers_when_two_teams_last_played():
+    schema = {tool["name"]: tool for tool in ActionExecutor(football=SimpleNamespace(names=list)).tool_schemas()}["get_football"]
+    description = schema["description"]
+    against = schema["input_schema"]["properties"]["against"]
+    assert against["type"] == "string"
+    # The other team goes with 'match', for the last time the team played them, five seasons back.
+    assert against["description"].startswith("The other team, for 'match': the last time the team played them, back five seasons.")
+    assert "date" in against["description"]
+    # "When did Liverpool last play Newcastle?" is a team's match against another, never its matches or the team alone.
+    assert "'when did Liverpool last play Newcastle?'" in description
+    assert ("'When did Liverpool last play Newcastle?' is 'match' with the team Liverpool and against Newcastle, "
+            "never 'matches'") in description
+    # What isn't found is said as it is told, never as the two never having played.
+    assert "never that they haven't played" in description
+    # What rounds one to three said stays.
+    assert "never from memory" in description and "'who scored for Stevenage?'" in description
+    assert "against" not in schema["input_schema"]["required"]
+
+
+def test_get_football_hands_the_other_team_to_the_words_and_none_when_not_given(monkeypatch):
+    from voice_assistant import actions as actions_module
+
+    given = []
+    monkeypatch.setattr(actions_module, "describe_football", lambda football, **asked: given.append(asked) or {
+        "success": True, "message": "ok"})
+    executor = ActionExecutor(football=SimpleNamespace(names=list))
+    executor.execute(Action("get_football", {"team": "Liverpool", "about": "match", "against": "Newcastle"}, from_model=True))
+    executor.execute(Action("get_football", {"team": "Liverpool", "about": "match"}, from_model=True))
+    assert [asked["against"] for asked in given] == ["Newcastle", None]
 
 
 def test_get_football_with_no_teams_followed_says_nothing_of_them():

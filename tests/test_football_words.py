@@ -1093,6 +1093,77 @@ def test_a_match_report_with_no_match(london):
     assert said_match_report(_match_answer(team=team, notes=[VAR_NOTE]), AT) == "No match is listed for England Women."
 
 
+# Newcastle United 2, Liverpool 2 on Sunday 23 August 2026 at St James' Park: the last time the two met.
+NEWCASTLE_LIVERPOOL = {
+    "id": "501", "kickoff": "2026-08-23T15:30:00+00:00", "state": "post", "phase": "full_time", "clock": "FT",
+    "home": "Newcastle United", "home_id": "361", "away": "Liverpool", "away_id": "364", "home_score": 2, "away_score": 2,
+    "league": "Premier League", "venue": {"name": "St James' Park", "city": "Newcastle upon Tyne"}, "events": [
+        {"minute": "12'", "kind": "goal", "side": "away", "player": "Mohamed Salah"},
+        {"minute": "40'", "kind": "goal", "side": "home", "player": "Alexander Isak"},
+        {"minute": "66'", "kind": "goal", "side": "home", "player": "Anthony Gordon"},
+        {"minute": "88'", "kind": "goal", "side": "away", "player": "Cody Gakpo"},
+    ]}
+
+
+def _liverpool_answer(**fields):
+    """A football_ask answer for Liverpool's match, as the Contract has it, with no match unless a test gives one."""
+    return _match_answer(team={"id": "364", "name": "Liverpool", "followed": True}, **fields)
+
+
+def test_a_match_found_for_the_other_team_is_said_as_any_match_is(london):
+    AT = _after_the_match()
+    asked = _liverpool_answer(match=_found_match(**NEWCASTLE_LIVERPOOL), seasons=1, notes=[PENALTY_CONCEDED])
+    plain = {key: value for key, value in asked.items() if key != "seasons"}
+    said = said_match_report(asked, AT, against="Newcastle")
+    assert said == said_match_report(plain, AT)
+    assert said.split("\n")[0] == ("Newcastle United 2, Liverpool 2, Premier League, on Sunday the 23rd of August, "
+                                   "at St James' Park in Newcastle upon Tyne. It was a draw.")
+    assert said.split("\n")[1] == "12': a goal for Liverpool, scored by Mohamed Salah. Newcastle United 0, Liverpool 1."
+
+
+@pytest.mark.parametrize("seasons, said", [
+    (6, "No match between Liverpool and Newcastle is listed in the last 6 seasons."),
+    (3, "No match between Liverpool and Newcastle is listed in the last 3 seasons."),
+    (2, "No match between Liverpool and Newcastle is listed in the last 2 seasons."),
+    # A national side has one list with no seasons in it, so "the last 1 seasons" is never said.
+    (1, "No match between Liverpool and Newcastle is listed in the results ESPN lists."),
+])
+def test_no_match_for_the_other_team_says_how_far_back_it_was_looked_for(london, seasons, said):
+    assert said_match_report(_liverpool_answer(seasons=seasons), _after_the_match(), against="Newcastle") == said
+
+
+def test_no_match_for_the_other_team_is_never_said_as_never_having_played(london):
+    said = said_match_report(_liverpool_answer(seasons=6), _after_the_match(), against="Newcastle")
+    assert not re.search(r"never|haven't|have not|not played|no games", said, re.IGNORECASE)
+
+
+def test_no_match_for_the_other_team_names_the_team_by_its_full_name(london):
+    team = {"id": "364", "name": "Liverpool", "full_name": "Liverpool FC", "followed": True}
+    assert said_match_report(_match_answer(team=team, seasons=4), _after_the_match(), against="Newcastle") == (
+        "No match between Liverpool FC and Newcastle is listed in the last 4 seasons.")
+
+
+@pytest.mark.parametrize("changes", [
+    {}, {"seasons": 0}, {"seasons": 7}, {"seasons": -1}, {"seasons": "3"}, {"seasons": 2.0}, {"seasons": True}, {"seasons": None},
+    {"seasons": [6]},
+], ids=["no seasons", "none looked through", "more than six", "negative", "text", "a float", "a flag", "null", "a list"])
+def test_an_answer_for_the_other_team_must_say_how_many_seasons_were_looked_through(london, changes):
+    # Without it the answer may be a script's own latest match for the team, which isn't the match of the two.
+    # An answer which has them is said, so that it is only what is wrong with the seasons which is refused.
+    assert said_match_report(_liverpool_answer(seasons=6), _after_the_match(), against="Newcastle")
+    with pytest.raises((KeyError, TypeError, ValueError)):
+        said_match_report(_liverpool_answer(match=_found_match(**NEWCASTLE_LIVERPOOL), **changes), _after_the_match(),
+                          against="Newcastle")
+    with pytest.raises((KeyError, TypeError, ValueError)):
+        said_match_report(_liverpool_answer(**changes), _after_the_match(), against="Newcastle")
+
+
+def test_seasons_are_not_asked_of_an_answer_with_no_other_team(london):
+    # Asked of the team alone, an answer has none, and one which does is no different.
+    assert said_match_report(_liverpool_answer(), _after_the_match()) == "No match is listed for Liverpool."
+    assert said_match_report(_liverpool_answer(seasons=3), _after_the_match()) == "No match is listed for Liverpool."
+
+
 @pytest.mark.parametrize("changes", [
     {"notes": "Penalty conceded"}, {"notes": ["Penalty conceded"]}, {"notes": [{"text": "A note."}]},
     {"notes": [{"minute": "41'"}]}, {"notes": [{"minute": 41, "text": "A note."}]}, {"notes": [{"minute": "41'", "text": 4}]},
@@ -1203,8 +1274,9 @@ class FakeHome:
             raise self.sensor
         return self.sensor
 
-    def football_ask(self, what, name, date="", days=1):
-        self.asked.append((what, name, date, days))
+    def football_ask(self, what, name, date="", days=1, against=""):
+        # The other team is noted only when there is one, so that a question without it reads as it always did.
+        self.asked.append((what, name, date, days) + ((against,) if against else ()))
         if isinstance(self.answer, Exception):
             raise self.answer
         return self.answer
@@ -1430,13 +1502,20 @@ def test_an_old_answer_is_old_even_if_it_found_nothing(london):
     ({"competition": "Premier League"}, _competition_answer([_found_match(events=[{"minute": "45'", "kind": "yellow_card", "side": "home"}])])),
     ({"competition": "Premier League"}, _competition_answer([_found_match(events="goal")])),
     ({"team": "England", "about": "match"}, _match_answer(notes="Penalty conceded")),
+    ({"team": "Liverpool", "about": "match", "against": "Newcastle"}, _liverpool_answer()),
+    ({"team": "Liverpool", "about": "match", "against": "Newcastle"}, _liverpool_answer(seasons=7)),
+    ({"team": "Liverpool", "about": "match", "against": "Newcastle"}, _liverpool_answer(seasons="6")),
+    ({"team": "Liverpool", "about": "match", "against": "Newcastle"},
+     _liverpool_answer(seasons=1, match=_found_match(events="goal"))),
     ({"team": "England", "about": "match"}, _match_answer(match=_found_match(events="goal"))),
     ({"competition": "Premier League", "about": "table"}, {"competition": {"name": "Premier League"}, "stale": False}),
     ({"competition": "Premier League", "about": "left"}, _left_answer(knockout="yes")),
     ({"competition": "Premier League", "about": "left"}, {"stale": False, "unknown": "Arsnal"}),
     ({"competition": "Premier League", "about": "left"}, {"stale": False, "unknown": [4]}),
 ], ids=["no team", "next not a list", "match lacking keys", "odds not numbers", "match state unknown", "day not a day",
-        "event kind unknown", "events not a list", "match notes not a list", "match events not a list", "table with no groups",
+        "event kind unknown", "events not a list", "match notes not a list", "other team with no seasons",
+        "other team with seven seasons", "other team with seasons as text", "other team with a match of the wrong shape",
+        "match events not a list", "table with no groups",
         "knockout not a flag", "unknown not a list", "unknown not names"])
 def test_an_answer_of_the_wrong_shape_cant_be_got_and_is_logged(london, caplog, given, answer):
     with caplog.at_level(logging.WARNING, logger="voice_assistant.football_words"):
@@ -1720,6 +1799,114 @@ def test_a_teams_match_on_a_day_is_asked_for_that_day_and_no_match_says_so_of_th
         home = FakeHome(answer=_match_answer())
         assert _said(home, team="England", about="match", date=given)["message"] == "No match is listed for England."
         assert home.asked == [("match", "England", "", 1)]
+
+
+def test_when_two_teams_last_played_is_asked_as_a_match_of_the_one_against_the_other(london):
+    # "When did Liverpool last play Newcastle?": the team's match, never its matches or the team, with the other team.
+    AT = _after_the_match()
+    answer = _liverpool_answer(match=_found_match(**NEWCASTLE_LIVERPOOL), seasons=1)
+    home = FakeHome(answer=answer)
+    said = describe(_football(home), team="Liverpool", about="match", against="Newcastle", now=AT)
+    assert said == {"success": True, "message": said_match_report(answer, AT, against="Newcastle")}
+    assert said["message"].split("\n")[0] == ("Newcastle United 2, Liverpool 2, Premier League, on Sunday the 23rd of August, "
+                                             "at St James' Park in Newcastle upon Tyne. It was a draw.")
+    assert home.asked == [("match", "Liverpool", "", 1, "Newcastle")]
+
+
+def test_when_two_teams_last_played_says_how_far_back_it_was_looked_for_where_they_havent_met(london):
+    home = FakeHome(answer=_liverpool_answer(seasons=6))
+    assert _said(home, team="Liverpool", about="match", against="Newcastle") == {
+        "success": True, "message": "No match between Liverpool and Newcastle is listed in the last 6 seasons."}
+    # A national side has one list with no seasons, so that is not said as seasons.
+    home = FakeHome(answer=_match_answer(seasons=1))
+    assert _said(home, team="England", about=" Match ", against=" Wales ") == {
+        "success": True, "message": "No match between England and Wales is listed in the results ESPN lists."}
+    assert home.asked == [("match", "England", "", 1, "Wales")]
+
+
+def test_a_team_the_other_team_isnt_found_is_said_as_any_name_espn_doesnt_know_is(london):
+    answer = {"unknown": ["Newcastel"], "stale": False}
+    assert _said(FakeHome(answer=answer), team="Liverpool", about="match", against="Newcastel") == {
+        "success": True, "message": "ESPN, where Home Assistant's football comes from, found nothing called Newcastel."}
+
+
+@pytest.mark.parametrize("answer", [
+    {"stale": True, "seasons": 6, "team": {}}, {"stale": False, "error": "OSError: down"},
+    {"stale": True, "unknown": ["Newcastel"]},
+    ValueError("Home Assistant's football command failed: 2, 'unrecognized arguments: --against=Newcastle'"),
+    requests.Timeout("slow"),
+], ids=["stale", "error", "stale and unknown", "a script which doesn't know the other team", "no answer in time"])
+def test_an_old_or_failed_answer_for_the_other_team_cant_be_got(london, answer):
+    home = FakeHome(answer=answer)
+    assert _said(home, team="Liverpool", about="match", against="Newcastle") == NOT_GOT
+    assert home.asked == [("match", "Liverpool", "", 1, "Newcastle")]
+
+
+@pytest.mark.parametrize("given, asked", [
+    # A day wins over the other team, which Home Assistant isn't told of, as the Contract says.
+    ({"team": "Liverpool", "about": "match", "against": "Newcastle", "date": "2025-03-16"},
+     ("match", "Liverpool", "20250316", 1)),
+    # Text which isn't a day is no day, and the other team stands.
+    ({"team": "Liverpool", "about": "match", "against": "Newcastle", "date": "last March"},
+     ("match", "Liverpool", "", 1, "Newcastle")),
+    # The team's own name, said another way round or with a space, is no other team: it is the team alone.
+    ({"team": "Liverpool", "about": "match", "against": "Liverpool"}, ("match", "Liverpool", "", 1)),
+    ({"team": " Liverpool ", "about": "match", "against": "  liverpool"}, ("match", "Liverpool", "", 1)),
+    ({"team": "Man  Utd", "about": "match", "against": "MAN UTD"}, ("match", "Man  Utd", "", 1)),
+    # No other team, or one which is only blanks, is the team alone as it always was.
+    ({"team": "Liverpool", "about": "match", "against": "  "}, ("match", "Liverpool", "", 1)),
+    ({"team": "Liverpool", "about": "match", "against": None}, ("match", "Liverpool", "", 1)),
+    # Whatever competition comes with a team, as for its match alone.
+    ({"team": "Liverpool", "competition": "Carabao Cup", "about": "match", "against": "Newcastle"},
+     ("match", "Liverpool", "", 1, "Newcastle")),
+    # Only a team's match has another team to be against.
+    ({"team": "Liverpool", "about": "matches", "against": "Newcastle"}, ("team", "Liverpool", "", 1)),
+    ({"team": "Liverpool", "against": "Newcastle"}, ("team", "Liverpool", "", 1)),
+    ({"team": "Liverpool", "about": "lineups", "against": "Newcastle"}, ("lineups", "Liverpool", "", 1)),
+    ({"team": "Liverpool", "about": "table", "against": "Newcastle"}, ("team", "Liverpool", "", 1)),
+    ({"competition": "Carabao Cup", "about": "left", "against": "Newcastle"}, ("left", "Carabao Cup", "", 1)),
+], ids=["a day wins", "not a day", "the same team", "the same team said another way", "the same name with spaces",
+        "only blanks", "none", "with a competition", "matches", "no kind", "lineups", "table", "left"])
+def test_the_other_team_is_asked_only_of_a_teams_match_with_no_day(london, given, asked):
+    home = FakeHome(answer={"stale": False, "unknown": ["x"]})
+    _said(home, **given)
+    assert home.asked == [asked]
+
+
+def test_a_match_on_a_day_with_the_other_team_given_says_the_day_not_the_seasons(london):
+    home = FakeHome(answer=_liverpool_answer())
+    assert _said(home, team="Liverpool", about="match", against="Newcastle", date="2025-03-16") == {
+        "success": True, "message": "No match is listed for Liverpool on that day."}
+
+
+@pytest.mark.parametrize("given", [
+    {"about": "match", "against": "Newcastle"},
+    {"about": " Match ", "against": "Newcastle", "team": "  "},
+    # A competition alone isn't a team to be against another.
+    {"about": "match", "against": "Newcastle", "competition": "Premier League"},
+], ids=["no team", "a team of blanks", "a competition alone"])
+def test_the_other_team_with_no_team_asks_which_team_without_asking_anyone(london, given):
+    # The sensor isn't read either, so that a followed team's match is never said for the question of two others.
+    home = FakeHome(answer=_liverpool_answer())
+    home.sensor = requests.ConnectionError("refused")
+    assert _said(home, **given) == {"success": True, "message": "Name a team for its match."}
+    assert home.asked == []
+
+
+def test_the_other_team_with_no_team_but_a_day_is_the_day_alone(london):
+    # The day wins over the other team, so this is a match on the day as asked with no team named.
+    teams = [_team("364", "Liverpool", now=_found_match(**{**SPAIN_ENGLAND, "id": "9", "home": "Liverpool"}))]
+    home = FakeHome(teams, answer=_liverpool_answer())
+    _said(home, now=_after_the_match(), about="match", against="Newcastle", date="2026-11-15")
+    assert home.asked == [("match", "Liverpool", "20261115", 1)]
+
+
+@pytest.mark.parametrize("against", [5, ["Newcastle"], {"name": "Newcastle"}, True])
+def test_the_other_team_which_isnt_a_name_isnt_a_name(london, against):
+    home = FakeHome(answer=_liverpool_answer(seasons=6))
+    assert _said(home, team="Liverpool", about="match", against=against) == {
+        "success": False, "message": "I didn't catch which team or competition."}
+    assert home.asked == []
 
 
 def _over(kickoff, **fields):

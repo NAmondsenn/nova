@@ -1183,6 +1183,45 @@ def test_the_football_command_asks_for_a_match(make_home):
         ("POST", ASK, {"json": {"what": "match", "name": "England", "date": "20261115", "days": 1}})]
 
 
+def test_the_other_team_is_asked_of_home_assistant_with_a_match(make_home):
+    home = make_home({ASK: _answer('{"team": {"id": "364"}, "seasons": 3, "stale": false}')})
+    assert home.football_ask("match", "Liverpool", against="Newcastle") == {
+        "team": {"id": "364"}, "seasons": 3, "stale": False}
+    assert home._session.requests == [
+        ("POST", ASK, {"json": {"what": "match", "name": "Liverpool", "date": "", "days": 1, "against": "Newcastle"}})]
+
+
+@pytest.mark.parametrize("name, sent", [
+    ("  Man   Utd ", "Man Utd"), ("O'Higgins; rm -rf", "OHiggins rm -rf"), ("Bodø/Glimt", "Bodø/Glimt"),
+    ("Brighton & Hove Albion", "Brighton & Hove Albion"), ("1. FC Köln", "1. FC Köln"), ("x" * 100, "x" * 60),
+])
+def test_the_other_team_is_cut_down_before_it_goes_as_a_name_is(make_home, name, sent):
+    home = make_home({ASK: _answer('{"stale": false}')})
+    home.football_ask("match", "Liverpool", against=name)
+    assert home._session.requests[0][2]["json"]["against"] == sent
+
+
+@pytest.mark.parametrize("what, against", [
+    # Nothing is sent for no other team, or one with nothing left once it is cut down...
+    ("match", ""), ("match", "  "), ("match", "';$()"),
+    # ...nor for a question which isn't a match, as the command takes the other team for a match only.
+    ("team", "Newcastle"), ("lineups", "Newcastle"), ("competition", "Newcastle"), ("table", "Newcastle"),
+])
+def test_the_other_team_is_only_sent_with_a_match_and_when_there_is_one(make_home, what, against):
+    home = make_home({ASK: _answer('{"stale": false}')})
+    home.football_ask(what, "Liverpool", against=against)
+    assert home._session.requests == [("POST", ASK, {"json": {"what": what, "name": "Liverpool", "date": "", "days": 1}})]
+
+
+def test_a_command_which_doesnt_know_the_other_team_is_a_failure(make_home):
+    # Home Assistant's command is given --against, which a script from before round four rejects: that is
+    # the command failing, which is never said as a match.
+    refused = {"stdout": "", "stderr": "football.py: error: unrecognized arguments: --against=Newcastle", "returncode": 2}
+    home = make_home({ASK: {"service_response": refused}})
+    with pytest.raises(ValueError, match="failed: 2"):
+        home.football_ask("match", "Liverpool", against="Newcastle")
+
+
 def test_only_the_six_questions_are_asked(make_home):
     home = make_home({})
     with pytest.raises(ValueError):
@@ -1204,6 +1243,13 @@ def test_the_football_command_takes_only_its_own_fields(make_home, data):
     with pytest.raises(NotAllowed):
         home._call_service("shell_command", "football_ask", data, returns=True)
     assert home._session.requests == []
+
+
+def test_the_football_command_takes_the_other_team_among_its_own_fields(make_home):
+    home = make_home({ASK: _answer('{"stale": false}')})
+    data = {"what": "match", "name": "Liverpool", "date": "", "days": 1, "against": "Newcastle"}
+    assert home._call_service("shell_command", "football_ask", data, returns=True)["returncode"] == 0
+    assert home._session.requests == [("POST", ASK, {"json": data})]
 
 
 @pytest.mark.parametrize("failure, said", [

@@ -123,7 +123,8 @@ RETURNS = {("weather", "get_forecasts"), ("todo", "get_items"), ("shell_command"
 FOOTBALL_TEAMS = "sensor.football_teams"
 FOOTBALL_BOX = "input_text.football_teams"
 ASK_TIMEOUT = 20
-# What football_ask may be asked, and the most of a name it sends on.
+# What football_ask may be asked, and the most of a name it sends on - of the team or competition asked
+# about and, for a match, of the other team.
 FOOTBALL_QUESTIONS = ("team", "competition", "table", "left", "lineups", "match")
 FOOTBALL_NAME_LENGTH = 60
 
@@ -628,7 +629,7 @@ class HomeAssistant:
             raise ValueError(f"Home Assistant's state of {entity_id} isn't a state")
         return state
 
-    def football_ask(self, what: str, name: str, date: str = "", days: int = 1) -> Dict:
+    def football_ask(self, what: str, name: str, date: str = "", days: int = 1, against: str = "") -> Dict:
         """
         Asks Home Assistant's football command a question - which asks ESPN, as Nova
         never does - through shell_command.football_ask.
@@ -643,6 +644,10 @@ class HomeAssistant:
                 other text is taken for.
             days: How many days from the date, from 1 to 31 - anything else is brought to
                 the nearest.
+            against: For a match only, the other team: the last time name played them.
+                Cut down as name is. Not sent at all for any other question, or for none -
+                or one with nothing left once it is cut down - so that every question but
+                that one goes as it did before the command knew of it.
 
         Returns:
             The command's answer, as it printed it: a dict.
@@ -656,9 +661,11 @@ class HomeAssistant:
         """
         if what not in FOOTBALL_QUESTIONS:
             raise ValueError(f"{what!r} isn't something to ask about football")
-        kept = "".join(char for char in name if char.isalnum() or char.isspace() or char in ".&/-")
-        data = {"what": what, "name": " ".join(kept.split())[:FOOTBALL_NAME_LENGTH].rstrip(),
+        data = {"what": what, "name": self._football_name(name),
                 "date": date if re.fullmatch(r"[0-9]{8}", date) else "", "days": max(1, min(31, days))}
+        other = self._football_name(against) if what == "match" else ""
+        if other:
+            data["against"] = other
         answer = self._call_service("shell_command", "football_ask", data, returns=True, timeout=ASK_TIMEOUT)
         if not isinstance(answer, dict):
             raise ValueError("Home Assistant's football command gave no answer")
@@ -673,6 +680,21 @@ class HomeAssistant:
         if not isinstance(printed, dict):
             raise ValueError("Home Assistant's football command didn't print a JSON object")
         return printed
+
+    @staticmethod
+    def _football_name(name: str) -> str:
+        """
+        Cuts a team's or competition's name down to what may go into a command line.
+
+        Args:
+            name: The name, as it was said.
+
+        Returns:
+            Its letters of any alphabet, digits, spaces and . & / - only, one space at a time and
+            at most FOOTBALL_NAME_LENGTH characters.
+        """
+        kept = "".join(char for char in name if char.isalnum() or char.isspace() or char in ".&/-")
+        return " ".join(kept.split())[:FOOTBALL_NAME_LENGTH].rstrip()
 
     def set_football_teams(self, value: str) -> None:
         """
@@ -1661,7 +1683,7 @@ class HomeAssistant:
                 light, one Nova never works (see _never_worked) - or, for
                 todo.update_item, anything but marking a thing completed - or, for
                 input_text, anything but FOOTBALL_BOX alone - or, for shell_command, any
-                field but football_ask's own: what, name, date and days.
+                field but football_ask's own: what, name, date, days and against.
             requests.RequestException: If Home Assistant couldn't be asked.
         """
         entities = data.get("entity_id")
@@ -1688,7 +1710,7 @@ class HomeAssistant:
                 # Never another text box, which could hold a setting something else reads.
                 or (domain == "input_text" and entities != [FOOTBALL_BOX])
                 # Only what the script is asked, never a field it might take for a command.
-                or (domain == "shell_command" and not set(data) <= {"what", "name", "date", "days"})):
+                or (domain == "shell_command" and not set(data) <= {"what", "name", "date", "days", "against"})):
             logger.warning(f"Refused to call {domain}.{service} with {data}")
             raise NotAllowed(f"{domain}.{service}")
         response = self._request("POST", f"/api/services/{domain}/{service}" + ("?return_response" if returns else ""),

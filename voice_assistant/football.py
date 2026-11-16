@@ -641,7 +641,8 @@ class Football:
         with self._lock:
             return list(self._known_as)
 
-    def ask(self, what: str, name: str, date: Optional[str] = None, days: Optional[int] = None) -> Dict:
+    def ask(self, what: str, name: str, date: Optional[str] = None, days: Optional[int] = None,
+            against: Optional[str] = None) -> Dict:
         """
         Asks Home Assistant a question about football which the followed teams' sensor can't
         answer - any team or competition - and checks that the answer can be trusted.
@@ -651,6 +652,9 @@ class Football:
             name: The team or competition asked about.
             date: The first day, as YYYYMMDD, or None for today.
             days: How many days from it, or None for one.
+            against: For a match, the other team - the last time name played them - or None
+                for none. Home Assistant is told of it only where there is one, so that a
+                question without it is asked just as it was before the command knew of it.
 
         Returns:
             The answer, as the Contract has it for the question - or, where ESPN found nothing
@@ -662,8 +666,9 @@ class Football:
                 Assistant answered 400, as it does for a football command it hasn't got - or what to
                 say, as HomeAssistant.failure_message has it, if Home Assistant couldn't be asked at all.
         """
+        other = {"against": against} if against else {}
         try:
-            answer = self._home.football_ask(what, name, date or "", 1 if days is None else days)
+            answer = self._home.football_ask(what, name, date or "", 1 if days is None else days, **other)
         except requests.Timeout as e:
             # Said before any other failure, as failure_message would call it Home Assistant being out of reach.
             raise _cant_get(f"Home Assistant didn't answer in time: {e!r}", logging.WARNING) from e

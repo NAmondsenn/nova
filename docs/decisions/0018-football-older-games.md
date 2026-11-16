@@ -1,6 +1,6 @@
 # 0018: Football, round four: older games
 
-16 November 2026 · Agreed with the user in chat · Approved, being built
+16 November 2026 · Agreed with the user in chat · Built
 
 (0017 is kept for the listening stats, whose branch had 0016 when football's reached `main` first.)
 
@@ -26,6 +26,12 @@ What a look on 16 November showed, all read-only:
 5. **Time.** An ask stops reading seasons ten seconds in, and its answer is then stale, as it couldn't look as far as it says. Nova waits 20 seconds for an ask.
 6. **BBC.** South Shields' league matches are only as far back as the pages the sensor keeps; their cup matches come from ESPN, as above. Nova says what it has.
 7. **Nova.** `get_football` gains `against` for `match`. A team and another team, with no day, is the last time they played; a day given wins over `against`. With nothing found, Nova says no match between the two is listed in the last N seasons (or on that day).
+8. **What Nova's build settled.** Everything is in `get_football`'s `against` and the words of `football_words.py`.
+   - `against` is cut down as a name is (letters, digits, spaces and . & / -, at most 60 characters) in `HomeAssistant.football_ask`, the one place anything reaches a command line, and is sent only for `match` and only where something is left of it; every other question goes to the command exactly as in rounds one to three.
+   - A day wins: with a date, `against` is dropped before Home Assistant is asked, so the answer is the day's match and, with none, "No match is listed for Liverpool on that day."
+   - The same team as `team`, however cased or spaced, is the team's match alone: a team has no match against itself, and Nova keeps no list of names to tell two ways of saying one team apart by. `against` with no team is "Name a team for its match.", asked of nobody and with the sensor unread, as a followed team's match is not the one of two teams.
+   - An answer to a `match` asked with `against` which doesn't say `seasons`, or says one outside 1 to 6, is "I can't get football right now.": without it the match could be the team's own latest, from a script which didn't know it was asked for another team's. A stale or error answer, or a command which fails (a script from before round four rejecting `--against`), is said as for any answer.
+   - Nothing found: "No match between Liverpool and Newcastle is listed in the last 6 seasons." (2 and up), and "in the results ESPN lists" for 1, where a national side's single list has no seasons in it. Never that the two haven't played.
 
 **The contract, round four.** Rounds one to three stand, with these additions, word for word the same in both plans:
 
