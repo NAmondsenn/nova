@@ -59,6 +59,9 @@ _SCORING = ("goal", "penalty", "own_goal")
 # BBC's has none for a match without actions, or a board kept from before Home Assistant gave events has none.
 _NO_SCORERS = "Its scorers aren't listed."
 
+# What is said after the events of a match whose goals listed don't end at its score, which is why none has a running score.
+_GOALS_DONT_ADD_UP = "The goals listed don't add up to the score."
+
 # A dash between two numbers, as in a score ("1-0") or a formation ("4-2-3-1"): whichever dash it is and with or without
 # spaces round it. The speech reads it out as "dash", so it is swapped for words - "to" in a score, a space in a
 # formation - and nothing else in what is said changes.
@@ -328,8 +331,12 @@ def said_events(match: Match) -> List[str]:
         by Harry Kane. Spain 0, England 1." - with the score after it for a goal, a penalty scored or an
         own goal, counted in order from 0, 0. Where the last of those scores
         isn't the match's own, or the match has no score, none is said, so that nothing false is: a list
-        which is short of a goal, or has one too many, can't say what the score was along the way. Empty
-        for a match which hasn't started, which has nothing to say, and for one with no events.
+        which is short of a goal, or has one too many, can't say what the score was along the way. Where
+        goals are listed, the match has a score and the two disagree, "The goals listed don't add up to the
+        score." follows the sentences, so that a score left out is said to be left out; with no score the
+        match's line says "no score listed", and with no goal listed at all that its scorers aren't listed
+        is for the caller (see _scorers_unlisted). Empty for a match which hasn't started, which has nothing
+        to say, and for one with no events.
     """
     if not _has_started(match):
         return []
@@ -347,6 +354,10 @@ def said_events(match: Match) -> List[str]:
         sentences.append(_said_event(event, match))
         scores.append(f" {match.home} {home_goals}, {match.away} {away_goals}." if scoring else "")
     if (home_goals, away_goals) != (match.home_score, match.away_score):
+        # A score the goals don't reach, or pass, is not said after each; and where there is one, that is said.
+        scored = match.home_score is not None and match.away_score is not None
+        if scored and home_goals + away_goals:
+            sentences.append(_GOALS_DONT_ADD_UP)
         return sentences
     return [sentence + score for sentence, score in zip(sentences, scores)]
 
@@ -861,7 +872,8 @@ def said_match_report(answer: Dict, now: datetime, on_a_day: bool = False) -> st
 
     Returns:
         Lines: the match, as said_match says it; "Its scorers aren't listed." if it has goals on its score and
-        none listed; what happened in it (see said_events); each of ESPN's notes
+        none listed; what happened in it (see said_events), which ends "The goals listed don't add up to the
+        score." where they don't; each of ESPN's notes
         ("Note at 41': Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area."), as with
         the events once the match has started and not before; and LAG as the last line if the match is in
         play. With no match, only that none is listed for the team - on that day, if one was asked about.

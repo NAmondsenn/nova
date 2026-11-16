@@ -347,12 +347,50 @@ def test_a_match_in_play_says_its_events_so_far(london):
     {"away_score": None},
 ], ids=["a goal short", "a goal too many", "the sides the other way round", "no score", "no home score", "no away score"])
 def test_the_running_score_is_left_out_where_it_doesnt_end_at_the_matchs_own(london, changes):
-    said = said_events(_m(**{**SPAIN_ENGLAND, **changes}))
-    # The events are all still said, and none has a score after it: nothing false is said.
-    assert len(said) == len(changes.get("events", SPAIN_ENGLAND["events"]))
+    events = changes.get("events", SPAIN_ENGLAND["events"])
+    # The events are all still said, and none has a score after it: nothing false is said. (A sentence may follow them,
+    # which says why: see the next test.)
+    said = said_events(_m(**{**SPAIN_ENGLAND, **changes}))[:len(events)]
+    assert len(said) == len(events)
     assert said[0] == "45': a penalty for England, scored by Harry Kane."
     assert said[3] == "63': a red card for Elliot Anderson of England."
     assert not any(re.search(r"[A-Za-z] \d", sentence) for sentence in said)
+
+
+DONT_ADD_UP = "The goals listed don't add up to the score."
+
+
+@pytest.mark.parametrize("changes", [
+    {"events": SPAIN_ENGLAND["events"][:-1]},
+    {"events": SPAIN_ENGLAND["events"] + [{"minute": "88'", "kind": "goal", "side": "home", "player": "Lamine Yamal"}]},
+    {"home_score": 3, "away_score": 2},
+], ids=["a goal short", "a goal too many", "the sides the other way round"])
+def test_a_running_score_left_out_is_said_to_be_left_out(london, changes):
+    match = _m(**{**SPAIN_ENGLAND, **changes})
+    said = said_events(match)
+    # The events come as they are, without running scores, and one more sentence ends them.
+    assert said[-1] == DONT_ADD_UP
+    assert not any(re.search(r"[A-Za-z] \d", sentence) for sentence in said)
+    assert len(said) == len(changes.get("events", SPAIN_ENGLAND["events"])) + 1
+    assert said[0] == "45': a penalty for England, scored by Harry Kane."
+    # The match report has it after the events, before any notes.
+    lines = said_match_report(_match_answer(match=_found_match(**{**SPAIN_ENGLAND, **changes}), notes=[PENALTY_CONCEDED]),
+                              _after_the_match()).split("\n")
+    assert lines[-2:] == [DONT_ADD_UP, "Note at 41': Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area."]
+
+
+@pytest.mark.parametrize("changes", [{"home_score": None, "away_score": None}, {"home_score": None}, {"away_score": None}],
+                         ids=["no score", "no home score", "no away score"])
+def test_a_match_with_no_score_has_nothing_to_add_up_to(london, changes):
+    # Its line says "no score listed", which is why none is said after each goal.
+    assert DONT_ADD_UP not in said_events(_m(**{**SPAIN_ENGLAND, **changes}))
+
+
+def test_the_goals_listed_adding_up_to_the_score_say_nothing_of_it_and_no_goals_listed_say_it_another_way(london):
+    assert DONT_ADD_UP not in said_events(_m(**SPAIN_ENGLAND))
+    # A red card alone, with goals on the score, is a match whose scorers aren't listed, not one whose goals don't add up.
+    red_only = _m(**{**SPAIN_ENGLAND, "events": SPAIN_ENGLAND["events"][3:4]})
+    assert said_events(red_only) == ["63': a red card for Elliot Anderson of England."]
 
 
 def test_nothing_said_of_what_happened_has_a_score_as_digits_with_a_dash(london):
