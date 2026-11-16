@@ -11,22 +11,35 @@ SoulSync saying a download is done isn't enough: it's downloaded only once Navid
 has it, and only what wasn't in Navidrome when it was asked for counts, so an old
 clean copy isn't taken for the explicit one just asked for. Nothing here plays or
 deletes a file. See docs/decisions/0012-music-fetched-by-voice.md.
+
+What lands is heard before anything is said of it, and a clean copy is swapped for an
+explicit one (clean_swap.py): its labels - "(clean)" on an album, Navidrome's explicit
+mark - are never believed, as SoulSync's tagging gets them wrong both ways. What the
+library already has is judged by what Nova heard of it, too. See
+docs/decisions/0019-clean-songs-by-ear.md.
 """
 
 import logging
 import os
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Set, Union
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import requests
 
 from voice_assistant import music
 from voice_assistant.actions import Action
+from voice_assistant.clean_ear import Verdict
+from voice_assistant.clean_store import CleanStore
 from voice_assistant.navidrome import (BRACKETED, CLEAN_VERSIONS, DASH, NavidromeError, NavidromeLibrary,
-                                       _says_version, is_clean, likeness, normalise, split_by)
+                                       _says_version, likeness, normalise, split_by)
 from voice_assistant.soulsync import AlbumRequest, Progress, SongRequest, SoulSync, SoulSyncError
+
+if TYPE_CHECKING:
+    # Only for the types: clean_swap imports this module.
+    from voice_assistant.clean_swap import Ears, Swapper
 
 # Logger setup
 logger = logging.getLogger(__name__)
@@ -100,7 +113,7 @@ def song_limit(config) -> float:
     return float(config.section("music").get("song_download_minutes", SONG_MINUTES)) * 60
 
 
-def swap_said(name: str, outcome: str) -> str:
+def swap_said(name: str, outcome: str, reason: Optional[str] = None) -> str:
     """
     What's said of a song which landed clean, once its swap is over (clean_swap.Swapper).
 
@@ -108,6 +121,7 @@ def swap_said(name: str, outcome: str) -> str:
         name: The song as it's named in what's said, e.g. "endless by Gunna".
         outcome: How the swap ended - "swapped", "only_clean", "unsure", "not_judged", or
             "couldnt" with its reason.
+        reason: Why it couldn't be swapped, in place of the outcome's own.
 
     Returns:
         The sentence, e.g. "endless by Gunna has been downloaded, but it's the clean
@@ -122,7 +136,7 @@ def swap_said(name: str, outcome: str) -> str:
     if outcome == "not_judged":
         return NOT_CHECKED.format(name=name)
     # The reason may be SoulSync's own sentence, with its full stop.
-    reason = (getattr(outcome, "reason", "") or "").strip().rstrip(".")
+    reason = (reason or getattr(outcome, "reason", "") or "").strip().rstrip(".")
     return (f"{name} has been downloaded, but it's the clean version, and I couldn't swap it"
             + (f": {reason}." if reason else "."))
 
@@ -182,30 +196,35 @@ def _albums(tracks: List[Dict]) -> List[List[Dict]]:
     return list(albums.values())
 
 
-def _as_had(wanted: Wanted, found: List[Dict]) -> Optional[str]:
+def _as_had(wanted: Wanted, found: List[Dict], heard_clean: Callable[[Dict], bool]) -> Optional[str]:
     """
     What Navidrome has of a request other than clean, named as Navidrome has it -
     "Rumours by Fleetwood Mac" for "download rumours" - or None if all it has is clean.
+    Clean is only what Nova heard clean: a copy on a "(clean)" album, never heard, is
+    had, as SICKO MODE on "ASTROWORLD (clean)" is explicit.
 
-    A song is had only clean when every copy of it is. An album is when every album
-    found has a clean track: a clean edition marks only the tracks it bleeped, and the
-    rest look like the explicit edition's - but an explicit edition beside it is had.
+    A song is had only clean when every copy of it was heard clean. An album is when
+    every album found has a track heard clean: a clean edition has only the tracks it
+    bleeped heard clean, as the rest have too few swears to judge - but an explicit
+    edition beside it is had.
 
     Args:
         wanted: What was asked for.
         found: Every copy of the song, or every track of the album, Navidrome has.
+        heard_clean: Whether a copy was heard clean.
 
     Returns:
         The song's title by its artist, or the album's name by the album's artist -
         never a track's, which may be a featured one.
     """
     if wanted.kind != "album":
-        track = next((track for track in found if not is_clean(track)), None)
+        track = next((track for track in found if not heard_clean(track)), None)
         if track is None:
             return None
         title, artist = track.get("title"), track.get("artist")
     else:
-        album = next((tracks for tracks in _albums(found) if not any(is_clean(track) for track in tracks)), None)
+        album = next((tracks for tracks in _albums(found) if not any(heard_clean(track) for track in tracks)),
+                     None)
         if album is None:
             return None
         title, artist = album[0].get("album"), album[0].get("albumArtist")
@@ -226,7 +245,7 @@ def _couldnt(wanted: Wanted, reason: Optional[str]) -> str:
     return f"I couldn't download {wanted.name}." + (f" {reason}" if reason else "")
 
 
-def _none_queued(wanted: Wanted, had: List[Dict]) -> str:
+def _none_queued(wanted: Wanted, had: List[Dict], heard_clean: Callable[[Dict], bool]) -> str:
     """
     What to say when SoulSync queued none of an album: "You've already got X." if
     Navidrome had any of it other than clean before it was asked for, named as
@@ -236,11 +255,12 @@ def _none_queued(wanted: Wanted, had: List[Dict]) -> str:
     Args:
         wanted: The album asked for.
         had: Every track of it Navidrome had before the request.
+        heard_clean: Whether a track was heard clean.
 
     Returns:
         The sentence to say.
     """
-    name = _as_had(wanted, had)
+    name = _as_had(wanted, had, heard_clean)
     return f"You've already got {name}." if name else _couldnt(wanted, NOTHING_QUEUED)
 
 
@@ -269,61 +289,70 @@ def _bare_title(title: str) -> str:
     return normalise(title)
 
 
-def _album_tracks(request: AlbumRequest, new: List[Dict]) -> List[Dict]:
+def _album_tracks(request: AlbumRequest, new: List[Dict]) -> List[List[Dict]]:
     """
-    The new tracks which are the album's, one a title: a clean copy and the explicit
-    one of the same track - "Dreams (Clean)" and "Dreams" - are one track, the
-    explicit one, as the album has it. With SoulSync's titles, only a new track with
-    every word of one of them counts.
+    The new tracks which are the album's, as the copies of each title: a clean copy and
+    the explicit one of the same track - "Dreams (Clean)" and "Dreams" - are one track,
+    and both are heard to tell which is which, as their names can't be believed. With
+    SoulSync's titles, only a new track with every word of one of them counts.
 
     Args:
         request: The AlbumRequest SoulSync gave.
         new: The tracks of the album in Navidrome which weren't there before the request.
 
     Returns:
-        The tracks which have landed, one for each title.
+        The copies of each track which has landed, a list for each title, in the order found.
     """
-    # Sorted is stable, so this only moves the clean ones after the rest.
-    explicit_first = sorted(new, key=is_clean)
     if request.tracks:
-        explicit_first = [track for track in explicit_first
-                          if any(likeness(track.get("title") or "", title) >= 2 for title in request.tracks)]
-    tracks: Dict[str, Dict] = {}
-    for track in explicit_first:
-        tracks.setdefault(_bare_title(track.get("title") or ""), track)
+        new = [track for track in new
+               if any(likeness(track.get("title") or "", title) >= 2 for title in request.tracks)]
+    tracks: Dict[str, List[Dict]] = {}
+    for track in new:
+        tracks.setdefault(_bare_title(track.get("title") or ""), []).append(track)
     return list(tracks.values())
 
 
-def _clean_ones(wanted: Wanted, tracks: List[Dict]) -> List[Dict]:
-    """The clean versions among the tracks which came down - logged, so the user can replace them."""
-    clean = [track for track in tracks if is_clean(track)]
-    if clean:
-        logger.warning(f"Clean versions came down for {wanted.name}, to be replaced by hand: "
-                       + "; ".join(f"{track.get('title')} on {track.get('album')}" for track in clean))
-    return clean
+def _of_its_tracks(count: int, start: bool) -> str:
+    """'One of its tracks' (or 'one', within a sentence), or '2 of its tracks'."""
+    if count == 1:
+        return f"{'One' if start else 'one'} of its tracks"
+    return f"{count} of its tracks"
 
 
-def _song_outcome(wanted: Wanted, new: List[Dict]) -> Optional[str]:
+def _album_said(lead: str, outcomes: Counter) -> str:
     """
-    What to say of a song once a copy of it is new in Navidrome - None while none
-    is. One that isn't clean is the download; if every one is, it came down clean.
+    What's said of an album once the tracks which came down are heard: the lead, then how
+    many were swapped for explicit copies and how many weren't plainly downloaded, e.g.
+    "Rumours by Fleetwood Mac has been downloaded. 2 of its tracks came down clean, so I
+    swapped them for the explicit ones. One of its tracks only came down clean, so I've
+    kept it."
+
+    Args:
+        lead: "X has been downloaded." or "Only N of the M tracks of X came down."
+        outcomes: How many tracks ended each way - "downloaded", "swapped", "only_clean",
+            "couldnt", "unsure" or "not_judged".
     """
-    if not new:
-        return None
-    if all(is_clean(track) for track in new):
-        _clean_ones(wanted, new)
-        return f"{wanted.name} came down as a clean version."
-    return f"{wanted.name} has been downloaded."
-
-
-def _album_downloaded(wanted: Wanted, tracks: List[Dict]) -> str:
-    """What to say of an album which has landed, with how many of its tracks came down clean."""
-    clean = len(_clean_ones(wanted, tracks))
-    if clean == 1:
-        return f"{wanted.name} has been downloaded, but one of its tracks came down as a clean version."
-    if clean:
-        return f"{wanted.name} has been downloaded, but {clean} of its tracks came down as clean versions."
-    return f"{wanted.name} has been downloaded."
+    said = [lead]
+    for kind in ("swapped", "only_clean", "couldnt", "unsure", "not_judged"):
+        count = outcomes.get(kind, 0)
+        if not count:
+            continue
+        one = count == 1
+        it = "it" if one else "them"
+        if kind == "swapped":
+            said.append(f"{_of_its_tracks(count, True)} came down clean, so I swapped {it} for the explicit "
+                        f"{'one' if one else 'ones'}.")
+        elif kind == "only_clean":
+            said.append(f"{_of_its_tracks(count, True)} only came down clean, so I've kept {it}.")
+        elif kind == "couldnt":
+            said.append(f"{_of_its_tracks(count, True)} came down clean, and I couldn't swap {it}.")
+        elif kind == "unsure":
+            said.append(f"I couldn't tell if {_of_its_tracks(count, False)} "
+                        f"{'is the clean version' if one else 'are clean versions'}.")
+        else:
+            said.append(f"I couldn't check {_of_its_tracks(count, False)} for "
+                        f"{'a clean version' if one else 'clean versions'}.")
+    return " ".join(said)
 
 
 class Downloads:
@@ -332,7 +361,9 @@ class Downloads:
     def __init__(self, config, say: Callable[[Optional[str], str], None],
                  soulsync: Optional[Callable[[], Optional[SoulSync]]] = None,
                  library: Optional[Callable[[], Optional[NavidromeLibrary]]] = None,
-                 now: Callable[[], float] = time.monotonic, wait: Optional[Callable[[float], bool]] = None):
+                 now: Callable[[], float] = time.monotonic, wait: Optional[Callable[[float], bool]] = None,
+                 ears: Optional["Ears"] = None, swapper: Optional["Swapper"] = None,
+                 store: Optional[CleanStore] = None):
         """
         Args:
             config: Configs loaded from config.yaml. The time limits are read from it
@@ -349,8 +380,17 @@ class Downloads:
             wait: Waits the seconds given between polls, and says whether Nova is
                 stopping - by default the wait of the event stop sets, which it
                 cuts short.
+            ears: Hears each copy that lands. Without them nothing landed can be
+                checked, and that's said.
+            swapper: Swaps a copy heard clean for an explicit one.
+            store: What Nova has heard of each song, to tell what the library has only
+                clean.
         """
         self.config = config
+        self._ears = ears
+        self._swapper = swapper
+        self._store = store
+        self._resumed = False
         self._say = say
         self._soulsync = soulsync or (lambda: SoulSync.from_config(config, os.getenv("SOULSYNC_API_KEY")))
         self._library = library or self._own_library
@@ -523,8 +563,8 @@ class Downloads:
 
         Returns:
             Navidrome's failure, which requests nothing - it may well have it; the offer
-            of the explicit one when what it has is clean; None for an album asked for
-            in words; else "You've already got X.".
+            of the explicit one when all it has was heard clean; None for an album asked
+            for in words; else "You've already got X.".
         """
         try:
             found = self._find(self._library(), wanted)
@@ -532,7 +572,7 @@ class Downloads:
             return {"success": False, "message": NavidromeLibrary._failure_message(e)}
         if not found:
             return None
-        had = _as_had(wanted, found)
+        had = _as_had(wanted, found, self._heard_clean)
         if had is None:
             return {"success": True,
                     "message": f"You've only got a clean version of {wanted.name}. {DOWNLOAD_EXPLICIT}",
@@ -592,11 +632,31 @@ class Downloads:
             return NOTHING_WAITING
         return " ".join(f"{name}, {_asked_ago(seconds)}." for name, seconds in waiting)
 
+    def resume_swaps(self):
+        """
+        Carries on the swaps Nova was part way through when it last stopped, on a thread
+        of its own - once, as the brain starts.
+        """
+        if self._swapper is None:
+            return
+        with self._lock:
+            if self._resumed:
+                return
+            self._resumed = True
+        threading.Thread(target=self._resume_swaps, daemon=True, name="swap-resume").start()
+
+    def _resume_swaps(self):
+        try:
+            self._swapper.resume()
+        except Exception:
+            logger.exception("Carrying on the swaps Nova was part way through failed")
+
     def stop(self):
         """
-        Ends every watch, as Nova stops. Whatever is still waiting is forgotten, and
-        logged, and nothing more is said of it - SoulSync carries on, so anything
-        which lands later is simply in Navidrome.
+        Ends every watch, as Nova stops, and every swap at its next step - each swap is
+        kept, to be carried on at the next start. Whatever is still waiting is
+        forgotten, and logged, and nothing more is said of it - SoulSync carries on, so
+        anything which lands later is simply in Navidrome.
         """
         with self._lock:
             forgotten = [wanted.name for wanted in self._waiting.values()]
@@ -604,6 +664,8 @@ class Downloads:
             self._asked_at.clear()
             self._names.clear()
             self._stopping.set()
+        if self._swapper is not None:
+            self._swapper.stop()
         if forgotten:
             logger.warning(f"Forgot {len(forgotten)} download{'' if len(forgotten) == 1 else 's'} still waiting, "
                            f"as Nova is stopping: {', '.join(forgotten)}")
@@ -678,17 +740,21 @@ class Downloads:
                 # still asked for, as the explicit one is what's wanted. The same look
                 # as for what lands, so what was there before is never taken for it.
                 had = self._had(library, sought)
-                name = _as_had(wanted, had)
+                name = _as_had(wanted, had, self._heard_clean)
                 if name:
                     logger.info(f"Navidrome already has {name}, so it isn't requested")
                     return self._tell(satellite, f"You've already got {name}.")
+                if had and self._swapper is not None:
+                    # Every copy it has was heard clean - a yes to the explicit one. SoulSync's
+                    # wishlist would drop a request as "already owned", so the clean copy is swapped.
+                    return self._swap_had(wanted, sought, had, satellite)
                 soulsync.request_song(request)
         except SoulSyncError as e:
             return self._tell(satellite, _couldnt(wanted, e.reason))
         before = {track.get("id") for track in had}
         if isinstance(request, AlbumRequest) and request.queued <= 0:
             # Nothing of it is coming, so there's nothing to wait for.
-            return self._tell(satellite, _none_queued(wanted, had))
+            return self._tell(satellite, _none_queued(wanted, had, self._heard_clean))
         self._tell(satellite, f"{wanted.name} requested.")
 
         new: List[Dict] = []
@@ -698,15 +764,16 @@ class Downloads:
             limit = self._limit(wanted)
             if self._now() - started >= limit:
                 new = self._look(library, sought, before, new)
-                return self._tell(satellite, self._last_word(wanted, request, new))
+                return self._tell(satellite, self._last_word(wanted, sought, request, new, satellite))
             if done_at is None:
                 progress = self._progress(soulsync, wanted, request)
                 if progress is not None and progress.state == "failed":
-                    return self._tell(satellite, self._last_word(wanted, request, new, progress.reason))
+                    return self._tell(satellite, self._last_word(wanted, sought, request, new, satellite,
+                                                                 progress.reason))
                 if progress is not None and progress.state == "done":
                     done_at = self._now()
             new = self._look(library, sought, before, new)
-            outcome = self._landed(wanted, request, new)
+            outcome = self._landed(wanted, sought, request, new, satellite)
             if outcome:
                 return self._tell(satellite, outcome)
             why = None if scanned else self._scan_due(wanted, started, done_at, limit)
@@ -805,38 +872,172 @@ class Downloads:
             logger.warning(f"Couldn't ask SoulSync how {wanted.name} is getting on this time, so the watch carries on")
             return None
 
-    @staticmethod
-    def _landed(wanted: Wanted, request: Union[SongRequest, AlbumRequest], new: List[Dict]) -> Optional[str]:
+    def _landed(self, wanted: Wanted, sought: Wanted, request: Union[SongRequest, AlbumRequest], new: List[Dict],
+                satellite: Optional[str]) -> Optional[str]:
         """
-        What to say if the request has landed, or None to wait on. A song has once
-        a copy of it is new in Navidrome; an album once as many of its tracks are
-        new as SoulSync queued - nine of Rumours' eleven, with the other two had.
+        What to say if the request has landed, once what landed is heard - or None to
+        wait on. A song has once a copy of it is new in Navidrome; an album once as many
+        of its tracks are new as SoulSync queued - nine of Rumours' eleven, with the
+        other two had.
+
+        Args:
+            wanted: What was asked for, named as SoulSync found a song.
+            sought: What Navidrome is searched for - for a song, the title asked for and
+                SoulSync's artist, as SoulSync is asked for it again in a swap.
+            request: The SongRequest or AlbumRequest SoulSync gave.
+            new: What's new in Navidrome.
+            satellite: The satellite that asked, or None.
         """
         if wanted.kind != "album":
-            return _song_outcome(wanted, new)
+            return self._heard_song(wanted, sought, new, satellite) if new else None
         tracks = _album_tracks(request, new)
-        return _album_downloaded(wanted, tracks) if len(tracks) >= request.queued else None
+        if len(tracks) < request.queued:
+            return None
+        return self._heard_album(f"{wanted.name} has been downloaded.", tracks, satellite)
 
-    @staticmethod
-    def _last_word(wanted: Wanted, request: Union[SongRequest, AlbumRequest], new: List[Dict],
-                   reason: Optional[str] = None) -> str:
+    def _last_word(self, wanted: Wanted, sought: Wanted, request: Union[SongRequest, AlbumRequest],
+                   new: List[Dict], satellite: Optional[str], reason: Optional[str] = None) -> str:
         """
         What to say once the watch ends without seeing all of it land - failed, or
-        out of time: what did land, or that it couldn't be downloaded.
+        out of time: what did land, once heard, or that it couldn't be downloaded.
 
         Args:
             wanted: What was asked for.
+            sought: What Navidrome is searched for, as _landed has it.
             request: The SongRequest or AlbumRequest SoulSync gave.
             new: What's new in Navidrome, at its last look.
+            satellite: The satellite that asked, or None.
             reason: Why SoulSync said it failed, if it did and said why.
         """
         if wanted.kind != "album":
-            return _song_outcome(wanted, new) or _couldnt(wanted, reason)
+            return (self._heard_song(wanted, sought, new, satellite) if new else "") or _couldnt(wanted, reason)
         tracks = _album_tracks(request, new)
         if tracks and len(tracks) < request.queued:
-            _clean_ones(wanted, tracks)
-            return f"Only {len(tracks)} of the {request.queued} tracks of {wanted.name} came down."
+            return self._heard_album(f"Only {len(tracks)} of the {request.queued} tracks of {wanted.name} came down.",
+                                     tracks, satellite)
         if tracks:
             # All of it, at the last look.
-            return _album_downloaded(wanted, tracks)
+            return self._heard_album(f"{wanted.name} has been downloaded.", tracks, satellite)
         return _couldnt(wanted, reason)
+
+    def _heard_song(self, wanted: Wanted, sought: Wanted, copies: List[Dict], satellite: Optional[str]) -> str:
+        """
+        What to say of a song once the copies of it which landed are heard, and a clean
+        one swapped: "downloaded" only for an explicit copy, or one with nothing to bleep.
+
+        Returns:
+            The sentence, or "" if Nova stopped part way.
+        """
+        verdict, copy = self._hear(copies)
+        outcome = self._outcome(verdict, copy, sought, satellite)
+        if outcome == "stopped":
+            return ""
+        if outcome == "downloaded":
+            return f"{wanted.name} has been downloaded."
+        if outcome == "couldnt" and self._swapper is None:
+            return swap_said(wanted.name, outcome, "swapping isn't set up")
+        return swap_said(wanted.name, outcome)
+
+    def _swap_had(self, wanted: Wanted, sought: Wanted, had: List[Dict], satellite: Optional[str]) -> str:
+        """
+        The explicit copy of a song Navidrome has only clean, got by swapping the clean one -
+        heard again first, as its file may have changed since, so only a copy still clean is
+        swapped.
+
+        Args:
+            wanted: The song, named as SoulSync found it.
+            sought: The song as SoulSync is asked for it again.
+            had: The copies Navidrome has, every one heard clean before.
+            satellite: The satellite that asked, or None.
+
+        Returns:
+            The last message said, or "" if Nova stopped first.
+        """
+        self._tell(satellite, f"{wanted.name} requested.")
+        verdict, copy = self._hear(had)
+        outcome = self._outcome(verdict, copy, sought, satellite)
+        if outcome == "stopped":
+            return ""
+        if outcome == "downloaded":
+            return self._tell(satellite, f"You've already got {wanted.name}.")
+        if outcome in ("unsure", "not_judged") and verdict.kind != "clean":
+            return self._tell(satellite, f"You've already got {wanted.name}, but I couldn't tell if it's the clean "
+                                         f"version.")
+        if outcome == "couldnt":
+            reason = (getattr(outcome, "reason", "") or "swapping isn't set up").strip().rstrip(".")
+            return self._tell(satellite, f"I couldn't download {wanted.name}, so you've still got the clean version: "
+                                         f"{reason}.")
+        return self._tell(satellite, swap_said(wanted.name, outcome))
+
+    def _heard_album(self, lead: str, tracks: List[List[Dict]], satellite: Optional[str]) -> str:
+        """
+        What to say of an album once each track which landed is heard, and the clean ones
+        swapped one at a time - each asked for again as a song, by its own title and artist.
+
+        Args:
+            lead: What's said first, of how much of it came down.
+            tracks: The copies of each track which landed, as _album_tracks gives them.
+            satellite: The satellite that asked, or None.
+
+        Returns:
+            The sentence, or "" if Nova stopped part way.
+        """
+        outcomes: Counter = Counter()
+        for copies in tracks:
+            if self._stopping.is_set():
+                return ""
+            verdict, copy = self._hear(copies)
+            outcome = self._outcome(verdict, copy, Wanted(copy.get("title") or "", copy.get("artist") or None,
+                                                          "track"), satellite)
+            if outcome == "stopped":
+                return ""
+            outcomes[outcome] += 1
+        return _album_said(lead, outcomes)
+
+    def _hear(self, copies: List[Dict]) -> Tuple[Verdict, Dict]:
+        """
+        Hears the copies of a song which landed, as a download's, which goes ahead of the
+        library check. Whatever goes wrong is "not judged", so the download is still said.
+        """
+        if self._ears is None:
+            return Verdict("not_judged", 0, 0, "listening isn't set up"), copies[0]
+        try:
+            return self._ears.hear_copies(copies, download=True)
+        except Exception:
+            logger.exception(f"Hearing {copies[0].get('title')} failed")
+            return Verdict("not_judged", 0, 0, "the listening failed"), copies[0]
+
+    def _outcome(self, verdict: Verdict, copy: Dict, swap_as: Wanted, satellite: Optional[str]) -> str:
+        """
+        How a song which landed ends: "downloaded" if it's explicit or has nothing to
+        bleep; "unsure" or "not_judged", kept as it is; or, heard clean, how its swap
+        ended - "swapped", "only_clean", "couldnt", "unsure", "not_judged" or "stopped".
+
+        Args:
+            verdict: What was heard of it.
+            copy: The copy the verdict is of, to swap.
+            swap_as: The song as SoulSync is asked for it again.
+            satellite: The satellite that asked, or None.
+        """
+        if verdict.kind in ("explicit", "too_few"):
+            return "downloaded"
+        if verdict.kind in ("unsure", "not_judged"):
+            return verdict.kind
+        if self._swapper is None:
+            logger.warning(f"{copy.get('title')} came down clean, and there's nothing to swap it with")
+            return "couldnt"
+        return self._swapper.swap(copy, swap_as, satellite, quiet=False)
+
+    def _heard_clean(self, track: Dict) -> bool:
+        """
+        Whether Nova heard a copy in the library clean - judged by ear, as kept in the
+        store, never by its name or Navidrome's mark. A copy whose size Navidrome now
+        gives differently has changed since, so isn't known.
+        """
+        if self._store is None or not track.get("id"):
+            return False
+        record = self._store.verdict(track["id"]) or {}
+        if (record.get("verdict") or {}).get("kind") != "clean":
+            return False
+        size, heard_size = track.get("size"), record.get("size")
+        return not (isinstance(size, int) and isinstance(heard_size, int) and size != heard_size)

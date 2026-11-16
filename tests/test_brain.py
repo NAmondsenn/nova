@@ -1930,10 +1930,23 @@ def test_a_second_stop_signal_doesnt_cut_the_cleanup_short(stopping):
 
 def test_the_brain_stops_its_downloads_before_its_satellites(stopping):
     # So what's still waiting is forgotten, rather than its outcome sent to the phone
-    # because the satellite which asked has just been let go.
+    # because the satellite which asked has just been let go - and the listening worker
+    # closes only once the downloads' swaps have stopped.
     stopping.downloads = Recorder("downloads", stopping.closed)
+    stopping.listener = Recorder("listener", stopping.closed)
     stopping._clean_up()
-    assert stopping.closed == ["clock", "downloads", "bedroom", "tts"]
+    assert stopping.closed == ["clock", "downloads", "listener", "bedroom", "tts"]
+
+
+def test_the_brain_carries_on_saved_swaps_as_it_starts(stopping, monkeypatch):
+    started = []
+    monkeypatch.setattr(stopping.downloads, "resume_swaps", lambda: started.append(True))
+    stopping.serve = stopping.shutdown
+
+    with pytest.raises(SystemExit):
+        stopping.run()
+
+    assert started == [True]
 
 
 def test_the_brain_needs_none_of_the_satellites_audio_libraries(monkeypatch):
@@ -2839,6 +2852,17 @@ def test_a_warning_or_alert_not_said_to_the_end_counts_as_not_said(brain, connec
 def test_the_brains_downloads_tell_through_it(brain):
     # One for every satellite, so the same thing asked for on two is requested once.
     assert isinstance(brain.downloads, Downloads) and brain.downloads._say == brain._say_download
+
+
+def test_the_downloads_hear_and_swap_through_one_store_worker_and_library(brain, tmp_path):
+    # One of each for the brain: the worker takes a song at a time, the store's lock is its
+    # own, and Navidrome limits sign-ins.
+    assert brain.downloads._ears is brain.ears and brain.downloads._swapper is brain.swapper
+    assert brain.ears.listener is brain.listener and brain.swapper.ears is brain.ears
+    assert brain.downloads._store is brain.ears.store is brain.swapper.store is brain.clean_store
+    assert brain.clean_store.path == str(tmp_path / "clean_songs.json")
+    assert brain.ears._library is brain.swapper._library
+    assert brain.swapper._say == brain._say_download
 
 
 def test_a_download_message_is_said_on_the_satellite_that_asked(brain, connect):

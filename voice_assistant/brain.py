@@ -31,6 +31,8 @@ import numpy as np
 from voice_assistant import logging_setup, paths, protocol, storage, watchdog
 from voice_assistant.batteries import BatteryChoices, BatteryWatcher
 from voice_assistant.choices import ChoiceStore
+from voice_assistant.clean_store import CleanStore
+from voice_assistant.clean_swap import Ears, Swapper, listening_library
 from voice_assistant.clock import Clock, spoken_clock_time
 from voice_assistant.display_feed import DisplayFeed
 from voice_assistant.display_server import DisplayServer
@@ -41,12 +43,15 @@ from voice_assistant.football_watch import FootballChoices, FootballWatcher, use
 from voice_assistant.google_calendar import READ_FAILURES, GoogleCalendar
 from voice_assistant.ha_registry import REGISTRY_TIMEOUT, HomeRegistry, HomeSocket
 from voice_assistant.home_assistant import HomeAssistant
+from voice_assistant.listener import Listener
 from voice_assistant.listening import Listening
 from voice_assistant.lists import Lists
+from voice_assistant.lyrics import Lyrics
 from voice_assistant.logging_setup import TRANSCRIPT
 from voice_assistant.media_watch import MediaWatcher
 from voice_assistant.memory import Memory
 from voice_assistant.music_device import MusicDevice
+from voice_assistant.music_folder import MusicFolder
 from voice_assistant.ntfy import RETOPIC, Ntfy
 from voice_assistant.pc import PCPower
 from voice_assistant.protocol import ProtocolError, Refused, admit
@@ -56,6 +61,7 @@ from voice_assistant.satellite_link import SOCKET_TIMEOUT, Stream
 from voice_assistant.satellite_passwords import SatellitePasswords, name_problem
 from voice_assistant.session import Session
 from voice_assistant.settings_page import SettingsPage
+from voice_assistant.soulsync import SoulSync, SoulSyncAdmin
 from voice_assistant.text_to_speech import TextToSpeech
 from voice_assistant.usage import UsageLog
 from voice_assistant.usage_device import UsageDevice
@@ -393,10 +399,25 @@ class Brain:
         self.clock = Clock(on_timer_finished=self._announce, on_unanswered=self._unanswered,
                            on_change=self._alarms_changed.set, can_hear=lambda satellite: satellite in self._caught_up,
                            let_in=lambda satellite: not self._gone_from_file(satellite), config=config, start=False)
+        # Each download heard before it's said, and a clean one swapped for an explicit copy
+        # - see clean_swap.py and docs/decisions/0019. One store of what's been heard, one
+        # listening worker and one Navidrome library to hear through, which the downloads and
+        # the library check share: the worker takes a song at a time, and Navidrome limits
+        # sign-ins.
+        self.clean_store = CleanStore(os.path.join(paths.DATA_DIR, "clean_songs.json"))
+        self.listener = Listener(os.path.join(paths.PROJECT_DIRECTORY, config.section("backend").get("model") or ""))
+        heard_through = listening_library(config)
+        self.ears = Ears(config, heard_through, self.listener, Lyrics, self.clean_store)
+        self.swapper = Swapper(
+            config, self.ears, lambda: MusicFolder((config.section("clean_check").get("music_folder") or "").strip()),
+            lambda: SoulSync.from_config(config, os.getenv("SOULSYNC_API_KEY")),
+            lambda: SoulSyncAdmin.from_config(config, os.getenv("SOULSYNC_ADMIN_PASSWORD")),
+            heard_through, self.clean_store, say=self._say_download)
         # Music fetched through SoulSync, each download said on the satellite which asked
         # for it - see downloads.py. One for every satellite, so the same song asked for
         # on two is only requested once.
-        self.downloads = Downloads(config, say=self._say_download)
+        self.downloads = Downloads(config, say=self._say_download, ears=self.ears, swapper=self.swapper,
+                                   store=self.clean_store)
 
         # One Piper, and one Nemotron, which every session shares.
         self.tts = TextToSpeech(config)
@@ -1638,6 +1659,8 @@ class Brain:
         self._note_start()
         self._give_out_orphans()
         self.clock.start()
+        # Swaps a restart came in the middle of, carried on - or their songs put back.
+        self.downloads.resume_swaps()
         # Alerts are only said from now on, once there's everything to say them with.
         if self.ntfy:
             self.ntfy.start()
@@ -1719,7 +1742,8 @@ class Brain:
     def _clean_up(self):
         """
         Closes everything down in order - the clock, so nothing else starts ringing,
-        and the downloads, so nothing more is said of them, then the batteries, the football
+        and the downloads, so nothing more is said of them, and the worker songs are
+        heard in, then the batteries, the football
         watcher, the listening stats, what's playing, the usage device, ntfy, the settings page and the clock
         displays' server and feed, then every satellite's session, so its device in Home
         Assistant and its music stop - and then the Piper process kept waiting for the next
@@ -1732,6 +1756,9 @@ class Brain:
         # already being said as this runs may still go to the phone, as its satellite
         # goes mid-sentence, and stop() may log that download as forgotten as well.
         self.downloads.stop()
+        # Once the downloads and their swaps have stopped, so no song is cut off for one -
+        # and the worker's model, about 1 GB, goes with it.
+        self.listener.close()
         if self.batteries:
             self.batteries.stop()
         if self.football_watcher:

@@ -1,9 +1,10 @@
 """
 Downloads Test
 Checks the watch on a download - asked of SoulSync, said to be requested, then
-followed until Navidrome has it or its time is up - with fakes in place of SoulSync
-and Navidrome, and a fake clock which only moves on when the watch waits, so nothing
-real is asked and no test waits out a poll.
+followed until Navidrome has it or its time is up, and what landed heard and a clean
+copy swapped - with fakes in place of SoulSync, Navidrome, the ears and the swapper,
+and a fake clock which only moves on when the watch waits, so nothing real is asked
+and no test waits out a poll.
 """
 
 import functools
@@ -14,6 +15,9 @@ import pytest
 import requests
 
 from voice_assistant.actions import Action
+from voice_assistant.clean_ear import Verdict
+from voice_assistant.clean_store import CleanStore
+from voice_assistant.clean_swap import Ears, Outcome
 from voice_assistant.downloads import NOT_SET_UP, POLL_EVERY, SCAN_AFTER, Downloads, Wanted, _bare_title
 from voice_assistant.navidrome import NavidromeLibrary
 from voice_assistant.soulsync import (KEY_REFUSED, MCP_OFF, NOT_ANSWERING, NOT_FOUND, AlbumRequest, Progress,
@@ -29,6 +33,8 @@ WAITING, DONE = Progress("waiting"), Progress("done")
 
 GOOBA_REQUESTED = ("kitchen", "Gooba by 6ix9ine requested.")
 GOOBA_DOWNLOADED = ("kitchen", "Gooba by 6ix9ine has been downloaded.")
+GOOBA_UNSURE = ("kitchen", "Gooba by 6ix9ine has been downloaded, but I couldn't tell if it's the clean version.")
+GOOBA_UNCHECKED = ("kitchen", "Gooba by 6ix9ine has been downloaded, but I couldn't check it for a clean version.")
 
 # What Claude is told after "Asked SoulSync for X." - never said, as the outcome is said
 # later - for a song, and for an album, which takes longer.
@@ -180,9 +186,70 @@ class FakeLibrary:
         return self.scans_allowed
 
 
+class FakeEars(Ears):
+    """
+    Stands in for Ears: hears each copy as the kind given for its id - explicit unless
+    told otherwise - with the real Ears' way of choosing among several copies.
+    """
+
+    HEARD = {"explicit": 5, "clean": 1, "unsure": 2}
+
+    def __init__(self):
+        self.kinds = {}
+        self.heard = []
+
+    def hear(self, song, download=False):
+        self.heard.append((song["id"], download))
+        kind = self.kinds.get(song["id"], "explicit")
+        if isinstance(kind, Exception):
+            raise kind
+        return Verdict(kind, 10, self.HEARD.get(kind, 0), "listening took too long" if kind == "not_judged" else "")
+
+
+class FakeSwapper:
+    """Stands in for the Swapper: each swap ends as given for the copy's id - swapped unless told otherwise."""
+
+    def __init__(self):
+        self.outcomes = {}
+        self.swaps = []
+        self.stopped = False
+        self.resumed = []
+
+    def swap(self, song, wanted, satellite, quiet):
+        self.swaps.append((song["id"], wanted, satellite, quiet))
+        return self.outcomes.get(song["id"], Outcome("swapped"))
+
+    def stop(self):
+        self.stopped = True
+
+    def resume(self):
+        self.resumed.append(threading.current_thread().name)
+
+
+def heard_clean(store, *tracks):
+    """Keeps a clean verdict for each track, as Ears would once it had heard it clean."""
+    for track in tracks:
+        store.set_verdict(track["id"], 4096, "2026-11-16T10:00:00Z", Verdict("clean", 10, 1), track["title"])
+
+
 @pytest.fixture
 def clock():
     return FakeTime()
+
+
+@pytest.fixture
+def ears():
+    return FakeEars()
+
+
+@pytest.fixture
+def swapper():
+    return FakeSwapper()
+
+
+@pytest.fixture
+def store(tmp_path):
+    return CleanStore(str(tmp_path / "clean_songs.json"))
 
 
 @pytest.fixture
@@ -207,15 +274,18 @@ def set_up(make_config, monkeypatch):
 
 
 @pytest.fixture
-def watching(config, clock, said):
-    """Makes Downloads which asks the fakes given, on the fake clock - with the settings given, if any."""
-    def make(soulsync, library, settings=None):
+def watching(config, clock, said, ears, swapper, store):
+    """
+    Makes Downloads which asks the fakes given, on the fake clock - with the settings given,
+    if any - and hears and swaps with the test's ears and swapper, or without a swapper.
+    """
+    def make(soulsync, library, settings=None, swapping=True):
         def say(satellite, message):
             said.append((satellite, message))
             clock.said_at.append(clock.time)
 
         return Downloads(settings or config, say, soulsync=lambda: soulsync, library=lambda: library, now=clock.now,
-                         wait=clock.wait)
+                         wait=clock.wait, ears=ears, swapper=swapper if swapping else None, store=store)
 
     return make
 
@@ -233,7 +303,7 @@ def _all_ended():
 
 
 @pytest.fixture
-def running(config, clock, said):
+def running(config, clock, said, ears, swapper, store):
     """
     Makes Downloads whose watches run on threads of their own and wait between polls
     as Nova's do, on the stop event - so each waits until stop, which ends every one
@@ -243,7 +313,8 @@ def running(config, clock, said):
 
     def make(soulsync, library, settings=None):
         downloads = Downloads(settings or config, lambda satellite, message: said.append((satellite, message)),
-                              soulsync=lambda: soulsync, library=lambda: library, now=clock.now)
+                              soulsync=lambda: soulsync, library=lambda: library, now=clock.now, ears=ears,
+                              swapper=swapper, store=store)
         made.append(downloads)
         return downloads
 
@@ -271,14 +342,16 @@ def test_its_named_as_asked_for_and_told_apart_however_its_spelt():
 
 # A song
 
-def test_a_song_is_requested_then_said_downloaded_once_navidrome_has_it(watching, clock, said):
-    # SoulSync: waiting, then done; Navidrome: nothing before, nothing, then Gooba.
+def test_a_song_is_requested_then_said_downloaded_once_navidrome_has_it(watching, clock, said, ears, swapper):
+    # SoulSync: waiting, then done; Navidrome: nothing before, nothing, then Gooba - heard explicit.
     soulsync = FakeSoulSync([WAITING, DONE])
     downloads = watching(soulsync, FakeLibrary(clock, songs=[[], [], [GOOBA]]))
 
     assert downloads._watch(GOOBA_WANTED, "kitchen") == "Gooba by 6ix9ine has been downloaded."
     assert said == [("kitchen", "Gooba by 6ix9ine requested."), ("kitchen", "Gooba by 6ix9ine has been downloaded.")]
     assert soulsync.requested == [("Gooba", "6ix9ine")]
+    # Heard before it was said, as a download's - and, explicit, never swapped.
+    assert ears.heard == [("1", True)] and swapper.swaps == []
 
 
 def test_done_in_soulsync_isnt_downloaded_until_navidrome_has_it_and_it_scans_once(watching, clock, said):
@@ -293,19 +366,121 @@ def test_done_in_soulsync_isnt_downloaded_until_navidrome_has_it_and_it_scans_on
     assert library.scans == [SCAN_AFTER + POLL_EVERY]  # when, by the fake clock; once only
 
 
-def test_a_song_that_came_down_clean_is_never_said_downloaded(watching, clock, said, caplog):
-    caplog.set_level(logging.INFO)
+# What landed, heard (decision 0019, section 3)
+
+def test_a_copy_named_clean_but_heard_explicit_is_downloaded(watching, clock, said, ears, swapper):
+    # SoulSync's tagging calls explicit songs clean, so a name is never believed.
     downloads = watching(FakeSoulSync([DONE]), FakeLibrary(clock, songs=[[], [GOOBA_CLEAN]]))
 
-    assert downloads._watch(GOOBA_WANTED, "kitchen") == "Gooba by 6ix9ine came down as a clean version."
-    assert said == [GOOBA_REQUESTED, ("kitchen", "Gooba by 6ix9ine came down as a clean version.")]
-    assert "Gooba (Clean)" in caplog.text  # logged, so the user can replace it
+    assert downloads._watch(GOOBA_WANTED, "kitchen") == "Gooba by 6ix9ine has been downloaded."
+    assert ears.heard == [("2", True)] and swapper.swaps == []
 
 
-def test_an_old_clean_copy_isnt_taken_for_the_download(watching, clock, said):
-    # Navidrome: [GOOBA_CLEAN] before, the same at the first poll, then [GOOBA_CLEAN, GOOBA].
+@pytest.mark.parametrize("kind, outcome", [("unsure", GOOBA_UNSURE), ("not_judged", GOOBA_UNCHECKED),
+                                           ("too_few", GOOBA_DOWNLOADED)])
+def test_a_song_heard_neither_way_says_so_and_is_never_swapped(watching, clock, said, ears, swapper, kind, outcome):
+    ears.kinds["1"] = kind
+    downloads = watching(FakeSoulSync([DONE]), FakeLibrary(clock, songs=[[], [GOOBA]]))
+
+    assert downloads._watch(GOOBA_WANTED, "kitchen") == outcome[1]
+    assert said == [GOOBA_REQUESTED, outcome] and swapper.swaps == []
+
+
+@pytest.mark.parametrize("swapped, outcome", [
+    (Outcome("swapped"), "Gooba by 6ix9ine has been downloaded."),
+    (Outcome("only_clean", "3 copies came down clean"), "Gooba by 6ix9ine only came down clean, so I've kept it."),
+    (Outcome("couldnt", "Navidrome still lists it"),
+     "Gooba by 6ix9ine has been downloaded, but it's the clean version, and I couldn't swap it: Navidrome still "
+     "lists it."),
+    (Outcome("couldnt", "SoulSync admin profile isn't set up"),
+     "Gooba by 6ix9ine has been downloaded, but it's the clean version, and I couldn't swap it: SoulSync admin "
+     "profile isn't set up."),
+    (Outcome("unsure", "heard 2 of its 10 swears"),
+     "Gooba by 6ix9ine has been downloaded, but I couldn't tell if it's the clean version."),
+    (Outcome("not_judged", "listening took too long"),
+     "Gooba by 6ix9ine has been downloaded, but I couldn't check it for a clean version."),
+])
+def test_a_song_heard_clean_is_swapped_before_anything_is_said(watching, clock, said, ears, swapper, swapped,
+                                                               outcome):
+    ears.kinds["1"] = "clean"
+    swapper.outcomes["1"] = swapped
+    downloads = watching(FakeSoulSync([DONE]), FakeLibrary(clock, songs=[[], [GOOBA]]))
+
+    assert downloads._watch(GOOBA_WANTED, "kitchen") == outcome
+    assert said == [GOOBA_REQUESTED, ("kitchen", outcome)]
+    # Swapped as a download's, not quietly, told which satellite asked.
+    assert swapper.swaps == [("1", GOOBA_WANTED, "kitchen", False)]
+
+
+def test_a_clean_song_is_swapped_by_the_title_asked_for_and_soulsyncs_artist(watching, clock, said, ears, swapper):
+    # "Endless by Gunner": named as SoulSync found it, asked for again as Navidrome is searched.
+    ears.kinds["e1"] = "clean"
+    library = FakeLibrary(clock, songs=[[], [ENDLESS]], names=ENDLESS_NAMES)
+
+    watching(FakeSoulSync(song=ENDLESS_FOUND), library)._watch(ENDLESS_ASKED, "kitchen")
+
+    assert swapper.swaps == [("e1", Wanted("Endless", "Gunna", "track"), "kitchen", False)]
+    assert said[-1] == ("kitchen", "endless by Gunna has been downloaded.")
+
+
+def test_of_two_copies_landed_the_one_heard_explicit_is_the_download(watching, clock, said, ears, swapper):
+    ears.kinds["2"] = "clean"
+    downloads = watching(FakeSoulSync([DONE]), FakeLibrary(clock, songs=[[], [GOOBA_CLEAN, GOOBA]]))
+
+    assert downloads._watch(GOOBA_WANTED, "kitchen") == "Gooba by 6ix9ine has been downloaded."
+    assert ears.heard == [("2", True), ("1", True)] and swapper.swaps == []
+
+
+def test_hearing_that_fails_unforeseen_still_says_its_downloaded_unchecked(watching, clock, said, ears, caplog):
+    ears.kinds["1"] = RuntimeError("made-up bug")
+    downloads = watching(FakeSoulSync([DONE]), FakeLibrary(clock, songs=[[], [GOOBA]]))
+
+    assert downloads._watch(GOOBA_WANTED, "kitchen") == GOOBA_UNCHECKED[1]
+    assert "made-up bug" in caplog.text
+
+
+def test_listening_that_fails_for_one_download_is_said_and_the_next_is_heard(watching, clock, said, ears):
+    # Review Focus 4: the worker failing mid-song, then the next song.
+    ears.kinds["1"] = "not_judged"
+    watching(FakeSoulSync([DONE]), FakeLibrary(clock, songs=[[], [GOOBA]]))._watch(GOOBA_WANTED, "kitchen")
+    assert said[-1] == GOOBA_UNCHECKED
+
+    watching(FakeSoulSync(song=ENDLESS_FOUND), FakeLibrary(clock, songs=[[], [ENDLESS]], names=ENDLESS_NAMES))._watch(
+        ENDLESS_ASKED, "kitchen")
+    assert said[-1] == ("kitchen", "endless by Gunna has been downloaded.")
+    assert ears.heard == [("1", True), ("e1", True)]
+
+
+def test_a_song_found_at_the_last_look_is_heard_too(watching, clock, said, ears, swapper):
+    # Only in Navidrome at its time limit, and heard clean: swapped, never called downloaded unheard.
+    ears.kinds["1"] = "clean"
+    swapper.outcomes["1"] = Outcome("only_clean")
+    library = FakeLibrary(clock)
+    library.songs = [[], lambda: [GOOBA] if clock.time >= 600 else []]
+
+    assert watching(FakeSoulSync([WAITING]), library)._watch(GOOBA_WANTED, "kitchen") == (
+        "Gooba by 6ix9ine only came down clean, so I've kept it.")
+
+
+def test_a_swap_nova_stopped_says_nothing(watching, clock, said, ears, swapper):
+    ears.kinds["1"] = "clean"
+    downloads = watching(FakeSoulSync([DONE]), FakeLibrary(clock, songs=[[], [GOOBA]]))
+
+    def stopped(song, wanted, satellite, quiet):
+        downloads.stop()
+        return Outcome("stopped")
+
+    swapper.swap = stopped
+    assert downloads._watch(GOOBA_WANTED, "kitchen") == ""
+    assert said == [GOOBA_REQUESTED]
+
+
+def test_an_old_clean_copy_isnt_taken_for_the_download(watching, clock, said, store):
+    # Navidrome: [GOOBA_CLEAN] before, heard clean, the same at the first poll, then [GOOBA_CLEAN, GOOBA].
+    # Without a swapper, so it's requested rather than swapped.
+    heard_clean(store, GOOBA_CLEAN)
     library = FakeLibrary(clock, songs=[[GOOBA_CLEAN], [GOOBA_CLEAN], [GOOBA_CLEAN, GOOBA]])
-    downloads = watching(FakeSoulSync([WAITING, DONE]), library)
+    downloads = watching(FakeSoulSync([WAITING, DONE]), library, swapping=False)
 
     downloads._watch(GOOBA_WANTED, "kitchen")
 
@@ -390,7 +565,10 @@ def test_a_song_is_found_however_its_import_tagged_it(watching, clock, said):
     assert clock.said_at[-1] == POLL_EVERY
 
 
-def test_a_song_navidrome_has_by_the_title_asked_for_and_soulsyncs_artist_isnt_requested(watching, clock, said):
+def test_a_song_navidrome_has_by_the_title_asked_for_and_soulsyncs_artist_isnt_requested(watching, clock, said,
+                                                                                        store):
+    # Named by the copy that isn't clean.
+    heard_clean(store, ENDLESS_CLEAN)
     soulsync = FakeSoulSync(song=ENDLESS_FOUND)
     downloads = watching(soulsync, FakeLibrary(clock, songs=[[ENDLESS_CLEAN, ENDLESS]], names=ENDLESS_NAMES))
 
@@ -399,17 +577,46 @@ def test_a_song_navidrome_has_by_the_title_asked_for_and_soulsyncs_artist_isnt_r
     assert soulsync.requested == [] and clock.time == 0
 
 
-def test_a_song_had_only_clean_by_the_title_asked_for_and_soulsyncs_artist_is_requested(watching, clock, said):
-    # And the clean copy it had isn't taken for the download.
+def test_a_song_had_only_clean_by_the_title_asked_for_and_soulsyncs_artist_is_requested(watching, clock, said,
+                                                                                      store):
+    # Heard clean before. And the clean copy it had isn't taken for the download. Without a
+    # swapper, which would swap it - see the next test.
+    heard_clean(store, ENDLESS_CLEAN)
     soulsync = FakeSoulSync(song=ENDLESS_FOUND)
     library = FakeLibrary(clock, songs=[[ENDLESS_CLEAN], [ENDLESS_CLEAN], [ENDLESS_CLEAN, ENDLESS]],
                           names=ENDLESS_NAMES)
 
-    watching(soulsync, library)._watch(ENDLESS_ASKED, "kitchen")
+    watching(soulsync, library, swapping=False)._watch(ENDLESS_ASKED, "kitchen")
 
     assert said == [("kitchen", "endless by Gunna requested."), ("kitchen", "endless by Gunna has been downloaded.")]
     assert soulsync.requested == [("endless", "Gunna")]
     assert clock.said_at[-1] == 2 * POLL_EVERY
+
+
+@pytest.mark.parametrize("heard, swapped, outcome", [
+    ("clean", Outcome("swapped"), "endless by Gunna has been downloaded."),
+    ("clean", Outcome("only_clean"), "endless by Gunna only came down clean, so I've kept it."),
+    ("clean", Outcome("couldnt", "Navidrome still lists it"),
+     "I couldn't download endless by Gunna, so you've still got the clean version: Navidrome still lists it."),
+    # Heard again first, in case its file changed since: never swapped unless it's still clean.
+    ("explicit", None, "You've already got endless by Gunna."),
+    ("unsure", None, "You've already got endless by Gunna, but I couldn't tell if it's the clean version."),
+])
+def test_a_yes_to_the_explicit_one_swaps_the_copy_heard_clean(watching, clock, said, store, ears, swapper, heard,
+                                                              swapped, outcome):
+    # SoulSync's wishlist would drop a plain request as "already owned", so the clean copy is swapped.
+    heard_clean(store, ENDLESS_CLEAN)
+    ears.kinds["e2"] = heard
+    if swapped:
+        swapper.outcomes["e2"] = swapped
+    soulsync = FakeSoulSync(song=ENDLESS_FOUND)
+
+    watching(soulsync, FakeLibrary(clock, songs=[[ENDLESS_CLEAN]], names=ENDLESS_NAMES))._watch(ENDLESS_ASKED,
+                                                                                                "kitchen")
+
+    assert said == [("kitchen", "endless by Gunna requested."), ("kitchen", outcome)]
+    assert soulsync.requested == [] and ears.heard == [("e2", True)]
+    assert swapper.swaps == ([("e2", Wanted("Endless", "Gunna", "track"), "kitchen", False)] if swapped else [])
 
 
 def test_a_song_soulsync_found_nothing_for_is_named_as_asked_for(watching, clock, said):
@@ -524,32 +731,60 @@ def test_a_live_take_of_a_track_is_a_track_of_its_own(watching, clock, said):
     assert said[-1] == ("kitchen", "Only 3 of the 4 tracks of Rumours by Fleetwood Mac came down.")
 
 
-def test_an_album_with_clean_tracks_says_how_many(watching, clock, said, caplog):
-    caplog.set_level(logging.INFO)
-    two_clean = [DREAMS, _track(2, "Go Your Own Way", clean=True), _track(3, "The Chain", clean=True)]
-    watching(FakeSoulSync(), FakeLibrary(clock, tracks=[[], two_clean]))._watch(RUMOURS_WANTED, "kitchen")
+def test_each_track_of_an_album_is_heard_and_the_clean_ones_swapped_one_at_a_time(watching, clock, said, ears,
+                                                                                   swapper):
+    # Marked as Navidrome marks them, which counts for nothing: Dreams is marked clean and heard
+    # explicit; Go Your Own Way and The Chain are heard clean.
+    tracks = [_track(1, "Dreams", clean=True), _track(2, "Go Your Own Way"), _track(3, "The Chain")]
+    ears.kinds.update({"r2": "clean", "r3": "clean"})
+    watching(FakeSoulSync(), FakeLibrary(clock, tracks=[[], tracks]))._watch(RUMOURS_WANTED, "kitchen")
 
-    assert said[-1] == ("kitchen", "Rumours by Fleetwood Mac has been downloaded, but 2 of its tracks came down "
-                                   "as clean versions.")
-    assert "Go Your Own Way" in caplog.text and "The Chain" in caplog.text  # logged, to be replaced
+    assert ears.heard == [("r1", True), ("r2", True), ("r3", True)]
+    # Each asked for again as a song, by its own title and artist, as a download's.
+    assert swapper.swaps == [("r2", Wanted("Go Your Own Way", "Fleetwood Mac", "track"), "kitchen", False),
+                             ("r3", Wanted("The Chain", "Fleetwood Mac", "track"), "kitchen", False)]
+    assert said[-1] == ("kitchen", "Rumours by Fleetwood Mac has been downloaded. 2 of its tracks came down clean, "
+                                   "so I swapped them for the explicit ones.")
 
-    one_clean = [DREAMS, GO_YOUR_OWN_WAY, _track(3, "The Chain", clean=True)]
-    watching(FakeSoulSync(), FakeLibrary(clock, tracks=[[], one_clean]))._watch(RUMOURS_WANTED, "kitchen")
 
-    assert said[-1] == ("kitchen", "Rumours by Fleetwood Mac has been downloaded, but one of its tracks came down "
-                                   "as a clean version.")
+def test_an_album_says_how_many_were_swapped_and_how_many_werent(watching, clock, said, ears, swapper):
+    tracks = [_track(number, title) for number, title in enumerate(RUMOURS_ALL[:7], 1)]
+    ears.kinds.update({"r1": "clean", "r2": "clean", "r3": "clean", "r4": "clean", "r5": "unsure", "r6": "not_judged"})
+    swapper.outcomes.update({"r2": Outcome("only_clean"), "r3": Outcome("couldnt", "Navidrome still lists it"),
+                             "r4": Outcome("only_clean")})
+    watching(FakeSoulSync(album=AlbumRequest(None, [], 11, 7)),
+             FakeLibrary(clock, tracks=[[], tracks]))._watch(RUMOURS_WANTED, "kitchen")
+
+    assert said[-1] == ("kitchen", "Rumours by Fleetwood Mac has been downloaded. One of its tracks came down "
+                                   "clean, so I swapped it for the explicit one. 2 of its tracks only came down "
+                                   "clean, so I've kept them. One of its tracks came down clean, and I couldn't swap "
+                                   "it. I couldn't tell if one of its tracks is the clean version. I couldn't check "
+                                   "one of its tracks for a clean version.")
+
+
+def test_part_of_an_album_by_its_time_limit_is_heard_too(watching, clock, said, ears, swapper):
+    ears.kinds["r1"] = "clean"
+    watching(FakeSoulSync(), FakeLibrary(clock, tracks=[[], [DREAMS, GO_YOUR_OWN_WAY]]))._watch(RUMOURS_WANTED,
+                                                                                               "kitchen")
+
+    assert said[-1] == ("kitchen", "Only 2 of the 3 tracks of Rumours by Fleetwood Mac came down. One of its tracks "
+                                   "came down clean, so I swapped it for the explicit one.")
+    assert [swap[0] for swap in swapper.swaps] == ["r1"]
 
 
 @pytest.mark.parametrize("album", [AlbumRequest("made-up-album", RUMOURS_TITLES, 3, 3),
                                    AlbumRequest(None, [], 3, 3)], ids=["named", "counted"])
-def test_a_track_which_came_down_both_clean_and_not_isnt_counted_clean(watching, clock, said, album):
-    # Two copies of The Chain landed, the clean one first - the album has the explicit one.
-    both = [DREAMS, GO_YOUR_OWN_WAY, _track(5, "The Chain", clean=True), THE_CHAIN]
+def test_a_track_which_came_down_both_clean_and_not_isnt_counted_clean(watching, clock, said, ears, swapper, album):
+    # Two copies of The Chain landed, the one heard clean first - the album has the explicit one,
+    # so nothing is swapped.
+    both = [DREAMS, GO_YOUR_OWN_WAY, _track(5, "The Chain (Clean)"), THE_CHAIN]
+    ears.kinds["r5"] = "clean"
     downloads = watching(FakeSoulSync(album=album), FakeLibrary(clock, tracks=[[], both]))
 
     downloads._watch(RUMOURS_WANTED, "kitchen")
 
     assert said[-1] == ("kitchen", "Rumours by Fleetwood Mac has been downloaded.")
+    assert ("r5", True) in ears.heard and ("r3", True) in ears.heard and swapper.swaps == []
 
 
 def test_part_of_an_album_by_the_time_limit_says_how_much(watching, clock, said):
@@ -728,6 +963,22 @@ def test_stopping_forgets_whats_waiting_logs_it_and_says_nothing_more(running, c
     assert downloads.waiting() == []
 
 
+def test_stopping_stops_the_swaps_too(running, clock, swapper):
+    running(FakeSoulSync(), FakeLibrary(clock)).stop()
+    assert swapper.stopped
+
+
+def test_saved_swaps_are_carried_on_once_on_a_thread_of_their_own(running, clock, swapper):
+    downloads = running(FakeSoulSync(), FakeLibrary(clock))
+
+    downloads.resume_swaps()
+    downloads.resume_swaps()
+    for thread in [thread for thread in threading.enumerate() if thread.name == "swap-resume"]:
+        thread.join(5)
+
+    assert swapper.resumed == ["swap-resume"]
+
+
 def test_stopping_says_one_download_for_one_and_nothing_with_none(running, clock, caplog):
     caplog.set_level(logging.INFO)
     running(FakeSoulSync(), FakeLibrary(clock)).stop()
@@ -891,7 +1142,8 @@ def test_nothing_to_download_is_asked_for(watching, set_up, clock, query):
 
 
 @pytest.mark.parametrize("had", [[GOOBA], [GOOBA_CLEAN, GOOBA]])
-def test_something_already_had_is_never_requested(watching, set_up, clock, had):
+def test_something_already_had_is_never_requested(watching, set_up, clock, store, had):
+    heard_clean(store, GOOBA_CLEAN)
     soulsync = FakeSoulSync()
     downloads = watching(soulsync, FakeLibrary(clock, songs=[had]), set_up)
 
@@ -935,10 +1187,11 @@ def test_a_part_owned_album_asked_for_is_requested_and_lands(watching, set_up, c
     assert soulsync.requested == [("Rumours", "Fleetwood Mac")]
 
 
-def test_an_album_had_only_clean_with_none_queued_isnt_said_to_be_got(watching, set_up, clock, said):
+def test_an_album_had_only_clean_with_none_queued_isnt_said_to_be_got(watching, set_up, clock, said, store):
     # A yes to the explicit one, of which SoulSync queued nothing: all Navidrome has is
     # clean, so "You've already got" it would be wrong.
-    clean = [DREAMS, _track(5, "Gold Dust Woman", clean=True)]
+    clean = [DREAMS, _track(5, "Gold Dust Woman")]
+    heard_clean(store, clean[1])
     downloads = watching(FakeSoulSync(album=AlbumRequest(None, [], 11, 0)), FakeLibrary(clock, tracks=[clean]),
                          set_up)
 
@@ -958,7 +1211,8 @@ def test_an_album_had_but_not_asked_for_in_words_is_only_said_to_be_got(watching
     assert soulsync.requested == [] and _watches() == []
 
 
-def test_only_a_clean_copy_had_offers_the_explicit_one(watching, set_up, clock):
+def test_only_a_clean_copy_had_offers_the_explicit_one(watching, set_up, clock, store):
+    heard_clean(store, GOOBA_CLEAN)
     soulsync = FakeSoulSync()
     downloads = watching(soulsync, FakeLibrary(clock, songs=[[GOOBA_CLEAN]]), set_up)
 
@@ -970,14 +1224,52 @@ def test_only_a_clean_copy_had_offers_the_explicit_one(watching, set_up, clock):
     assert soulsync.requested == [] and _watches() == []
 
 
-@pytest.mark.parametrize("editions", [
-    # One album: a clean edition marks only the tracks it bleeped - the rest are as the explicit one's.
-    [DREAMS, _track(5, "Gold Dust Woman", clean=True)],
-    # Two, each with a clean track.
-    [DREAMS, _track(5, "Gold Dust Woman", clean=True),
-     _track(6, "Dreams", album="Rumours (Clean)"), _track(7, "Gold Dust Woman", clean=True, album="Rumours (Clean)")],
+SICKO_MODE = {"id": "s1", "title": "SICKO MODE", "artist": "Travis Scott", "album": "ASTROWORLD (clean)",
+              "explicitStatus": "clean"}
+
+
+@pytest.mark.parametrize("kind, reply", [
+    ("explicit", {"success": True, "message": "You've already got SICKO MODE by Travis Scott."}),
+    # Never heard: had, whatever its album calls it.
+    (None, {"success": True, "message": "You've already got SICKO MODE by Travis Scott."}),
+    ("clean", {"success": True, "message": "You've only got a clean version of SICKO MODE by Travis Scott. "
+                                           "Do you want me to download the explicit one?",
+               "ask_first": Action("request_download", {"query": "SICKO MODE by Travis Scott", "search_type": None})}),
 ])
-def test_an_album_with_a_clean_track_in_every_edition_offers_the_explicit_one(watching, set_up, clock, editions):
+def test_whats_had_is_judged_by_what_was_heard_not_by_its_name(watching, set_up, clock, store, kind, reply):
+    # SoulSync's tagging put "(clean)" on ASTROWORLD, and Navidrome marks it clean, though it's explicit.
+    if kind:
+        store.set_verdict("s1", 4096, "2026-11-16T10:00:00Z", Verdict(kind, 14, 9 if kind == "explicit" else 1),
+                          "Travis Scott - SICKO MODE")
+    soulsync = FakeSoulSync()
+    downloads = watching(soulsync, FakeLibrary(clock, songs=[[SICKO_MODE]], names=(("SICKO MODE", "Travis Scott"),)),
+                         set_up)
+
+    assert downloads.download("SICKO MODE by Travis Scott", None, "kitchen") == reply
+    assert soulsync.requested == [] and _watches() == []
+
+
+def test_a_copy_heard_clean_whose_file_has_changed_since_is_had(watching, set_up, clock, store):
+    # Navidrome gives a new size for it: a new file, not the one heard.
+    heard_clean(store, GOOBA_CLEAN)
+    changed = {**GOOBA_CLEAN, "size": 9999}
+    downloads = watching(FakeSoulSync(), FakeLibrary(clock, songs=[[changed]]), set_up)
+
+    assert downloads.download("Gooba by 6ix9ine", "track", "kitchen")["message"] == (
+        "You've already got Gooba (Clean) by 6ix9ine.")
+
+
+@pytest.mark.parametrize("editions", [
+    # One album: a clean edition has only the tracks it bleeped heard clean - the rest have too
+    # few swears to judge.
+    [DREAMS, _track(5, "Gold Dust Woman")],
+    # Two, each with a track heard clean.
+    [DREAMS, _track(5, "Gold Dust Woman"),
+     _track(6, "Dreams", album="Rumours (Clean)"), _track(7, "Gold Dust Woman", album="Rumours (Clean)")],
+])
+def test_an_album_with_a_clean_track_in_every_edition_offers_the_explicit_one(watching, set_up, clock, store,
+                                                                              editions):
+    heard_clean(store, *[track for track in editions if track["title"] == "Gold Dust Woman"])
     library = FakeLibrary(clock, tracks=[editions])
     downloads = watching(FakeSoulSync(), library, set_up)
 
@@ -990,14 +1282,15 @@ def test_an_album_with_a_clean_track_in_every_edition_offers_the_explicit_one(wa
 
 
 @pytest.mark.parametrize("clean_edition", [
-    [_track(5, "Dreams", album="Rumours (Clean)"), _track(6, "Gold Dust Woman", clean=True, album="Rumours (Clean)")],
+    [_track(5, "Dreams", album="Rumours (Clean)"), _track(6, "Gold Dust Woman", album="Rumours (Clean)")],
     # Called the same, told apart by Navidrome's id.
-    [_track(5, "Dreams", album_id="another"), _track(6, "Gold Dust Woman", clean=True, album_id="another")],
+    [_track(5, "Dreams", album_id="another"), _track(6, "Gold Dust Woman", album_id="another")],
 ])
 @pytest.mark.parametrize("clean_first", [True, False])
-def test_an_album_had_explicit_beside_a_clean_edition_is_already_got(watching, set_up, clock, said, clean_edition,
-                                                                     clean_first):
+def test_an_album_had_explicit_beside_a_clean_edition_is_already_got(watching, set_up, clock, said, store,
+                                                                     clean_edition, clean_first):
     # Not offered the explicit one, which it has: asked for, and with none queued, it's had.
+    heard_clean(store, clean_edition[1])
     explicit = [DREAMS, GO_YOUR_OWN_WAY, THE_CHAIN]
     soulsync = FakeSoulSync(album=AlbumRequest(None, [], 11, 0))
     library = FakeLibrary(clock, tracks=[clean_edition + explicit if clean_first else explicit + clean_edition])
@@ -1038,9 +1331,12 @@ def test_a_misheard_song_asked_for_is_named_as_soulsync_found_it_from_then_on(wa
     assert library.looked_for[:2] == list(ENDLESS_NAMES)
 
 
-def test_a_yes_requests_without_looking_in_navidrome_again(watching, set_up, clock, said):
-    # Only the clean copy, which the offer was about - and which isn't the download.
-    library = FakeLibrary(clock, songs=[[GOOBA_CLEAN], [GOOBA_CLEAN, GOOBA]])
+def test_a_yes_requests_without_looking_in_navidrome_again(watching, set_up, clock, said, store, ears, swapper):
+    # Only the copy heard clean, which the offer was about - and which, heard clean again by
+    # the watch, is swapped.
+    heard_clean(store, GOOBA_CLEAN)
+    ears.kinds["2"] = "clean"
+    library = FakeLibrary(clock, songs=[[GOOBA_CLEAN]])
     soulsync = FakeSoulSync([DONE])
     downloads = watching(soulsync, library, set_up)
 
@@ -1049,7 +1345,8 @@ def test_a_yes_requests_without_looking_in_navidrome_again(watching, set_up, clo
 
     assert _all_ended()
     assert said == [GOOBA_REQUESTED, GOOBA_DOWNLOADED]
-    assert soulsync.requested == [("Gooba", "6ix9ine")]
+    assert library.looked_for == [("Gooba", "6ix9ine")] and soulsync.requested == []
+    assert [swap[0] for swap in swapper.swaps] == ["2"]
 
 
 def test_the_same_thing_asked_for_while_it_waits_is_requested_once(running, set_up, clock):
@@ -1071,8 +1368,9 @@ def test_the_same_thing_asked_for_while_it_waits_is_requested_once(running, set_
     assert soulsync.requested == [("Gooba", "6ix9ine")]
 
 
-def test_a_download_not_asked_for_in_words_is_offered_instead(watching, set_up, clock):
-    # Navidrome: nothing, then only a clean copy, then the explicit one.
+def test_a_download_not_asked_for_in_words_is_offered_instead(watching, set_up, clock, store):
+    # Navidrome: nothing, then only a copy heard clean, then the explicit one.
+    heard_clean(store, GOOBA_CLEAN)
     soulsync = FakeSoulSync()
     downloads = watching(soulsync, FakeLibrary(clock, songs=[[], [GOOBA_CLEAN], [GOOBA]]), set_up)
 
