@@ -1080,7 +1080,9 @@ def test_get_football_offers_what_happened_in_a_match():
     description = schema["description"]
     properties = schema["input_schema"]["properties"]
     assert "match" in properties["about"]["enum"]
-    assert ("'match' for what happened in a team's match - its goals, penalties, red cards and ESPN's notes"
+    # "Who scored" goes to 'match': the 'matches' answer has no scorers, and the tool's words would then let Claude
+    # say Home Assistant has none.
+    assert ("'match' for who scored or what happened in a team's match - its goals, penalties, red cards and ESPN's notes"
             in properties["about"]["description"])
     # It is asked with the team named, even one of the user's own; with none, it is the followed team whose match is in
     # play, else over, on the day, which is the date (today when none is given): not the line-ups' way, which is the

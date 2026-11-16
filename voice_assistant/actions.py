@@ -1102,8 +1102,9 @@ class ActionExecutor:
         competition={"type": "string", "description": "The league or cup asked about, e.g. 'Premier League' or 'Carabao Cup'."},
         about={"type": "string", "enum": ["matches", "table", "left", "lineups", "match"],
                "description": "'table' for a league table, 'left' for who is still in a cup, 'lineups' for a team's "
-                              "starting eleven and bench, 'match' for what happened in a team's match - its goals, "
-                              "penalties, red cards and ESPN's notes, else 'matches'. Use 'lineups' with the team named, "
+                              "starting eleven and bench, 'match' for who scored or what happened in a team's "
+                              "match - its goals, penalties, red cards and ESPN's notes, else 'matches'. Use "
+                              "'lineups' with the team named, "
                               "even one of the user's own; with neither a team nor a competition, the followed team "
                               "playing now or today. Reply with the side asked for, or both. 'match' is asked with the team "
                               "named too; with neither a team nor a competition it is the followed team whose match is "
