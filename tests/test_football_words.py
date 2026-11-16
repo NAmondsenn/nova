@@ -309,11 +309,22 @@ def test_an_event_with_no_player_says_who_it_was_for_alone(london):
         {"minute": "50'", "kind": "red_card", "side": "away"}]})
     assert said_events(match) == [
         "10': a goal for England. Spain 0, England 1.",
-        "20': a penalty for Spain. Spain 1, England 1.",
+        "20': a penalty for Spain, scored. Spain 1, England 1.",
         "30': an own goal for England. Spain 1, England 2.",
         "40': a penalty for Spain, missed.",
         "50': a red card for England.",
     ]
+
+
+def test_a_penalty_scored_with_no_player_says_it_was_scored(london):
+    # "a penalty for Spain." alone would not say whether it went in.
+    match = _m(**{**SPAIN_ENGLAND, "home_score": 1, "away_score": 0, "winner": "home", "events": [
+        {"minute": "20'", "kind": "penalty", "side": "home"}]})
+    assert said_events(match) == ["20': a penalty for Spain, scored. Spain 1, England 0."]
+    # With no running score to give, it is still said to have been scored.
+    short = _m(**{**SPAIN_ENGLAND, "home_score": 2, "away_score": 0, "winner": "home", "events": [
+        {"minute": "20'", "kind": "penalty", "side": "home"}]})
+    assert said_events(short)[0] == "20': a penalty for Spain, scored."
 
 
 def test_a_match_with_no_events_says_nothing_more(london):

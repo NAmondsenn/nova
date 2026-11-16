@@ -301,15 +301,16 @@ def _said_event(event: MatchEvent, match: Match) -> str:
     Returns:
         e.g. "45': a penalty for England, scored by Harry Kane.", "63': a red card for Elliot Anderson of England."
         or "32': an own goal by C. Sykes, for Oxford City." Where the source named no player, the same
-        without one, e.g. "53': a goal for England." A penalty missed is for the side which took it:
-        "65': a penalty for Spain, missed by Mikel Oyarzabal."
+        without one, e.g. "53': a goal for England." A penalty is said to be scored or missed even with no
+        player, which "a penalty for Spain." would not say: "20': a penalty for Spain, scored." A penalty
+        missed is for the side which took it: "65': a penalty for Spain, missed by Mikel Oyarzabal."
     """
     team = _side_name(match, event.side)
     who = event.player
     if event.kind == "goal":
         what = f"a goal for {team}" + (f", scored by {who}" if who else "")
     elif event.kind == "penalty":
-        what = f"a penalty for {team}" + (f", scored by {who}" if who else "")
+        what = f"a penalty for {team}, scored" + (f" by {who}" if who else "")
     elif event.kind == "own_goal":
         what = f"an own goal by {who}, for {team}" if who else f"an own goal for {team}"
     elif event.kind == "penalty_missed":
