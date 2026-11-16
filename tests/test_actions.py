@@ -1775,7 +1775,8 @@ class FakePlaylistPlayer:
         self.reply = reply
         self.played = []
 
-    def play_playlist(self, name):
+    def play_playlist(self, name, exact=False):
+        assert exact is True
         self.played.append(name)
         if self.reply is not None:
             return dict(self.reply)

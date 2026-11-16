@@ -585,10 +585,11 @@ class ActionExecutor:
         playlist = ((self.config.section("new_music") if self.config else {}).get("playlist") or "").strip()
         if not playlist:
             return {"success": False, "message": NO_NEW_MUSIC_PLAYLIST}
-        # Only Navidrome has it: SoulSync makes the playlist there, and Spotify's own aren't asked for.
+        # Only Navidrome has it: SoulSync makes the playlist there, and Spotify's own aren't asked for. Only
+        # one of exactly this name plays, never a near miss, which would be taken for the new music.
         if getattr(self.music, "name", None) != "Navidrome":
             return {"success": False, "message": NEW_MUSIC_NOT_ON_SPOTIFY}
-        reply = self._music_offline() or self.music.play_playlist(playlist)
+        reply = self._music_offline() or self.music.play_playlist(playlist, exact=True)
         # Not there yet, which isn't the same as Navidrome not answering - that says so itself.
         if reply.get("missing"):
             return {"success": False, "message": NEW_MUSIC_MISSING}

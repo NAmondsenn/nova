@@ -569,14 +569,27 @@ class NavidromePlayer(NavidromeLibrary):
             return [], ""
         return self._album_songs(album["id"]), f"{album.get('name')} by {album.get('artist')}"
 
-    def _find_playlist(self, name: str) -> Tuple[List[Dict], str]:
-        """One of the user's playlists, or their starred songs, shuffled."""
-        if means_liked_songs(name):
+    def _find_playlist(self, name: str, exact: bool = False) -> Tuple[List[Dict], str]:
+        """
+        One of the user's playlists, or their starred songs, shuffled.
+
+        Args:
+            name: The playlist's name.
+            exact: Whether only a playlist of just this name will do, however it's cased or
+                punctuated, and never the starred songs - for a name from the settings, which
+                is the playlist itself, not a spoken guess at one.
+        """
+        if not exact and means_liked_songs(name):
             return self._liked_songs()
         playlists = self._call("getPlaylists").get("playlists", {}).get("playlist") or []
-        wanted = distinctive(name)
-        playlist = wanted and best([{**playlist, "distinctive": distinctive(playlist.get("name", ""))}
-                                    for playlist in playlists], "distinctive", wanted, None)
+        if exact:
+            wanted = normalise(name)
+            playlist = wanted and next((found for found in playlists if normalise(found.get("name", "")) == wanted),
+                                       None)
+        else:
+            wanted = distinctive(name)
+            playlist = wanted and best([{**playlist, "distinctive": distinctive(playlist.get("name", ""))}
+                                        for playlist in playlists], "distinctive", wanted, None)
         if not playlist:
             return [], ""
         songs = self._call("getPlaylist", id=playlist["id"]).get("playlist", {}).get("entry") or []
@@ -644,15 +657,17 @@ class NavidromePlayer(NavidromeLibrary):
         logger.info(f"Playing {said} ({len(songs)} song{'s' if len(songs) != 1 else ''} queued)")
         return {"success": True, "message": f"Playing {said}"}
 
-    def play_playlist(self, name: str) -> Dict:
+    def play_playlist(self, name: str, exact: bool = False) -> Dict:
         """
         Plays one of the user's playlists, shuffled.
 
         Args:
             name: The playlist name as the user said it.
+            exact: Whether only a playlist of just this name is played - see _find_playlist -
+                rather than the closest to what was said.
         """
         try:
-            songs, said = self._find_playlist(name)
+            songs, said = self._find_playlist(name, exact)
         except (requests.RequestException, NavidromeError, ValueError) as e:
             return {"success": False, "message": self._failure_message(e)}
         if not songs:

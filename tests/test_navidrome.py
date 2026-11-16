@@ -515,6 +515,29 @@ def test_no_album_is_no_tracks(make_library):
     assert [endpoint for endpoint, _ in library._session.requests] == ["search3", "search3"]
 
 
+def test_the_new_music_playlist_is_only_ever_the_exact_name(make_player):
+    # A near miss shares a word with the name but isn't it: it must not play as the new music.
+    answers = {
+        "getPlaylists": {"playlists": {"playlist": [{"id": "p1", "name": "Gym Shuffle"},
+                                                    {"id": "p2", "name": "Discovery Weekly"}]}},
+        "getPlaylist": {"playlist": {"entry": SONGS}},
+    }
+    player = make_player(answers)
+    result = player.play_playlist("Discovery Shuffle", exact=True)
+    assert result["success"] is False and result["missing"] is True and player._queue == []
+    # Said aloud it still finds the closest, as it always has.
+    assert make_player(answers).play_playlist("discovery shuffle")["success"] is True
+
+    # The exact one plays, however it's cased or punctuated, and only its own songs.
+    answers["getPlaylists"]["playlists"]["playlist"].append({"id": "p3", "name": "discovery  shuffle!"})
+    exact = make_player(answers)
+    assert exact.play_playlist("Discovery Shuffle", exact=True) == {"success": True,
+                                                                    "message": "Playing discovery  shuffle!"}
+    # Liked songs are no playlist, so a setting naming them finds none.
+    assert make_player({"getStarred2": {"starred2": {"song": SONGS}}, "getPlaylists": {}}).play_playlist(
+        "liked songs", exact=True)["missing"] is True
+
+
 def test_newest_albums_since(make_library):
     # Newest first, as Navidrome lists them, with the fractional seconds and Z it writes - and one a
     # little before the cut off, which isn't kept. Offsets are the same moment wherever the clock is.
