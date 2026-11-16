@@ -13,13 +13,18 @@ since the REST API has no album request: find_album searches for it, request_alb
 puts its tracks on the wishlist, and process_wishlist starts them downloading now
 rather than at the wishlist's next run. SoulSync gives no id to follow either by, so
 whether one has come down is for Navidrome to say.
+
+For a clean song swapped for another copy (docs/decisions/0019), unwish takes a
+request back off the wishlist, and SoulSyncAdmin makes SoulSync forget a file Nova
+set aside - only its own row for it, never the file.
 """
 
 import difflib
 import logging
+import posixpath
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlsplit
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import quote, urlsplit
 
 import requests
 
@@ -65,6 +70,12 @@ NOT_ANSWERING = "SoulSync isn't answering."
 KEY_REFUSED = "SoulSync didn't accept its key, so SOULSYNC_API_KEY under Keys needs checking."
 NOT_FOUND = "SoulSync couldn't find it."
 MCP_OFF = "SoulSync's MCP is off, so it can't download albums. Turn it on in SoulSync's settings."
+
+# The reasons a swap couldn't make SoulSync forget a song, listed with it on the settings page.
+ADMIN_REFUSED = "SoulSync didn't accept Nova's admin profile, so SOULSYNC_ADMIN_PASSWORD under Keys needs checking."
+ADMIN_NOT_ALLOWED = "SoulSync didn't let Nova's admin profile remove a song, so it needs admin rights."
+NOT_FORGOTTEN = "SoulSync couldn't forget the song's old copy."
+NOT_IN_MUSIC_FOLDER = "Nova couldn't tell SoulSync which file it was."
 
 # Words which, anywhere in a note on an album's edition, say it's had the swearing
 # taken out - see _is_clean_edition.
@@ -351,6 +362,40 @@ def pick_track(candidates: List[Dict], title: str, artist: Optional[str]) -> Opt
     return None
 
 
+def _ask(send: Callable, url: str, timeout: float, **request) -> Tuple[int, Any]:
+    """
+    One request to SoulSync, through a session's post, get or delete.
+
+    Args:
+        send: The session's method, e.g. session.post.
+        url: Where on SoulSync, in full.
+        timeout: Seconds to wait for its answer.
+        request: What goes with it, e.g. json={...} or params={...}.
+
+    Returns:
+        The status code, and the JSON SoulSync answered with - None if it wasn't JSON.
+
+    Raises:
+        SoulSyncError: If SoulSync couldn't be reached.
+    """
+    try:
+        # On the local network, so it's still asked with only the internet down,
+        # but not with no network at all - see NavidromeLibrary._call.
+        if not network.online():
+            raise requests.ConnectionError("No network connection")
+        response = send(url, timeout=timeout, **request)
+    except requests.RequestException as e:
+        # Only the kind of error, never the error itself, which can hold the
+        # request - and with it the key or the admin's password.
+        logger.error(f"SoulSync request failed: {type(e).__name__}")
+        raise SoulSyncError(NOT_ANSWERING if isinstance(e, (requests.ConnectionError, requests.Timeout))
+                            else None) from None
+    try:
+        return response.status_code, response.json()
+    except ValueError:
+        return response.status_code, None
+
+
 class SoulSync:
     """Asks SoulSync for songs and albums, and how they're getting on."""
 
@@ -388,7 +433,8 @@ class SoulSync:
 
     def _send(self, path: str, timeout: float, body: Dict) -> Tuple[int, Any]:
         """
-        One request to SoulSync: a POST of the body, as everything Nova asks of it is.
+        One request to SoulSync: a POST of the body, as nearly everything Nova asks of
+        it is. The errors, and what is logged, are as _ask has them.
 
         Args:
             path: Where on SoulSync, e.g. "/api/v1/wishlist".
@@ -401,27 +447,12 @@ class SoulSync:
         Raises:
             SoulSyncError: If SoulSync couldn't be reached.
         """
-        try:
-            # On the local network, so it's still asked with only the internet down,
-            # but not with no network at all - see NavidromeLibrary._call.
-            if not network.online():
-                raise requests.ConnectionError("No network connection")
-            response = self._session.post(f"{self.url}{path}", json=body, timeout=timeout)
-        except requests.RequestException as e:
-            # Only the kind of error, never the error itself, which can hold the
-            # request - and with it the key.
-            logger.error(f"SoulSync request failed: {type(e).__name__}")
-            raise SoulSyncError(NOT_ANSWERING if isinstance(e, (requests.ConnectionError, requests.Timeout))
-                                else None) from None
-        try:
-            return response.status_code, response.json()
-        except ValueError:
-            return response.status_code, None
+        return _ask(self._session.post, f"{self.url}{path}", timeout, json=body)
 
     def _get(self, path: str, timeout: float, params: Dict) -> Tuple[int, Any]:
         """
         One read from SoulSync: a GET with query parameters, as its stats are asked for.
-        Everything else is as _send has it, including the errors and what is logged.
+        Everything else is as _send has it.
 
         Args:
             path: Where on SoulSync, e.g. "/api/stats/cached".
@@ -434,20 +465,7 @@ class SoulSync:
         Raises:
             SoulSyncError: If SoulSync couldn't be reached.
         """
-        try:
-            if not network.online():
-                raise requests.ConnectionError("No network connection")
-            response = self._session.get(f"{self.url}{path}", params=params, timeout=timeout)
-        except requests.RequestException as e:
-            # Only the kind of error, never the error itself, which can hold the
-            # request - and with it the key.
-            logger.error(f"SoulSync request failed: {type(e).__name__}")
-            raise SoulSyncError(NOT_ANSWERING if isinstance(e, (requests.ConnectionError, requests.Timeout))
-                                else None) from None
-        try:
-            return response.status_code, response.json()
-        except ValueError:
-            return response.status_code, None
+        return _ask(self._session.get, f"{self.url}{path}", timeout, params=params)
 
     @staticmethod
     def _read(status: int, answer: Any) -> Dict:
@@ -579,15 +597,20 @@ class SoulSync:
 
     # What the assistant asks for
 
-    def find_song(self, title: str, artist: Optional[str]) -> SongRequest:
+    def find_song(self, title: str, artist: Optional[str], album: Optional[str] = None) -> SongRequest:
         """
         Finds the song asked for: searches SoulSync for it, and takes the one
         pick_track chooses. Nothing is requested yet - see request_song - so Navidrome
         can be looked in again by the title asked for and SoulSync's artist.
 
+        With an album, pick_track chooses first from the songs on it, then from all of
+        them: a clean track of ASTROWORLD is swapped for SICKO MODE on ASTROWORLD, not
+        the single SoulSync lists above it, if it can be.
+
         Args:
             title: The song's title as asked for.
             artist: Its artist, or None if only the title was given.
+            album: The album it should preferably be on, or None if any will do.
 
         Returns:
             The SongRequest, named as SoulSync has the song.
@@ -600,7 +623,9 @@ class SoulSync:
         data = self._read(status, answer).get("data")
         tracks = data.get("tracks") if isinstance(data, dict) else None
         tracks = [track for track in tracks if isinstance(track, dict)] if isinstance(tracks, list) else []
-        track = pick_track(tracks, title, artist)
+        on_album = [track for track in tracks
+                    if album and normalise(_name_of(track.get("album"))) == normalise(album)]
+        track = (on_album and pick_track(on_album, title, artist)) or pick_track(tracks, title, artist)
         if track is None:
             raise SoulSyncError(NOT_FOUND)
         artists = _artists(track)
@@ -636,6 +661,57 @@ class SoulSync:
         except SoulSyncError:
             # It's on the wishlist either way, so it still comes down - only later.
             logger.warning("SoulSync's wishlist couldn't be started, so the song waits for its next run")
+
+    def unwish(self, track_id: str) -> bool:
+        """
+        Takes a song request_song asked for back off SoulSync's wishlist, so a swap
+        that gave up on it can't have it land later beside the copy put back.
+
+        Args:
+            track_id: The id it went on the wishlist with: its track's "id" from the
+                search, Deezer's.
+
+        Returns:
+            True if SoulSync took it off; False, with a warning, if it wasn't there or
+            couldn't be asked. Never raises: the copy is put back either way.
+        """
+        if not track_id:
+            logger.warning("A song couldn't be taken off SoulSync's wishlist: it has no id")
+            return False
+        try:
+            # One part of the address, whatever the id holds, so it can't point anywhere else.
+            status, _ = _ask(self._session.delete, f"{self.url}/api/v1/wishlist/{quote(str(track_id), safe='')}",
+                             REQUEST_TIMEOUT)
+        except Exception as e:
+            logger.warning(f"{track_id} couldn't be taken off SoulSync's wishlist: {type(e).__name__}")
+            return False
+        if 200 <= status < 300:
+            logger.info(f"Took {track_id} off SoulSync's wishlist")
+            return True
+        # A 404 is nothing there at that id.
+        logger.warning(f"{track_id} couldn't be taken off SoulSync's wishlist: HTTP {status}")
+        return False
+
+    def library_tracks(self, title: str, artist: str) -> List[Dict]:
+        """
+        SoulSync's own rows for a song - its record of what the library has, which its
+        wishlist checks before it downloads anything.
+
+        Args:
+            title: The song's title.
+            artist: Its artist.
+
+        Returns:
+            The rows, each with its "id" and "file_path" ("/app/Transfer/<path in the
+            music folder>").
+
+        Raises:
+            SoulSyncError: If SoulSync couldn't be asked, or answered with an error.
+        """
+        data = self._read(*self._get("/api/v1/library/tracks", REQUEST_TIMEOUT,
+                                     {"title": title, "artist": artist})).get("data")
+        tracks = data.get("tracks") if isinstance(data, dict) else None
+        return [track for track in tracks if isinstance(track, dict)] if isinstance(tracks, list) else []
 
     def song_progress(self, request: SongRequest) -> Progress:
         """
@@ -692,3 +768,153 @@ class SoulSync:
             request: The AlbumRequest request_album gave.
         """
         return Progress("waiting")
+
+
+class SoulSyncAdmin:
+    """
+    Signs in to SoulSync as Nova's admin profile, to make it forget a song Nova set
+    aside. Its key can't: removing a row from SoulSync's library is for a profile with
+    admin rights, signed in with a password, as its own pages do. Without this its
+    wishlist drops the request for the song again as "already owned", as it did live
+    on 16 November.
+    """
+
+    def __init__(self, url: str, profile: str, password: str, session=None):
+        """
+        Args:
+            url: SoulSync's address, e.g. "http://soulsync.local:8008".
+            profile: The admin profile's name, from the settings page.
+            password: Its password, SOULSYNC_ADMIN_PASSWORD - never logged or shown.
+            session: The requests.Session to ask through, which keeps the
+                "soulsync_session" cookie the sign-in sets; a new one if None.
+        """
+        self.url = url.rstrip("/")
+        self.profile = profile
+        self._password = password
+        self._session = session if session is not None else requests.Session()
+        self._signed_in = False
+
+    def __repr__(self) -> str:
+        return f"SoulSyncAdmin(url={self.url!r}, profile={self.profile!r})"
+
+    @classmethod
+    def from_config(cls, config, password: Optional[str]) -> Optional["SoulSyncAdmin"]:
+        """
+        Nova's SoulSync admin, as config.yaml and .env set it up, or None if they don't.
+
+        Args:
+            config: Configs loaded from config.yaml - soulsync.url and clean_check.soulsync_admin.
+            password: SOULSYNC_ADMIN_PASSWORD from .env.
+
+        Returns:
+            A SoulSyncAdmin, or None without the address, the profile or the password.
+        """
+        url = (config.section("soulsync").get("url") or "").strip()
+        profile = (config.section("clean_check").get("soulsync_admin") or "").strip()
+        password = password or ""
+        if not url or not profile or not password:
+            if profile or password:
+                logger.warning("Swapping a clean song needs soulsync.url, clean_check.soulsync_admin and "
+                               "SOULSYNC_ADMIN_PASSWORD, and not all are set")
+            return None
+        return cls(url, profile, password)
+
+    def _sign_in(self):
+        """
+        Signs in as the admin profile; the session keeps the cookie SoulSync answers with.
+
+        Raises:
+            SoulSyncError: If SoulSync couldn't be asked, or refused the profile.
+        """
+        status, answer = _ask(self._session.post, f"{self.url}/api/auth/login", REQUEST_TIMEOUT,
+                              json={"username": self.profile, "password": self._password})
+        if status in (401, 403) or (isinstance(answer, dict) and answer.get("success") is False):
+            logger.error(f"SoulSync refused Nova's admin profile: HTTP {status}")
+            raise SoulSyncError(ADMIN_REFUSED)
+        if status != 200:
+            logger.error(f"SoulSync's sign-in answered with an error: HTTP {status}")
+            raise SoulSyncError()
+        self._signed_in = True
+
+    def _remove(self, row_id: Any):
+        """
+        Removes one of SoulSync's rows - its record only. Nothing goes with the DELETE:
+        delete_file would delete the file, and blacklist would keep SoulSync from ever
+        getting the song again. A 401 or 403 is a session run out, so it signs in again,
+        once. A row already gone (404) is as good as removed.
+
+        Args:
+            row_id: The row's "id", as library_tracks lists it.
+
+        Raises:
+            SoulSyncError: If it couldn't be removed.
+        """
+        url = f"{self.url}/api/library/track/{quote(str(row_id), safe='')}"
+        for _ in range(2):
+            if not self._signed_in:
+                self._sign_in()
+            status, answer = _ask(self._session.delete, url, REQUEST_TIMEOUT)
+            if status not in (401, 403):
+                break
+            self._signed_in = False
+        else:
+            logger.error(f"SoulSync wouldn't let Nova's admin profile remove a row: HTTP {status}")
+            raise SoulSyncError(ADMIN_NOT_ALLOWED)
+        if status == 404:
+            return
+        error = answer.get("error") if isinstance(answer, dict) else None
+        refused = error or (isinstance(answer, dict) and answer.get("success") is False)
+        if 200 <= status < 300 and not refused:
+            return
+        message = error.get("message") if isinstance(error, dict) else error if isinstance(error, str) else None
+        logger.error(f"SoulSync couldn't remove a row: HTTP {status}")
+        raise SoulSyncError(_said(message) if message else NOT_FORGOTTEN)
+
+    def forget(self, soulsync: SoulSync, title: str, artist: str, rel_path: str) -> bool:
+        """
+        Makes SoulSync forget the file of a song Nova set aside: finds SoulSync's row
+        for it, by title and artist with the key, and removes only that row. The file
+        isn't touched - it's already in Nova's holding folder.
+
+        A row is the file's when its path ends with the file's path in the music
+        folder, from a folder: SoulSync files it as "/app/Transfer/<path>", where
+        Navidrome has "<path>". "Travis Scott/ASTROWORLD/03 SICKO MODE.flac" is
+        "/app/Transfer/Travis Scott/ASTROWORLD/03 SICKO MODE.flac"'s, and "3 SICKO
+        MODE.flac" is no one's.
+
+        Args:
+            soulsync: The SoulSync asked with the key, for the rows.
+            title: The song's title, as SoulSync's search for its rows is asked.
+            artist: Its artist.
+            rel_path: Its file's path in the music folder, as Navidrome gives it.
+
+        Returns:
+            True if no row is left for the file - none there at all counts - and
+            False, with a warning, if one is still listed after its removal.
+
+        Raises:
+            SoulSyncError: If the path isn't one inside the music folder, SoulSync
+                couldn't be asked, refused the admin profile, or couldn't remove the row.
+        """
+        rel = posixpath.normpath(rel_path) if rel_path else ""
+        # A path from the root, or out of the music folder, would match nothing of the
+        # song's, or something that isn't it.
+        if not rel_path or rel_path.startswith("/") or rel in (".", "..") or rel.startswith("../"):
+            logger.error("A song's path to forget wasn't one inside the music folder")
+            raise SoulSyncError(NOT_IN_MUSIC_FOLDER)
+
+        def rows() -> List[Dict]:
+            return [row for row in soulsync.library_tracks(title, artist)
+                    if posixpath.normpath(str(row.get("file_path") or "")).endswith("/" + rel)]
+
+        found = rows()
+        # A row with no id can't be removed, so it's still listed below, and that's said.
+        for row in found:
+            if row.get("id") is not None:
+                self._remove(row["id"])
+        if found and rows():
+            logger.warning(f"SoulSync still lists {title} by {artist} after it was removed")
+            return False
+        if found:
+            logger.info(f"SoulSync forgot {title} by {artist}")
+        return True

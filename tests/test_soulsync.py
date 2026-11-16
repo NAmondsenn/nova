@@ -13,7 +13,8 @@ import requests
 
 from voice_assistant import network
 from voice_assistant.soulsync import (MCP_TIMEOUT, PICTURE_MOST, REQUEST_TIMEOUT, SEARCH_TIMEOUT, AlbumRequest,
-                                      Progress, SongRequest, SoulSync, SoulSyncError, pick_album, pick_track)
+                                      Progress, SongRequest, SoulSync, SoulSyncAdmin, SoulSyncError, pick_album,
+                                      pick_track)
 
 URL = "http://soulsync.local:8008"
 RECORDED_TRACK_COUNT = 11
@@ -124,13 +125,25 @@ class FakeSoulSync:
         # Each GET as (address, params, headers, how it was asked), and what each address answers.
         self.fetched = []
         self.pages = {}
+        # Each DELETE as (address, anything sent with it, headers), and what each address answers.
+        self.deleted = []
+        self.removals = {}
 
     def get(self, url, params=None, timeout=None, stream=False, allow_redirects=True):
         self.timeouts.append(timeout)
         if self.fail:
             raise self.fail
         self.fetched.append((url, params, dict(self.headers), {"stream": stream, "redirects": allow_redirects}))
-        return self.pages.get(url) or FakeResponse(404, {"error": "not found"})
+        page = self.pages.get(url)
+        # A page made at the time it's asked for, as SoulSync's library is after a row is removed.
+        return (page() if callable(page) else page) or FakeResponse(404, {"error": "not found"})
+
+    def delete(self, url, timeout=None, **more):
+        self.timeouts.append(timeout)
+        if self.fail:
+            raise self.fail
+        self.deleted.append((url, more, dict(self.headers)))
+        return FakeResponse(*self.removals.get(url, (404, {"success": False, "error": {"code": "NOT_FOUND"}})))
 
     def post(self, url, json=None, timeout=None):
         self.timeouts.append(timeout)
@@ -237,6 +250,25 @@ def test_no_song_found_that_will_do_says_so(soulsync, http, found):
         soulsync.find_song("Gooba", "6ix9ine")
     assert error.value.reason == "SoulSync couldn't find it."
     assert [url for url, _, _ in http.posted] == [SEARCH]
+
+
+def test_a_song_on_the_album_named_is_preferred(soulsync, http):
+    # Swapping a clean track of an album: the explicit one on the same album, though
+    # SoulSync lists the single first.
+    single, on_album = _track("SICKO MODE", "Travis Scott", "SICKO MODE"), _track("SICKO MODE", "Travis Scott",
+                                                                                  "ASTROWORLD")
+    http.answers[SEARCH] = _found(single, on_album)
+    assert soulsync.find_song("SICKO MODE", "Travis Scott", "Astroworld").track == on_album
+    # Without an album, SoulSync's order stands; the search is asked for the same way either way.
+    assert soulsync.find_song("SICKO MODE", "Travis Scott").track == single
+    assert http.posted[0][1] == http.posted[1][1] == {"query": "Travis Scott - SICKO MODE", "limit": 10}
+
+
+def test_a_song_on_no_album_named_is_still_found_on_another(soulsync, http):
+    # Only on the single, and a clean version on the album, which is never taken.
+    single = _track("SICKO MODE", "Travis Scott", "SICKO MODE")
+    http.answers[SEARCH] = _found(_track("SICKO MODE (Clean)", "Travis Scott", "ASTROWORLD"), single)
+    assert soulsync.find_song("SICKO MODE", "Travis Scott", "Astroworld").track == single
 
 
 def test_a_misheard_artist_spelt_like_the_one_found_is_taken_for_exactly_the_title():
@@ -704,3 +736,201 @@ def test_picture_never_raises(soulsync, http, monkeypatch):
     http.fail = None
     monkeypatch.setattr(network, "online", lambda: False)
     assert soulsync.picture("/api/navidrome/cover/abc") is None
+
+
+# Taking a wish back
+
+def test_a_wish_is_taken_back_by_the_id_it_was_made_with(soulsync, http):
+    http.removals[f"{URL}/api/v1/wishlist/3135556"] = _envelope({"removed": True})
+    assert soulsync.unwish("3135556") is True
+    assert http.deleted == [(f"{URL}/api/v1/wishlist/3135556", {}, {"Authorization": "Bearer the-key"})]
+    assert http.timeouts == [REQUEST_TIMEOUT]
+
+
+def test_a_wish_that_isnt_there_or_cant_be_taken_back_is_false_and_never_raises(soulsync, http, caplog):
+    # Nothing at that id: SoulSync answers 404.
+    assert soulsync.unwish("3135556") is False
+    http.fail = requests.ConnectionError("made-up")
+    assert soulsync.unwish("3135556") is False
+    assert soulsync.unwish("") is False
+    assert caplog.text.count("couldn't be taken off SoulSync's wishlist") == 3
+    assert len(http.deleted) == 1
+
+
+def test_an_id_is_sent_as_one_part_of_the_address(soulsync, http):
+    soulsync.unwish("../library/track/7")
+    assert http.deleted[0][0] == f"{URL}/api/v1/wishlist/..%2Flibrary%2Ftrack%2F7"
+
+
+# Forgetting a song set aside
+
+LIBRARY = f"{URL}/api/v1/library/tracks"
+LOGIN = f"{URL}/api/auth/login"
+PASSWORD = "made-up-password"
+REL = "Travis Scott/ASTROWORLD/03 SICKO MODE.flac"
+
+
+def _row(row_id, rel):
+    """A row as GET /api/v1/library/tracks lists it: its file under SoulSync's /app/Transfer."""
+    return {"id": row_id, "title": "SICKO MODE", "artist_name": "Travis Scott", "album_title": "ASTROWORLD",
+            "file_path": f"/app/Transfer/{rel}"}
+
+
+class FakeAdmin:
+    """
+    Stands in for the admin's requests.Session: its sign-in sets the "soulsync_session"
+    cookie, and a DELETE with it takes the row from the library the key's GET lists.
+    """
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.cookies = {}
+        self.logins = []
+        self.deleted = []
+        # What sign-ins answer, in turn, and what deletes answer before their own, in turn.
+        self.login_answers = []
+        self.delete_answers = []
+
+    def post(self, url, json=None, timeout=None):
+        self.logins.append((url, copy.deepcopy(json)))
+        status, body = self.login_answers.pop(0) if self.login_answers else (200, {"success": True, "profile": {}})
+        if status == 200:
+            self.cookies["soulsync_session"] = f"made-up-session-{len(self.logins)}"
+        return FakeResponse(status, body)
+
+    def delete(self, url, timeout=None, **more):
+        self.deleted.append((url, more, dict(self.cookies)))
+        if self.delete_answers:
+            return FakeResponse(*self.delete_answers.pop(0))
+        if not self.cookies:
+            return FakeResponse(401, {"success": False, "error": "Not signed in"})
+        row_id = url.rsplit("/", 1)[1]
+        self.rows[:] = [row for row in self.rows if str(row["id"]) != row_id]
+        return FakeResponse(200, {"success": True})
+
+
+@pytest.fixture
+def library(http):
+    """SoulSync's own rows, listed by the key's GET as they are when it's asked."""
+    rows = [_row(41, REL), _row(42, "Travis Scott/SICKO MODE/01 SICKO MODE.flac")]
+    http.pages[LIBRARY] = lambda: FakeResponse(*_envelope({"tracks": copy.deepcopy(rows)}))
+    return rows
+
+
+@pytest.fixture
+def admin_http(library):
+    return FakeAdmin(library)
+
+
+@pytest.fixture
+def admin(admin_http):
+    return SoulSyncAdmin(URL + "/", "nova", PASSWORD, session=admin_http)
+
+
+def test_forgetting_signs_in_once_and_removes_only_the_row_for_that_file(soulsync, http, admin, admin_http,
+                                                                          library):
+    assert admin.forget(soulsync, "SICKO MODE", "Travis Scott", REL) is True
+
+    # Found with the key, by title and artist, and looked at again once it's gone.
+    assert [(url, params, headers) for url, params, headers, _ in http.fetched] == \
+        [(LIBRARY, {"title": "SICKO MODE", "artist": "Travis Scott"}, {"Authorization": "Bearer the-key"})] * 2
+    assert admin_http.logins == [(LOGIN, {"username": "nova", "password": PASSWORD})]
+    # Only the row: nothing sent with the DELETE, so never delete_file or blacklist,
+    # and it went with the session's cookie.
+    assert admin_http.deleted == [(f"{URL}/api/library/track/41", {}, {"soulsync_session": "made-up-session-1"})]
+    assert "delete_file" not in str(admin_http.deleted) and "blacklist" not in str(admin_http.deleted)
+    assert [row["id"] for row in library] == [42]
+
+    # Signed in already, so the next song needs no sign-in.
+    library.append(_row(43, "Gunna/one of wun/endless.flac"))
+    assert admin.forget(soulsync, "endless", "Gunna", "Gunna/one of wun/endless.flac") is True
+    assert len(admin_http.logins) == 1 and len(admin_http.deleted) == 2
+
+
+def test_a_row_already_gone_is_forgotten_without_signing_in(soulsync, http, admin, admin_http, library):
+    library.pop(0)
+    assert admin.forget(soulsync, "SICKO MODE", "Travis Scott", REL) is True
+    assert admin_http.logins == [] and admin_http.deleted == []
+
+
+@pytest.mark.parametrize("rel, matches", [
+    # Matched however the path is written, once normalised.
+    ("Travis Scott/./ASTROWORLD//03 SICKO MODE.flac", True),
+    # A file whose name only ends the same isn't that file.
+    ("3 SICKO MODE.flac", False),
+    ("SICKO MODE.flac", False)])
+def test_a_row_is_matched_by_its_whole_path_from_a_folder(soulsync, admin, admin_http, rel, matches):
+    assert admin.forget(soulsync, "SICKO MODE", "Travis Scott", rel) is True
+    assert len(admin_http.deleted) == (1 if matches else 0)
+
+
+@pytest.mark.parametrize("rel", ["", "/app/Transfer/" + REL, "../Transfer/" + REL, "."])
+def test_a_path_from_the_root_or_out_of_the_music_folder_is_refused_before_anything_is_asked(soulsync, http, admin,
+                                                                                         admin_http, rel):
+    with pytest.raises(SoulSyncError) as error:
+        admin.forget(soulsync, "SICKO MODE", "Travis Scott", rel)
+    assert error.value.reason
+    assert http.fetched == [] and admin_http.logins == [] and admin_http.deleted == []
+
+
+def test_a_refused_sign_in_says_which_key_to_check_and_never_shows_the_password(soulsync, admin, admin_http,
+                                                                                caplog, library):
+    admin_http.login_answers = [(401, {"success": False, "error": "Invalid username or password"})]
+    with pytest.raises(SoulSyncError) as error:
+        admin.forget(soulsync, "SICKO MODE", "Travis Scott", REL)
+    assert error.value.reason == ("SoulSync didn't accept Nova's admin profile, so SOULSYNC_ADMIN_PASSWORD under "
+                                  "Keys needs checking.")
+    assert admin_http.deleted == [] and len(library) == 2
+    for text in (str(error.value), repr(error.value), repr(admin), str(admin), caplog.text):
+        assert PASSWORD not in text
+
+
+def test_a_refused_delete_signs_in_again_once(soulsync, admin, admin_http, library):
+    # Its session ran out between songs.
+    admin_http.delete_answers = [(403, {"success": False, "error": "Not allowed"})]
+    assert admin.forget(soulsync, "SICKO MODE", "Travis Scott", REL) is True
+    assert len(admin_http.logins) == 2 and len(admin_http.deleted) == 2
+    assert [row["id"] for row in library] == [42]
+
+
+def test_a_delete_refused_after_signing_in_again_raises(soulsync, admin, admin_http, library):
+    admin_http.delete_answers = [(403, {"success": False, "error": "Admin only"})] * 2
+    with pytest.raises(SoulSyncError) as error:
+        admin.forget(soulsync, "SICKO MODE", "Travis Scott", REL)
+    assert error.value.reason
+    assert len(admin_http.logins) == 2 and len(admin_http.deleted) == 2 and len(library) == 2
+
+
+@pytest.mark.parametrize("answer", [(500, {"success": False, "error": "Database is locked"}), (500, None)])
+def test_a_failed_delete_raises(soulsync, admin, admin_http, answer, library):
+    admin_http.delete_answers = [answer]
+    with pytest.raises(SoulSyncError):
+        admin.forget(soulsync, "SICKO MODE", "Travis Scott", REL)
+    assert len(admin_http.logins) == 1 and len(library) == 2
+
+
+def test_a_row_still_listed_after_its_delete_is_false(soulsync, admin, admin_http, library):
+    # SoulSync said it was removed, but still lists it.
+    admin_http.delete_answers = [(200, {"success": True})]
+    assert admin.forget(soulsync, "SICKO MODE", "Travis Scott", REL) is False
+
+
+def test_soulsync_out_of_reach_for_the_admin_isnt_answering(soulsync, admin, admin_http, monkeypatch, caplog):
+    def unreachable(*args, **kwargs):
+        raise requests.ConnectionError(f"made-up {PASSWORD}")
+    monkeypatch.setattr(admin_http, "post", unreachable)
+    with pytest.raises(SoulSyncError) as error:
+        admin.forget(soulsync, "SICKO MODE", "Travis Scott", REL)
+    assert error.value.reason == "SoulSync isn't answering."
+    assert PASSWORD not in caplog.text and PASSWORD not in str(error.value)
+
+
+def test_the_admin_is_made_only_with_an_address_a_profile_and_a_password(make_config):
+    url = {"url": "http://soulsync.local:8008/"}
+    assert SoulSyncAdmin.from_config(make_config(soulsync=url, clean_check={"soulsync_admin": ""}), PASSWORD) is None
+    assert SoulSyncAdmin.from_config(make_config(soulsync=url, clean_check={"soulsync_admin": "nova"}), "") is None
+    assert SoulSyncAdmin.from_config(make_config(soulsync={"url": ""}, clean_check={"soulsync_admin": "nova"}),
+                                     PASSWORD) is None
+    assert SoulSyncAdmin.from_config(make_config(soulsync=url), PASSWORD) is None
+    admin = SoulSyncAdmin.from_config(make_config(soulsync=url, clean_check={"soulsync_admin": " nova "}), PASSWORD)
+    assert (admin.url, admin.profile) == ("http://soulsync.local:8008", "nova")
