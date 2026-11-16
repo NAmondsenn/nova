@@ -13,6 +13,7 @@ import struct
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 
 import numpy as np
@@ -131,6 +132,50 @@ def test_a_worker_that_dies_mid_song_raises_and_the_next_song_gets_a_fresh_one(t
     assert first != second and gone(first)
 
 
+def test_a_worker_that_dies_before_reading_the_song_raises(tmp_path, listeners):
+    # Its end of the pipe closes with most of a minute's song still to send.
+    heard = fake(tmp_path, None, source=FAKE.format(body="").split("while True")[0]
+                 + "sys.stdin.buffer.read(4)\nos._exit(1)\n")
+    listeners.append(heard)
+
+    started = time.monotonic()
+    with pytest.raises(ListenError):
+        heard.transcribe(np.zeros(16000 * 60, dtype=np.float32), timeout=30)
+    assert time.monotonic() - started < 10
+    assert gone(pids(tmp_path)[0])
+
+
+def test_a_failure_sending_the_song_fails_at_once(tmp_path, listeners, monkeypatch):
+    class Broken:
+        @staticmethod
+        def pack(*args):
+            raise RuntimeError("something unforeseen")
+
+    monkeypatch.setattr(listener, "struct", Broken)
+    heard = fake(tmp_path, 'answer({"text": "hi"})')
+    listeners.append(heard)
+
+    started = time.monotonic()
+    with pytest.raises(ListenError):
+        heard.transcribe(SECOND, timeout=30)
+    assert time.monotonic() - started < 10
+    # Killed so fast it may not have got as far as noting its process id.
+    assert heard._process is None
+
+
+def test_the_worker_gets_none_of_novas_keys(tmp_path, listeners, monkeypatch):
+    monkeypatch.setenv("NAVIDROME_PASSWORD", "not for the worker")
+    monkeypatch.setenv("LANG", "en_GB.UTF-8")
+    heard = fake(tmp_path, 'answer({"text": json.dumps(dict(os.environ))})')
+    listeners.append(heard)
+
+    given = json.loads(heard.transcribe(SECOND, timeout=10))
+    assert "NAVIDROME_PASSWORD" not in given
+    assert given["PATH"] == os.environ["PATH"] and given["LANG"] == "en_GB.UTF-8"
+    # Python may add LC_CTYPE itself, in a C locale.
+    assert set(given) <= {"PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH", "LC_CTYPE"}
+
+
 def test_a_worker_that_hangs_raises_after_the_timeout_and_is_killed(tmp_path, listeners):
     heard = fake(tmp_path, "time.sleep(3600)")
     listeners.append(heard)
@@ -211,6 +256,27 @@ def test_close_kills_the_worker(tmp_path, listeners):
     assert len(pids(tmp_path)) == 2
 
 
+def test_close_in_the_middle_of_a_song_fails_it_and_leaves_no_timer(tmp_path, listeners):
+    heard = fake(tmp_path, "time.sleep(3600)", idle=0.2)
+    listeners.append(heard)
+    failed = []
+
+    def song():
+        try:
+            heard.transcribe(SECOND, timeout=30)
+        except ListenError as e:
+            failed.append(e)
+
+    singing = threading.Thread(target=song)
+    started = time.monotonic()
+    singing.start()
+    assert soon(lambda: pids(tmp_path))
+    heard.close()
+    singing.join(10)
+    assert failed and time.monotonic() - started < 10
+    assert gone(pids(tmp_path)[0]) and heard._timer is None
+
+
 def test_close_with_no_worker_is_fine(tmp_path):
     fake(tmp_path, 'answer({"text": "hi"})').close()
 
@@ -221,6 +287,58 @@ def test_the_worker_is_closed_once_idle(tmp_path, listeners):
 
     heard.transcribe(SECOND, timeout=10)
     assert soon(lambda: gone(pids(tmp_path)[0]))
+
+
+def test_onnxruntimes_gpu_search_is_only_logged_as_info(tmp_path, listeners, caplog):
+    # pve2 has no GPU, so onnxruntime says so each time the worker starts. That's expected.
+    gpu = ('[W:onnxruntime:Default, device_discovery.cc:285 GetGpuDevices] Failed to detect '
+           'devices under "/sys/class/drm/card1": device_discovery.cc:94 ReadFileContents '
+           'Failed to open file: "/sys/class/drm/card1/device/vendor"')
+    heard = fake(tmp_path, f"""\
+        sys.stderr.write({gpu!r} + "\\nout of memory\\n")
+        sys.stderr.flush()
+        answer({{"text": "hi"}})
+    """)
+    listeners.append(heard)
+
+    with caplog.at_level(logging.INFO, logger="voice_assistant.listener"):
+        heard.transcribe(SECOND, timeout=10)
+        assert soon(lambda: sum("out of memory" in r.getMessage() for r in caplog.records) == 1)
+    lines = [(r.levelno, r.getMessage()) for r in caplog.records if r.name == "voice_assistant.listener"]
+    assert [level for level, _ in lines] == [logging.INFO, logging.WARNING]
+    assert "Failed to detect devices" in lines[0][1] and "out of memory" in lines[1][1]
+
+
+def test_the_idle_timer_waits_while_a_song_is_being_judged(tmp_path, listeners):
+    # Whoever judges a song holds the lock from fetching it to storing its verdict, and
+    # some songs never reach transcribe. The worker is closed once they let go.
+    heard = fake(tmp_path, 'answer({"text": "hi"})', idle=0.2)
+    listeners.append(heard)
+    heard.transcribe(SECOND, timeout=10)
+    holding, release = threading.Event(), threading.Event()
+
+    def judge():
+        with heard.lock:
+            holding.set()
+            release.wait(10)
+
+    judging = threading.Thread(target=judge)
+    judging.start()
+    holding.wait(10)
+    time.sleep(0.6)
+    assert not gone(pids(tmp_path)[0])
+    release.set()
+    judging.join(10)
+    assert soon(lambda: gone(pids(tmp_path)[0]))
+
+
+def test_a_song_longer_than_the_idle_time_keeps_its_worker(tmp_path, listeners):
+    heard = fake(tmp_path, 'time.sleep(0.6); answer({"text": "hi"})', idle=0.2)
+    listeners.append(heard)
+
+    assert heard.transcribe(SECOND, timeout=10) == "hi"
+    assert heard.transcribe(SECOND, timeout=10) == "hi"
+    assert len(pids(tmp_path)) == 1
 
 
 def test_the_workers_complaints_go_to_the_log_as_warnings(tmp_path, listeners, caplog):
@@ -264,12 +382,29 @@ def test_decode_asks_ffmpeg_for_mono_16khz_float(monkeypatch):
         return subprocess.CompletedProcess(command, 0, struct.pack("<3f", 0.5, -0.5, 0.25), b"")
 
     monkeypatch.setattr(listener.subprocess, "run", run)
+    monkeypatch.setattr(listener.shutil, "which", lambda name: "/usr/bin/nice" if name == "nice" else None)
 
     samples = decode(b"an mp3")
-    assert asked["command"] == ["ffmpeg", "-v", "error", "-i", "pipe:0", "-ac", "1", "-ar", "16000",
-                                "-f", "f32le", "pipe:1"]
+    # At the lowest priority too: a first library check decodes hundreds of songs.
+    assert asked["command"] == ["/usr/bin/nice", "-n", "19", "ffmpeg", "-v", "error", "-i", "pipe:0",
+                                "-ac", "1", "-ar", "16000", "-f", "f32le", "pipe:1"]
     assert asked["input"] == b"an mp3"
     assert samples.dtype == np.float32 and samples.tolist() == [0.5, -0.5, 0.25]
+
+
+def test_decode_without_nice_runs_ffmpeg_anyway(monkeypatch):
+    asked = []
+
+    def run(command, **kwargs):
+        asked.append(command)
+        return subprocess.CompletedProcess(command, 0, struct.pack("<f", 0.5), b"")
+
+    monkeypatch.setattr(listener.subprocess, "run", run)
+    monkeypatch.setattr(listener.shutil, "which", lambda name: None)
+
+    assert decode(b"an mp3").tolist() == [0.5]
+    assert asked == [["ffmpeg", "-v", "error", "-i", "pipe:0", "-ac", "1", "-ar", "16000",
+                      "-f", "f32le", "pipe:1"]]
 
 
 def test_decode_that_ffmpeg_fails_raises(monkeypatch):

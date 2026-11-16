@@ -16,7 +16,9 @@ and a song judged clean is moved out of the library.
 
 import json
 import logging
+import os
 import queue
+import re
 import shutil
 import struct
 import subprocess
@@ -35,6 +37,15 @@ logger = logging.getLogger(__name__)
 # The song, whatever it's in, down-mixed to the mono 16kHz float32 Nemotron hears.
 DECODE = ["ffmpeg", "-v", "error", "-i", "pipe:0", "-ac", "1", "-ar", str(RATE),
           "-f", "f32le", "pipe:1"]
+
+# What of Nova's environment the worker is given: enough to run Python, and none of the
+# keys and passwords Nova reads into its own (NAVIDROME_PASSWORD, say).
+WORKER_ENVIRONMENT = ("PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH")
+
+# onnxruntime looking for a GPU as the worker's model loads - pve2 has none, so it's said
+# every time: '[W:onnxruntime:Default, device_discovery.cc:285 GetGpuDevices] Failed to
+# detect devices under "/sys/class/drm/card1": ...'. Logged as info, not as a warning.
+EXPECTED = re.compile(r"GetGpuDevices|Failed to detect devices under")
 
 # Seconds ffmpeg has to decode a song. It takes a second or two for a long one; this is
 # only so a stuck ffmpeg can't hold up every song after it.
@@ -59,7 +70,8 @@ def decode(audio: bytes) -> np.ndarray:
         ListenError: ffmpeg couldn't decode it.
     """
     try:
-        done = subprocess.run(DECODE, input=audio, capture_output=True, timeout=DECODE_TIMEOUT)
+        done = subprocess.run(_niced(DECODE), input=audio, capture_output=True,
+                              timeout=DECODE_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired) as e:
         logger.warning(f"Couldn't decode a song to listen to: {type(e).__name__}")
         raise ListenError("couldn't decode the song") from e
@@ -71,21 +83,25 @@ def decode(audio: bytes) -> np.ndarray:
     return np.frombuffer(data[:len(data) - len(data) % 4], dtype="<f4")
 
 
+def _niced(command: List[str]) -> List[str]:
+    """A command run under "nice -n 19", the lowest priority, where there's a nice to run it."""
+    nice = shutil.which("nice")
+    if nice is None:
+        logger.warning(f"There's no nice to run {command[0]} with, "
+                       f"so it runs at the usual priority")
+        return command
+    return [nice, "-n", "19"] + command
+
+
 def worker_command(folder: str, threads: int) -> List[str]:
     """
-    How the worker is run: by the brain's own Python, under "nice -n 19" where there is one.
+    How the worker is run: by the brain's own Python, at the lowest priority.
 
     Args:
         folder: Where the model is.
         threads: How many processor threads it works with.
     """
-    command = [sys.executable, "-m", "voice_assistant.listen_worker", folder, str(threads)]
-    nice = shutil.which("nice")
-    if nice is None:
-        logger.warning("There's no nice to start the listening worker with, so it only "
-                       "drops to the lowest priority once it's started")
-        return command
-    return [nice, "-n", "19"] + command
+    return _niced([sys.executable, "-m", "voice_assistant.listen_worker", folder, str(threads)])
 
 
 def _log_complaints(stderr):
@@ -94,7 +110,8 @@ def _log_complaints(stderr):
         for line in iter(stderr.readline, b""):
             line = line.decode(errors="replace").rstrip()
             if line:
-                logger.warning(f"Listening worker: {line}")
+                level = logging.INFO if EXPECTED.search(line) else logging.WARNING
+                logger.log(level, f"Listening worker: {line}")
 
 
 class Listener:
@@ -177,7 +194,9 @@ class Listener:
                 # Its stderr is only ever logged: stdout is for its answers alone.
                 self._process = subprocess.Popen(
                     command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE, cwd=PROJECT_DIRECTORY)
+                    stderr=subprocess.PIPE, cwd=PROJECT_DIRECTORY,
+                    env={name: os.environ[name] for name in WORKER_ENVIRONMENT
+                         if name in os.environ})
             except OSError as e:
                 logger.warning(f"Couldn't start the listening worker: {type(e).__name__}")
                 raise ListenError("couldn't start listening") from e
@@ -201,8 +220,9 @@ class Listener:
                 process.stdin.write(data)
                 process.stdin.flush()
                 answers.put(process.stdout.readline())
-            # A worker that's died, or been killed and its pipes closed.
-            except (OSError, ValueError) as e:
+            # A worker that's died, or been killed and its pipes closed - or anything else,
+            # so the song fails now rather than once its whole timeout is up.
+            except Exception as e:
                 answers.put(e)
 
         threading.Thread(target=talk, daemon=True, name="listener-song").start()
@@ -212,6 +232,8 @@ class Listener:
             logger.warning(f"Listening to a song took over {timeout:.0f}s, "
                            f"so its worker was stopped")
             raise ListenError("listening took too long")
+        if isinstance(line, Exception) and not isinstance(line, (OSError, ValueError)):
+            logger.warning(f"Couldn't send a song to the listening worker: {type(line).__name__}")
         if isinstance(line, Exception) or not line:
             raise ListenError("the listening stopped part way through")
         try:
@@ -245,7 +267,9 @@ class Listener:
                 return
             timer = threading.Timer(self.idle, lambda: self._idle_close(timer))
             timer.daemon = True
-            self._timer = timer
+            earlier, self._timer = self._timer, timer
+        if earlier is not None:
+            earlier.cancel()
         timer.start()
 
     def _stop_timer(self):
@@ -255,8 +279,13 @@ class Listener:
             timer.cancel()
 
     def _idle_close(self, timer: threading.Timer):
-        # A song being heard, or one since, has the worker: it isn't idle.
+        with self._guard:
+            if self._timer is not timer:
+                return
+        # A song is being judged - perhaps one that never reaches transcribe, and so
+        # never sets the timer again itself - so the worker is looked at again later.
         if not self.lock.acquire(blocking=False):
+            self._start_timer()
             return
         try:
             with self._guard:
