@@ -24,9 +24,9 @@ Rounds one to five stand, with this addition.
 
 ## Review Focus
 
-1. "What happened in the match?" at 00:30 after a followed team's match that kicked off at 19:45 and ended at 21:40: that match; at 09:00 the next day: that match; at 08:00 two days on: "Name a team for its match." (twelve hours past); a match in play always first.
+1. "What happened in the match?" at 00:30 after a followed team's match that kicked off at 19:45 and ended at 21:40: that match; at 09:00 the next day: that match; at 08:00 two days on: "Name a team for its match." (past the twelve hours, which the build counts from the match's end, taken as three hours after kick-off: 15 hours from kick-off, to 10:45 after one at 19:45); a match in play always first.
 2. The watcher: a lower score noted at 89' and the full-time reading showing it: "Goal ruled out." once, then "Full time. ..." with the lower score; the full-time reading showing the higher score again: no ruled-out line; a waiting note with no full-time reading time known: nothing said of it.
-3. Not found with `bbc_since` "2021-08": "No match between South Shields and Spennymoor Town is listed in the last 6 seasons, nor in BBC Sport's results since August 2021."; a "bbc:" other team: "No match between South Shields and Spennymoor Town is among BBC Sport's results for South Shields since August 2021."; `bbc_since` that isn't YYYY-MM: refused.
+3. Not found with `bbc_since` "2021-08": "No match between South Shields and Spennymoor Town is listed in the last 6 seasons, nor in BBC Sport's results since August 2021."; a "bbc:" other team: "No match between South Shields and Spennymoor Town is among BBC Sport's results for South Shields since August 2021."; a side only BBC Sport could know, never met, which Home Assistant answers as `unknown` with `bbc_since`: "No match between South Shields and Nowhere Rovers is among BBC Sport's results for South Shields since August 2021, and ESPN found nothing called Nowhere Rovers." (as before, ESPN's line, without `bbc_since`); `bbc_since` that isn't YYYY-MM: refused, found or not.
 4. A match found with `bbc_since`: said as any match is (nothing of `bbc_since`).
 5. Nothing said with a dash between digits ("August 2021", never "2021-08").
 

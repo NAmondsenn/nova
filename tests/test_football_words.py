@@ -1392,6 +1392,80 @@ def test_nothing_of_bbc_sport_is_said_with_digits_joined_by_a_dash(london):
         assert "2021-08" not in said and not re.search(r"\d\s*[-\u2010-\u2015\u2212]\s*\d", said)
 
 
+def _never_met_answer(since="2021-08", team=SHIELDS_TEAM, unknown=("Nowhere Rovers",), **fields):
+    """
+    What Home Assistant answers for South Shields' match against a side only BBC Sport could know and which they never
+    met: the team, the side as it was asked in "unknown", and how far back BBC Sport was read - no seasons, no "against".
+    """
+    return {"team": team, "unknown": list(unknown), "stale": False, **({"bbc_since": since} if since is not None else {}), **fields}
+
+
+def test_a_rival_nobody_knows_is_said_with_bbc_sports_results_it_was_looked_for_in(london):
+    home = FakeHome(answer=_never_met_answer())
+    assert _said(home, team="South Shields", about="match", against="Nowhere Rovers") == {
+        "success": True, "message": "No match between South Shields and Nowhere Rovers is among BBC Sport's results for "
+                                    "South Shields since August 2021, and ESPN found nothing called Nowhere Rovers."}
+    assert home.asked == [("match", "South Shields", "", 1, "Nowhere Rovers")]
+
+
+@pytest.mark.parametrize("since, month", [("2022-01", "January 2022"), ("2021-12", "December 2021")])
+def test_a_rival_nobody_knows_is_said_with_the_month_in_words(london, since, month):
+    said = _said(FakeHome(answer=_never_met_answer(since)), team="South Shields", about="match", against="Nowhere Rovers")["message"]
+    assert said == (f"No match between South Shields and Nowhere Rovers is among BBC Sport's results for South Shields "
+                    f"since {month}, and ESPN found nothing called Nowhere Rovers.")
+    assert not re.search(r"\d\s*[-\u2010-\u2015\u2212]\s*\d", said)
+
+
+def test_a_rival_nobody_knows_is_said_as_it_was_asked_and_the_team_as_its_lines_say_it(london):
+    team = {**SHIELDS_TEAM, "full_name": "South Shields FC"}
+    home = FakeHome(answer=_never_met_answer(team=team))
+    # As it was sent on, cut down to what a command line may hold, which is the name Home Assistant lists as unknown.
+    said = _said(home, team="South Shields", about="match", against="  nowhere   Rovers! ")["message"]
+    assert said == ("No match between South Shields FC and nowhere Rovers is among BBC Sport's results for South Shields FC "
+                    "since August 2021, and ESPN found nothing called Nowhere Rovers.")
+    assert home.asked == [("match", "South Shields", "", 1, "nowhere Rovers")]
+
+
+def test_a_rival_nobody_knows_is_said_as_before_where_bbc_sport_wasnt_read(london):
+    # No bbc_since: Home Assistant read nothing of BBC Sport's, so none of its results are named.
+    for answer in (_never_met_answer(since=None), _never_met_answer(since=None, team={"id": "448", "name": "England"})):
+        assert _said(FakeHome(answer=answer), team="South Shields", about="match", against="Nowhere Rovers") == {
+            "success": True, "message": "ESPN, where Home Assistant's football comes from, found nothing called Nowhere Rovers."}
+
+
+@pytest.mark.parametrize("answer", [
+    # Nothing which says the team, or another name unknown than the one asked: ESPN's line, as it always was.
+    {"unknown": ["Nowhere Rovers"], "stale": False, "bbc_since": "2021-08"},
+    {"team": SHIELDS_TEAM, "unknown": ["Somewhere Town"], "stale": False, "bbc_since": "2021-08"},
+], ids=["no team", "another name"])
+def test_a_name_nobody_knows_which_isnt_the_rival_is_said_as_espn_does(london, answer):
+    said = _said(FakeHome(answer=answer), team="South Shields", about="match", against="Nowhere Rovers")["message"]
+    assert said == f"ESPN, where Home Assistant's football comes from, found nothing called {answer['unknown'][0]}."
+
+
+def test_a_rival_nobody_knows_is_said_with_bbc_sport_only_for_a_match_asked_against_it(london):
+    # Without a rival asked for the name is the team's own, and "unknown" is what ESPN doesn't know, as it always was.
+    answer = {"team": SHIELDS_TEAM, "unknown": ["Nowhere Rovers"], "stale": False, "bbc_since": "2021-08"}
+    assert _said(FakeHome(answer=answer), team="Nowhere Rovers", about="match") == {
+        "success": True, "message": "ESPN, where Home Assistant's football comes from, found nothing called Nowhere Rovers."}
+    assert _said(FakeHome(answer=answer), team="Nowhere Rovers", about="matches")["message"].startswith("ESPN, where")
+
+
+@pytest.mark.parametrize("since", ["2021-8", "2021-13", "August 2021", "", 202108, True, ["2021-08"]])
+def test_a_bbc_since_of_the_wrong_shape_is_refused_where_nothing_was_found_too(london, caplog, since):
+    for answer in (_never_met_answer(since), {"unknown": ["Nowhere Rovers"], "stale": False, "bbc_since": since}):
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="voice_assistant.football_words"):
+            assert _said(FakeHome(answer=answer), team="South Shields", about="match", against="Nowhere Rovers") == NOT_GOT
+        assert [record.levelno for record in caplog.records] == [logging.WARNING]
+
+
+@pytest.mark.parametrize("unknown", ["Nowhere Rovers", [4], ["Nowhere Rovers", ""]])
+def test_an_unknown_which_isnt_a_list_of_names_is_refused_beside_bbc_since_too(london, unknown):
+    answer = {**_never_met_answer(), "unknown": unknown}
+    assert _said(FakeHome(answer=answer), team="South Shields", about="match", against="Nowhere Rovers") == NOT_GOT
+
+
 def test_bbc_sport_read_is_said_end_to_end_and_a_bad_month_is_cant_get(london, caplog):
     home = FakeHome(answer=_since_answer(6))
     assert _said(home, team="South Shields", about="match", against="Spennymoor") == {
@@ -2439,7 +2513,7 @@ def test_a_match_with_no_team_in_play_after_midnight_comes_before_last_nights_ma
         assert home.asked == [("match", "Stevenage", "", 1)]
 
 
-def test_a_match_with_no_team_asks_for_the_latest_to_kick_off_of_those_played_in_the_twelve_hours(london):
+def test_a_match_with_no_team_asks_for_the_latest_to_kick_off_of_those_played_in_the_fifteen_hours(london):
     now = datetime(2026, 11, 13, 0, 30).astimezone()
     later = _team("395", "Stevenage", last=[_over("2026-11-12T20:45:00+00:00", **{"home": "Stevenage", "id": "30"})])
     for box in ([_played_last_night("last"), later], [later, _played_last_night("now")]):
@@ -2475,7 +2549,7 @@ def test_a_match_with_no_team_just_after_midnight_leaves_out_a_match_not_played(
     assert home.asked == []
 
 
-def test_a_match_with_no_team_and_a_day_is_the_day_not_the_twelve_hours(london):
+def test_a_match_with_no_team_and_a_day_is_the_day_not_the_fifteen_hours(london):
     # Today named at half past midnight is a day which last night's match was not on; yesterday named finds it.
     now = datetime(2026, 11, 13, 0, 30).astimezone()
     home = FakeHome([_played_last_night("last")])
@@ -2499,6 +2573,27 @@ def test_a_match_with_no_team_cant_say_nobody_played_while_a_team_which_may_have
     with caplog.at_level(logging.WARNING, logger="voice_assistant.football"):
         assert _said(home, now=datetime(2026, 11, 13, 0, 30).astimezone(), about="match") == NOT_GOT
     assert home.asked == []
+
+
+@pytest.mark.parametrize("at", [datetime(2026, 11, 13, 0, 30), datetime(2026, 11, 13, 9, 0)], ids=["00:30", "09:00"])
+def test_a_match_with_no_team_is_last_nights_though_the_teams_now_is_a_match_still_to_come_today(london, at):
+    # The sensor's now is today's match, not yet played, and last night's is among its last results.
+    team = _team("364", "Liverpool", now=_found_match(kickoff="2026-11-13T20:00:00+00:00"), last=[_over(KICKOFF_LAST_NIGHT)])
+    home = FakeHome([team], answer=_match_answer())
+    assert _said(home, now=at.astimezone(), about="match")["success"]
+    assert home.asked == [("match", "Liverpool", "", 1)]
+
+
+def test_a_match_with_no_team_is_the_fresh_teams_last_night_while_another_followed_team_is_stale(london, caplog):
+    # What the stale team has may be older or newer, but a fresh team's match which was just played is the answer.
+    stale = _team("395", "Stevenage", stale=True, last=[_over("2026-11-12T20:45:00+00:00", id="30", home="Stevenage")])
+    now = datetime(2026, 11, 13, 0, 30).astimezone()
+    for box in ([stale, _played_last_night("last")], [_played_last_night("now"), stale]):
+        home = FakeHome(box, answer=_match_answer())
+        with caplog.at_level(logging.WARNING, logger="voice_assistant.football"):
+            assert _said(home, now=now, about="match")["success"]
+        assert home.asked == [("match", "Liverpool", "", 1)]
+        assert caplog.records == []
 
 
 @pytest.mark.parametrize("state, phase", [("in", "first_half"), ("post", "full_time")], ids=["in play", "over today"])

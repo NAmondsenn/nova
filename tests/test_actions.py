@@ -1090,6 +1090,7 @@ def test_get_football_offers_what_happened_in_a_match():
     # match about to start.
     assert ("'match' is asked with the team named too; with neither a team nor a competition it is the followed team "
             "whose match is in play, else the one whose match is over, on the day (today when no date is given), "
+            "or with no date the one just played (last night's, until the next morning), "
             "with the day in date if one was asked about") in properties["about"]["description"]
     assert "asked the same way" not in properties["about"]["description"]
     assert "the day of a team's match" in properties["date"]["description"]

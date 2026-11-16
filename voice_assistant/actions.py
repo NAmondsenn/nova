@@ -1211,6 +1211,7 @@ class ActionExecutor:
                               "playing now or today. Reply with the side asked for, or both. 'match' is asked with the team "
                               "named too; with neither a team nor a competition it is the followed team whose match is "
                               "in play, else the one whose match is over, on the day (today when no date is given), "
+                              "or with no date the one just played (last night's, until the next morning), "
                               "with the day in date if one was asked about."},
         date={"type": "string", "description": "The first day of a competition's matches, or the day of a team's match, as "
                                                 "YYYY-MM-DD. Leave out for today; a team's match is then the one in play, else its last. "

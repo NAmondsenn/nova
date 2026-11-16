@@ -343,8 +343,8 @@ def _goals(before: Dict, match: Match, reported: Optional[float], over: bool = F
     never an old copy of the match in play, and none follows it to confirm anything, so one written
     after the first which showed the same lower score says it at once, though it is under two minutes
     on (a goal ruled out at 89 minutes, then full time). A lower score first seen on the reading
-    which ends the match, or within about two minutes of it, is never said, as the comparison stops
-    at full time (see events). If a reading shows anything else the note is dropped and that reading
+    which ends the match is never said, as nothing was waiting and the comparison stops at full time
+    (see events). If a reading shows anything else the note is dropped and that reading
     is compared as usual. The same reading seen again confirms nothing, as Nova looks
     more often than Home Assistant writes the sensor, so the second look is usually the first
     one's reading; and nor does the next reading, a minute on, while the match goes on, as two

@@ -1032,11 +1032,11 @@ def said_match_report(answer: Dict, now: datetime, on_a_day: bool = False, again
         for "is listed in the last 1 seasons". Where Home Assistant also read BBC Sport's month pages for a followed
         team's league matches ("bbc_since", the month it read back to), that is named where it was looked: "No match
         between South Shields and Spennymoor Town is listed in the last 6 seasons, nor in BBC Sport's results since
-        August 2021." (for a national side's one list, "is among ESPN's results for South Shields, nor in BBC Sport's
-        results since August 2021."), and for a side only BBC Sport knows, whose id begins "bbc:", "... is among BBC
-        Sport's results for South Shields since August 2021." Nothing of it is said of a match found or of a day.
-        Where the two teams' ids are one, the team was asked against itself
-        under another name: only that they are the same team ("Liverpool and Liverpool FC are the same team."),
+        August 2021." (for a side whose one list has no seasons in it, "is among ESPN's results for South Shields, nor in
+        BBC Sport's results since August 2021."), and for a side only BBC Sport knows, whose id begins "bbc:", "... is
+        among BBC Sport's results for South Shields since August 2021." Nothing of it is said of a match found or of a
+        day. (A side only BBC Sport could know which Home Assistant never met is not in this answer at all: it is "unknown",
+        and _said_answer says it.) Where the two teams' ids are one, the team was asked against itself under another name: only that they are the same team ("Liverpool and Liverpool FC are the same team."),
         with nothing of a match, as a team has none against itself.
 
     Raises:
@@ -1172,19 +1172,32 @@ def _said_answer(what: str, answer: Dict, now: datetime, on_a_day: bool = False,
 
     Returns:
         What to say, which for an answer which found nothing by the name is that, without the
-        said_ functions being used.
+        said_ functions being used. For a match asked against another team which ESPN found nothing called, where
+        the team is in the answer and Home Assistant read BBC Sport's results for it ("bbc_since"), that is the
+        results named: "No match between South Shields and Nowhere Rovers is among BBC Sport's results for South
+        Shields since August 2021, and ESPN found nothing called Nowhere Rovers." - the team as its own lines say it,
+        and the other team as it was asked for, which is how Home Assistant lists it as unknown. Home Assistant gives
+        no seasons for such a side, as only BBC Sport could know it.
 
     Raises:
         KeyError: If a key is missing from the answer, a match or a table row - or, for a match asked
             against another team, its seasons or the other team found.
         TypeError: If a value isn't of the type it should be.
-        ValueError: If a match or a day is of the wrong shape, seasons aren't from 1 to 6, or the other
-            team found has no name.
+        ValueError: If a match or a day is of the wrong shape, seasons aren't from 1 to 6, the other
+            team found has no name, or a match's bbc_since isn't a year and month.
     """
+    # Read for any answer to a match, so that one of the wrong shape is refused whether or not anything was found.
+    since = _bbc_read_since(answer) if what == "match" else None
     unknown = answer.get("unknown")
     if unknown:
         if not isinstance(unknown, list) or not all(isinstance(name, str) and name for name in unknown):
             raise TypeError(f"unknown should be a list of names, not {unknown!r}")
+        team = _field(answer, "team", dict, None) if what == "match" and against and since else None
+        if team is not None and any(_name_key(name) == _name_key(against) for name in unknown):
+            # ESPN doesn't know the other team, but BBC Sport's results for the team were read, which may have it.
+            name = _field(team, "full_name", str, None) or _field(team, "name", str)
+            return (f"No match between {name} and {against} is among BBC Sport's results for {name} since {since}, "
+                    f"and ESPN found nothing called {_and_list(unknown)}.")
         return f"ESPN, where Home Assistant's football comes from, found nothing called {_and_list(unknown)}."
     if what == "table":
         return said_table(answer)
