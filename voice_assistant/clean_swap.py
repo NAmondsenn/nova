@@ -1,30 +1,41 @@
 """
 Clean Swap Module
-Hears a song against its lyrics to judge it clean or explicit (Ears), for a download and for
-the library check - decision 0019, sections 1 to 3.
+Hears a song against its lyrics to judge it clean or explicit (Ears), and swaps a clean copy
+for an explicit one (Swapper), for a download and for the library check - decision 0019,
+sections 1 to 4.
 
 Ears fetches what it needs from Navidrome - the file's size and time, the lyrics, the sound -
 and gives the sound to the listening worker, then keeps the verdict with the file's size and
 time, so a song is only heard again once its file changes. Every failure to hear a song is
 "not judged" with a plain reason, never a guess: a song judged clean gets moved out of the
 library.
+
+The Swapper sets the clean copy aside in the music folder's .nova-held, has Navidrome and
+SoulSync forget it, asks SoulSync for it again and hears what comes, a set number of times.
+The user must never end up without a copy of a song he had: whatever fails, the copy last set
+aside goes back where it was, and nothing is ever deleted. Each step is saved before it's
+taken, so a restart carries a swap on, or puts the song back.
 """
 
 import logging
 import os
 import threading
-from dataclasses import replace
-from typing import Callable, Dict, List, Optional, Tuple
+import time
+import uuid
+from dataclasses import asdict, replace
+from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 
 import requests
 
 from voice_assistant import music
 from voice_assistant.clean_ear import Thresholds, Verdict, count_swears, judge
 from voice_assistant.clean_store import CleanStore
+from voice_assistant.downloads import NAVIDROME_ERRORS, POLL_EVERY, SCAN_AFTER, Wanted, song_limit, swap_said
 from voice_assistant.listener import ListenError, Listener, decode
-from voice_assistant.music_folder import MusicFolderError
-from voice_assistant.navidrome import NavidromeError, NavidromeLibrary
+from voice_assistant.music_folder import HELD, HELD_GONE, NEW_COPY, PUT_BACK, Held, MusicFolder, MusicFolderError
+from voice_assistant.navidrome import BRACKETED, NavidromeError, NavidromeLibrary
 from voice_assistant.nemotron import RATE
+from voice_assistant.soulsync import NOT_FORGOTTEN, SoulSync, SoulSyncAdmin, SoulSyncError
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +53,38 @@ TIMEOUT_MORE = 60
 # explicit (or with nothing to bleep) is the download, whatever the others are; a copy only
 # judged clean when no other copy could be anything else.
 BEST_FIRST = ("explicit", "too_few", "unsure", "not_judged", "clean")
+
+# Seconds Navidrome is given, once asked to scan, to stop listing a copy set aside. Its
+# watcher usually sees the move within seconds.
+DROP_WAIT = 120
+
+# How many more times SoulSync is asked for a song which came down clean, when the settings
+# don't say - as config.yaml has it.
+SWAP_TRIES = 2
+
+# Why a swap couldn't be made, as the page's list and the download's sentence give it:
+# "... and I couldn't swap it: Navidrome still lists it."
+NO_ADMIN = "SoulSync admin profile isn't set up"
+NO_SOULSYNC = "SoulSync isn't set up"
+NO_NAVIDROME = "Navidrome isn't set up"
+STILL_LISTED = "Navidrome still lists it"
+NOT_IN_TIME = "SoulSync didn't bring another copy in time"
+NOT_SAVED = "Nova couldn't save the swap's progress"
+WENT_WRONG = "something went wrong part way, so Nova carries it on when it next starts"
+# A restart came between moving the copy and saving where it went: never guessed at.
+WHERE_NOT_SAVED = f"set aside, but where wasn't saved - look in {HELD}"
+
+# The steps of a swap, saved as each starts, so a restart carries it on from there: moving the
+# copy into .nova-held, waiting for Navidrome to stop listing it, having SoulSync forget it,
+# asking SoulSync for it again, and watching for what comes.
+SETTING_ASIDE = "setting_aside"
+DROPPING = "dropping"
+FORGETTING = "forgetting"
+FETCHING = "fetching"
+WATCHING = "watching"
+
+# Which list each way a swap ends goes on, if any: an unsure copy is listed as it's heard.
+LISTS = {"swapped": "swapped", "only_clean": "only_clean", "couldnt": "couldnt", "not_judged": "couldnt"}
 
 
 def song_name(song: Dict) -> str:
@@ -207,3 +250,458 @@ class Ears:
                                song_id=song["id"])
         except (OSError, TypeError, ValueError) as e:
             logger.error(f"Couldn't keep what was heard of {name}: {type(e).__name__}")
+
+
+class Outcome(str):
+    """
+    How a swap ended - "swapped", "only_clean", "unsure", "not_judged" or "couldnt" - or
+    "stopped", when Nova stopped part way and the swap is carried on at its next start. It's
+    the word itself, so it compares as one, with why in its reason: Outcome("couldnt",
+    "Navidrome still lists it") == "couldnt".
+    """
+
+    reason: str
+
+    def __new__(cls, kind: str, reason: str = "") -> "Outcome":
+        outcome = super().__new__(cls, kind)
+        outcome.reason = reason
+        return outcome
+
+
+STOPPED = Outcome("stopped")
+
+# What a swap needs: the music folder, SoulSync with its key, SoulSync's admin profile and
+# Navidrome.
+Parts = Tuple[MusicFolder, SoulSync, SoulSyncAdmin, NavidromeLibrary]
+
+
+def _album(song: Dict) -> Optional[str]:
+    """
+    A song's album as SoulSync is asked to prefer it, without its version notes: SoulSync's
+    tagging adds "(clean)" to an album which isn't, and a candidate on "ASTROWORLD" would
+    never match "ASTROWORLD (clean)".
+    """
+    album = " ".join(BRACKETED.sub(" ", song.get("album") or "").split())
+    return album or None
+
+
+def _copy(song: Dict, rel: str) -> Dict:
+    """The copy of a song being swapped, as it's saved: its Navidrome id, names and file."""
+    return {"id": song["id"], "title": song.get("title") or "", "artist": song.get("artist") or "", "rel": rel}
+
+
+def _held(saved: Dict) -> Held:
+    """A Held as it was saved, its sidecars made pairs again - a JSON round trip makes them lists."""
+    return Held(saved["original"], saved["held"], [tuple(pair) for pair in saved.get("sidecars") or []])
+
+
+class Swapper:
+    """Swaps a song heard clean for an explicit copy, one step saved at a time."""
+
+    def __init__(self, config, ears: Ears, folder_factory: Callable[[], Optional[MusicFolder]],
+                 soulsync_factory: Callable[[], Optional[SoulSync]],
+                 admin_factory: Callable[[], Optional[SoulSyncAdmin]],
+                 library_factory: Callable[[], Optional[NavidromeLibrary]], store: CleanStore,
+                 say: Callable[[Optional[str], str], None], now: Callable[[], float] = time.time,
+                 wait: Optional[Callable[[float], bool]] = None):
+        """
+        Args:
+            config: Configs loaded from config.yaml - clean_check.swap_tries, and the song time
+                limit under music, read as each swap needs them.
+            ears: Hears each copy SoulSync brings.
+            folder_factory: Gives the MusicFolder from the settings as they are now.
+            soulsync_factory: Gives the SoulSync to ask with the key, or None if it isn't set up.
+            admin_factory: Gives Nova's SoulSyncAdmin, or None if it isn't set up.
+            library_factory: Gives the NavidromeLibrary, or None if it isn't set up.
+            store: Where each swap's progress and outcome are kept.
+            say: Says how a download's swap carried on after a restart ended, given the
+                satellite which asked - as Downloads says a download's outcome.
+            now: The wall clock, in seconds - a swap's time limit outlives a restart.
+            wait: Waits the seconds given between looks, and says whether Nova is stopping -
+                by default the wait of the event stop sets, which it cuts short.
+        """
+        self.config = config
+        self.ears = ears
+        self._folder = folder_factory
+        self._soulsync = soulsync_factory
+        self._admin = admin_factory
+        self._library = library_factory
+        self.store = store
+        self._say = say
+        self._now = now
+        self._stopping = threading.Event()
+        self._wait = wait or self._stopping.wait
+
+    def stop(self):
+        """Ends every swap at its next step, as Nova stops. Each is saved, to be carried on at the next start."""
+        self._stopping.set()
+
+    def swap(self, song: Dict, wanted: Wanted, satellite: Optional[str], quiet: bool) -> Outcome:
+        """
+        Swaps a copy of a song heard clean: sets it aside, has Navidrome and SoulSync forget it,
+        asks SoulSync for it again and hears what comes - up to clean_check.swap_tries more
+        times while each comes down clean.
+
+        Args:
+            song: The clean copy, as Navidrome lists it, with its 'id', 'title', 'artist' and 'album'.
+            wanted: The song as SoulSync is to be asked for it - for a download, the title asked
+                for and SoulSync's artist - and as it's named if a restart says how it ended.
+            satellite: The satellite which asked for the download, or None.
+            quiet: True for the library check, whose swaps say nothing, even after a restart.
+
+        Returns:
+            "swapped" for an explicit copy (or one with nothing to bleep); "only_clean" when every
+            try came down clean, the last kept; "unsure" or "not_judged" for a copy kept as it
+            couldn't be judged either way; "couldnt", with its reason, when it was put back or
+            never moved; or "stopped", as Nova stops. Each but "stopped" is on the page's lists.
+        """
+        name = song_name(song)
+        parts = self._parts()
+        if isinstance(parts, str):
+            return self._list(name, song["id"], "couldnt", parts)
+        try:
+            rel = parts[3].song_file(song["id"])["path"]
+        except NavidromeError as e:
+            return self._list(name, song["id"], "couldnt", str(e))
+        swap = {"key": uuid.uuid4().hex, "stage": SETTING_ASIDE, "song_id": song["id"], "name": name,
+                "named": wanted.name, "satellite": satellite, "quiet": quiet, "title": wanted.title,
+                "artist": wanted.artist, "album": _album(song), "copy": _copy(song, rel), "held": [], "tries": 0}
+        # Saved before anything moves, so a restart part way never loses where a song went -
+        # and if it can't be saved, nothing moves.
+        if not self._save(swap):
+            return self._list(name, song["id"], "couldnt", NOT_SAVED)
+        logger.info(f"Swapping {name}, which was heard clean")
+        return self._carry_on(swap, parts)
+
+    def resume(self):
+        """
+        Carries on each swap Nova was part way through when it stopped: one watching for a copy
+        goes on watching while its time limit lasts, and is put back once it's past; one moved
+        but not yet fetched for goes on. Without the music folder they're all left for the next
+        start, as nothing can be put back.
+        """
+        saved = self.store.swaps()
+        if not saved:
+            return
+        folder = self._folder()
+        problem = folder.usable() if folder is not None else "no music folder is set"
+        if problem:
+            logger.warning(f"{len(saved)} swap{'' if len(saved) == 1 else 's'} left for Nova's next start, "
+                           f"as {problem}")
+            return
+        logger.info(f"Carrying on {len(saved)} swap{'' if len(saved) == 1 else 's'} Nova was part way through")
+        for swap in saved:
+            if self._stopping.is_set():
+                return
+            try:
+                outcome = self._resume(swap, folder)
+            except Exception:
+                # One swap's surprise mustn't keep the others from being carried on.
+                logger.exception(f"Carrying on the swap of {swap.get('name')} failed")
+                continue
+            self._tell(swap, outcome)
+
+    def _resume(self, swap: Dict, folder: MusicFolder) -> Optional[Outcome]:
+        """One saved swap, carried on or put back - None if it ended with nothing to say."""
+        if swap.get("stage") == SETTING_ASIDE:
+            rel = (swap.get("copy") or {}).get("rel")
+            if rel and os.path.lexists(os.path.join(folder.root, rel)):
+                # Stopped before the copy moved: nothing to carry on or put back.
+                self._end_saved(swap)
+                logger.info(f"The swap of {swap.get('name')} hadn't moved anything, so it's ended")
+                return None
+            return self._end(swap, "couldnt", WHERE_NOT_SAVED)
+        parts = self._parts()
+        if isinstance(parts, str):
+            # Can't be carried on, but the copy can still go back.
+            return self._put_back(swap, (folder, self._soulsync(), None, self._library()), parts,
+                                  unwish=swap.get("stage") == WATCHING)
+        return self._carry_on(swap, parts)
+
+    def _tell(self, swap: Dict, outcome: Optional[Outcome]):
+        """Says how a download's swap carried on after a restart ended. The library check's say nothing."""
+        if outcome is None or outcome == STOPPED or swap.get("quiet", True):
+            return
+        try:
+            self._say(swap.get("satellite"), swap_said(swap.get("named") or swap.get("name") or "", outcome))
+        except Exception:
+            logger.exception(f"How the swap of {swap.get('name')} ended couldn't be said")
+
+    def _parts(self) -> Union[Parts, str]:
+        """What a swap needs, or why it can't be made - nothing is moved without all of it."""
+        folder = self._folder()
+        problem = folder.usable() if folder is not None else "no music folder is set"
+        if problem:
+            return problem
+        admin = self._admin()
+        if admin is None:
+            return NO_ADMIN
+        soulsync = self._soulsync()
+        if soulsync is None:
+            return NO_SOULSYNC
+        library = self._library()
+        if library is None:
+            return NO_NAVIDROME
+        return folder, soulsync, admin, library
+
+    def _carry_on(self, swap: Dict, parts: Parts) -> Outcome:
+        """
+        Runs a swap on from its saved step. Something unforeseen leaves it saved as it is, to
+        be carried on at the next start, rather than acted on half understood.
+        """
+        try:
+            return self._run(swap, parts)
+        except Exception:
+            logger.exception(f"Swapping {swap['name']} failed part way; it's carried on at Nova's next start")
+            return self._list(swap["name"], swap.get("song_id"), "couldnt", WENT_WRONG)
+
+    def _run(self, swap: Dict, parts: Parts) -> Outcome:
+        """Each step of a swap in turn, from the one saved, until it ends or Nova stops."""
+        folder, soulsync, admin, library = parts
+        while not self._stopping.is_set():
+            stage = swap["stage"]
+            if stage == SETTING_ASIDE:
+                try:
+                    held = folder.set_aside(swap["copy"]["rel"])
+                except MusicFolderError as e:
+                    # Nothing of this copy moved: set_aside puts back what it moved. Copies set
+                    # aside by earlier tries stay held, as clean as this one.
+                    return self._end(swap, "couldnt", e.reason)
+                swap["held"].append(asdict(held))
+                self._next(swap, DROPPING)
+            elif stage == DROPPING:
+                dropped = self._dropped(library, swap["copy"])
+                if dropped is None:
+                    break
+                if not dropped:
+                    return self._put_back(swap, parts, STILL_LISTED)
+                self._next(swap, FORGETTING)
+            elif stage == FORGETTING:
+                copy = swap["copy"]
+                try:
+                    reason = None if admin.forget(soulsync, copy["title"], copy["artist"], copy["rel"]) \
+                        else NOT_FORGOTTEN
+                except SoulSyncError as e:
+                    reason = e.reason or "SoulSync couldn't be asked"
+                if reason:
+                    return self._put_back(swap, parts, reason)
+                self._next(swap, FETCHING)
+            elif stage == FETCHING:
+                ended = self._fetch(swap, soulsync, library, parts)
+                if ended:
+                    return ended
+            elif stage == WATCHING:
+                new = self._watch(library, swap)
+                if new is None:
+                    break
+                if not new:
+                    return self._put_back(swap, parts, NOT_IN_TIME, unwish=True)
+                ended = self._judge(swap, library, new)
+                if ended:
+                    return ended
+            else:
+                return self._put_back(swap, parts, f"its saved step, {stage!r}, wasn't one Nova knows")
+        return STOPPED
+
+    def _fetch(self, swap: Dict, soulsync: SoulSync, library: NavidromeLibrary, parts: Parts) -> Optional[Outcome]:
+        """Asks SoulSync for the song again, saved as watching first - None once it's asked for."""
+        try:
+            request = soulsync.find_song(swap["title"], swap["artist"], swap["album"])
+        except SoulSyncError as e:
+            # Nothing was put on the wishlist, so there's nothing to take off it.
+            return self._put_back(swap, parts, e.reason or "SoulSync couldn't be asked")
+        # Looked for by the title asked for and SoulSync's artist, as a download is - and only
+        # what isn't listed now counts.
+        before = self._listed(library, Wanted(swap["title"], request.artist, "track"))
+        swap.update(stage=WATCHING, tries=swap["tries"] + 1, track_id=request.track.get("id"),
+                    sought_artist=request.artist, before=sorted(before or ()), asked_at=self._now(),
+                    limit=song_limit(self.config))
+        # Before asking, so a restart which comes before the answer still takes it off the wishlist.
+        self._save(swap)
+        try:
+            soulsync.request_song(request)
+        except SoulSyncError as e:
+            return self._put_back(swap, parts, e.reason or "SoulSync couldn't be asked", unwish=True)
+        logger.info(f"Asked SoulSync for {swap['name']} again, try {swap['tries']}")
+        return None
+
+    def _judge(self, swap: Dict, library: NavidromeLibrary, new: List[Dict]) -> Optional[Outcome]:
+        """
+        Hears the copies SoulSync brought and ends the swap by what they are - or, for a clean
+        one with tries to spare, sets that one aside too, and returns None to fetch again.
+        """
+        verdict, copy = self.ears.hear_copies(new, download=not swap["quiet"])
+        if self._stopping.is_set():
+            # Heard as the worker was closed: not judged, but only because Nova is stopping.
+            return STOPPED
+        if verdict.kind in ("explicit", "too_few"):
+            return self._end(swap, "swapped", "")
+        if verdict.kind == "unsure":
+            # Kept, never swapped; Ears has listed it.
+            return self._end(swap, "unsure", f"heard {verdict.heard} of its {verdict.expected} swears")
+        if verdict.kind != "clean":
+            return self._end(swap, "not_judged", verdict.reason,
+                             listed=f"couldn't check the copy SoulSync brought: {verdict.reason}")
+        if swap["tries"] > self._tries():
+            # The last copy stays in the library; the earlier ones stay held.
+            return self._end(swap, "only_clean", f"{swap['tries']} copies came down clean")
+        try:
+            rel = library.song_file(copy["id"])["path"]
+        except NavidromeError as e:
+            return self._end(swap, "couldnt", f"couldn't find the clean copy SoulSync brought: {e}")
+        swap.update(stage=SETTING_ASIDE, copy=_copy(copy, rel))
+        if not self._save(swap):
+            return self._end(swap, "couldnt", NOT_SAVED)
+        return None
+
+    def _tries(self) -> int:
+        """How many more times SoulSync is asked for a clean song, from the settings as they are now."""
+        tries = self.config.section("clean_check").get("swap_tries")
+        return SWAP_TRIES if tries is None else int(tries)
+
+    def _dropped(self, library: NavidromeLibrary, copy: Dict) -> Optional[bool]:
+        """
+        Asks Navidrome to scan, then whether it has stopped listing a copy set aside, every
+        POLL_EVERY seconds for DROP_WAIT.
+
+        Returns:
+            True once it has, False if it still does after DROP_WAIT, None if Nova is stopping.
+        """
+        library.start_scan()
+        started = self._now()
+        while not self._wait(POLL_EVERY):
+            listed = self._listed(library, Wanted(copy["title"], copy["artist"] or None, "track"))
+            if listed is not None and copy["id"] not in listed:
+                return True
+            if self._now() - started >= DROP_WAIT:
+                return False
+        return None
+
+    def _watch(self, library: NavidromeLibrary, swap: Dict) -> Optional[List[Dict]]:
+        """
+        Looks for a new copy in Navidrome every POLL_EVERY seconds, as a download is watched,
+        until its time limit from when SoulSync was asked - with one scan in time for the last
+        look, as SoulSync never says it's done.
+
+        Returns:
+            The new copies, or [] once the limit has passed without any; None if Nova is stopping.
+        """
+        sought = Wanted(swap["title"], swap.get("sought_artist"), "track")
+        before = set(swap.get("before") or ())
+        scanned = False
+        while not self._wait(POLL_EVERY):
+            listed = self._found(library, sought)
+            new = [song for song in listed or [] if song.get("id") not in before]
+            if new:
+                return new
+            waited = self._now() - swap["asked_at"]
+            if waited >= swap["limit"]:
+                return []
+            if not scanned and waited >= swap["limit"] - SCAN_AFTER - POLL_EVERY:
+                scanned = True
+                library.start_scan()
+        return None
+
+    def _listed(self, library: NavidromeLibrary, sought: Wanted) -> Optional[Set[str]]:
+        """The ids of the copies of a song Navidrome lists, or None if it couldn't be asked."""
+        found = self._found(library, sought)
+        return None if found is None else {song.get("id") for song in found}
+
+    @staticmethod
+    def _found(library: NavidromeLibrary, sought: Wanted) -> Optional[List[Dict]]:
+        """The copies of a song Navidrome lists, or None if it couldn't be asked this time."""
+        try:
+            return library.find_songs(sought.title, sought.artist)
+        except NAVIDROME_ERRORS as e:
+            NavidromeLibrary._failure_message(e)
+            logger.warning(f"Couldn't look for {sought.name} in Navidrome this time, so the swap waits on")
+            return None
+
+    def _put_back(self, swap: Dict, parts, reason: str, unwish: bool = False) -> Outcome:
+        """
+        Ends a swap which couldn't go on: takes its request off SoulSync's wishlist, if it made
+        one, so nothing lands later beside the copy put back; puts back the copy it last set
+        aside; and asks Navidrome to scan for it.
+
+        Args:
+            swap: The swap.
+            parts: The music folder, SoulSync, its admin and Navidrome - SoulSync or Navidrome
+                None if they aren't set up, when that part is left out.
+            reason: Why it couldn't go on.
+            unwish: Whether SoulSync was asked for it, so it comes off the wishlist.
+
+        Returns:
+            "couldnt", with the reason and what became of the copy set aside.
+        """
+        folder, soulsync, _admin, library = parts
+        if unwish and swap.get("track_id"):
+            if soulsync is not None:
+                soulsync.unwish(swap["track_id"])
+            else:
+                logger.warning(f"{swap['name']} couldn't be taken off SoulSync's wishlist, as it isn't set up")
+        put = folder.put_back(_held(swap["held"][-1])) if swap.get("held") else None
+        if library is not None:
+            library.start_scan()
+        if put in (None, PUT_BACK):
+            said = reason
+        elif put == NEW_COPY:
+            said = (f"{reason}, and a new file is where it was, so both are kept: the new file, "
+                    f"and the old copy in {HELD}")
+        elif put == HELD_GONE:
+            said = f"{reason}, and the copy set aside has gone from {HELD}"
+        else:
+            said = f"{reason}, and it couldn't be put back ({put}), so it's still in {HELD}"
+        if put not in (None, PUT_BACK):
+            logger.warning(f"Putting {swap['name']} back: {put}")
+        return self._end(swap, "couldnt", said)
+
+    def _next(self, swap: Dict, stage: str):
+        """Moves a swap on to its next step, saved."""
+        swap["stage"] = stage
+        self._save(swap)
+
+    def _save(self, swap: Dict) -> bool:
+        """
+        Saves a swap's progress. Once a copy has moved a failure is only logged, and the swap
+        carries on: stopping would leave the song held with less known about it.
+
+        Returns:
+            Whether it was saved.
+        """
+        try:
+            self.store.save_swap(swap)
+        except (OSError, TypeError, ValueError) as e:
+            logger.error(f"Couldn't save the swap of {swap['name']} at {swap['stage']}: {type(e).__name__}")
+            return False
+        return True
+
+    def _end_saved(self, swap: Dict):
+        """Forgets a swap which is over. If that can't be saved, the next start finds it ended as it is."""
+        try:
+            self.store.end_swap(swap["key"])
+        except OSError as e:
+            logger.error(f"Couldn't forget the finished swap of {swap.get('name')}: {type(e).__name__}")
+
+    def _end(self, swap: Dict, kind: str, reason: str, listed: Optional[str] = None) -> Outcome:
+        """
+        Ends a swap: forgets its progress and puts it on the page's list for how it ended.
+
+        Args:
+            swap: The swap.
+            kind: How it ended.
+            reason: Why, as the outcome gives it.
+            listed: The reason as the page's list gives it, if not the same.
+        """
+        self._end_saved(swap)
+        logger.info(f"The swap of {swap['name']} ended {kind}" + (f": {reason}" if reason else ""))
+        if kind in LISTS:
+            self._list(swap["name"], swap.get("song_id"), LISTS[kind], listed or reason)
+        return Outcome(kind, reason)
+
+    def _list(self, name: str, song_id: Optional[str], kind: str, reason: str) -> Outcome:
+        """Puts a song on one of the page's lists; a list that can't be saved is logged."""
+        try:
+            self.store.add(kind, name, reason, song_id=song_id)
+        except (OSError, TypeError, ValueError) as e:
+            logger.error(f"Couldn't list {name} as {kind}: {type(e).__name__}")
+        return Outcome(kind, reason)

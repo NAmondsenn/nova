@@ -1,12 +1,15 @@
 """
 Clean Swap Test
-Checks how a song is heard against its lyrics (Ears) - decision 0019, sections 1 to 3 - with
-fakes in place of Navidrome, the lyrics, ffmpeg and the listening worker, and the store kept in
-the test's own folder. The model is never loaded and nothing real is asked.
+Checks how a song is heard against its lyrics (Ears) and how a clean one is swapped (Swapper) -
+decision 0019, sections 1 to 4 - with fakes in place of Navidrome, SoulSync, its admin, the
+lyrics, ffmpeg and the listening worker, the music folder and the store in the test's own
+folder. The model is never loaded and nothing real is asked.
 """
 
 import logging
+import os
 import threading
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -15,9 +18,13 @@ import requests
 from voice_assistant import clean_swap
 from voice_assistant.clean_ear import Verdict
 from voice_assistant.clean_store import CleanStore
-from voice_assistant.clean_swap import Ears, listening_library
+from voice_assistant.clean_swap import Ears, Outcome, Swapper, listening_library
+from voice_assistant.downloads import Wanted, swap_said
 from voice_assistant.listener import ListenError
+from voice_assistant.music_folder import HELD, MusicFolder
 from voice_assistant.navidrome import NavidromeError, NavidromeLibrary
+from voice_assistant.soulsync import (ADMIN_REFUSED, KEY_REFUSED, NOT_FORGOTTEN, NOT_FOUND, SongRequest,
+                                      SoulSyncError)
 
 # Ten swears in the lyrics, so a song is judged by how many of them are heard.
 LYRICS = "\n".join(["fuck this", "shit that", "bitch please", "fuck it", "shit no"] * 2)
@@ -336,3 +343,573 @@ def test_one_library_is_kept_for_listening_until_its_settings_change(make_config
 
     monkeypatch.delenv("NAVIDROME_PASSWORD")
     assert library() is None
+
+
+# Swapping a clean song - decision 0019, section 4. The music folder is a real folder in the
+# test's own, and the fake Navidrome lists what's in it, as Navidrome does once its watcher or
+# a scan has seen it.
+
+T0 = 1_800_000_000.0
+ENDLESS_REL = "Gunna/The Last Wun/endless.mp3"
+ENDLESS_TAGS = ("endless", "Gunna", "The Last Wun (explicit)")
+ENDLESS_WANTED = Wanted("endless", "Gunna", "track")
+
+
+class FakeTime:
+    """The clock a swap reads - the wall clock, as a swap outlives a restart - moved on only by waiting."""
+
+    def __init__(self, start=T0):
+        self.time = start
+        self.stopped = False
+        # Things to do once the clock reaches a time, as (time, what).
+        self.later = []
+
+    def now(self):
+        return self.time
+
+    def wait(self, seconds):
+        self.time += seconds
+        for when, then in [item for item in self.later if item[0] <= self.time]:
+            self.later.remove((when, then))
+            then()
+        return self.stopped
+
+
+def put(root, rel, data):
+    """Writes a file into the music folder, with its folders."""
+    path = os.path.join(root, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as file:
+        file.write(data)
+
+
+def read(root, rel):
+    with open(os.path.join(root, rel), "rb") as file:
+        return file.read()
+
+
+class FakeNavidrome:
+    """
+    Stands in for Navidrome: lists the songs in the music folder, never .nova-held, each with
+    an id from its path - so a new copy filed where the old one was has the old one's id, as
+    Navidrome's ids do. Stale, it goes on listing what it listed, as one that never scans would.
+    """
+
+    def __init__(self, root, clock, tags=None):
+        self.root = root
+        self.clock = clock
+        self.tags = dict(tags or {})
+        # Files there which it hasn't picked up yet.
+        self.hidden = set()
+        self.stale = False
+        self.scans = []
+        self.listed = self._read()
+
+    def _read(self):
+        songs = []
+        for folder, folders, names in os.walk(self.root):
+            folders[:] = [name for name in folders if name != HELD]
+            for name in sorted(names):
+                rel = os.path.relpath(os.path.join(folder, name), self.root)
+                if name.endswith(".mp3") and rel not in self.hidden:
+                    title, artist, album = self.tags.get(rel, ENDLESS_TAGS)
+                    songs.append({"id": f"id-{rel}", "title": title, "artist": artist, "album": album})
+        return songs
+
+    def find_songs(self, title, artist):
+        if not self.stale:
+            self.listed = self._read()
+        return [song for song in self.listed if song["title"] == title and artist in (None, song["artist"])]
+
+    def song_file(self, song_id):
+        rel = song_id[len("id-"):]
+        path = os.path.join(self.root, rel)
+        if not os.path.isfile(path):
+            raise NavidromeError("Couldn't ask Navidrome for the song's file: HTTPError 404")
+        return {"path": rel, "size": os.path.getsize(path), "updated": "2026-11-16T10:00:00Z"}
+
+    def start_scan(self):
+        self.scans.append(self.clock.now())
+        return True
+
+
+class FakeSoulSync:
+    """
+    Stands in for SoulSync: finds whatever's asked for, and on each request files a new copy
+    into the music folder the given seconds later - or never, for None.
+    """
+
+    def __init__(self, root, clock, lands=(), find_fails=None, request_fails=None):
+        self.root = root
+        self.clock = clock
+        self.lands = list(lands)
+        self.find_fails = find_fails
+        self.request_fails = request_fails
+        self.found = []
+        self.requested = []
+        self.unwished = []
+
+    def find_song(self, title, artist, album=None):
+        self.found.append((title, artist, album))
+        if self.find_fails:
+            raise self.find_fails
+        return SongRequest(title, artist, {"id": f"deezer-{len(self.found)}", "name": title})
+
+    def request_song(self, request):
+        self.requested.append(request.track["id"])
+        if self.request_fails:
+            raise self.request_fails
+        landing = self.lands.pop(0) if self.lands else None
+        if landing is not None:
+            after, rel, data = landing
+            self.clock.later.append((self.clock.now() + after, lambda: put(self.root, rel, data)))
+
+    def unwish(self, track_id):
+        self.unwished.append(track_id)
+        return True
+
+
+class FakeAdmin:
+    """Stands in for SoulSyncAdmin: forgets each file it's told of, or doesn't, or raises."""
+
+    def __init__(self, forgets=True):
+        self.forgets = forgets
+        self.forgot = []
+
+    def forget(self, soulsync, title, artist, rel_path):
+        self.forgot.append((title, artist, rel_path))
+        if isinstance(self.forgets, Exception):
+            raise self.forgets
+        return self.forgets
+
+
+class FakeEars:
+    """Stands in for Ears: hears each set of new copies as the next kind given."""
+
+    HEARD = {"explicit": 5, "clean": 1, "unsure": 2}
+
+    def __init__(self, kinds=("explicit",)):
+        self.kinds = list(kinds)
+        self.heard = []
+
+    def hear_copies(self, copies, download=False):
+        self.heard.append(([copy["id"] for copy in copies], download))
+        kind = self.kinds.pop(0) if len(self.kinds) > 1 else self.kinds[0]
+        reason = "listening took too long" if kind == "not_judged" else ""
+        return Verdict(kind, 10, self.HEARD.get(kind, 0), reason), copies[0]
+
+
+@pytest.fixture
+def music(tmp_path):
+    """The music folder, with Gunna's clean endless and its lyrics in it."""
+    root = str(tmp_path / "music")
+    put(root, ENDLESS_REL, b"clean endless")
+    put(root, "Gunna/The Last Wun/endless.lrc", b"[00:01] lyrics")
+    return root
+
+
+@pytest.fixture
+def swap_config(make_config):
+    return make_config(clean_check={"swap_tries": 2}, music={"song_download_minutes": 10})
+
+
+@pytest.fixture
+def make_swapper(swap_config, store, music):
+    """
+    A Swapper over the music folder with the fakes given - each made afresh unless given -
+    on a fake clock. What it says is kept in its 'said'.
+    """
+    def make(clock=None, soulsync=None, admin="default", ears=None, library=None, folder=None, config=None):
+        clock = clock or FakeTime()
+        library = library or FakeNavidrome(music, clock)
+        soulsync = soulsync or FakeSoulSync(music, clock)
+        admin = FakeAdmin() if admin == "default" else admin
+        ears = ears or FakeEars()
+        said = []
+        swapper = Swapper(config or swap_config, ears, lambda: MusicFolder(folder or music), lambda: soulsync,
+                          lambda: admin, lambda: library, store, lambda satellite, message: said.append(
+                              (satellite, message)), now=clock.now, wait=clock.wait)
+        swapper.fakes = SimpleNamespace(clock=clock, library=library, soulsync=soulsync, admin=admin, ears=ears)
+        swapper.said = said
+        return swapper
+
+    return make
+
+
+def _endless(library):
+    return next(song for song in library.find_songs("endless", "Gunna"))
+
+
+def test_a_clean_song_is_set_aside_forgotten_fetched_again_and_swapped(make_swapper, music, store):
+    swapper = make_swapper()
+    fakes = swapper.fakes
+    # The explicit copy is filed where the clean one was, half a minute after it's asked for.
+    fakes.soulsync.lands = [(30, ENDLESS_REL, b"explicit endless")]
+
+    outcome = swapper.swap(_endless(fakes.library), ENDLESS_WANTED, "kitchen", quiet=False)
+
+    assert outcome == "swapped"
+    # The clean copy and its lyrics wait in .nova-held; the explicit one is in the library.
+    assert read(music, f"{HELD}/{ENDLESS_REL}") == b"clean endless"
+    assert read(music, f"{HELD}/Gunna/The Last Wun/endless.lrc") == b"[00:01] lyrics"
+    assert read(music, ENDLESS_REL) == b"explicit endless"
+    # Scanned as it was set aside; forgotten by its file; asked for on its album, without
+    # the album's version note.
+    assert fakes.library.scans[0] == T0
+    assert fakes.admin.forgot == [("endless", "Gunna", ENDLESS_REL)]
+    assert fakes.soulsync.found == [("endless", "Gunna", "The Last Wun")]
+    assert fakes.soulsync.requested == ["deezer-1"] and fakes.soulsync.unwished == []
+    # The new copy has the old one's id, as it's at the same path - and is heard, as a download's.
+    assert fakes.ears.heard == [([f"id-{ENDLESS_REL}"], True)]
+    assert store.listed("swapped") == [{"name": "Gunna - endless", "reason": "", "song_id": f"id-{ENDLESS_REL}"}]
+    assert store.swaps() == [] and swapper.said == []
+
+
+def test_every_try_coming_down_clean_keeps_the_last_and_holds_the_rest(make_swapper, music, store):
+    swapper = make_swapper(ears=FakeEars(["clean", "clean", "clean"]))
+    fakes = swapper.fakes
+    fakes.soulsync.lands = [(30, ENDLESS_REL, f"clean try {number}".encode()) for number in (1, 2, 3)]
+
+    outcome = swapper.swap(_endless(fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    # Two tries more than the first fetch: three in all.
+    assert outcome == "only_clean"
+    assert fakes.soulsync.requested == ["deezer-1", "deezer-2", "deezer-3"]
+    assert len(fakes.admin.forgot) == 3 and len(fakes.ears.heard) == 3
+    # The copy each earlier try brought stays held, numbered beside the first; the last is kept.
+    assert read(music, f"{HELD}/{ENDLESS_REL}") == b"clean endless"
+    assert read(music, f"{HELD}/Gunna/The Last Wun/endless (2).mp3") == b"clean try 1"
+    assert read(music, f"{HELD}/Gunna/The Last Wun/endless (3).mp3") == b"clean try 2"
+    assert read(music, ENDLESS_REL) == b"clean try 3"
+    assert [entry["name"] for entry in store.listed("only_clean")] == ["Gunna - endless"]
+    assert store.swaps() == [] and store.listed("swapped") == []
+
+
+def test_no_tries_more_is_one_fetch(make_swapper, make_config, music):
+    swapper = make_swapper(ears=FakeEars(["clean"]),
+                           config=make_config(clean_check={"swap_tries": 0}, music={"song_download_minutes": 10}))
+    swapper.fakes.soulsync.lands = [(30, ENDLESS_REL, b"clean again")]
+
+    assert swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True) == "only_clean"
+    assert swapper.fakes.soulsync.requested == ["deezer-1"]
+
+
+def test_a_fetch_that_never_lands_is_taken_off_the_wishlist_and_the_song_put_back(make_swapper, music, store):
+    swapper = make_swapper()
+    fakes = swapper.fakes
+    fakes.soulsync.lands = [None]
+
+    outcome = swapper.swap(_endless(fakes.library), ENDLESS_WANTED, "kitchen", quiet=False)
+
+    assert outcome == "couldnt" and outcome.reason == "SoulSync didn't bring another copy in time"
+    assert fakes.soulsync.unwished == ["deezer-1"]
+    # Back where it was, with its lyrics, and Navidrome asked to scan for it.
+    assert read(music, ENDLESS_REL) == b"clean endless"
+    assert read(music, "Gunna/The Last Wun/endless.lrc") == b"[00:01] lyrics"
+    assert not os.path.exists(os.path.join(music, HELD, ENDLESS_REL))
+    assert fakes.library.scans[-1] >= T0 + 600
+    assert store.listed("couldnt") == [{"name": "Gunna - endless", "song_id": f"id-{ENDLESS_REL}",
+                                        "reason": "SoulSync didn't bring another copy in time"}]
+    assert store.swaps() == []
+
+
+def test_a_new_file_where_the_song_was_is_kept_beside_the_held_copy(make_swapper, music, store):
+    # Something filed where it was, which Navidrome hasn't picked up by the time limit.
+    swapper = make_swapper()
+    fakes = swapper.fakes
+    song = _endless(fakes.library)
+    fakes.library.hidden.add(ENDLESS_REL)
+    fakes.soulsync.lands = [(500, ENDLESS_REL, b"something new")]
+
+    outcome = swapper.swap(song, ENDLESS_WANTED, None, quiet=True)
+
+    assert outcome == "couldnt"
+    assert outcome.reason == ("SoulSync didn't bring another copy in time, and a new file is where it was, "
+                              f"so both are kept: the new file, and the old copy in {HELD}")
+    assert read(music, ENDLESS_REL) == b"something new"
+    assert read(music, f"{HELD}/{ENDLESS_REL}") == b"clean endless"
+    assert store.listed("couldnt")[0]["reason"] == outcome.reason
+
+
+def test_without_an_admin_profile_nothing_is_moved(make_swapper, music, store):
+    swapper = make_swapper(admin=None)
+
+    outcome = swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    assert outcome == "couldnt" and outcome.reason == "SoulSync admin profile isn't set up"
+    assert store.listed("couldnt") == [{"name": "Gunna - endless", "song_id": f"id-{ENDLESS_REL}",
+                                        "reason": "SoulSync admin profile isn't set up"}]
+    assert read(music, ENDLESS_REL) == b"clean endless" and not os.path.exists(os.path.join(music, HELD))
+    assert swapper.fakes.soulsync.found == [] and store.swaps() == []
+
+
+def test_without_a_music_folder_nothing_is_moved(make_swapper, music, tmp_path, store):
+    swapper = make_swapper(folder=str(tmp_path / "not-there"))
+
+    outcome = swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    assert outcome == "couldnt" and outcome.reason == "the music folder doesn't exist"
+    assert read(music, ENDLESS_REL) == b"clean endless" and swapper.fakes.admin.forgot == []
+
+
+def test_a_song_navidrome_still_lists_is_put_back_and_never_forgotten(make_swapper, music, store):
+    swapper = make_swapper()
+    fakes = swapper.fakes
+    fakes.library.stale = True
+
+    outcome = swapper.swap(_endless(fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    assert outcome == "couldnt" and outcome.reason == "Navidrome still lists it"
+    assert read(music, ENDLESS_REL) == b"clean endless"
+    # Given two minutes after it was asked to scan.
+    assert fakes.clock.time == T0 + 120
+    assert fakes.admin.forgot == [] and fakes.soulsync.found == []
+
+
+@pytest.mark.parametrize("forgets, reason", [
+    (False, NOT_FORGOTTEN),
+    (SoulSyncError(ADMIN_REFUSED), ADMIN_REFUSED),
+])
+def test_a_song_soulsync_wont_forget_is_put_back_and_not_fetched(make_swapper, music, store, forgets, reason):
+    swapper = make_swapper(admin=FakeAdmin(forgets))
+
+    outcome = swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    assert outcome == "couldnt" and outcome.reason == reason
+    assert read(music, ENDLESS_REL) == b"clean endless" and swapper.fakes.soulsync.found == []
+
+
+def test_a_song_soulsync_cant_find_again_is_put_back(make_swapper, music, store):
+    swapper = make_swapper()
+    fakes = swapper.fakes
+    fakes.soulsync.find_fails = SoulSyncError(NOT_FOUND)
+
+    outcome = swapper.swap(_endless(fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    assert outcome == "couldnt" and outcome.reason == NOT_FOUND
+    assert read(music, ENDLESS_REL) == b"clean endless"
+    # Nothing was put on the wishlist, so there's nothing to take off it.
+    assert fakes.soulsync.unwished == []
+
+
+def test_a_request_soulsync_refuses_is_taken_off_the_wishlist_and_the_song_put_back(make_swapper, music):
+    swapper = make_swapper()
+    fakes = swapper.fakes
+    fakes.soulsync.request_fails = SoulSyncError(KEY_REFUSED)
+
+    outcome = swapper.swap(_endless(fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    assert outcome == "couldnt" and outcome.reason == KEY_REFUSED
+    assert fakes.soulsync.unwished == ["deezer-1"] and read(music, ENDLESS_REL) == b"clean endless"
+
+
+@pytest.mark.parametrize("kind, outcome_kind, listed", [("unsure", "unsure", None),
+                                                        ("not_judged", "not_judged", "couldnt")])
+def test_a_new_copy_not_heard_clean_or_explicit_is_kept(make_swapper, music, store, kind, outcome_kind, listed):
+    swapper = make_swapper(ears=FakeEars([kind]))
+    swapper.fakes.soulsync.lands = [(30, ENDLESS_REL, b"new endless")]
+
+    outcome = swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    assert outcome == outcome_kind
+    assert read(music, ENDLESS_REL) == b"new endless" and read(music, f"{HELD}/{ENDLESS_REL}") == b"clean endless"
+    assert len(swapper.fakes.soulsync.requested) == 1 and store.swaps() == []
+    if listed:
+        assert store.listed(listed)[0]["reason"] == "couldn't check the copy SoulSync brought: listening took too long"
+
+
+def test_an_albums_version_note_is_left_off_when_soulsync_is_asked(make_swapper, music):
+    swapper = make_swapper()
+    fakes = swapper.fakes
+    fakes.library.tags[ENDLESS_REL] = ("SICKO MODE", "Travis Scott", "ASTROWORLD (clean)")
+    fakes.soulsync.lands = [(30, ENDLESS_REL, b"explicit")]
+    song = fakes.library.find_songs("SICKO MODE", "Travis Scott")[0]
+
+    swapper.swap(song, Wanted("SICKO MODE", "Travis Scott", "track"), None, quiet=True)
+
+    assert fakes.soulsync.found == [("SICKO MODE", "Travis Scott", "ASTROWORLD")]
+
+
+# Saved as it goes, and carried on after a restart
+
+def test_a_swap_is_saved_before_anything_moves(make_swapper, music, store, monkeypatch):
+    seen = []
+    save_swap = store.save_swap
+
+    def saving(swap):
+        seen.append((swap["stage"], os.path.exists(os.path.join(music, ENDLESS_REL))))
+        save_swap(swap)
+
+    monkeypatch.setattr(store, "save_swap", saving)
+    swapper = make_swapper()
+    swapper.fakes.soulsync.lands = [(30, ENDLESS_REL, b"explicit")]
+    swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    assert seen[0] == ("setting_aside", True)
+    assert seen[1] == ("dropping", False)
+    assert [stage for stage, _ in seen] == ["setting_aside", "dropping", "forgetting", "fetching", "watching"]
+
+
+def test_a_swap_which_cant_be_saved_before_moving_moves_nothing(make_swapper, music, store, monkeypatch):
+    def full(swap):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(store, "save_swap", full)
+    swapper = make_swapper()
+
+    outcome = swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    assert outcome == "couldnt" and outcome.reason == "Nova couldn't save the swap's progress"
+    assert read(music, ENDLESS_REL) == b"clean endless" and not os.path.exists(os.path.join(music, HELD))
+
+
+def test_a_swap_which_cant_be_saved_once_moved_carries_on(make_swapper, music, store, monkeypatch, caplog):
+    save_swap = store.save_swap
+    saves = []
+
+    def first_only(swap):
+        saves.append(swap["stage"])
+        if len(saves) > 1:
+            raise OSError("No space left on device")
+        save_swap(swap)
+
+    monkeypatch.setattr(store, "save_swap", first_only)
+    swapper = make_swapper()
+    swapper.fakes.soulsync.lands = [(30, ENDLESS_REL, b"explicit")]
+
+    assert swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True) == "swapped"
+    assert "Couldn't save the swap of Gunna - endless" in caplog.text
+    assert store.swaps() == []
+
+
+def _stopped_while_watching(make_swapper, quiet=False):
+    """A swap stopped by Nova stopping a minute after SoulSync was asked, as a restart would."""
+    swapper = make_swapper()
+    fakes = swapper.fakes
+    fakes.soulsync.lands = [None]
+    fakes.clock.later.append((T0 + 200, lambda: setattr(fakes.clock, "stopped", True)))
+    outcome = swapper.swap(_endless(fakes.library), ENDLESS_WANTED, "kitchen", quiet=quiet)
+    return swapper, outcome
+
+
+def test_a_swap_stopped_part_way_is_kept_to_carry_on(make_swapper, music, store):
+    swapper, outcome = _stopped_while_watching(make_swapper)
+
+    assert outcome == "stopped"
+    [saved] = store.swaps()
+    assert saved["stage"] == "watching" and saved["track_id"] == "deezer-1"
+    assert read(music, f"{HELD}/{ENDLESS_REL}") == b"clean endless"
+    assert store.listed("couldnt") == [] and swapper.said == []
+
+
+def test_a_restart_inside_the_limit_watches_on_to_the_end(make_swapper, music, store):
+    _stopped_while_watching(make_swapper)
+    [saved] = store.swaps()
+
+    # Started again a few minutes later; the copy asked for lands a minute after that.
+    clock = FakeTime(saved["asked_at"] + 300)
+    swapper = make_swapper(clock=clock)
+    clock.later.append((clock.time + 60, lambda: put(music, ENDLESS_REL, b"explicit endless")))
+    swapper.resume()
+
+    assert read(music, ENDLESS_REL) == b"explicit endless"
+    assert swapper.fakes.soulsync.found == [] and swapper.fakes.soulsync.unwished == []
+    assert store.swaps() == [] and store.listed("swapped")[0]["name"] == "Gunna - endless"
+    # A download's swap says how it ended, as the download would have.
+    assert swapper.said == [("kitchen", "endless by Gunna has been downloaded.")]
+
+
+def test_a_restart_past_the_limit_puts_the_song_back(make_swapper, music, store):
+    _stopped_while_watching(make_swapper)
+    [saved] = store.swaps()
+
+    clock = FakeTime(saved["asked_at"] + 700)
+    swapper = make_swapper(clock=clock)
+    swapper.resume()
+
+    assert swapper.fakes.soulsync.unwished == ["deezer-1"]
+    assert read(music, ENDLESS_REL) == b"clean endless"
+    assert not os.path.exists(os.path.join(music, HELD, ENDLESS_REL))
+    assert swapper.fakes.library.scans
+    assert store.swaps() == [] and store.listed("couldnt")[0]["reason"] == "SoulSync didn't bring another copy in time"
+    assert swapper.said == [("kitchen", "endless by Gunna has been downloaded, but it's the clean version, and I "
+                                        "couldn't swap it: SoulSync didn't bring another copy in time.")]
+
+
+def test_a_quiet_swap_carried_on_says_nothing(make_swapper, store):
+    _stopped_while_watching(make_swapper, quiet=True)
+    [saved] = store.swaps()
+
+    swapper = make_swapper(clock=FakeTime(saved["asked_at"] + 700))
+    swapper.resume()
+
+    assert swapper.said == [] and store.swaps() == []
+
+
+def test_a_restart_before_anything_moved_ends_the_swap_quietly(make_swapper, music, store):
+    store.save_swap({"key": "made-up", "stage": "setting_aside", "name": "Gunna - endless", "named": "endless by Gunna",
+                     "satellite": "kitchen", "quiet": False, "held": [],
+                     "copy": {"id": f"id-{ENDLESS_REL}", "title": "endless", "artist": "Gunna", "rel": ENDLESS_REL}})
+    swapper = make_swapper()
+
+    swapper.resume()
+
+    assert store.swaps() == [] and store.listed("couldnt") == [] and swapper.said == []
+    assert read(music, ENDLESS_REL) == b"clean endless"
+
+
+def test_a_restart_between_moving_and_saving_where_says_where_to_look(make_swapper, music, store):
+    # Moved by hand here, as set_aside would have before the swap could save where.
+    put(music, f"{HELD}/{ENDLESS_REL}", read(music, ENDLESS_REL))
+    os.remove(os.path.join(music, ENDLESS_REL))
+    store.save_swap({"key": "made-up", "stage": "setting_aside", "name": "Gunna - endless", "named": "endless by Gunna",
+                     "satellite": None, "quiet": True, "held": [],
+                     "copy": {"id": f"id-{ENDLESS_REL}", "title": "endless", "artist": "Gunna", "rel": ENDLESS_REL}})
+    swapper = make_swapper()
+
+    swapper.resume()
+
+    assert store.swaps() == []
+    assert store.listed("couldnt")[0]["reason"] == f"set aside, but where wasn't saved - look in {HELD}"
+    # Never guessed at: nothing is moved.
+    assert read(music, f"{HELD}/{ENDLESS_REL}") == b"clean endless"
+    assert not os.path.exists(os.path.join(music, ENDLESS_REL))
+
+
+def test_swaps_are_left_for_later_without_a_music_folder(make_swapper, store, tmp_path):
+    _stopped_while_watching(make_swapper)
+
+    swapper = make_swapper(clock=FakeTime(T0 + 5000), folder=str(tmp_path / "not-mounted"))
+    swapper.resume()
+
+    assert len(store.swaps()) == 1 and swapper.fakes.soulsync.unwished == []
+
+
+def test_a_swap_carried_on_without_an_admin_profile_is_put_back(make_swapper, music, store):
+    _stopped_while_watching(make_swapper)
+    [saved] = store.swaps()
+
+    swapper = make_swapper(clock=FakeTime(saved["asked_at"] + 300), admin=None)
+    swapper.resume()
+
+    assert read(music, ENDLESS_REL) == b"clean endless" and swapper.fakes.soulsync.unwished == ["deezer-1"]
+    assert store.swaps() == [] and store.listed("couldnt")[0]["reason"] == "SoulSync admin profile isn't set up"
+
+
+# What's said of a download's swap
+
+@pytest.mark.parametrize("outcome, said", [
+    (Outcome("swapped"), "endless by Gunna has been downloaded."),
+    (Outcome("only_clean"), "endless by Gunna only came down clean, so I've kept it."),
+    (Outcome("unsure"), "endless by Gunna has been downloaded, but I couldn't tell if it's the clean version."),
+    (Outcome("not_judged", "listening took too long"),
+     "endless by Gunna has been downloaded, but I couldn't check it for a clean version."),
+    (Outcome("couldnt", "Navidrome still lists it"),
+     "endless by Gunna has been downloaded, but it's the clean version, and I couldn't swap it: Navidrome still "
+     "lists it."),
+    (Outcome("couldnt", NOT_FOUND),
+     "endless by Gunna has been downloaded, but it's the clean version, and I couldn't swap it: SoulSync couldn't "
+     "find it."),
+])
+def test_a_swaps_outcome_is_said_as_the_spec_has_it(outcome, said):
+    assert swap_said("endless by Gunna", outcome) == said

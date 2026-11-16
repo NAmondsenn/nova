@@ -89,6 +89,43 @@ ALBUM_MINUTES = 30
 # that wasn't JSON.
 NAVIDROME_ERRORS = (requests.RequestException, NavidromeError, ValueError)
 
+# What's said of a song which landed and was heard, when it isn't plainly downloaded - see
+# decision 0019, section 3. A clean copy is never called downloaded.
+UNSURE = "{name} has been downloaded, but I couldn't tell if it's the clean version."
+NOT_CHECKED = "{name} has been downloaded, but I couldn't check it for a clean version."
+
+
+def song_limit(config) -> float:
+    """A song's time limit, in seconds from the request, from the settings as they are now."""
+    return float(config.section("music").get("song_download_minutes", SONG_MINUTES)) * 60
+
+
+def swap_said(name: str, outcome: str) -> str:
+    """
+    What's said of a song which landed clean, once its swap is over (clean_swap.Swapper).
+
+    Args:
+        name: The song as it's named in what's said, e.g. "endless by Gunna".
+        outcome: How the swap ended - "swapped", "only_clean", "unsure", "not_judged", or
+            "couldnt" with its reason.
+
+    Returns:
+        The sentence, e.g. "endless by Gunna has been downloaded, but it's the clean
+        version, and I couldn't swap it: Navidrome still lists it."
+    """
+    if outcome == "swapped":
+        return f"{name} has been downloaded."
+    if outcome == "only_clean":
+        return f"{name} only came down clean, so I've kept it."
+    if outcome == "unsure":
+        return UNSURE.format(name=name)
+    if outcome == "not_judged":
+        return NOT_CHECKED.format(name=name)
+    # The reason may be SoulSync's own sentence, with its full stop.
+    reason = (getattr(outcome, "reason", "") or "").strip().rstrip(".")
+    return (f"{name} has been downloaded, but it's the clean version, and I couldn't swap it"
+            + (f": {reason}." if reason else "."))
+
 
 @dataclass(frozen=True)
 class Wanted:
@@ -720,10 +757,9 @@ class Downloads:
 
     def _limit(self, wanted: Wanted) -> float:
         """The time limit for the kind asked for, in seconds, from the settings as they are now."""
-        settings = self.config.section("music")
         if wanted.kind == "album":
-            return float(settings.get("album_download_minutes", ALBUM_MINUTES)) * 60
-        return float(settings.get("song_download_minutes", SONG_MINUTES)) * 60
+            return float(self.config.section("music").get("album_download_minutes", ALBUM_MINUTES)) * 60
+        return song_limit(self.config)
 
     @staticmethod
     def _find(library: NavidromeLibrary, wanted: Wanted) -> List[Dict]:
