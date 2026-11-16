@@ -294,7 +294,7 @@ def said_events(match: Match) -> List[str]:
     Returns:
         One sentence for each event, in the order they happened - e.g. "45': a penalty for England, scored
         by Harry Kane. Spain 0, England 1." - with the score after it for a goal, a penalty scored or an
-        own goal, worked out by counting them in order from nothing each. Where the last of those scores
+        own goal, counted in order from 0, 0. Where the last of those scores
         isn't the match's own, or the match has no score, none is said, so that nothing false is: a list
         which is short of a goal, or has one too many, can't say what the score was along the way. Empty
         for a match which hasn't started, which has nothing to say, and for one with no events.
@@ -319,12 +319,6 @@ def said_events(match: Match) -> List[str]:
     return [sentence + score for sentence, score in zip(sentences, scores)]
 
 
-def _surname(player: str) -> str:
-    """A player's name for a round-up, without the first of his names where he has more than one: "Kane" for "Harry Kane"."""
-    words = player.split()
-    return " ".join(words[1:]) if len(words) > 1 else player
-
-
 def _goals_and_cards(match: Match) -> str:
     """
     Says a match's goals and red cards in a few words, for a round-up where each match is a line.
@@ -333,10 +327,12 @@ def _goals_and_cards(match: Match) -> str:
         match: The match.
 
     Returns:
-        e.g. "Goals: Kane 45' (pen), Konsa 53', White 57' for England; Oyarzabal 65' (pen), Williams 75' for Spain.
-        Red card: Anderson (England) 63'." The sides come in the order of their first goal, each goal a surname
-        and a minute, "(pen)" for a penalty and "(og)" for an own goal, which is listed under the side it counts for.
-        With no player named, only the minute is said. A penalty missed is no goal and isn't said. "" for a
+        e.g. "Goals: Harry Kane 45' (pen), Ezri Konsa 53', Ben White 57' for England; Mikel Oyarzabal 65' (pen),
+        Nico Williams 75' for Spain. Red card: Elliot Anderson (England) 63'." The sides come in the order of
+        their first goal, each goal a name and a minute, "(pen)" for a penalty and "(og)" for an own goal, which
+        is listed under the side it counts for. Names are as the source gives them, as no rule finds a surname
+        without a list ("Vinícius Júnior", "Son Heung-min"): Claude, which says the answer, shortens them as
+        people do. With no player named, only the minute is said. A penalty missed is no goal and isn't said. "" for a
         match which hasn't started, and for one with neither a goal nor a red card.
     """
     if not _has_started(match):
@@ -345,12 +341,12 @@ def _goals_and_cards(match: Match) -> str:
     cards: List[str] = []
     for event in match.events:
         if event.kind in _SCORING:
-            scorer = f"{_surname(event.player)} {event.minute}" if event.player else event.minute
+            scorer = f"{event.player} {event.minute}" if event.player else event.minute
             mark = {"penalty": " (pen)", "own_goal": " (og)"}.get(event.kind, "")
             goals.setdefault(event.side, []).append(scorer + mark)
         elif event.kind == "red_card":
             team = _side_name(match, event.side)
-            cards.append(f"{_surname(event.player)} ({team}) {event.minute}" if event.player else f"{team} {event.minute}")
+            cards.append(f"{event.player} ({team}) {event.minute}" if event.player else f"{team} {event.minute}")
     parts = []
     if goals:
         parts.append("Goals: " + "; ".join(f"{', '.join(scored)} for {_side_name(match, side)}"
@@ -829,9 +825,9 @@ def said_match_report(answer: Dict, now: datetime, on_a_day: bool = False) -> st
 
     Returns:
         Lines: the match, as said_match says it; what happened in it (see said_events); each of ESPN's notes
-        ("Note at 41': Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area."); and LAG
-        as the last line if the match is in play. With no match, only that none is listed for the team - on
-        that day, if one was asked about.
+        ("Note at 41': Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area."), as with
+        the events once the match has started and not before; and LAG as the last line if the match is in
+        play. With no match, only that none is listed for the team - on that day, if one was asked about.
 
     Raises:
         KeyError: If a key is missing from the answer, the team, the match, an event or a note.
@@ -847,7 +843,8 @@ def said_match_report(answer: Dict, now: datetime, on_a_day: bool = False) -> st
     if found is None:
         return f"No match is listed for {name}{' on that day' if on_a_day else ''}."
     match = Match.from_home(found)
-    return "\n".join(_with_lag([said_match(match, now)] + said_events(match) + notes, [match]))
+    # A match which hasn't started has nothing to note, as it has nothing which happened in it.
+    return "\n".join(_with_lag([said_match(match, now)] + said_events(match) + (notes if _has_started(match) else []), [match]))
 
 
 def _asked_days(given) -> int:

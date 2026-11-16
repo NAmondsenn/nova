@@ -394,9 +394,13 @@ def test_each_kind_of_event_the_contract_has_is_read(kind):
     assert match.events == (MatchEvent("12'", kind, "home", "Harry Kane"),)
 
 
-@pytest.mark.parametrize("events", [None, []])
-def test_a_match_with_no_events_has_none(events):
+@pytest.mark.parametrize("events", [None, []], ids=["null", "empty"])
+def test_a_match_given_no_events_has_none(events):
     assert Match.from_home(_found_match(events=events)).events == ()
+
+
+def test_a_match_with_no_events_key_has_none():
+    assert "events" not in _found_match()
     assert Match.from_home(_found_match()).events == ()
 
 

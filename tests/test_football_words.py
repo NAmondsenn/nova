@@ -574,8 +574,8 @@ def test_a_round_up_says_each_started_matchs_goals_after_it_on_the_same_line(lon
     answer = _competition_answer([_found_match(**SPAIN_ENGLAND)], days=["20261115"], competition=NATIONS_LEAGUE)
     assert said_competition(answer, AT).split("\n") == [
         "Spain 2, England 3, UEFA Nations League, on Sunday the 15th of November. England won. "
-        "Goals: Kane 45' (pen), Konsa 53', White 57' for England; Oyarzabal 65' (pen), Williams 75' for Spain. "
-        "Red card: Anderson (England) 63'.",
+        "Goals: Harry Kane 45' (pen), Ezri Konsa 53', Ben White 57' for England; "
+        "Mikel Oyarzabal 65' (pen), Nico Williams 75' for Spain. Red card: Elliot Anderson (England) 63'.",
         "Days with matches: Sunday the 15th of November.",
     ]
 
@@ -584,7 +584,7 @@ def test_a_round_up_lists_an_own_goal_under_the_side_it_counts_for(london):
     answer = _competition_answer([_found_match(**OXFORD_SOUTH_SHIELDS)], days=["20261031"])
     assert said_competition(answer, _after_the_match()).split("\n")[0] == (
         "Oxford City 1, South Shields 3, National League North, on Saturday the 31st of October. South Shields won. "
-        "Goals: Sykes 32' (og) for Oxford City; Smith 50', Jones 61', Brown 78' (pen) for South Shields.")
+        "Goals: C. Sykes 32' (og) for Oxford City; J. Smith 50', T. Jones 61', D. Brown 78' (pen) for South Shields.")
 
 
 def test_a_round_up_says_what_there_is_to_say_of_a_match_and_nothing_more(london):
@@ -595,7 +595,7 @@ def test_a_round_up_says_what_there_is_to_say_of_a_match_and_nothing_more(london
         {"minute": "80'", "kind": "penalty_missed", "side": "home", "player": "Mikel Oyarzabal"}]}
     # Red cards are said as they are, a penalty missed is not a goal, and with no goals there is no "Goals".
     assert said_competition(_competition_answer([_found_match(**no_goals)]), AT).split("\n")[0].endswith(
-        "It was a draw. Red cards: Anderson (England) 63', Rodri (Spain) 70'.")
+        "It was a draw. Red cards: Elliot Anderson (England) 63', Rodri (Spain) 70'.")
     # A match with no events is said as it was before this round.
     plain = _found_match(**{**SPAIN_ENGLAND, "events": []})
     assert said_competition(_competition_answer([plain]), AT).split("\n")[0] == said_match(_m(**plain), AT)
@@ -614,15 +614,16 @@ def test_a_round_up_with_no_player_says_the_minute_alone(london):
         "It was a draw. Goals: 10' for England; 20' (pen) for Spain. Red card: England 30'.")
 
 
-@pytest.mark.parametrize("name, said", [
-    ("Harry Kane", "Kane"), ("C. Sykes", "Sykes"), ("Rodri", "Rodri"), ("Virgil van Dijk", "van Dijk"),
-    ("Trent Alexander-Arnold", "Alexander-Arnold"), ("Alexis Mac Allister", "Mac Allister"),
+@pytest.mark.parametrize("name", [
+    "Harry Kane", "C. Sykes", "Rodri", "Virgil van Dijk", "Vinícius Júnior", "Son Heung-min", "João Pedro", "Pedro Neto",
 ])
-def test_a_scorer_is_said_by_the_surname_in_a_round_up(london, name, said):
+def test_a_scorer_is_said_as_the_source_gives_the_name_in_a_round_up(london, name):
+    # No rule finds a surname without a list of names, and "Vinícius Júnior" or "Son Heung-min" would be misnamed.
     match = {**SPAIN_ENGLAND, "home_score": 0, "away_score": 1, "events": [
-        {"minute": "10'", "kind": "goal", "side": "away", "player": name}]}
+        {"minute": "10'", "kind": "goal", "side": "away", "player": name},
+        {"minute": "20'", "kind": "red_card", "side": "home", "player": name}]}
     assert said_competition(_competition_answer([_found_match(**match)]), _after_the_match()).split("\n")[0].endswith(
-        f"Goals: {said} 10' for England.")
+        f"Goals: {name} 10' for England. Red card: {name} (Spain) 20'.")
 
 
 def test_a_round_up_with_events(london):
@@ -642,7 +643,7 @@ def test_a_round_up_with_events(london):
                 {"minute": "12'", "kind": "goal", "side": "home", "player": "Tom Hart"},
                 {"minute": "40'", "kind": "penalty", "side": "away", "player": "Sam Lowe"},
                 {"minute": "77'", "kind": "goal", "side": "home", "player": "Tom Hart"}])
-            goals = f" Goals: Hart 12', Hart 77' for {home}; Lowe 40' (pen) for {away}."
+            goals = f" Goals: Tom Hart 12', Tom Hart 77' for {home}; Sam Lowe 40' (pen) for {away}."
         elif place % 3 == 1:
             match.update(home_score=0, away_score=0, events=[])
             goals = ""
@@ -650,7 +651,7 @@ def test_a_round_up_with_events(london):
             match.update(home_score=1, away_score=0, winner="home", events=[
                 {"minute": "5'", "kind": "goal", "side": "home", "player": "Joe Reed"},
                 {"minute": "88'", "kind": "red_card", "side": "away", "player": "Max Dunn"}])
-            goals = f" Goals: Reed 5' for {home}. Red card: Dunn ({away}) 88'."
+            goals = f" Goals: Joe Reed 5' for {home}. Red card: Max Dunn ({away}) 88'."
         found.append(match)
         expected.append(said_match(_m(**match), AT) + goals)
     lines = said_competition(_competition_answer(found, days=["20261124"]), AT).split("\n")
@@ -666,7 +667,8 @@ def test_a_round_up_with_a_match_in_play_has_its_goals_so_far_and_the_warning_la
     lines = said_competition(_competition_answer([_found_match(**live)], days=["20261115"]), _after_the_match()).split("\n")
     assert lines == [
         "Spain 1, England 3, UEFA Nations League, in play, second half, 66'. "
-        "Goals: Kane 45' (pen), Konsa 53', White 57' for England; Oyarzabal 65' (pen) for Spain. Red card: Anderson (England) 63'.",
+        "Goals: Harry Kane 45' (pen), Ezri Konsa 53', Ben White 57' for England; Mikel Oyarzabal 65' (pen) for Spain. "
+        "Red card: Elliot Anderson (England) 63'.",
         "Days with matches: Sunday the 15th of November.",
         LAG,
     ]
@@ -915,6 +917,19 @@ def test_a_match_report_with_no_notes_or_events_is_the_match_alone(london):
     coming = _found_match(**{**SPAIN_ENGLAND, "state": "pre", "phase": None, "clock": "", "home_score": None,
                              "away_score": None, "winner": None, "kickoff": "2026-11-24T19:45:00+00:00"})
     assert said_match_report(_match_answer(match=coming), AT) == said_match(_m(**coming), AT)
+
+
+def test_a_match_report_of_a_match_which_has_not_started_says_no_notes(london):
+    AT = _after_the_match()
+    coming = _found_match(**{**SPAIN_ENGLAND, "state": "pre", "phase": None, "clock": "", "home_score": None,
+                             "away_score": None, "winner": None, "kickoff": "2026-11-24T19:45:00+00:00"})
+    answer = _match_answer(match=coming, notes=[PENALTY_CONCEDED])
+    # As the events are not said, whatever it is given, nor are the notes: only the match is.
+    assert said_match_report(answer, AT) == said_match(_m(**coming), AT)
+    # Once it has started, they are.
+    started = _found_match(**{**SPAIN_ENGLAND, "events": []})
+    assert said_match_report({**answer, "match": started}, AT).split("\n")[-1] == (
+        "Note at 41': Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area.")
 
 
 def test_a_match_report_of_a_match_in_play_ends_with_the_warning(london):
