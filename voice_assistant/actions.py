@@ -636,7 +636,7 @@ class ActionExecutor:
             f" Most songs: {named[0]}." if named else "")
         return {"success": True,
                 "message": (f"{len(albums)} album{'' if len(albums) == 1 else 's'} and "
-                            f"{total} song{'' if total == 1 else 's'} {'has' if total == 1 else 'have'} come "
+                            f"{total} song{'' if total == 1 else 's'} have come "
                             f"into your library in the last {span}.{who}")}
 
     @tool(

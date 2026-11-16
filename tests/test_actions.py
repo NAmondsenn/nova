@@ -1881,7 +1881,8 @@ def test_whats_new_counts_and_names(make_executor, monkeypatch):
 
 def test_whats_new_says_one_album_in_the_singular(make_executor, monkeypatch):
     result = _whats_new(make_executor, FakeNewestLibrary([album("Band A", 1)]), days=1, monkeypatch=monkeypatch)
-    assert result.say == "1 album and 1 song has come into your library in the last day. Most songs: Band A."
+    # Two things counted together have come, however few of each.
+    assert result.say == "1 album and 1 song have come into your library in the last day. Most songs: Band A."
 
 
 def test_whats_new_none(make_executor, monkeypatch):
