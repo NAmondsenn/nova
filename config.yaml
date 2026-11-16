@@ -329,9 +329,11 @@ new_music:
   follow_top_artists: 25
   # The playlist "find me something new" plays, which Nova makes in Navidrome and replaces each
   # morning from 6 with the songs that came into the library in the last `days` days, newest
-  # first, up to 500 - see voice_assistant/new_music.py. Nova's own: it only ever changes one of
-  # this name belonging to the Navidrome user it signs in as, and makes it public so your own
-  # user sees it. A new name is made the next morning; the old one is left for you to delete.
+  # first, up to 500 - see voice_assistant/new_music.py. Nova's own: it only ever changes the playlist
+  # it made itself, found by the id it noted when it made it - never one you made, even of this name -
+  # and makes it public so your own user sees it. If you delete it, Nova makes it again; a new name is
+  # made the next morning, and the old one is left for you to delete. The name needs a letter from A
+  # to Z or a digit in it.
   playlist: "New Music"
   # How many days back the playlist reaches, from 1 to 60. Used at the next morning's making.
   days: 14

@@ -254,7 +254,7 @@ def brain(tmp_path, monkeypatch, make_config):
     return SimpleNamespace(config=config, clock=Clock(config=config, start=False), memory=None,
                            routines=Routines(path=str(tmp_path / "routines.json")), ntfy=None, weather=None,
                            batteries=None, lists=None, pc=None, registry=None, calendar=None, media=None,
-                           downloads=None, football=None, listening=None, wrapped_store=None, usage=None,
+                           downloads=None, football=None, listening=None, wrapped_store=None, usage=None, new_music_playlist=None,
                            tts=FakePiper(), stt=FakeSpeechToText(), sounds_folder=Path(paths.SOUNDS_DIR))
 
 

@@ -550,6 +550,25 @@ def test_the_new_music_playlist_nova_makes_comes_before_anothers_of_the_name(mak
     assert [asked["id"] for endpoint, asked in player._session.requests if endpoint == "getPlaylist"] == ["p2"]
 
 
+def test_the_new_music_playlist_nova_made_plays_by_its_id_and_never_another_of_the_name(make_player):
+    # His own of the same name, the same owner, is listed first: only the recorded id plays.
+    answers = {
+        "getPlaylists": {"playlists": {"playlist": [{"id": "p1", "name": "New Music", "owner": "Nova"},
+                                                    {"id": "p2", "name": "new music!", "owner": "Nova"}]}},
+        "getPlaylist": lambda params: {"playlist": {"entry": SONGS if params["id"] == "p2" else []}},
+    }
+    player = make_player(answers)
+    assert player.play_playlist("New Music", exact=True, playlist_id="p2") == {"success": True,
+                                                                              "message": "Playing new music!"}
+    assert [asked["id"] for endpoint, asked in player._session.requests if endpoint == "getPlaylist"] == ["p2"]
+
+    # Gone, it is missing, and the one of the same name isn't played in its place.
+    gone = make_player(answers)
+    result = gone.play_playlist("New Music", exact=True, playlist_id="p9")
+    assert result["success"] is False and result["missing"] is True and gone._queue == []
+    assert not [1 for endpoint, _ in gone._session.requests if endpoint == "getPlaylist"]
+
+
 def test_newest_albums_since(make_library):
     # Newest first, as Navidrome lists them, with the fractional seconds and Z it writes - and one a
     # little before the cut off, which isn't kept. Offsets are the same moment wherever the clock is.

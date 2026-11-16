@@ -53,6 +53,11 @@ class FakeNavidrome:
         # Each request as (endpoint, params without the sign-in).
         self.asked = []
         self.down = False
+        # Whether createPlaylist leaves out the id of what it made, as an old server may, and whether
+        # getPlaylists then leaves the new playlists out too, so they can't be found.
+        self.no_id = False
+        self.hide_new = False
+        self.hidden = set()
         self._next = 0
 
     def album(self, n: int, arrived: datetime, songs: int = 3):
@@ -89,7 +94,8 @@ class FakeNavidrome:
         return {"playlists": {"playlist": [
             {"id": pid, "name": found["name"], "owner": found["owner"], "public": found["public"],
              "songCount": len(found["songs"])}
-            for pid, found in self.playlists.items() if found["owner"] == user or found["public"]]}}
+            for pid, found in self.playlists.items() if (found["owner"] == user or found["public"])
+            and pid not in self.hidden]}}
 
     def _createPlaylist(self, params, user):
         songs = params.get("songId") or []
@@ -100,6 +106,10 @@ class FakeNavidrome:
             self.playlists[pid]["songs"] = songs
         else:
             pid = self.playlist(params["name"], owner=user, songs=songs)
+            if self.hide_new:
+                self.hidden.add(pid)
+            if self.no_id:
+                return {}
         return {"playlist": {"id": pid, "name": self.playlists[pid]["name"]}}
 
     def _updatePlaylist(self, params, user):
@@ -109,6 +119,10 @@ class FakeNavidrome:
         if "public" in params:
             found["public"] = params["public"] == "true"
         return {}
+
+    def created(self):
+        """The playlists made, by name, as asked of createPlaylist."""
+        return [params["name"] for endpoint, params in self.asked if endpoint == "createPlaylist" and "name" in params]
 
     def writes(self):
         return [(endpoint, params) for endpoint, params in self.asked if endpoint in ("createPlaylist", "updatePlaylist")]
@@ -139,6 +153,10 @@ class Setup:
     def record(self):
         return json.loads(self.path.read_text()) if self.path.exists() else None
 
+    def made(self, pid, name="new music", day="2026-11-15"):
+        """The record of a playlist Nova made on an earlier day: its id, and the normalised name it was made under."""
+        self.path.write_text(json.dumps({"day": day, "id": pid, "name": name}))
+
 
 @pytest.fixture
 def navidrome(monkeypatch):
@@ -164,15 +182,17 @@ def test_the_playlist_is_made_newest_first_and_public(setup):
     # Newest album first, each album's songs in its own order; not the old album, nor the older song of the newer one.
     assert made["songs"] == ["al2-s1", "al2-s2", "al2-s3", "al4-s2", "al1-s1", "al1-s2"]
     assert made["owner"] == "nova" and made["public"] is True
-    assert setup.record() == {"day": "2026-11-16"}
+    # Its id is kept, with the name it was made under, so the next morning replaces this one and no other.
+    assert setup.record() == {"day": "2026-11-16", "id": "pl1", "name": "new music"}
 
 
-def test_the_playlist_is_replaced_and_no_other_is_touched(setup):
-    # Nova's own from before, under other capitals; his own of the same name, which Nova can see as it's public;
-    # and another of Nova's.
+def test_the_playlist_nova_made_is_replaced_and_no_other_is_touched(setup):
+    # Nova's own from before, under other capitals, which the record has the id of; his own of the same name,
+    # another user's, which Nova can see as it's public; and another of Nova's.
     ours = setup.navidrome.playlist("new music!", songs=["gone-1", "gone-2"], public=True)
     his = setup.navidrome.playlist("New Music", owner="someone", songs=["his-1"], public=True)
     other = setup.navidrome.playlist("Gym", songs=["gym-1"])
+    setup.made(ours)
     before = copy.deepcopy(setup.navidrome.playlists)
     setup.navidrome.album(1, MORNING - timedelta(days=2), songs=2)
     setup.watcher.look()
@@ -183,10 +203,146 @@ def test_the_playlist_is_replaced_and_no_other_is_touched(setup):
     assert setup.navidrome.playlists[his] == before[his] and setup.navidrome.playlists[other] == before[other]
     assert len(setup.navidrome.playlists) == 3
     assert {params["playlistId"] for _, params in setup.navidrome.writes()} == {ours}
+    assert setup.navidrome.created() == []
+    assert setup.record() == {"day": "2026-11-16", "id": ours, "name": "new music"}
+
+
+def test_his_own_playlist_of_the_name_is_never_written_though_he_is_the_same_user(setup):
+    # Nova signs in as the user who owns his playlists, so a playlist of the name he made himself is owned by
+    # the same user. With no record of an id, it is no proof the playlist is Nova's: a new one is made.
+    his = setup.navidrome.playlist("New Music", songs=["his-1", "his-2"], public=True)
+    setup.navidrome.album(1, MORNING - timedelta(days=2), songs=2)
+    setup.watcher.look()
+
+    assert setup.navidrome.playlists[his]["songs"] == ["his-1", "his-2"]
+    assert len(setup.navidrome.playlists) == 2
+    [new] = [pid for pid in setup.navidrome.playlists if pid != his]
+    assert setup.navidrome.playlists[new]["songs"] == ["al1-s1", "al1-s2"] and setup.navidrome.playlists[new]["public"]
+    assert {params["playlistId"] for _, params in setup.navidrome.writes() if "playlistId" in params} == {new}
+    assert setup.record() == {"day": "2026-11-16", "id": new, "name": "new music"}
+
+    # And the next morning too: the recorded one is replaced, his still left, and no third is made.
+    setup.navidrome.album(2, MORNING + timedelta(hours=20), songs=1)
+    setup.at = MORNING + timedelta(days=1)
+    setup.watcher.look()
+    assert setup.navidrome.playlists[his]["songs"] == ["his-1", "his-2"]
+    assert len(setup.navidrome.playlists) == 2 and setup.navidrome.playlists[new]["songs"][0] == "al2-s1"
+
+
+def test_a_record_from_before_ids_were_kept_makes_a_new_playlist(setup):
+    # The old record held only the day: the playlist of the name, though Nova made it, isn't picked by name.
+    old = setup.navidrome.playlist("New Music", songs=["old-1"], public=True)
+    setup.path.write_text(json.dumps({"day": "2026-11-15"}))
+    setup.navidrome.album(1, MORNING - timedelta(days=2), songs=1)
+    setup.watcher.look()
+    assert setup.navidrome.playlists[old]["songs"] == ["old-1"] and len(setup.navidrome.playlists) == 2
+
+
+def test_a_playlist_he_deleted_is_made_again_and_the_new_id_kept(setup):
+    gone = setup.navidrome.playlist("New Music", songs=["x"], public=True)
+    setup.made(gone)
+    del setup.navidrome.playlists[gone]
+    setup.navidrome.album(1, MORNING - timedelta(days=2), songs=2)
+    setup.watcher.look()
+
+    [(new, made)] = setup.navidrome.playlists.items()
+    assert new != gone and made["name"] == "New Music" and made["songs"] == ["al1-s1", "al1-s2"] and made["public"]
+    assert setup.record() == {"day": "2026-11-16", "id": new, "name": "new music"}
+    assert setup.navidrome.created() == ["New Music"]
+    assert setup.watcher.playlist_id("New Music") == new
+
+
+def test_a_renamed_setting_makes_a_new_playlist_and_leaves_the_old(setup):
+    old = setup.navidrome.playlist("New Music", songs=["old-1"], public=True)
+    setup.made(old)
+    setup.settings["playlist"] = "Fresh In"
+    setup.navidrome.album(1, MORNING - timedelta(days=2), songs=1)
+    setup.watcher.look()
+
+    assert setup.navidrome.playlists[old]["songs"] == ["old-1"]
+    [new] = [pid for pid in setup.navidrome.playlists if pid != old]
+    assert setup.navidrome.playlists[new]["name"] == "Fresh In" and setup.navidrome.playlists[new]["songs"] == ["al1-s1"]
+    assert setup.record() == {"day": "2026-11-16", "id": new, "name": "fresh in"}
+
+    # The next morning replaces the new one, and makes no other.
+    setup.navidrome.album(2, MORNING + timedelta(hours=20), songs=1)
+    setup.at = MORNING + timedelta(days=1)
+    setup.watcher.look()
+    assert len(setup.navidrome.playlists) == 2 and setup.navidrome.playlists[old]["songs"] == ["old-1"]
+    assert setup.navidrome.playlists[new]["songs"] == ["al2-s1", "al1-s1"]
+
+
+def test_a_server_which_gives_no_id_is_asked_for_what_it_made_among_the_new(setup):
+    # His own of the name is there before, and isn't taken for the new one.
+    his = setup.navidrome.playlist("New Music", songs=["his-1"], public=True)
+    setup.navidrome.no_id = True
+    setup.navidrome.album(1, MORNING - timedelta(days=2), songs=1)
+    setup.watcher.look()
+
+    assert setup.navidrome.created() == ["New Music"]
+    assert setup.navidrome.playlists[his]["songs"] == ["his-1"]
+    [new] = [pid for pid in setup.navidrome.playlists if pid != his]
+    assert setup.navidrome.playlists[new]["songs"] == ["al1-s1"]
+    assert setup.record() == {"day": "2026-11-16", "id": new, "name": "new music"}
+
+
+def test_a_server_which_gives_no_id_and_hides_the_new_one_makes_at_most_one_per_look(setup, caplog):
+    setup.navidrome.no_id = True
+    setup.navidrome.hide_new = True
+    setup.navidrome.album(1, MORNING - timedelta(days=2), songs=1)
+    with caplog.at_level("INFO", logger="voice_assistant.new_music"):
+        setup.watcher.look()
+    # One made, none filled or noted, the day not recorded so it is tried again at the next look.
+    assert setup.navidrome.created() == ["New Music"] and len(setup.navidrome.playlists) == 1
+    assert setup.navidrome.writes() == [("createPlaylist", {"name": "New Music"})]
+    assert setup.record() is None
+    assert "NavidromeError" in caplog.text
+
+
+def test_a_failure_part_way_fills_the_same_playlist_at_the_next_look(setup):
+    for n in range(1, 21):
+        setup.navidrome.album(n, MORNING - timedelta(minutes=n), songs=10)
+    updates = setup.navidrome._updatePlaylist
+
+    def fails(params, user):
+        raise requests.ConnectionError("down")
+    setup.navidrome._updatePlaylist = fails
+    setup.watcher.look()
+    [(pid, _)] = setup.navidrome.playlists.items()
+    # Its id is kept, though the day isn't, so the next look fills it rather than making another.
+    assert setup.record() == {"id": pid, "name": "new music"}
+
+    setup.navidrome._updatePlaylist = updates
+    setup.at = MORNING.replace(hour=7)
+    setup.watcher.look()
+    assert list(setup.navidrome.playlists) == [pid] and len(setup.navidrome.playlists[pid]["songs"]) == 200
+    assert setup.navidrome.created() == ["New Music"]
+
+
+@pytest.mark.parametrize("name", ["!!!", "\U0001F3B5\U0001F3B6", " - ", "\u30cb\u30e5\u30fc"])
+def test_a_name_with_no_letters_or_digits_is_skipped_with_one_line(setup, caplog, name):
+    setup.navidrome.album(1, MORNING - timedelta(days=1), songs=1)
+    setup.settings["playlist"] = name
+    with caplog.at_level("INFO", logger="voice_assistant.new_music"):
+        setup.watcher.look()
+    assert setup.navidrome.asked == [] and setup.record() is None
+    assert [record.getMessage() for record in caplog.records] == [
+        "The new-music playlist's name has no letters or digits, so it isn't made"]
+
+
+def test_the_recorded_id_is_only_for_the_name_it_was_made_under(setup):
+    setup.made("pl9")
+    assert setup.watcher.playlist_id("New Music") == "pl9" and setup.watcher.playlist_id(" new  MUSIC! ") == "pl9"
+    assert setup.watcher.playlist_id("Fresh In") is None and setup.watcher.playlist_id("") is None
+    setup.path.write_text(json.dumps({"day": "2026-11-15"}))
+    assert setup.watcher.playlist_id("New Music") is None
+    setup.path.write_text("not json")
+    assert setup.watcher.playlist_id("New Music") is None
 
 
 def test_a_playlist_made_private_since_is_made_public_again(setup):
     ours = setup.navidrome.playlist("New Music", songs=["gone-1"])
+    setup.made(ours)
     setup.navidrome.album(1, MORNING - timedelta(days=2), songs=1)
     setup.watcher.look()
     assert setup.navidrome.playlists[ours]["public"] is True
@@ -194,14 +350,15 @@ def test_a_playlist_made_private_since_is_made_public_again(setup):
 
 def test_nothing_new_leaves_the_playlist_as_it_was(setup, caplog):
     ours = setup.navidrome.playlist("New Music", songs=["kept-1", "kept-2"], public=True)
+    setup.made(ours)
     setup.navidrome.album(1, MORNING - timedelta(days=20), songs=2)
     with caplog.at_level("INFO", logger="voice_assistant.new_music"):
         setup.watcher.look()
     assert setup.navidrome.playlists[ours]["songs"] == ["kept-1", "kept-2"]
     assert setup.navidrome.writes() == []
     assert "Nothing new in the last 14 days" in caplog.text
-    # Done for the day all the same.
-    assert setup.record() == {"day": "2026-11-16"}
+    # Done for the day all the same, with the playlist it holds still noted.
+    assert setup.record() == {"day": "2026-11-16", "id": ours, "name": "new music"}
 
 
 def test_navidrome_down_is_tried_again_at_the_next_look(setup, caplog):
@@ -217,7 +374,7 @@ def test_navidrome_down_is_tried_again_at_the_next_look(setup, caplog):
     setup.at = MORNING.replace(hour=7)
     setup.watcher.look()
     assert setup.named("New Music")[0]["songs"] == ["al1-s1", "al1-s2"]
-    assert setup.record() == {"day": "2026-11-16"}
+    assert setup.record() == {"day": "2026-11-16", "id": "pl1", "name": "new music"}
 
 
 def test_once_a_day_from_six(setup):
@@ -244,7 +401,8 @@ def test_once_a_day_from_six(setup):
     setup.at = MORNING + timedelta(days=1)
     setup.watcher.look()
     assert setup.named("New Music")[0]["songs"] == ["al2-s1", "al1-s1"]
-    assert setup.record() == {"day": "2026-11-17"}
+    assert setup.record() == {"day": "2026-11-17", "id": "pl1", "name": "new music"}
+    assert setup.navidrome.created() == ["New Music"]
 
 
 def test_six_is_local_time_in_summer_too(setup):
@@ -256,7 +414,7 @@ def test_six_is_local_time_in_summer_too(setup):
     assert setup.record() is None
     setup.at = july
     setup.watcher.look()
-    assert setup.record() == {"day": "2027-07-05"}
+    assert setup.record()["day"] == "2027-07-05"
 
 
 def test_the_newest_500_songs_at_most_are_given_100_at_a_time(setup):
@@ -268,7 +426,7 @@ def test_the_newest_500_songs_at_most_are_given_100_at_a_time(setup):
     assert made["songs"][:2] == ["al1-s1", "al1-s2"] and made["songs"][-1] == "al50-s10"
     # Each request lists 100 songs at most, so its address stays short.
     writes = setup.navidrome.writes()
-    assert [len(params.get("songId") or params.get("songIdToAdd") or []) for _, params in writes] == [100] * 5 + [0]
+    assert [len(params.get("songId") or params.get("songIdToAdd") or []) for _, params in writes] == [0] + [100] * 5 + [0]
     assert writes[-1][1] == {"playlistId": writes[1][1]["playlistId"], "public": "true"}
 
 

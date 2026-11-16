@@ -284,7 +284,7 @@ class ActionExecutor:
 
     def __init__(self, music=None, clock=None, volume=None, weather=None, home=None, memory=None, ntfy=None,
                  satellite: Optional[str] = None, batteries=None, lists=None, pc=None, calendar=None,
-                 downloads=None, football=None, listening=None, wrapped=None, config=None):
+                 downloads=None, football=None, listening=None, wrapped=None, config=None, new_music=None):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -315,6 +315,8 @@ class ActionExecutor:
             wrapped: WrappedStore, the saved Wrappeds, or None if there isn't one.
             config: Configs loaded from config.yaml, for the settings a tool reads as they are
                 at each call - new_music.playlist.
+            new_music: NewMusicPlaylist, which knows the id of the playlist Nova made, or None
+                if there isn't one - find_new_music plays that one by its id when it has it.
         """
         self.music = music
         self.clock = clock
@@ -333,6 +335,7 @@ class ActionExecutor:
         self.listening = listening
         self.wrapped = wrapped
         self.config = config
+        self.new_music = new_music
         # What was last asked, and what the assistant said - or the last alert, and
         # all of it - for "send that to my phone". Kept up to date by the Conversation.
         self.last_answer: Optional[Tuple[str, str]] = None
@@ -585,11 +588,16 @@ class ActionExecutor:
         playlist = ((self.config.section("new_music") if self.config else {}).get("playlist") or "").strip()
         if not playlist:
             return {"success": False, "message": NO_NEW_MUSIC_PLAYLIST}
-        # Only Navidrome has it: Nova makes the playlist there, and Spotify's own aren't asked for. Only
-        # one of exactly this name plays, never a near miss, which would be taken for the new music.
+        # Only Navidrome has it: Nova makes the playlist there, and Spotify's own aren't asked for. The one
+        # Nova made plays, by the id it recorded, and none of his own of the same name; only before it has
+        # made one under this name is it asked for by exact name, never a near miss.
         if getattr(self.music, "name", None) != "Navidrome":
             return {"success": False, "message": NEW_MUSIC_NOT_ON_SPOTIFY}
-        reply = self._music_offline() or self.music.play_playlist(playlist, exact=True)
+        playlist_id = self.new_music.playlist_id(playlist) if self.new_music else None
+        if playlist_id:
+            reply = self._music_offline() or self.music.play_playlist(playlist, exact=True, playlist_id=playlist_id)
+        else:
+            reply = self._music_offline() or self.music.play_playlist(playlist, exact=True)
         # Not there yet, which isn't the same as Navidrome not answering - that says so itself.
         if reply.get("missing"):
             return {"success": False, "message": NEW_MUSIC_MISSING}

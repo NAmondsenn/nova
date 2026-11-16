@@ -1775,9 +1775,9 @@ class FakePlaylistPlayer:
         self.reply = reply
         self.played = []
 
-    def play_playlist(self, name, exact=False):
+    def play_playlist(self, name, exact=False, playlist_id=None):
         assert exact is True
-        self.played.append(name)
+        self.played.append(name if playlist_id is None else (name, playlist_id))
         if self.reply is not None:
             return dict(self.reply)
         if name in self.playlists:
@@ -1798,6 +1798,37 @@ def test_find_new_music_plays_setting(make_executor, make_config):
     config.apply({("new_music", "playlist"): "Fresh Finds"})
     assert executor.execute(FIND_NEW).say == "Playing Fresh Finds"
     assert player.played == ["Discovery Shuffle", "Fresh Finds"]
+
+
+class FakeNewMusic:
+    """Stands in for NewMusicPlaylist's record of the playlist Nova made, by the name it was made under."""
+
+    def __init__(self, made):
+        self.made = made
+
+    def playlist_id(self, name):
+        return self.made.get(name)
+
+
+def test_find_new_music_plays_the_playlist_nova_made_by_its_id(make_executor, make_config):
+    config = make_config(new_music={"playlist": "New Music"})
+    player = FakePlaylistPlayer(["New Music"])
+    executor = make_executor(player, config=config, new_music=FakeNewMusic({"New Music": "pl7"}))
+    assert executor.execute(FIND_NEW).ok is True
+    # Under another name there is no record yet, so the exact name is asked for, as before.
+    config.apply({("new_music", "playlist"): "Fresh Finds"})
+    executor.execute(FIND_NEW)
+    assert player.played == [("New Music", "pl7"), "Fresh Finds"]
+
+
+def test_find_new_music_with_the_recorded_playlist_gone_says_it_isnt_made(make_executor, make_config):
+    config = make_config(new_music={"playlist": "New Music"})
+    # The player says it is missing as Navidrome's does, and an own playlist of the name isn't looked for.
+    player = FakePlaylistPlayer(reply={"success": False, "missing": True, "message": "I couldn't find it."})
+    result = make_executor(player, config=config, new_music=FakeNewMusic({"New Music": "pl7"})).execute(FIND_NEW)
+    assert (result.ok, result.say) == (
+        False, "Your new-music playlist isn't made yet; Nova makes it each morning from what's arrived.")
+    assert player.played == [("New Music", "pl7")]
 
 
 def test_find_new_music_is_offered_with_the_music_and_not_without(make_executor, make_config):

@@ -488,33 +488,64 @@ class NavidromeLibrary:
                     return songs
         return songs
 
-    def own_playlist(self, name: str) -> Optional[Dict]:
+    def playlist_with_id(self, playlist_id: str) -> Optional[Dict]:
         """
-        The playlist of just this name, however it's cased or punctuated, which belongs to
-        the user Nova signs in as - never another user's, even one Navidrome would let an
-        admin change - or None if there isn't one.
+        The playlist of this id, if Navidrome still has it and it belongs to the user Nova
+        signs in as - never another user's, even one Navidrome would let an admin change -
+        or None. Nova only ever writes a playlist it recorded the id of when it made it
+        (see new_music.py), so this is asked by id and never by name.
 
         Raises:
             requests.RequestException: If Navidrome couldn't be reached.
             NavidromeError: If it answered with an error.
         """
-        wanted = normalise(name)
+        if not playlist_id:
+            return None
         playlists = self._call("getPlaylists").get("playlists", {}).get("playlist") or []
-        return next((playlist for playlist in playlists if wanted and normalise(playlist.get("name") or "") == wanted
+        return next((playlist for playlist in playlists if playlist.get("id") == playlist_id
                      and str(playlist.get("owner") or "").casefold() == self.username.casefold()), None)
 
-    def replace_playlist(self, name: str, song_ids: List[str]) -> bool:
+    def make_playlist(self, name: str) -> str:
         """
-        Makes the playlist of this name, Nova's own, hold just these songs, in this order:
-        made if there isn't one, its songs replaced if there is. Either way it's made
-        public, so whichever Navidrome user listens sees it. No other playlist is touched.
+        Makes a new, empty playlist of this name, always a new one whatever else is called
+        that, and gives its id for the caller to record before it's filled.
 
         Args:
             name: The playlist's name.
-            song_ids: The songs, at least one.
 
         Returns:
-            Whether the playlist was there already.
+            The new playlist's id.
+
+        Raises:
+            requests.RequestException: If Navidrome couldn't be reached.
+            NavidromeError: If it answered with an error, or didn't say which playlist it
+                made and it couldn't be told from those which were there before.
+        """
+        before = {playlist.get("id") for playlist in self._call("getPlaylists").get("playlists", {}).get(
+            "playlist") or []}
+        made = self._call("createPlaylist", name=name).get("playlist") or {}
+        if made.get("id"):
+            return made["id"]
+        # A server too old to say what it made: the one of this exact name which wasn't there before,
+        # the newest if more, and never a playlist which was.
+        wanted = normalise(name)
+        playlists = self._call("getPlaylists").get("playlists", {}).get("playlist") or []
+        new = [playlist for playlist in playlists if playlist.get("id") not in before and wanted
+               and normalise(playlist.get("name") or "") == wanted
+               and str(playlist.get("owner") or "").casefold() == self.username.casefold()]
+        if not new:
+            raise NavidromeError("the playlist made wasn't found")
+        # Newest by the time Navidrome gives it, else the last it lists.
+        return max(enumerate(new), key=lambda at: (str(at[1].get("created") or at[1].get("changed") or ""), at[0]))[1]["id"]
+
+    def replace_playlist(self, playlist_id: str, song_ids: List[str]):
+        """
+        Makes the playlist of this id, one Nova made, hold just these songs, in this order,
+        and public so whichever Navidrome user listens sees it. No other playlist is touched.
+
+        Args:
+            playlist_id: The playlist's id, as make_playlist gave it.
+            song_ids: The songs, at least one.
 
         Raises:
             requests.RequestException: If Navidrome couldn't be reached.
@@ -522,21 +553,11 @@ class NavidromeLibrary:
                 hold only some of the songs until it's made again.
         """
         first, rest = song_ids[:PLAYLIST_SONGS_AT_ONCE], song_ids[PLAYLIST_SONGS_AT_ONCE:]
-        playlist = self.own_playlist(name)
-        if playlist:
-            # Given a playlist's id, Navidrome's createPlaylist replaces its songs with those given.
-            self._call("createPlaylist", playlistId=playlist["id"], songId=first)
-            playlist_id = playlist["id"]
-        else:
-            made = self._call("createPlaylist", name=name, songId=first).get("playlist") or {}
-            # A server too old to say what it made is asked for it by name.
-            playlist_id = made.get("id") or (self.own_playlist(name) or {}).get("id")
-            if not playlist_id:
-                raise NavidromeError("the playlist made wasn't found")
+        # Given a playlist's id, Navidrome's createPlaylist replaces its songs with those given.
+        self._call("createPlaylist", playlistId=playlist_id, songId=first)
         for start in range(0, len(rest), PLAYLIST_SONGS_AT_ONCE):
             self._call("updatePlaylist", playlistId=playlist_id, songIdToAdd=rest[start:start + PLAYLIST_SONGS_AT_ONCE])
         self._call("updatePlaylist", playlistId=playlist_id, public="true")
-        return bool(playlist)
 
     def start_scan(self) -> bool:
         """
@@ -669,7 +690,8 @@ class NavidromePlayer(NavidromeLibrary):
             return [], ""
         return self._album_songs(album["id"]), f"{album.get('name')} by {album.get('artist')}"
 
-    def _find_playlist(self, name: str, exact: bool = False) -> Tuple[List[Dict], str]:
+    def _find_playlist(self, name: str, exact: bool = False, playlist_id: Optional[str] = None
+                       ) -> Tuple[List[Dict], str]:
         """
         One of the user's playlists, or their starred songs, shuffled.
 
@@ -678,12 +700,16 @@ class NavidromePlayer(NavidromeLibrary):
             exact: Whether only a playlist of just this name will do, however it's cased or
                 punctuated, and never the starred songs - for a name from the settings, which
                 is the playlist itself, not a spoken guess at one. Nova's own of the name comes
-                before another user's, as it's the one Nova makes (see new_music.py).
+                before another user's.
+            playlist_id: The id of the playlist Nova made, which is then the only one played,
+                whatever it's called now (see new_music.py); none if it's gone.
         """
-        if not exact and means_liked_songs(name):
+        if playlist_id is None and not exact and means_liked_songs(name):
             return self._liked_songs()
         playlists = self._call("getPlaylists").get("playlists", {}).get("playlist") or []
-        if exact:
+        if playlist_id is not None:
+            playlist = next((found for found in playlists if found.get("id") == playlist_id), None)
+        elif exact:
             wanted = normalise(name)
             named = [found for found in playlists if wanted and normalise(found.get("name", "")) == wanted]
             playlist = next((found for found in named if str(found.get("owner") or "").casefold()
@@ -759,7 +785,7 @@ class NavidromePlayer(NavidromeLibrary):
         logger.info(f"Playing {said} ({len(songs)} song{'s' if len(songs) != 1 else ''} queued)")
         return {"success": True, "message": f"Playing {said}"}
 
-    def play_playlist(self, name: str, exact: bool = False) -> Dict:
+    def play_playlist(self, name: str, exact: bool = False, playlist_id: Optional[str] = None) -> Dict:
         """
         Plays one of the user's playlists, shuffled.
 
@@ -767,9 +793,11 @@ class NavidromePlayer(NavidromeLibrary):
             name: The playlist name as the user said it.
             exact: Whether only a playlist of just this name is played - see _find_playlist -
                 rather than the closest to what was said.
+            playlist_id: Play only the playlist of this id - Nova's own New Music, as it recorded
+                the id when it made it - and say it's missing if it's gone, not look by name.
         """
         try:
-            songs, said = self._find_playlist(name, exact)
+            songs, said = self._find_playlist(name, exact, playlist_id)
         except (requests.RequestException, NavidromeError, ValueError) as e:
             return {"success": False, "message": self._failure_message(e)}
         if not songs:
