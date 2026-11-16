@@ -1,6 +1,7 @@
 """Tests for the words Claude is given to answer football questions from."""
 
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -11,8 +12,8 @@ import requests
 from voice_assistant import football_words
 from voice_assistant.football import Football, Match, Reading, Team
 from voice_assistant.football_words import (
-    LAG, NO_LINEUP_TEAM, describe, said_competition, said_followed, said_left, said_lineups, said_match, said_table,
-    said_team)
+    LAG, NO_LINEUP_TEAM, describe, said_competition, said_events, said_followed, said_left, said_lineups, said_match,
+    said_match_report, said_table, said_team)
 from voice_assistant.home_assistant import FOOTBALL_TEAMS
 
 # An instant well away from any change of clock, so that a test passes in whichever time zone it runs.
@@ -104,6 +105,38 @@ ARSENAL_SIDE = {"team": "Arsenal", "starters": ["Raya", "White", "Saliba", "Gabr
                 "Odegaard", "Saka", "Martinelli", "Gyokeres"], "bench": []}
 
 
+# Spain 2, England 3 on Sunday 15 November 2026, with its six events as Home Assistant gives them: Spain at home.
+SPAIN_ENGLAND = {
+    "id": "401", "kickoff": "2026-11-15T19:45:00+00:00", "state": "post", "phase": "full_time", "clock": "FT",
+    "home": "Spain", "home_id": "164", "away": "England", "away_id": "448", "home_score": 2, "away_score": 3,
+    "league": "UEFA Nations League", "winner": "away", "events": [
+        {"minute": "45'", "kind": "penalty", "side": "away", "player": "Harry Kane"},
+        {"minute": "53'", "kind": "goal", "side": "away", "player": "Ezri Konsa"},
+        {"minute": "57'", "kind": "goal", "side": "away", "player": "Ben White"},
+        {"minute": "63'", "kind": "red_card", "side": "away", "player": "Elliot Anderson"},
+        {"minute": "65'", "kind": "penalty", "side": "home", "player": "Mikel Oyarzabal"},
+        {"minute": "75'", "kind": "goal", "side": "home", "player": "Nico Williams"},
+    ]}
+
+# Oxford City 1, South Shields 3 on Saturday 31 October 2026, a match from BBC Sport: South Shields keep their ESPN id.
+# C. Sykes, a South Shields player, put the first goal into his own net, so it counts for Oxford City, the home side -
+# BBC lists it under the side it counts for, and the goals only add up to the score that way.
+OXFORD_SOUTH_SHIELDS = {
+    "id": "bbc:7", "kickoff": "2026-10-31T15:00:00+00:00", "state": "post", "phase": "full_time", "clock": "FT",
+    "home": "Oxford City", "home_id": "bbc:x", "away": "South Shields", "away_id": "18312", "home_score": 1, "away_score": 3,
+    "league": "National League North", "winner": "away", "events": [
+        {"minute": "32'", "kind": "own_goal", "side": "home", "player": "C. Sykes"},
+        {"minute": "50'", "kind": "goal", "side": "away", "player": "J. Smith"},
+        {"minute": "61'", "kind": "goal", "side": "away", "player": "T. Jones"},
+        {"minute": "78'", "kind": "penalty", "side": "away", "player": "D. Brown"},
+    ]}
+
+
+def _after_the_match():
+    """Monday 16 November 2026 at midday, local time: the day after Spain v England."""
+    return datetime(2026, 11, 16, 12, 0).astimezone()
+
+
 def test_a_match_to_come(london):
     AT = datetime(2026, 11, 13, 12, 0).astimezone()
     match = _m(kickoff="2026-11-22T16:30:00+00:00", state="pre", home="Liverpool", away="Man Utd", away_name="Manchester United",
@@ -177,16 +210,16 @@ def test_results(london):
     shootout = {"state": "post", "kickoff": "2026-11-10T19:00:00+00:00", "home": "Stevenage", "away": "Fulham U21",
                 "home_score": 2, "away_score": 2, "league": "EFL Trophy"}
     assert said_match(_m(**shootout, winner="home", shootout=[4, 3]), AT) == (
-        "Stevenage 2, Fulham U21 2, EFL Trophy, on Tuesday the 10th of November. Stevenage won 4-3 on penalties.")
+        "Stevenage 2, Fulham U21 2, EFL Trophy, on Tuesday the 10th of November. Stevenage won on penalties, 4 to 3.")
     assert said_match(_m(**shootout, winner="away", shootout=[3, 4]), AT) == (
-        "Stevenage 2, Fulham U21 2, EFL Trophy, on Tuesday the 10th of November. Fulham U21 won 4-3 on penalties.")
+        "Stevenage 2, Fulham U21 2, EFL Trophy, on Tuesday the 10th of November. Fulham U21 won on penalties, 4 to 3.")
     extra = {"state": "post", "kickoff": "2026-11-10T19:00:00+00:00", "home": "Plymouth Argyle", "away": "Stevenage",
              "home_score": 3, "away_score": 2, "league": "FA Cup", "extra_time": True}
     assert said_match(_m(**extra, winner="home"), AT) == (
         "Plymouth Argyle 3, Stevenage 2, FA Cup, on Tuesday the 10th of November, after extra time. Plymouth Argyle won.")
     # Extra time and then penalties are both said.
     assert said_match(_m(**{**extra, "home_score": 2}, winner="away", shootout=[2, 4]), AT) == (
-        "Plymouth Argyle 2, Stevenage 2, FA Cup, on Tuesday the 10th of November, after extra time. Stevenage won 4-2 on penalties.")
+        "Plymouth Argyle 2, Stevenage 2, FA Cup, on Tuesday the 10th of November, after extra time. Stevenage won on penalties, 4 to 2.")
 
 
 def test_a_result_is_only_said_from_what_home_assistant_gave(london):
@@ -229,6 +262,158 @@ def test_odds_which_dont_add_up_to_percentages_are_refused(london):
             said_match(_m(kickoff="2026-11-22T16:30:00+00:00", odds=odds), AT)
 
 
+def test_a_match_says_what_happened_in_order_with_the_score_after_each_goal(london):
+    assert said_events(_m(**SPAIN_ENGLAND)) == [
+        "45': a penalty for England, scored by Harry Kane. Spain 0, England 1.",
+        "53': a goal for England, scored by Ezri Konsa. Spain 0, England 2.",
+        "57': a goal for England, scored by Ben White. Spain 0, England 3.",
+        "63': a red card for Elliot Anderson of England.",
+        "65': a penalty for Spain, scored by Mikel Oyarzabal. Spain 1, England 3.",
+        "75': a goal for Spain, scored by Nico Williams. Spain 2, England 3.",
+    ]
+
+
+def test_an_own_goal(london):
+    assert said_events(_m(**OXFORD_SOUTH_SHIELDS)) == [
+        "32': an own goal by C. Sykes, for Oxford City. Oxford City 1, South Shields 0.",
+        "50': a goal for South Shields, scored by J. Smith. Oxford City 1, South Shields 1.",
+        "61': a goal for South Shields, scored by T. Jones. Oxford City 1, South Shields 2.",
+        "78': a penalty for South Shields, scored by D. Brown. Oxford City 1, South Shields 3.",
+    ]
+
+
+def test_an_own_goal_is_counted_for_the_side_it_is_for_and_not_the_side_of_the_player(london):
+    match = _m(**{**SPAIN_ENGLAND, "home_score": 1, "away_score": 0, "winner": "home", "events": [
+        {"minute": "12'", "kind": "own_goal", "side": "home", "player": "Harry Maguire"}]})
+    assert said_events(match) == ["12': an own goal by Harry Maguire, for Spain. Spain 1, England 0."]
+
+
+def test_a_penalty_missed_and_a_red_card_leave_the_score_as_it_was(london):
+    match = _m(**{**SPAIN_ENGLAND, "home_score": 0, "away_score": 1, "winner": "away", "events": [
+        {"minute": "20'", "kind": "penalty_missed", "side": "home", "player": "Mikel Oyarzabal"},
+        {"minute": "55'", "kind": "red_card", "side": "home", "player": "Rodri"},
+        {"minute": "80'", "kind": "goal", "side": "away", "player": "Harry Kane"}]})
+    assert said_events(match) == [
+        "20': a penalty for Spain, missed by Mikel Oyarzabal.",
+        "55': a red card for Rodri of Spain.",
+        "80': a goal for England, scored by Harry Kane. Spain 0, England 1.",
+    ]
+
+
+def test_an_event_with_no_player_says_who_it_was_for_alone(london):
+    match = _m(**{**SPAIN_ENGLAND, "home_score": 1, "away_score": 2, "events": [
+        {"minute": "10'", "kind": "goal", "side": "away"},
+        {"minute": "20'", "kind": "penalty", "side": "home", "player": None},
+        {"minute": "30'", "kind": "own_goal", "side": "away"},
+        {"minute": "40'", "kind": "penalty_missed", "side": "home"},
+        {"minute": "50'", "kind": "red_card", "side": "away"}]})
+    assert said_events(match) == [
+        "10': a goal for England. Spain 0, England 1.",
+        "20': a penalty for Spain, scored. Spain 1, England 1.",
+        "30': an own goal for England. Spain 1, England 2.",
+        "40': a penalty for Spain, missed.",
+        "50': a red card for England.",
+    ]
+
+
+def test_a_penalty_scored_with_no_player_says_it_was_scored(london):
+    # "a penalty for Spain." alone would not say whether it went in.
+    match = _m(**{**SPAIN_ENGLAND, "home_score": 1, "away_score": 0, "winner": "home", "events": [
+        {"minute": "20'", "kind": "penalty", "side": "home"}]})
+    assert said_events(match) == ["20': a penalty for Spain, scored. Spain 1, England 0."]
+    # With no running score to give, it is still said to have been scored.
+    short = _m(**{**SPAIN_ENGLAND, "home_score": 2, "away_score": 0, "winner": "home", "events": [
+        {"minute": "20'", "kind": "penalty", "side": "home"}]})
+    assert said_events(short)[0] == "20': a penalty for Spain, scored."
+
+
+def test_a_match_with_no_events_says_nothing_more(london):
+    assert said_events(_m(**{**SPAIN_ENGLAND, "events": []})) == []
+    assert said_events(_m(**{k: v for k, v in SPAIN_ENGLAND.items() if k != "events"})) == []
+
+
+def test_a_match_which_has_not_started_never_has_events_said(london):
+    match = _m(**{**SPAIN_ENGLAND, "state": "pre", "phase": None, "clock": "", "home_score": None, "away_score": None, "winner": None})
+    assert match.events != () and said_events(match) == []
+
+
+def test_a_match_in_play_says_its_events_so_far(london):
+    match = _m(**{**SPAIN_ENGLAND, "state": "in", "phase": "second_half", "clock": "66'", "home_score": 1, "away_score": 3,
+                  "winner": None, "events": SPAIN_ENGLAND["events"][:5]})
+    assert said_events(match) == [
+        "45': a penalty for England, scored by Harry Kane. Spain 0, England 1.",
+        "53': a goal for England, scored by Ezri Konsa. Spain 0, England 2.",
+        "57': a goal for England, scored by Ben White. Spain 0, England 3.",
+        "63': a red card for Elliot Anderson of England.",
+        "65': a penalty for Spain, scored by Mikel Oyarzabal. Spain 1, England 3.",
+    ]
+
+
+@pytest.mark.parametrize("changes", [
+    {"events": SPAIN_ENGLAND["events"][:-1]},
+    {"events": SPAIN_ENGLAND["events"] + [{"minute": "88'", "kind": "goal", "side": "home", "player": "Lamine Yamal"}]},
+    {"home_score": 3, "away_score": 2},
+    {"home_score": None, "away_score": None},
+    {"home_score": None},
+    {"away_score": None},
+], ids=["a goal short", "a goal too many", "the sides the other way round", "no score", "no home score", "no away score"])
+def test_the_running_score_is_left_out_where_it_doesnt_end_at_the_matchs_own(london, changes):
+    events = changes.get("events", SPAIN_ENGLAND["events"])
+    # The events are all still said, and none has a score after it: nothing false is said. (A sentence may follow them,
+    # which says why: see the next test.)
+    said = said_events(_m(**{**SPAIN_ENGLAND, **changes}))[:len(events)]
+    assert len(said) == len(events)
+    assert said[0] == "45': a penalty for England, scored by Harry Kane."
+    assert said[3] == "63': a red card for Elliot Anderson of England."
+    assert not any(re.search(r"[A-Za-z] \d", sentence) for sentence in said)
+
+
+DONT_ADD_UP = "The goals listed don't add up to the score."
+
+
+@pytest.mark.parametrize("changes", [
+    {"events": SPAIN_ENGLAND["events"][:-1]},
+    {"events": SPAIN_ENGLAND["events"] + [{"minute": "88'", "kind": "goal", "side": "home", "player": "Lamine Yamal"}]},
+    {"home_score": 3, "away_score": 2},
+], ids=["a goal short", "a goal too many", "the sides the other way round"])
+def test_a_running_score_left_out_is_said_to_be_left_out(london, changes):
+    match = _m(**{**SPAIN_ENGLAND, **changes})
+    said = said_events(match)
+    # The events come as they are, without running scores, and one more sentence ends them.
+    assert said[-1] == DONT_ADD_UP
+    assert not any(re.search(r"[A-Za-z] \d", sentence) for sentence in said)
+    assert len(said) == len(changes.get("events", SPAIN_ENGLAND["events"])) + 1
+    assert said[0] == "45': a penalty for England, scored by Harry Kane."
+    # The match report has it after the events, before any notes.
+    lines = said_match_report(_match_answer(match=_found_match(**{**SPAIN_ENGLAND, **changes}), notes=[PENALTY_CONCEDED]),
+                              _after_the_match()).split("\n")
+    assert lines[-2:] == [DONT_ADD_UP, "Note at 41': Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area."]
+
+
+@pytest.mark.parametrize("changes", [{"home_score": None, "away_score": None}, {"home_score": None}, {"away_score": None}],
+                         ids=["no score", "no home score", "no away score"])
+def test_a_match_with_no_score_has_nothing_to_add_up_to(london, changes):
+    # Its line says "no score listed", which is why none is said after each goal.
+    said = said_events(_m(**{**SPAIN_ENGLAND, **changes}))
+    assert DONT_ADD_UP not in said
+    assert len(said) == len(SPAIN_ENGLAND["events"])
+
+
+def test_the_goals_listed_adding_up_to_the_score_say_nothing_of_it_and_no_goals_listed_say_it_another_way(london):
+    assert DONT_ADD_UP not in said_events(_m(**SPAIN_ENGLAND))
+    # A red card alone, with goals on the score, is a match whose scorers aren't listed, not one whose goals don't add up.
+    red_only = _m(**{**SPAIN_ENGLAND, "events": SPAIN_ENGLAND["events"][3:4]})
+    assert said_events(red_only) == ["63': a red card for Elliot Anderson of England."]
+
+
+def test_nothing_said_of_what_happened_has_a_score_as_digits_with_a_dash(london):
+    AT = _after_the_match()
+    for found in (SPAIN_ENGLAND, OXFORD_SOUTH_SHIELDS):
+        said = (said_events(_m(**found)) + [said_competition(_competition_answer([_found_match(**found)]), AT)]
+                + [said_match_report({"team": {"id": "448", "name": "England"}, "stale": False, "match": found}, AT)])
+        assert not any(re.search(r"\d\s*[-\u2013]\s*\d", words) for words in said)
+
+
 def test_the_followed_teams_overview(london):
     AT = datetime(2026, 11, 13, 12, 0).astimezone()
     reading = _reading(_team("364", "Liverpool", now=_found_match(**LIVE), next=[_found_match(**SUNDAY_AWAY)],
@@ -269,7 +454,7 @@ def test_a_team_with_results_but_no_fixtures_says_both(london):
                        home_score=2, away_score=2, league="EFL Trophy", winner="home", shootout=[4, 3])
     assert said_followed(_reading(_team("395", "Stevenage", last=[cup])), AT) == (
         "Stevenage: no fixtures listed. "
-        "Last: Stevenage 2, Fulham U21 2, EFL Trophy, on Tuesday the 10th of November. Stevenage won 4-3 on penalties.")
+        "Last: Stevenage 2, Fulham U21 2, EFL Trophy, on Tuesday the 10th of November. Stevenage won on penalties, 4 to 3.")
 
 
 def test_the_overview_with_no_teams_and_with_some_left_out(london):
@@ -432,6 +617,152 @@ def test_a_competition_with_a_match_in_play_ends_with_the_warning(london):
     assert said_competition(answer, AT).split("\n")[-2:] == ["Days with matches: today.", LAG]
 
 
+NATIONS_LEAGUE = {"slug": "uefa.nations", "name": "UEFA Nations League"}
+
+
+def test_a_round_up_says_each_started_matchs_goals_after_it_on_the_same_line(london):
+    AT = _after_the_match()
+    answer = _competition_answer([_found_match(**SPAIN_ENGLAND)], days=["20261115"], competition=NATIONS_LEAGUE)
+    assert said_competition(answer, AT).split("\n") == [
+        "Spain 2, England 3, UEFA Nations League, on Sunday the 15th of November. England won. "
+        "Goals: Harry Kane 45' (pen), Ezri Konsa 53', Ben White 57' for England; "
+        "Mikel Oyarzabal 65' (pen), Nico Williams 75' for Spain. Red card: Elliot Anderson (England) 63'.",
+        "Days with matches: Sunday the 15th of November.",
+    ]
+
+
+def test_a_round_up_lists_an_own_goal_under_the_side_it_counts_for(london):
+    answer = _competition_answer([_found_match(**OXFORD_SOUTH_SHIELDS)], days=["20261031"])
+    assert said_competition(answer, _after_the_match()).split("\n")[0] == (
+        "Oxford City 1, South Shields 3, National League North, on Saturday the 31st of October. South Shields won. "
+        "Goals: C. Sykes 32' (og) for Oxford City; J. Smith 50', T. Jones 61', D. Brown 78' (pen) for South Shields.")
+
+
+def test_a_round_up_says_what_there_is_to_say_of_a_match_and_nothing_more(london):
+    AT = _after_the_match()
+    no_goals = {**SPAIN_ENGLAND, "home_score": 0, "away_score": 0, "winner": None, "events": [
+        {"minute": "63'", "kind": "red_card", "side": "away", "player": "Elliot Anderson"},
+        {"minute": "70'", "kind": "red_card", "side": "home", "player": "Rodri"},
+        {"minute": "80'", "kind": "penalty_missed", "side": "home", "player": "Mikel Oyarzabal"}]}
+    # Red cards are said as they are, a penalty missed is not a goal, and with no goals there is no "Goals".
+    assert said_competition(_competition_answer([_found_match(**no_goals)]), AT).split("\n")[0].endswith(
+        "It was a draw. Red cards: Elliot Anderson (England) 63', Rodri (Spain) 70'.")
+    # A match with no events and no goals is said as it was before this round.
+    plain = _found_match(**{**SPAIN_ENGLAND, "home_score": 0, "away_score": 0, "winner": None, "events": []})
+    assert said_competition(_competition_answer([plain]), AT).split("\n")[0] == said_match(_m(**plain), AT)
+    # And one not started has none, whatever it is given.
+    to_come = _found_match(**{**SPAIN_ENGLAND, "state": "pre", "phase": None, "clock": "", "home_score": None,
+                              "away_score": None, "winner": None, "kickoff": "2026-11-24T19:45:00+00:00"})
+    said = said_competition(_competition_answer([to_come]), AT).split("\n")[0]
+    assert said == said_match(_m(**to_come), AT) + " No odds are listed for it." and "Goals" not in said
+
+
+def test_a_round_up_with_no_player_says_the_minute_alone(london):
+    match = {**SPAIN_ENGLAND, "home_score": 1, "away_score": 1, "winner": None, "events": [
+        {"minute": "10'", "kind": "goal", "side": "away"}, {"minute": "20'", "kind": "penalty", "side": "home"},
+        {"minute": "30'", "kind": "red_card", "side": "away"}]}
+    assert said_competition(_competition_answer([_found_match(**match)]), _after_the_match()).split("\n")[0].endswith(
+        "It was a draw. Goals: 10' for England; 20' (pen) for Spain. Red card: England 30'.")
+
+
+# What a match with goals on its score and none among its events is said to have: BBC's Buxton 0, South Shields 2 has no
+# actions, and a board kept from before Home Assistant could give events has none for up to six hours.
+NO_SCORERS = "Its scorers aren't listed."
+RED_AND_MISSED = [{"minute": "63'", "kind": "red_card", "side": "away", "player": "Elliot Anderson"},
+                  {"minute": "80'", "kind": "penalty_missed", "side": "home", "player": "Mikel Oyarzabal"}]
+
+
+@pytest.mark.parametrize("events, after", [
+    ([], ""), (None, ""), (RED_AND_MISSED, " Red card: Elliot Anderson (England) 63'."),
+], ids=["an empty list", "no events key", "only a red card and a penalty missed"])
+def test_a_round_up_says_the_scorers_of_a_match_with_goals_and_no_goal_listed_arent_listed(london, events, after):
+    found = {key: value for key, value in SPAIN_ENGLAND.items() if key != "events"}
+    if events is not None:
+        found["events"] = events
+    line = said_competition(_competition_answer([found], days=["20261115"], competition=NATIONS_LEAGUE), _after_the_match()).split("\n")[0]
+    assert line == said_match(_m(**found), _after_the_match()) + after + " " + NO_SCORERS
+
+
+def test_a_round_up_says_the_scorers_of_a_match_in_play_with_a_goal_and_none_listed_arent_listed(london):
+    live = {**SPAIN_ENGLAND, "state": "in", "phase": "second_half", "clock": "66'", "home_score": 1, "away_score": 0,
+            "winner": None, "events": []}
+    lines = said_competition(_competition_answer([live], days=["20261115"]), _after_the_match()).split("\n")
+    assert lines == [said_match(_m(**live), _after_the_match()) + " " + NO_SCORERS, "Days with matches: Sunday the 15th of November.", LAG]
+
+
+def test_a_round_up_says_nothing_of_scorers_where_there_are_no_goals_or_the_goals_are_listed(london):
+    AT = _after_the_match()
+    goalless = {**SPAIN_ENGLAND, "home_score": 0, "away_score": 0, "winner": None}
+    for events in ([], None, RED_AND_MISSED):
+        found = {key: value for key, value in goalless.items() if key != "events"}
+        if events is not None:
+            found["events"] = events
+        assert NO_SCORERS not in said_competition(_competition_answer([found]), AT)
+    # Nor of a match whose goals are listed, nor of one still to come, which has no score.
+    assert NO_SCORERS not in said_competition(_competition_answer([_found_match(**SPAIN_ENGLAND)]), AT)
+    assert NO_SCORERS not in said_competition(_competition_answer([_found_match()]), AT)
+
+
+@pytest.mark.parametrize("name", [
+    "Harry Kane", "C. Sykes", "Rodri", "Virgil van Dijk", "Vinícius Júnior", "Son Heung-min", "João Pedro", "Pedro Neto",
+])
+def test_a_scorer_is_said_as_the_source_gives_the_name_in_a_round_up(london, name):
+    # No rule finds a surname without a list of names, and "Vinícius Júnior" or "Son Heung-min" would be misnamed.
+    match = {**SPAIN_ENGLAND, "home_score": 0, "away_score": 1, "events": [
+        {"minute": "10'", "kind": "goal", "side": "away", "player": name},
+        {"minute": "20'", "kind": "red_card", "side": "home", "player": name}]}
+    assert said_competition(_competition_answer([_found_match(**match)]), _after_the_match()).split("\n")[0].endswith(
+        f"Goals: {name} 10' for England. Red card: {name} (Spain) 20'.")
+
+
+def test_a_round_up_with_events(london):
+    AT = _after_the_match()
+    pairs = [("Arsenal", "Chelsea"), ("Liverpool", "Everton"), ("Manchester City", "Manchester United"),
+             ("Tottenham Hotspur", "West Ham United"), ("Newcastle United", "Aston Villa"), ("Brighton", "Fulham"),
+             ("Brentford", "Wolves"), ("Crystal Palace", "Bournemouth"), ("Leeds United", "Burnley"),
+             ("Sunderland", "Nottingham Forest"), ("Real Madrid", "Barcelona"), ("Atletico Madrid", "Sevilla"),
+             ("Bayern Munich", "Borussia Dortmund"), ("Juventus", "AC Milan"), ("Inter Milan", "Napoli"),
+             ("Paris Saint-Germain", "Marseille"), ("Ajax", "PSV"), ("Benfica", "Porto")]
+    found, expected = [], []
+    for place, (home, away) in enumerate(pairs):
+        match = {"id": str(place), "kickoff": "2026-11-24T20:00:00+00:00", "state": "post", "phase": "full_time", "clock": "FT",
+                 "home": home, "away": away, "home_id": f"h{place}", "away_id": f"a{place}", "league": "UEFA Champions League"}
+        if place % 3 == 0:
+            match.update(home_score=2, away_score=1, winner="home", events=[
+                {"minute": "12'", "kind": "goal", "side": "home", "player": "Tom Hart"},
+                {"minute": "40'", "kind": "penalty", "side": "away", "player": "Sam Lowe"},
+                {"minute": "77'", "kind": "goal", "side": "home", "player": "Tom Hart"}])
+            goals = f" Goals: Tom Hart 12', Tom Hart 77' for {home}; Sam Lowe 40' (pen) for {away}."
+        elif place % 3 == 1:
+            match.update(home_score=0, away_score=0, events=[])
+            goals = ""
+        else:
+            match.update(home_score=1, away_score=0, winner="home", events=[
+                {"minute": "5'", "kind": "goal", "side": "home", "player": "Joe Reed"},
+                {"minute": "88'", "kind": "red_card", "side": "away", "player": "Max Dunn"}])
+            goals = f" Goals: Joe Reed 5' for {home}. Red card: Max Dunn ({away}) 88'."
+        found.append(match)
+        expected.append(said_match(_m(**match), AT) + goals)
+    lines = said_competition(_competition_answer(found, days=["20261124"]), AT).split("\n")
+    # Every match is still one line: its result, then its goals; and the days come after all of them.
+    assert lines[:18] == expected
+    assert lines[18:] == ["Days with matches: Tuesday the 24th of November."]
+    assert sum("Goals:" in line for line in lines) == 12
+
+
+def test_a_round_up_with_a_match_in_play_has_its_goals_so_far_and_the_warning_last(london):
+    live = {**SPAIN_ENGLAND, "state": "in", "phase": "second_half", "clock": "66'", "home_score": 1, "away_score": 3,
+            "winner": None, "events": SPAIN_ENGLAND["events"][:5]}
+    lines = said_competition(_competition_answer([_found_match(**live)], days=["20261115"]), _after_the_match()).split("\n")
+    assert lines == [
+        "Spain 1, England 3, UEFA Nations League, in play, second half, 66'. "
+        "Goals: Harry Kane 45' (pen), Ezri Konsa 53', Ben White 57' for England; Mikel Oyarzabal 65' (pen) for Spain. "
+        "Red card: Elliot Anderson (England) 63'.",
+        "Days with matches: Sunday the 15th of November.",
+        LAG,
+    ]
+
+
 @pytest.mark.parametrize("days", [["tomorrow"], ["2026-11-24"], [20261124]])
 def test_a_day_which_isnt_a_day_is_refused(london, days):
     AT = datetime(2026, 11, 13, 12, 0).astimezone()
@@ -526,10 +857,21 @@ def test_both_sides(london):
     assert len(lines) == 3
     assert lines[0] == said_match(_m(**SUNDAY_AWAY), AT.astimezone())
     # The team asked about comes first, whatever order the answer has
-    assert lines[1] == ("Liverpool's starting eleven (4-2-3-1): Alisson, Frimpong, Konate, Van Dijk, Kerkez, "
+    assert lines[1] == ("Liverpool's starting eleven (4 2 3 1): Alisson, Frimpong, Konate, Van Dijk, Kerkez, "
                         "Gravenberch, Mac Allister, Salah, Szoboszlai, Gakpo and Isak. Bench: Mamardashvili and Gomez.")
     assert lines[2].startswith("Arsenal's starting eleven: Raya,")
     assert lines[2].endswith("Bench: none listed.")
+
+
+@pytest.mark.parametrize("formation, said", [
+    ("4-2-3-1", "4 2 3 1"), ("3-4-2-1", "3 4 2 1"), ("4 \u2013 4 \u2013 2", "4 4 2"),
+    # Only a dash between digits is swapped: anything else in the formation stays as it was.
+    ("4-4-2 box-to-box", "4 4 2 box-to-box"), ("Back-3 (5-2-3)", "Back-3 (5 2 3)"), ("4231", "4231"),
+], ids=["four digits", "four digits again", "spaced en dashes", "words with dashes", "a word and digits", "no dash"])
+def test_a_formation_is_said_without_dashes_as_they_are_read_out(london, formation, said):
+    side = {**LIVERPOOL_SIDE, "formation": formation}
+    lines = said_lineups(_lineups_answer(match=_found_match(**SUNDAY_AWAY), sides=[side]), AT.astimezone()).split("\n")
+    assert lines[1].startswith(f"Liverpool's starting eleven ({said}): Alisson,")
 
 
 def test_one_side_out(london):
@@ -547,7 +889,7 @@ def test_the_other_side_out_and_not_the_team_asked_about(london):
 def test_the_team_asked_about_at_home(london):
     # Liverpool are the home side in the Contract's default match, so the other way round from SUNDAY_AWAY.
     lines = said_lineups(_lineups_answer(match=_found_match(), sides=[ARSENAL_SIDE, LIVERPOOL_SIDE]), AT.astimezone()).split("\n")
-    assert lines[1].startswith("Liverpool's starting eleven (4-2-3-1): Alisson,")
+    assert lines[1].startswith("Liverpool's starting eleven (4 2 3 1): Alisson,")
     assert lines[2].startswith("Arsenal's starting eleven: Raya,")
     assert said_lineups(_lineups_answer(match=_found_match(), sides=[LIVERPOOL_SIDE]), AT.astimezone()).split("\n")[-1] == (
         "Arsenal's line-up isn't out yet.")
@@ -602,15 +944,15 @@ def test_the_sides_are_said_by_their_full_names(london):
     match = _found_match(**{**LIVE, "state": "pre", "phase": None, "home_score": None, "away_score": None})
     team = {"id": "360", "name": "Man Utd", "full_name": "Manchester United", "followed": True}
     lines = said_lineups(_lineups_answer(team=team, match=match, sides=[LIVERPOOL_SIDE, UNITED_SIDE]), AT.astimezone()).split("\n")
-    assert lines[1].startswith("Manchester United's starting eleven (3-4-3): Raya,")
-    assert lines[2].startswith("Liverpool's starting eleven (4-2-3-1): Alisson,")
+    assert lines[1].startswith("Manchester United's starting eleven (3 4 3): Raya,")
+    assert lines[2].startswith("Liverpool's starting eleven (4 2 3 1): Alisson,")
     # Where one side is out, the other is named as the match names it
     lines = said_lineups(_lineups_answer(team=team, match=match, sides=[LIVERPOOL_SIDE]), AT.astimezone()).split("\n")
     assert lines[-1] == "Manchester United's line-up isn't out yet."
     # A side is placed in the match by either of the names the match gives it
     short = {**UNITED_SIDE, "team_name": None}
     lines = said_lineups(_lineups_answer(team=team, match=match, sides=[short]), AT.astimezone()).split("\n")
-    assert lines[1].startswith("Man Utd's starting eleven (3-4-3): Raya,")
+    assert lines[1].startswith("Man Utd's starting eleven (3 4 3): Raya,")
     assert lines[-1] == "Liverpool's line-up isn't out yet."
 
 
@@ -639,6 +981,208 @@ def test_no_match_at_all(london):
     assert said_lineups(_lineups_answer(), AT.astimezone()) == "No match is listed for Liverpool."
     team = {"id": "364", "name": "Liverpool", "full_name": "Liverpool FC", "followed": True}
     assert said_lineups(_lineups_answer(team=team), AT.astimezone()) == "No match is listed for Liverpool FC."
+
+
+def _match_answer(**fields):
+    """A football_ask answer for a team's match, as the Contract has it, with no match unless a test gives one."""
+    return {"team": {"id": "448", "name": "England", "followed": False}, "stale": False, **fields}
+
+
+PENALTY_CONCEDED = {"minute": "41'", "text": "Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area."}
+VAR_NOTE = {"minute": "88'", "text": "VAR Decision: No Penalty England."}
+
+
+def test_a_match_report_says_the_match_then_its_events_then_the_notes(london):
+    answer = _match_answer(match=_found_match(**SPAIN_ENGLAND), notes=[PENALTY_CONCEDED, VAR_NOTE])
+    assert said_match_report(answer, _after_the_match()).split("\n") == [
+        "Spain 2, England 3, UEFA Nations League, on Sunday the 15th of November. England won.",
+        "45': a penalty for England, scored by Harry Kane. Spain 0, England 1.",
+        "53': a goal for England, scored by Ezri Konsa. Spain 0, England 2.",
+        "57': a goal for England, scored by Ben White. Spain 0, England 3.",
+        "63': a red card for Elliot Anderson of England.",
+        "65': a penalty for Spain, scored by Mikel Oyarzabal. Spain 1, England 3.",
+        "75': a goal for Spain, scored by Nico Williams. Spain 2, England 3.",
+        "Note at 41': Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area.",
+        "Note at 88': VAR Decision: No Penalty England.",
+    ]
+
+
+def test_a_match_report_with_no_notes_or_events_is_the_match_alone(london):
+    AT = _after_the_match()
+    assert said_match_report(_match_answer(match=_found_match(**SPAIN_ENGLAND)), AT).split("\n")[-1] == (
+        "75': a goal for Spain, scored by Nico Williams. Spain 2, England 3.")
+    bare = _found_match(**{**SPAIN_ENGLAND, "home_score": 0, "away_score": 0, "winner": None, "events": []})
+    assert said_match_report(_match_answer(match=bare, notes=[]), AT) == said_match(_m(**bare), AT)
+    # A match which hasn't started is said as it is, with its odds if it has them, and never with events.
+    coming = _found_match(**{**SPAIN_ENGLAND, "state": "pre", "phase": None, "clock": "", "home_score": None,
+                             "away_score": None, "winner": None, "kickoff": "2026-11-24T19:45:00+00:00"})
+    assert said_match_report(_match_answer(match=coming), AT) == said_match(_m(**coming), AT)
+
+
+@pytest.mark.parametrize("events, then", [
+    ([], []), (None, []), (RED_AND_MISSED, ["63': a red card for Elliot Anderson of England.", "80': a penalty for Spain, missed by Mikel Oyarzabal."]),
+], ids=["an empty list", "no events key", "only a red card and a penalty missed"])
+def test_a_match_report_says_the_scorers_of_a_match_with_goals_and_no_goal_listed_arent_listed(london, events, then):
+    AT = _after_the_match()
+    found = {key: value for key, value in SPAIN_ENGLAND.items() if key != "events"}
+    if events is not None:
+        found["events"] = events
+    said = said_match_report(_match_answer(match=found, notes=[PENALTY_CONCEDED]), AT).split("\n")
+    # After the match line, then what is listed, then the notes.
+    assert said == [said_match(_m(**found), AT), NO_SCORERS, *then,
+                    "Note at 41': Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area."]
+
+
+def test_a_match_report_says_nothing_of_scorers_for_a_goalless_match_or_one_whose_goals_are_listed(london):
+    AT = _after_the_match()
+    goalless = {**SPAIN_ENGLAND, "home_score": 0, "away_score": 0, "winner": None, "events": []}
+    assert said_match_report(_match_answer(match=goalless), AT) == said_match(_m(**goalless), AT)
+    assert NO_SCORERS not in said_match_report(_match_answer(match=SPAIN_ENGLAND), AT)
+
+
+def test_a_match_report_of_a_match_which_has_not_started_says_no_notes(london):
+    AT = _after_the_match()
+    coming = _found_match(**{**SPAIN_ENGLAND, "state": "pre", "phase": None, "clock": "", "home_score": None,
+                             "away_score": None, "winner": None, "kickoff": "2026-11-24T19:45:00+00:00"})
+    answer = _match_answer(match=coming, notes=[PENALTY_CONCEDED])
+    # As the events are not said, whatever it is given, nor are the notes: only the match is.
+    assert said_match_report(answer, AT) == said_match(_m(**coming), AT)
+    # Once it has started, they are.
+    started = _found_match(**{**SPAIN_ENGLAND, "events": []})
+    assert said_match_report({**answer, "match": started}, AT).split("\n")[-1] == (
+        "Note at 41': Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area.")
+
+
+@pytest.mark.parametrize("state", ["in", "post"])
+def test_a_match_report_of_a_match_which_is_off_says_no_events_or_notes(london, state):
+    AT = _after_the_match()
+    # Called off after kick-off, with what Home Assistant had of it: nothing happened in it which is said.
+    off = _found_match(**{**SPAIN_ENGLAND, "state": state, "phase": "off", "clock": "Abandoned", "winner": None})
+    assert off["events"] and said_events(_m(**off)) == []
+    assert said_match_report(_match_answer(match=off, notes=[PENALTY_CONCEDED, VAR_NOTE]), AT) == said_match(_m(**off), AT)
+    # Nor are its scorers said not to be listed, with goals on its score and none of them listed.
+    bare = {**off, "events": []}
+    assert said_match_report(_match_answer(match=bare, notes=[PENALTY_CONCEDED]), AT) == said_match(_m(**bare), AT)
+
+
+@pytest.mark.parametrize("state", ["in", "post"])
+def test_a_round_up_of_a_match_which_is_off_says_the_match_alone(london, state):
+    AT = _after_the_match()
+    off = {**SPAIN_ENGLAND, "state": state, "phase": "off", "clock": "Abandoned", "winner": None}
+    for events in (SPAIN_ENGLAND["events"], []):
+        found = _found_match(**{**off, "events": events})
+        assert said_competition(_competition_answer([found], days=["20261115"]), AT).split("\n")[0] == said_match(_m(**found), AT)
+
+
+def test_a_match_report_of_a_match_in_play_ends_with_the_warning(london):
+    live = {**SPAIN_ENGLAND, "state": "in", "phase": "second_half", "clock": "66'", "home_score": 1, "away_score": 3,
+            "winner": None, "events": SPAIN_ENGLAND["events"][:5]}
+    lines = said_match_report(_match_answer(match=_found_match(**live), notes=[PENALTY_CONCEDED]), _after_the_match()).split("\n")
+    assert lines[0] == "Spain 1, England 3, UEFA Nations League, in play, second half, 66'."
+    assert lines[1:6] == said_events(_m(**live))
+    assert lines[6:] == ["Note at 41': Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area.", LAG]
+    # Over, it has no warning.
+    assert LAG not in said_match_report(_match_answer(match=_found_match(**SPAIN_ENGLAND)), _after_the_match())
+
+
+def test_a_match_report_with_no_match(london):
+    AT = _after_the_match()
+    assert said_match_report(_match_answer(), AT) == "No match is listed for England."
+    assert said_match_report(_match_answer(), AT, on_a_day=True) == "No match is listed for England on that day."
+    team = {"id": "448", "name": "England", "full_name": "England Women", "followed": False}
+    assert said_match_report(_match_answer(team=team, notes=[VAR_NOTE]), AT) == "No match is listed for England Women."
+
+
+@pytest.mark.parametrize("changes", [
+    {"notes": "Penalty conceded"}, {"notes": ["Penalty conceded"]}, {"notes": [{"text": "A note."}]},
+    {"notes": [{"minute": "41'"}]}, {"notes": [{"minute": 41, "text": "A note."}]}, {"notes": [{"minute": "41'", "text": 4}]},
+    {"notes": [{"minute": "41'", "text": ""}]}, {"notes": [{"minute": "", "text": "A note."}]},
+    {"match": "Spain v England"}, {"match": {"id": "1"}}, {"team": "England"},
+    {"match": _found_match(events=[{"minute": "45'", "kind": "yellow_card", "side": "away"}])},
+    {"match": _found_match(events="goal")},
+], ids=["notes not a list", "a note not a dict", "note with no minute", "note with no text", "minute not text", "text not text",
+        "text empty", "minute empty", "match not a dict", "match lacking keys", "team not a dict", "event kind unknown",
+        "events not a list"])
+def test_a_match_report_of_the_wrong_shape_is_refused(london, changes):
+    answer = {**_match_answer(match=_found_match(**SPAIN_ENGLAND), notes=[PENALTY_CONCEDED]), **changes}
+    with pytest.raises((KeyError, TypeError, ValueError)):
+        said_match_report(answer, _after_the_match())
+    # Notes of the wrong shape are refused even where there is no match to give them to.
+    if "notes" in changes:
+        with pytest.raises((KeyError, TypeError, ValueError)):
+            said_match_report(_match_answer(**changes), _after_the_match())
+
+
+@pytest.mark.parametrize("text, said", [
+    ("VAR Decision: No Goal France 1-0 Türkiye.", "VAR Decision: No Goal France 1 to 0 Türkiye."),
+    ("VAR Decision: No Goal France 2 - 1 Türkiye.", "VAR Decision: No Goal France 2 to 1 Türkiye."),
+    ("VAR Decision: No Goal France 1\u20130 Türkiye.", "VAR Decision: No Goal France 1 to 0 Türkiye."),
+    ("Own goal by Rodri (Spain). Spain 0-1 England, then 1-1.", "Own goal by Rodri (Spain). Spain 0 to 1 England, then 1 to 1."),
+    # Only a score between two numbers changes: a dash between words, in a name or after a space is left as it was.
+    ("Second yellow card - a long-range effort hit the post.", "Second yellow card - a long-range effort hit the post."),
+    ("VAR Decision: Goal cancelled - offside, 2-1 stays.", "VAR Decision: Goal cancelled - offside, 2 to 1 stays."),
+    ("Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area.",
+     "Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area."),
+], ids=["a plain dash", "a dash with spaces", "an en dash", "two scores", "dashes which aren't scores", "a score and a spaced dash",
+        "no score"])
+def test_a_score_in_a_note_is_said_with_to_and_nothing_else_in_the_note_changes(london, text, said):
+    answer = _match_answer(match=_found_match(**SPAIN_ENGLAND), notes=[{"minute": "90'+3'", "text": text}])
+    assert said_match_report(answer, _after_the_match()).split("\n")[-1] == f"Note at 90'+3': {said}"
+
+
+# A shoot-out after extra time at 2, 2, as it is won by the home side, by the away side, and with no winner named.
+SHOOTOUTS = [{"winner": "home", "shootout": [4, 3]}, {"winner": "away", "shootout": [3, 4]}, {"winner": None, "shootout": [3, 4]}]
+# What ESPN's notes say of a score, as the VAR ones do.
+SCORE_NOTES = [{"minute": "41'", "text": "VAR Decision: No Goal France 1-0 Türkiye."},
+               {"minute": "88'", "text": "Penalty saved. Spain 2 - 2 England, after 2\u20132 at half time."}]
+
+
+def _level_after_extra_time(**changes):
+    """Spain 2, England 2 after extra time, with the goals which make it so and a red card, as the Contract has them."""
+    return _found_match(**{**SPAIN_ENGLAND, "home_score": 2, "away_score": 2, "extra_time": True, "events": [
+        {"minute": "12'", "kind": "goal", "side": "home", "player": "Nico Williams"},
+        {"minute": "45'", "kind": "penalty", "side": "away", "player": "Harry Kane"},
+        {"minute": "63'", "kind": "red_card", "side": "away", "player": "Elliot Anderson"},
+        {"minute": "70'", "kind": "own_goal", "side": "away", "player": "Dani Carvajal"},
+        {"minute": "90'+3'", "kind": "penalty_missed", "side": "home", "player": "Mikel Oyarzabal"},
+        {"minute": "118'", "kind": "goal", "side": "home", "player": "Lamine Yamal"},
+    ], **changes})
+
+
+def test_no_sentence_nova_builds_has_a_score_as_digits_joined_by_a_dash(london):
+    AT = _after_the_match()
+    # A formation is digits joined by dashes too, so the line-ups have one.
+    side = {"team": "Spain", "formation": "4-2-3-1", "starters": ["Simón", "Carvajal"], "bench": ["Remiro"]}
+    spain = {"id": "164", "name": "Spain", "followed": False}
+    row = {"league": "UEFA Nations League", "group": "", "rank": 1, "of": 4, "played": 3, "won": 1, "drawn": 1, "lost": 1,
+           "gd": -2, "points": 4}
+    group = {"name": "UEFA Nations League", "rows": [{"rank": 1, "team": "Spain", "played": 3, "won": 1, "drawn": 1, "lost": 1,
+                                                        "gd": -2, "points": 4}]}
+    said = []
+    for shootout in SHOOTOUTS:
+        found = _level_after_extra_time(**shootout)
+        match = Match.from_home(found)
+        team = _team("164", "Spain", now=found, next=[found], last=[found])
+        said += [said_match(match, AT), *said_events(match),
+                 said_followed(_reading(team), AT),
+                 said_team(_team_answer(now=found, next=[found], last=[found], tables=[row]), AT),
+                 said_competition(_competition_answer([found], days=["20261115"]), AT),
+                 said_left(_left_answer(matches=[found], teams=["Spain", "England"]), AT),
+                 said_lineups(_lineups_answer(team=spain, match=found, sides=[side]), AT),
+                 said_match_report(_match_answer(match=found, notes=SCORE_NOTES), AT),
+                 said_table({"competition": {"name": "UEFA Nations League"}, "groups": [group]})]
+        # And through describe, which says each of them as Claude is given it.
+        for given, answer in (({"team": "Spain"}, _team_answer(now=found, last=[found])),
+                              ({"team": "Spain", "about": "lineups"}, _lineups_answer(team=spain, match=found, sides=[side])),
+                              ({"team": "Spain", "about": "match"}, _match_answer(match=found, notes=SCORE_NOTES)),
+                              ({"competition": "UEFA Nations League", "about": "match"}, _competition_answer([found]))):
+            said.append(_said(FakeHome(answer=answer), now=AT, **given)["message"])
+    assert any("France 1 to 0 Türkiye" in words for words in said)
+    assert not [words for words in said if re.search(r"\d\s*[-\u2010-\u2015\u2212]\s*\d", words)]
+    # The shoot-out is said in words, with its winner's penalties first.
+    assert "Spain won on penalties, 4 to 3." in said_match(Match.from_home(_level_after_extra_time(**SHOOTOUTS[0])), AT)
+    assert "England won on penalties, 4 to 3." in said_match(Match.from_home(_level_after_extra_time(**SHOOTOUTS[1])), AT)
+    assert "The penalty shootout finished Spain 3, England 4." in said_match(Match.from_home(_level_after_extra_time(**SHOOTOUTS[2])), AT)
 
 
 class FakeHome:
@@ -801,6 +1345,15 @@ def test_a_team_is_asked_of_home_assistant(london):
     ({"team": "Liverpool", "about": "matches"}, ("team", "Liverpool", "", 1)),
     ({"team": "Liverpool", "about": "left"}, ("team", "Liverpool", "", 1)),
     ({"team": "Liverpool", "about": " Lineups "}, ("lineups", "Liverpool", "", 1)),
+    ({"team": "England", "about": "match"}, ("match", "England", "", 1)),
+    ({"team": "England", "about": " Match ", "date": "2026-11-15"}, ("match", "England", "20261115", 1)),
+    # A team's match is asked of the team whatever competition is given with it, as its line-ups are.
+    ({"team": "England", "competition": "UEFA Nations League", "about": "match"}, ("match", "England", "", 1)),
+    ({"team": "England", "competition": "UEFA Nations League", "about": "match", "date": "2026-11-15"},
+     ("match", "England", "20261115", 1)),
+    # A competition alone is its matches, with their goals, on the day given.
+    ({"competition": "Champions League", "about": "match", "date": "2026-11-15"}, ("competition", "Champions League", "20261115", 1)),
+    ({"competition": "Champions League", "about": "match"}, ("competition", "Champions League", "", 1)),
     ({"competition": "Premier League", "about": " Table "}, ("table", "Premier League", "", 1)),
     ({"competition": "Premier League", "about": "standings"}, ("competition", "Premier League", "", 1)),
     ({"team": "  Liverpool ", "competition": "  "}, ("team", "Liverpool", "", 1)),
@@ -818,6 +1371,7 @@ def test_each_question_goes_to_the_right_ask(london, given, asked):
                    {"rank": 1, "team": "Arsenal", "played": 10, "won": 8, "drawn": 1, "lost": 1, "gd": 14, "points": 25}]}]},
      lambda answer, now: said_table(answer), "1. Arsenal, played 10, 25 points"),
     ("left", _left_answer(teams=["Arsenal", "Liverpool"]), said_left, "Still in the Carabao Cup: Arsenal and Liverpool."),
+    ("match", _competition_answer([_found_match(**SPAIN_ENGLAND)]), said_competition, "Goals: Harry Kane 45' (pen)"),
 ])
 def test_each_answer_is_said_by_its_own_words(london, about, answer, said_by, words):
     AT = datetime(2026, 11, 13, 12, 0).astimezone()
@@ -851,11 +1405,12 @@ def test_names_espn_doesnt_know_are_all_said_and_no_words_are_built_for_them(lon
     def refused(*_):
         raise AssertionError("said_* was called for an answer which found nothing")
 
-    for name in ("said_team", "said_competition", "said_table", "said_left", "said_lineups"):
+    for name in ("said_team", "said_competition", "said_table", "said_left", "said_lineups", "said_match_report"):
         monkeypatch.setattr(football_words, name, refused)
     answer = {"unknown": ["Arsnal", "Chelsee"], "stale": False}
     for given in ({"team": "Arsnal"}, {"competition": "x"}, {"competition": "x", "about": "table"},
-                  {"competition": "x", "about": "left"}, {"team": "Arsnal", "about": "lineups"}):
+                  {"competition": "x", "about": "left"}, {"team": "Arsnal", "about": "lineups"},
+                  {"team": "Arsnal", "about": "match"}, {"competition": "x", "about": "match"}):
         assert _said(FakeHome(answer=answer), **given) == {
             "success": True,
             "message": "ESPN, where Home Assistant's football comes from, found nothing called Arsnal and Chelsee."}
@@ -872,12 +1427,17 @@ def test_an_old_answer_is_old_even_if_it_found_nothing(london):
     ({"team": "Arsenal"}, _team_answer(next=[_found_match(odds={"home": "55", "draw": 23, "away": 22})])),
     ({"competition": "Premier League"}, _competition_answer([_found_match(state="live")])),
     ({"competition": "Premier League"}, _competition_answer([_found_match()], days=["next week"])),
+    ({"competition": "Premier League"}, _competition_answer([_found_match(events=[{"minute": "45'", "kind": "yellow_card", "side": "home"}])])),
+    ({"competition": "Premier League"}, _competition_answer([_found_match(events="goal")])),
+    ({"team": "England", "about": "match"}, _match_answer(notes="Penalty conceded")),
+    ({"team": "England", "about": "match"}, _match_answer(match=_found_match(events="goal"))),
     ({"competition": "Premier League", "about": "table"}, {"competition": {"name": "Premier League"}, "stale": False}),
     ({"competition": "Premier League", "about": "left"}, _left_answer(knockout="yes")),
     ({"competition": "Premier League", "about": "left"}, {"stale": False, "unknown": "Arsnal"}),
     ({"competition": "Premier League", "about": "left"}, {"stale": False, "unknown": [4]}),
 ], ids=["no team", "next not a list", "match lacking keys", "odds not numbers", "match state unknown", "day not a day",
-        "table with no groups", "knockout not a flag", "unknown not a list", "unknown not names"])
+        "event kind unknown", "events not a list", "match notes not a list", "match events not a list", "table with no groups",
+        "knockout not a flag", "unknown not a list", "unknown not names"])
 def test_an_answer_of_the_wrong_shape_cant_be_got_and_is_logged(london, caplog, given, answer):
     with caplog.at_level(logging.WARNING, logger="voice_assistant.football_words"):
         assert _said(FakeHome(answer=answer), **given) == NOT_GOT
@@ -1138,3 +1698,223 @@ def test_lineups_of_a_team_are_asked_of_it_whatever_competition_is_given(london)
 def test_a_lineups_answer_of_the_wrong_shape_is_refused(london, changes):
     answer = _lineups_answer(**{"match": _found_match(**SUNDAY_AWAY), **changes})
     assert _said(FakeHome(answer=answer), team="Liverpool", about="lineups") == NOT_GOT
+
+
+def test_a_teams_match_is_asked_of_home_assistant_and_said_as_what_happened(london):
+    AT = _after_the_match()
+    answer = _match_answer(match=_found_match(**SPAIN_ENGLAND), notes=[PENALTY_CONCEDED])
+    home = FakeHome(answer=answer)
+    said = describe(_football(home), team="England", about="match", now=AT)
+    assert said == {"success": True, "message": said_match_report(answer, AT)}
+    assert said["message"].split("\n")[1] == "45': a penalty for England, scored by Harry Kane. Spain 0, England 1."
+    assert home.asked == [("match", "England", "", 1)]
+
+
+def test_a_teams_match_on_a_day_is_asked_for_that_day_and_no_match_says_so_of_the_day(london):
+    home = FakeHome(answer=_match_answer())
+    assert _said(home, team="England", about="match", date="2026-11-15") == {
+        "success": True, "message": "No match is listed for England on that day."}
+    assert home.asked == [("match", "England", "20261115", 1)]
+    # With no day asked for, it is only that none is listed; and text which isn't a day is no day, which Home Assistant isn't told of.
+    for given in (None, "Sunday", "15/11/2026"):
+        home = FakeHome(answer=_match_answer())
+        assert _said(home, team="England", about="match", date=given)["message"] == "No match is listed for England."
+        assert home.asked == [("match", "England", "", 1)]
+
+
+def _over(kickoff, **fields):
+    """A match which kicked off at this time (UTC) and is over, for the match asked about with no team named."""
+    return _found_match(**{"state": "post", "phase": "full_time", "clock": "FT", "home_score": 1, "away_score": 0,
+                           "kickoff": kickoff, **fields})
+
+
+@pytest.mark.parametrize("teams", [
+    [_team("395", "Stevenage"), _team("364", "Liverpool", next=[_found_match(kickoff="2026-11-21T15:00:00+00:00")])],
+    [_team("364", "Liverpool", now=_found_match(kickoff="2026-11-14T15:00:00+00:00"))],
+    # A match still to come today has nothing which happened in it, so it isn't the one asked about.
+    [_team("364", "Liverpool", now=_found_match(kickoff="2026-11-13T20:00:00+00:00"))],
+    [_team("364", "Liverpool", now=_found_match(kickoff="2026-11-13T20:00:00+00:00", phase="off")),
+     _team("395", "Stevenage", now=_stevenage_match(state="post", phase="off"))],
+], ids=["no match today", "a match tomorrow", "a match still to come today", "matches which are off"])
+def test_a_match_with_no_team_and_nobody_playing_or_done_playing_asks_which_team(london, teams):
+    home = FakeHome(teams)
+    assert _said(home, about="match") == {"success": True, "message": "Name a team for its match."}
+    assert home.asked == []
+
+
+def test_a_match_with_no_team_and_no_team_followed_says_so_as_the_overview_does(london):
+    # Nobody is followed, which is not that none of them is playing.
+    home = FakeHome([])
+    assert _said(home, about="match") == {"success": True, "message": "No teams are followed."}
+    assert home.asked == []
+
+
+@pytest.mark.parametrize("teams, sensor", [
+    ([_team("364", "Liverpool", now=_found_match(**LIVE), stale=True)], {}),
+    ([_team("364", "Liverpool", now=_found_match(**LIVE), stale=True), _team("395", "Stevenage")], {}),
+    ([_team("364", "Liverpool", stale=True), _team("395", "Stevenage", stale=True)], {}),
+    ([_team("364", "Liverpool", now=_found_match(**LIVE)), _team("395", "Stevenage")], {"stale": True}),
+    # The stale team's match may be the one over today: a fresh team with one still to come is not the answer.
+    ([_team("364", "Liverpool", now=_over("2026-11-13T10:00:00+00:00"), stale=True),
+      _team("395", "Stevenage", now=_stevenage_match(kickoff="2026-11-13T20:00:00+00:00"))], {}),
+], ids=["a stale team playing", "a stale team playing and a fresh one not", "every team stale",
+        "a stale sensor which marks no team", "a stale team's match over and a fresh one still to come"])
+def test_a_match_with_no_team_cant_say_nobody_is_playing_while_a_team_is_stale(london, caplog, teams, sensor):
+    home = FakeHome(teams, **sensor)
+    with caplog.at_level(logging.WARNING, logger="voice_assistant.football"):
+        assert _said(home, about="match") == NOT_GOT
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]
+    assert home.asked == []
+
+
+def test_a_match_with_no_team_asks_for_a_fresh_team_playing_though_another_is_stale(london):
+    teams = [_team("364", "Liverpool", now=_found_match(**LIVE), stale=True),
+             _team("395", "Stevenage", now=_stevenage_match(state="in", phase="first_half"))]
+    home = FakeHome(teams, answer=_match_answer())
+    assert _said(home, about="match")["success"]
+    assert home.asked == [("match", "Stevenage", "", 1)]
+
+
+def test_a_match_with_no_team_is_said_as_the_match_of_the_team_playing(london):
+    teams = [_team("395", "Stevenage", now=_stevenage_match(state="post")), _team("364", "Liverpool", now=_found_match(**LIVE))]
+    answer = _match_answer(team={"id": "364", "name": "Liverpool", "followed": True}, match=_found_match(**LIVE))
+    home = FakeHome(teams, answer=answer)
+    assert _said(home, about="match") == {"success": True, "message": said_match_report(answer, AT.astimezone())}
+    assert home.asked == [("match", "Liverpool", "", 1)]
+
+
+def test_a_match_with_no_team_asks_for_a_team_in_play_before_one_over(london):
+    teams = [_team("395", "Stevenage", now=_stevenage_match(state="post")), _team("364", "Liverpool", now=_found_match(**LIVE))]
+    home = FakeHome(teams, answer=_match_answer())
+    _said(home, now=datetime(2026, 11, 13, 14, 0).astimezone(), about="match")
+    assert home.asked == [("match", "Liverpool", "", 1)]
+
+
+def test_a_match_with_no_team_asks_for_the_match_over_today_not_one_still_to_come(london):
+    # At six in the evening, Stevenage's match at three is over and Liverpool's at eight is not begun: what happened
+    # is Stevenage's, though Liverpool come first in the box and are the one a line-up is asked for.
+    evening = datetime(2026, 11, 13, 18, 0).astimezone()
+    teams = [_team("364", "Liverpool", now=_found_match(kickoff="2026-11-13T20:00:00+00:00")),
+             _team("395", "Stevenage", now=_stevenage_match(state="post", kickoff="2026-11-13T15:00:00+00:00"))]
+    home = FakeHome(teams, answer=_match_answer())
+    _said(home, now=evening, about="match")
+    assert home.asked == [("match", "Stevenage", "", 1)]
+    home = FakeHome(teams, answer=_lineups_answer(match=_found_match()))
+    _said(home, now=evening, about="lineups")
+    assert home.asked == [("lineups", "Liverpool", "", 1)]
+
+
+def test_a_match_with_no_team_asks_for_the_match_over_today_which_kicked_off_last(london):
+    evening = datetime(2026, 11, 13, 18, 0).astimezone()
+    earlier = _team("364", "Liverpool", now=_over("2026-11-13T10:00:00+00:00"))
+    later = _team("395", "Stevenage", now=_stevenage_match(state="post", kickoff="2026-11-13T12:30:00+00:00"))
+    for teams in ([earlier, later], [later, earlier]):
+        home = FakeHome(teams, answer=_match_answer())
+        _said(home, now=evening, about="match")
+        assert home.asked == [("match", "Stevenage", "", 1)]
+
+
+@pytest.mark.parametrize("state, phase", [("in", "first_half"), ("post", "full_time")], ids=["in play", "over today"])
+def test_a_match_with_no_team_doesnt_rank_a_match_from_bbc_last_as_it_has_events(london, state, phase):
+    # South Shields come first in the box and are in the same state at the same time: BBC's match is asked for, though
+    # for line-ups it is not, as it never has any.
+    mark = {"state": state, "phase": phase}
+    teams = [_team("18312", "South Shields", now=_shields_match(**mark)), _team("395", "Stevenage", now=_stevenage_match(**mark))]
+    home = FakeHome(teams, answer=_match_answer())
+    assert _said(home, about="match")["success"]
+    assert home.asked == [("match", "South Shields", "", 1)]
+    home = FakeHome(teams, answer=_lineups_answer(match=_found_match()))
+    assert _said(home, about="lineups")["success"]
+    assert home.asked == [("lineups", "Stevenage", "", 1)]
+
+
+def test_a_match_with_no_team_asks_for_the_later_kick_off_whether_or_not_it_is_from_bbc(london):
+    early = {"state": "post", "phase": "full_time", "kickoff": "2026-11-13T10:30:00+00:00"}
+    late = {"state": "post", "phase": "full_time", "kickoff": "2026-11-13T11:45:00+00:00"}
+    for shields, stevenage, asked in ((early, late, "Stevenage"), (late, early, "South Shields")):
+        teams = [_team("18312", "South Shields", now=_shields_match(**shields)), _team("395", "Stevenage", now=_stevenage_match(**stevenage))]
+        for box in (teams, list(reversed(teams))):
+            home = FakeHome(box, answer=_match_answer())
+            _said(home, about="match")
+            assert home.asked == [("match", asked, "", 1)]
+
+
+def test_a_match_with_no_team_asks_for_the_team_by_the_entry_of_the_box_which_found_it(london):
+    teams = [_team("360", "Man Utd", asked="Manchester United FC", now=_found_match(**LIVE))]
+    home = FakeHome(teams, answer=_match_answer())
+    _said(home, about="match")
+    assert home.asked == [("match", "Manchester United FC", "", 1)]
+
+
+def test_a_match_with_no_team_and_a_day_asks_for_the_followed_team_whose_match_was_on_it(london):
+    # Yesterday, from the teams' results: the one which kicked off last, as for today. A match on another day isn't it.
+    teams = [_team("364", "Liverpool", last=[_over("2026-11-12T15:00:00+00:00"), _over("2026-11-08T16:30:00+00:00")]),
+             _team("395", "Stevenage", last=[_over("2026-11-12T19:45:00+00:00", home="Stevenage")]),
+             _team("18312", "South Shields", last=[_over("2026-11-10T19:45:00+00:00")])]
+    home = FakeHome(teams, answer=_match_answer())
+    assert _said(home, about="match", date="2026-11-12")["message"] == "No match is listed for England on that day."
+    assert home.asked == [("match", "Stevenage", "20261112", 1)]
+    # And with the earlier one the only one on the day, that is.
+    home = FakeHome(teams[:1] + teams[2:], answer=_match_answer())
+    _said(home, about="match", date="2026-11-12")
+    assert home.asked == [("match", "Liverpool", "20261112", 1)]
+
+
+def test_a_match_with_no_team_and_a_day_finds_the_teams_match_in_its_now_as_well_as_its_last(london):
+    # A match which finished after midnight is still the sensor's "now" the next morning.
+    team = _team("364", "Liverpool", now=_over("2026-11-12T22:00:00+00:00"))
+    home = FakeHome([team], answer=_match_answer())
+    _said(home, about="match", date="2026-11-12")
+    assert home.asked == [("match", "Liverpool", "20261112", 1)]
+
+
+def test_a_match_with_no_team_and_today_as_the_day_is_as_with_no_day(london):
+    # A match which kicked off before midnight and is still in play twenty minutes after it: today's, as the match in play
+    # always is, though it isn't one of the day's kick-offs, which is what it would have to be for any other day.
+    teams = [_team("364", "Liverpool", now=_found_match(**LIVE, kickoff="2026-11-12T23:30:00+00:00"))]
+    just_after_midnight = datetime(2026, 11, 13, 0, 20).astimezone()
+    home = FakeHome(teams, answer=_match_answer())
+    _said(home, now=just_after_midnight, about="match", date="2026-11-13")
+    assert home.asked == [("match", "Liverpool", "20261113", 1)]
+    home = FakeHome(teams, answer=_match_answer())
+    _said(home, now=just_after_midnight, about="match")
+    assert home.asked == [("match", "Liverpool", "", 1)]
+    # Whereas for yesterday the match is among the day's kick-offs, and for the day before it isn't.
+    home = FakeHome(teams, answer=_match_answer())
+    _said(home, now=just_after_midnight, about="match", date="2026-11-12")
+    assert home.asked == [("match", "Liverpool", "20261112", 1)]
+    home = FakeHome(teams)
+    assert _said(home, now=just_after_midnight, about="match", date="2026-11-11") == {"success": True, "message": "Name a team for its match."}
+    assert home.asked == []
+
+
+@pytest.mark.parametrize("date, teams", [
+    # What is in play now, or still to come, isn't what happened on another day.
+    ("2026-11-12", [_team("364", "Liverpool", now=_found_match(**LIVE), last=[_over("2026-11-08T16:30:00+00:00")])]),
+    ("2026-11-14", [_team("364", "Liverpool", next=[_found_match(kickoff="2026-11-14T15:00:00+00:00")])]),
+    ("2026-11-12", [_team("364", "Liverpool", last=[_over("2026-11-12T15:00:00+00:00", state="pre")])]),
+    ("2026-11-12", [_team("364", "Liverpool", last=[_over("2026-11-12T15:00:00+00:00", phase="off")])]),
+], ids=["a match in play now", "a match tomorrow", "a match not begun", "a match which is off"])
+def test_a_match_with_no_team_and_a_day_with_no_match_on_it_asks_which_team(london, date, teams):
+    home = FakeHome(teams)
+    assert _said(home, about="match", date=date) == {"success": True, "message": "Name a team for its match."}
+    assert home.asked == []
+
+
+def test_a_match_with_no_team_and_a_day_cant_say_none_was_played_while_a_team_is_stale(london, caplog):
+    teams = [_team("364", "Liverpool", stale=True, last=[_over("2026-11-12T15:00:00+00:00")]), _team("395", "Stevenage")]
+    home = FakeHome(teams)
+    with caplog.at_level(logging.WARNING, logger="voice_assistant.football"):
+        assert _said(home, about="match", date="2026-11-12") == NOT_GOT
+    assert home.asked == []
+
+
+@pytest.mark.parametrize("failure, said", [
+    (requests.ConnectionError("refused"), "I can't reach Home Assistant right now."),
+    (requests.HTTPError("404", response=SimpleNamespace(status_code=404)), "Football isn't set up in Home Assistant."),
+])
+def test_a_match_with_no_team_says_why_the_sensor_cant_be_read(london, failure, said):
+    home = FakeHome()
+    home.sensor = failure
+    assert _said(home, about="match") == {"success": False, "message": said}
+    assert _said(FakeHome(["Liverpool"]), about="match") == NOT_GOT

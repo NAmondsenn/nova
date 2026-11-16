@@ -186,7 +186,7 @@
 ### Task 7: Records, the full suite and the deploy
 
 **Files:**
-- Create: `docs/decisions/0016-listening-stats.md` (decision record in the style of 0014: SoulSync as the one source and why, rolling windows, the device, the Wrapped and where it's kept)
+- Create: `docs/decisions/0017-listening-stats.md` (decision record in the style of 0014: SoulSync as the one source and why, rolling windows, the device, the Wrapped and where it's kept)
 - Modify: `README.md` (one paragraph under what Nova can do), `CHANGELOG` if the repo keeps one
 
 - [ ] **Step 1:** Write the decision record and the README paragraph.

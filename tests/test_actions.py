@@ -1057,7 +1057,7 @@ def test_get_football_offers_lineups():
     schema = {tool["name"]: tool for tool in ActionExecutor(football=SimpleNamespace(names=list)).tool_schemas()}["get_football"]
     description = schema["description"]
     about = schema["input_schema"]["properties"]["about"]
-    assert about["enum"] == ["matches", "table", "left", "lineups"]
+    assert about["enum"] == ["matches", "table", "left", "lineups", "match"]
     assert "starting eleven" in about["description"]
     assert "line-ups" in description and "starting 11" in description
     # With a team named, even one of the user's own; with none, the followed team playing now or today.
@@ -1069,11 +1069,43 @@ def test_get_football_offers_lineups():
     assert "Reply with the side asked for, or both" in about["description"]
     # Line-ups are only ever said from what Home Assistant gave, as the rest are.
     # So are who is left in a cup, the ground and the odds: odds from memory would be a made-up figure.
-    assert ("fixtures, scores, results, tables, line-ups, who is left, the ground and the odds only from that, "
-            "never from memory") in description
-    # Scorers are still what it hasn't got, but line-ups are no longer.
+    assert ("fixtures, scores, results, what happened in a match (goals, scorers, red cards), tables, line-ups, "
+            "who is left, the ground and the odds only from that, never from memory") in description
+    # Neither scorers nor line-ups are what it hasn't got now: yellow cards are one thing it still hasn't.
     missing = description.split("hasn't got", 1)[1].split(".", 1)[0]
-    assert "scorers" in missing and "line-ups" not in missing
+    assert "yellow cards" in missing and "scorers" not in missing and "line-ups" not in missing
+
+
+def test_get_football_offers_what_happened_in_a_match():
+    schema = {tool["name"]: tool for tool in ActionExecutor(football=SimpleNamespace(names=list)).tool_schemas()}["get_football"]
+    description = schema["description"]
+    properties = schema["input_schema"]["properties"]
+    assert "match" in properties["about"]["enum"]
+    # "Who scored" goes to 'match': the 'matches' answer has no scorers, and the tool's words would then let Claude
+    # say Home Assistant has none.
+    assert ("'match' for who scored or what happened in a team's match - its goals, penalties, red cards and ESPN's notes"
+            in properties["about"]["description"])
+    # It is asked with the team named, even one of the user's own; with none, it is the followed team whose match is in
+    # play, else over, on the day, which is the date (today when none is given): not the line-ups' way, which is the
+    # match about to start.
+    assert ("'match' is asked with the team named too; with neither a team nor a competition it is the followed team "
+            "whose match is in play, else the one whose match is over, on the day (today when no date is given), "
+            "with the day in date if one was asked about") in properties["about"]["description"]
+    assert "asked the same way" not in properties["about"]["description"]
+    assert "the day of a team's match" in properties["date"]["description"]
+    # A round-up of a competition on a day is its matches with a date, not a team's match.
+    assert "'what happened in the Champions League yesterday?' is a competition with a date" in description
+    assert "what happened in a match" in description
+    # The speech reads digits joined by a dash as "dash", whether a score or a formation.
+    assert ("Say a score as 'Spain 2, England 3' or in words, and never write digits joined by a dash - a score or a "
+            "formation - which is read out as 'dash'.") in description
+    # What ESPN's notes don't say is not said, though a late winner is worked out from the minutes and the score.
+    assert ("Say a mistake cost a game only where one of ESPN's notes says what happened; a late winner or equaliser "
+            "may be worked out from the minutes and the score.") in description
+    # 'Who scored' is a question of a match.
+    assert "'who scored for Stevenage?'" in description
+    # What round two added stays.
+    assert "line-ups" in description and "never from memory" in description
 
 
 def test_get_football_hands_everything_it_was_given_to_the_words(monkeypatch):

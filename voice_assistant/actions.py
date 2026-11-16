@@ -1093,24 +1093,35 @@ class ActionExecutor:
     # of the question in words, or that football can't be got.
     @tool(
         "Read football from Home Assistant: fixtures, live scores, results, tables, who's left in a cup, line-ups, "
-        "the ground and bookmakers' odds - for 'what's the Liverpool score?', 'when do Arsenal play next?', 'did "
-        "Stevenage win?', 'is the Champions League on next week?', 'where are Liverpool in the table?', 'what's the "
-        "starting 11 for Liverpool?' or 'who's left in the Carabao Cup?'. Give the team or the competition asked "
-        "about, putting right a name that was clearly misheard; leave both out to ask about the user's own teams in "
-        "general. You get what Home Assistant has, to reply from. Answer fixtures, scores, results, tables, "
-        "line-ups, who is left, the ground and the odds only from that, never from memory, and if it hasn't got "
-        "something - scorers - say Home Assistant's football doesn't have it. Say how far behind a live score may be "
-        "only if asked how fresh it is.",
+        "what happened in a match, the ground and bookmakers' odds - for 'what's the Liverpool score?', 'when do "
+        "Arsenal play next?', 'did Stevenage win?', 'is the Champions League on next week?', 'where are Liverpool "
+        "in the table?', 'what's the starting 11 for Liverpool?', 'who's left in the Carabao Cup?', 'what happened "
+        "in the England match?' or 'who scored for Stevenage?'. Give the team or the competition asked about, "
+        "putting right a name that was clearly misheard; leave both out to ask about the user's own teams in "
+        "general. 'what happened in the Champions League yesterday?' is a competition with a date, not a team's "
+        "match. You get what Home Assistant has, to reply from. Answer fixtures, scores, results, what happened in "
+        "a match (goals, scorers, red cards), tables, line-ups, who is left, the ground and the odds only from "
+        "that, never from memory, and if it hasn't got something - yellow cards - say Home Assistant's football "
+        "doesn't have it. Say a mistake cost a game only where one of ESPN's notes says what happened; a late "
+        "winner or equaliser may be worked out from the minutes and the score. Say a score as 'Spain 2, England "
+        "3' or in words, and never write digits joined by a dash - a score or a formation - which is read out as "
+        "'dash'. Say how far behind a live score may be only if asked how fresh it is.",
         needs="football",
         reads=True,
         team={"type": "string", "description": "The team asked about, e.g. 'Liverpool' or 'Bayern Munich'."},
         competition={"type": "string", "description": "The league or cup asked about, e.g. 'Premier League' or 'Carabao Cup'."},
-        about={"type": "string", "enum": ["matches", "table", "left", "lineups"],
+        about={"type": "string", "enum": ["matches", "table", "left", "lineups", "match"],
                "description": "'table' for a league table, 'left' for who is still in a cup, 'lineups' for a team's "
-                              "starting eleven and bench, else 'matches'. Use 'lineups' with the team named, even one of "
-                              "the user's own; with neither a team nor a competition, the followed team playing now or "
-                              "today. Reply with the side asked for, or both."},
-        date={"type": "string", "description": "The first day of a competition's matches, as YYYY-MM-DD. Leave out for today."},
+                              "starting eleven and bench, 'match' for who scored or what happened in a team's "
+                              "match - its goals, penalties, red cards and ESPN's notes, else 'matches'. Use "
+                              "'lineups' with the team named, "
+                              "even one of the user's own; with neither a team nor a competition, the followed team "
+                              "playing now or today. Reply with the side asked for, or both. 'match' is asked with the team "
+                              "named too; with neither a team nor a competition it is the followed team whose match is "
+                              "in play, else the one whose match is over, on the day (today when no date is given), "
+                              "with the day in date if one was asked about."},
+        date={"type": "string", "description": "The first day of a competition's matches, or the day of a team's match, as "
+                                                "YYYY-MM-DD. Leave out for today; a team's match is then the one in play, else its last."},
         days={"type": "integer", "description": "How many days from it, 1 to 31. Leave out for one day."},
     )
     def get_football(self, team=None, competition=None, about=None, date=None, days=None):

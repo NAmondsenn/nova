@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -130,15 +131,40 @@ def test_full_time():
         ("full_time", "Full time, after extra time. Notts County 1, Stevenage 2.")]
     assert _events(seen, _match("post", "full_time", 2, 2, winner="away", shootout=(3, 4)))[0] == [
         ("goals", "Goal for Notts County. Notts County 2, Stevenage 2."),
-        ("full_time", "Full time. Notts County 2, Stevenage 2. Stevenage won 4-3 on penalties.")]
+        ("full_time", "Full time. Notts County 2, Stevenage 2. Stevenage won on penalties, 4 to 3.")]
 
 
 def test_a_shootout_is_won_by_the_side_home_assistant_names_with_its_own_score_first():
     _, seen = _events(None, _match("in", "penalties", 1, 1))
     assert _events(seen, _match("post", "full_time", 1, 1, winner="home", shootout=(5, 4), extra_time=True))[0] == [
-        ("full_time", "Full time, after extra time. Notts County 1, Stevenage 1. Notts County won 5-4 on penalties.")]
+        ("full_time", "Full time, after extra time. Notts County 1, Stevenage 1. Notts County won on penalties, 5 to 4.")]
     assert _events(seen, _match("post", "full_time", 1, 1, shootout=(5, 4)))[0] == [
         ("full_time", "Full time. Notts County 1, Stevenage 1. The penalty shootout finished Notts County 5, Stevenage 4.")]
+
+
+def test_no_announcement_has_a_score_as_digits_joined_by_a_dash():
+    # It is read out as "dash", so a shoot-out is said in words, whichever side won it and whether or not it followed extra time.
+    _, seen = _events(None, _match("in", "penalties", 2, 2))
+    said = []
+    for winner, shootout in (("home", (5, 4)), ("away", (4, 5)), (None, (5, 4))):
+        for extra_time in (False, True):
+            full_time = _match("post", "full_time", 2, 2, winner=winner, shootout=shootout, extra_time=extra_time)
+            said += [message for _, message in _events(seen, full_time)[0]]
+    assert len(said) == 6 and said[0] == "Full time. Notts County 2, Stevenage 2. Notts County won on penalties, 5 to 4."
+    # The rest are said too: starting, a goal for either side and for both, half time and the second half.
+    for kind, before, after in (
+            ("starting", None, _match(minutes=10)),
+            ("goals", _match("in", "first_half", 1, 1), _match("in", "first_half", 2, 1)),
+            ("goals", _match("in", "first_half", 1, 1), _match("in", "first_half", 1, 2)),
+            ("goals", _match("in", "first_half", 1, 1), _match("in", "first_half", 2, 2)),
+            ("half_time", _match("in", "first_half", 2, 1), _match("in", "half_time", 2, 1)),
+            ("second_half", _match("in", "half_time", 2, 1), _match("in", "second_half", 2, 1))):
+        _, record = _events(None, before) if before else (None, None)
+        sentences = _events(record, after)[0]
+        assert [sentence[0] for sentence in sentences] == [kind]
+        said += [message for _, message in sentences]
+    assert len(said) == 12
+    assert not [words for words in said if re.search(r"\d\s*[-\u2010-\u2015\u2212]\s*\d", words)]
 
 
 def test_full_time_is_said_once():

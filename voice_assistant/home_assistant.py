@@ -124,7 +124,7 @@ FOOTBALL_TEAMS = "sensor.football_teams"
 FOOTBALL_BOX = "input_text.football_teams"
 ASK_TIMEOUT = 20
 # What football_ask may be asked, and the most of a name it sends on.
-FOOTBALL_QUESTIONS = ("team", "competition", "table", "left", "lineups")
+FOOTBALL_QUESTIONS = ("team", "competition", "table", "left", "lineups", "match")
 FOOTBALL_NAME_LENGTH = 60
 
 # How far "dim" and "brighten" move a light, in points of brightness. 30 is steps that
@@ -634,7 +634,7 @@ class HomeAssistant:
         never does - through shell_command.football_ask.
 
         Args:
-            what: The question: "team", "competition", "table", "left" or "lineups".
+            what: The question: "team", "competition", "table", "left", "lineups" or "match".
             name: The team or competition asked about, as it was said. Cut down to letters
                 of any alphabet, digits, spaces and . & / - before it goes, one space at
                 a time and at most FOOTBALL_NAME_LENGTH characters, as it ends up in a
@@ -648,7 +648,7 @@ class HomeAssistant:
             The command's answer, as it printed it: a dict.
 
         Raises:
-            ValueError: If what isn't one of the five, or the command failed - a
+            ValueError: If what isn't one of the six, or the command failed - a
                 returncode other than 0 - or what it printed isn't a JSON object.
             NotAllowed: If _call_service refuses it, which it only does for a fault here.
             requests.RequestException: If Home Assistant couldn't be asked, or didn't

@@ -1,4 +1,4 @@
-# 0016: Listening stats and the Wrapped, from SoulSync
+# 0017: Listening stats and the Wrapped, from SoulSync
 
 15 November 2026 · Agreed with the user in chat · Built
 

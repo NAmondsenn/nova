@@ -1,6 +1,7 @@
 """
 Football Module
-What football is, and how a team is followed, from decisions 2, 5 and 6 of docs/decisions/0014.
+What football is, and how a team is followed, from decisions 2, 5 and 6 of docs/decisions/0014, and what happened
+in a match (its events) from decision 1 of docs/decisions/0016.
 
 Home Assistant is the only source of football (see HomeAssistant.state): Nova never
 calls ESPN and keeps no list of teams, leagues or abbreviations, so everything here
@@ -55,6 +56,12 @@ STALE_AFTER = 300
 
 # The states a match is in, as the Contract has them: not started, in play, over.
 _MATCH_STATES = ("pre", "in", "post")
+
+# What can happen in a match, and for which side, as the Contract has them. A goal, a penalty and an own goal count
+# for the side given - an own goal for the side which gains by it - while a penalty missed and a red card are of the
+# player's own side.
+_EVENT_KINDS = ("goal", "penalty", "own_goal", "penalty_missed", "red_card")
+_EVENT_SIDES = ("home", "away")
 
 # How a wait for the sensor to show a team just followed ends.
 _SHOWN = "shown"
@@ -179,6 +186,56 @@ def _cant_get(why: str, level: int = logging.DEBUG) -> FootballUnavailable:
 
 
 @dataclass(frozen=True)
+class MatchEvent:
+    """
+    One thing which happened in a match, as Home Assistant gives it.
+
+    Attributes:
+        minute: The source's own label for the minute, e.g. "45'" or "90'+3'".
+        kind: "goal", "penalty" (scored), "own_goal", "penalty_missed" or "red_card".
+        side: "home" or "away": the side a goal, penalty or own goal counts for, which for an own goal is
+            not the side of the player who scored it; the player's own side for a penalty missed or a red card.
+        player: The name the source gives, or None where it gives none.
+    """
+
+    minute: str
+    kind: str
+    side: str
+    player: Optional[str]
+
+    @classmethod
+    def from_home(cls, found: Dict) -> "MatchEvent":
+        """
+        Builds an event from one of the dicts in a match's "events".
+
+        Args:
+            found: The dict, with minute, kind and side, and player where the source names one.
+
+        Returns:
+            The event.
+
+        Raises:
+            KeyError: If the minute, kind or side is missing.
+            TypeError: If a value isn't of the type it should be.
+            ValueError: If the minute is empty, or the kind or the side isn't one of the Contract's.
+        """
+        if not isinstance(found, dict):
+            raise TypeError(f"an event should be a dict, not {found!r}")
+        minute = _field(found, "minute", str)
+        if not minute:
+            raise ValueError("an event needs a minute")
+        kind = _field(found, "kind", str)
+        if kind not in _EVENT_KINDS:
+            raise ValueError(f"kind should be one of {_EVENT_KINDS}, not {kind!r}")
+        side = _field(found, "side", str)
+        if side not in _EVENT_SIDES:
+            raise ValueError(f"side should be home or away, not {side!r}")
+        # A player given as blank is no name, which is said as none.
+        player = (_field(found, "player", str, None) or "").strip() or None
+        return cls(minute=minute, kind=kind, side=side, player=player)
+
+
+@dataclass(frozen=True)
 class Match:
     """
     One match, as Home Assistant gives it.
@@ -206,6 +263,9 @@ class Match:
         venue: Where it's played, e.g. "Anfield in Liverpool", or just the name with no city.
         odds: The bookmaker's chances as whole percentages ("home", "draw", "away") and its
             "source", or None. Only in answers to a question, and only before kick-off.
+        events: What happened in it, in the order it happened: its goals, penalties, own goals, penalties
+            missed and red cards. Only in answers to a question, and only once it has started; empty where
+            Home Assistant gave none.
     """
 
     id: str
@@ -225,6 +285,7 @@ class Match:
     extra_time: bool
     venue: Optional[str]
     odds: Optional[Dict]
+    events: Tuple[MatchEvent, ...] = ()
 
     @classmethod
     def from_home(cls, found: Dict) -> "Match":
@@ -240,10 +301,10 @@ class Match:
             The match.
 
         Raises:
-            KeyError: If a key a match always has is missing.
+            KeyError: If a key a match always has is missing, or an event lacks its minute, kind or side.
             TypeError: If a value isn't of the type it should be.
             ValueError: If the kick-off isn't a time with a time zone, or the state, the
-                winner or the shoot-out isn't one of the Contract's.
+                winner, the shoot-out, or the kind or side of an event isn't one of the Contract's.
         """
         if not isinstance(found, dict):
             raise TypeError(f"a match should be a dict, not {found!r}")
@@ -259,6 +320,7 @@ class Match:
                 raise ValueError(f"shootout should be two whole numbers, not {shootout!r}")
             shootout = (shootout[0], shootout[1])
         odds = _field(found, "odds", dict, None)
+        events = tuple(MatchEvent.from_home(event) for event in _field(found, "events", list, []))
         return cls(
             id=_field(found, "id", str),
             kickoff=_instant(_field(found, "kickoff", str)),
@@ -278,6 +340,7 @@ class Match:
             extra_time=_field(found, "extra_time", bool, False),
             venue=_ground(found.get("venue")),
             odds=dict(odds) if odds is not None else None,
+            events=events,
         )
 
 
@@ -584,7 +647,7 @@ class Football:
         answer - any team or competition - and checks that the answer can be trusted.
 
         Args:
-            what: The question: "team", "competition", "table", "left" or "lineups".
+            what: The question: "team", "competition", "table", "left", "lineups" or "match".
             name: The team or competition asked about.
             date: The first day, as YYYYMMDD, or None for today.
             days: How many days from it, or None for one.
