@@ -846,6 +846,18 @@ def test_a_quiet_swap_carried_on_says_nothing(make_swapper, store):
     assert swapper.said == [] and store.swaps() == []
 
 
+def test_a_swap_running_now_isnt_carried_on_a_second_time(make_swapper, music, store):
+    # Saved swaps are read as Nova starts, on a thread of their own; a download's swap may
+    # already be under way by then.
+    swapper = make_swapper()
+    fakes = swapper.fakes
+    fakes.soulsync.lands = [(60, ENDLESS_REL, b"explicit endless")]
+    fakes.clock.later.append((T0 + 45, swapper.resume))
+
+    assert swapper.swap(_endless(fakes.library), ENDLESS_WANTED, "kitchen", quiet=False) == "swapped"
+    assert fakes.soulsync.requested == ["deezer-1"] and len(fakes.ears.heard) == 1 and swapper.said == []
+
+
 def test_a_restart_before_anything_moved_ends_the_swap_quietly(make_swapper, music, store):
     store.save_swap({"key": "made-up", "stage": "setting_aside", "name": "Gunna - endless", "named": "endless by Gunna",
                      "satellite": "kitchen", "quiet": False, "held": [],

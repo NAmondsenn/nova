@@ -331,6 +331,10 @@ class Swapper:
         self._now = now
         self._stopping = threading.Event()
         self._wait = wait or self._stopping.wait
+        # The keys of the swaps running now, which resume leaves alone: it reads the saved
+        # swaps on a thread of its own as Nova starts, when a download's may be under way.
+        self._running: Set[str] = set()
+        self._running_lock = threading.Lock()
 
     def stop(self):
         """Ends every swap at its next step, as Nova stops. Each is saved, to be carried on at the next start."""
@@ -368,10 +372,16 @@ class Swapper:
                 "artist": wanted.artist, "album": _album(song), "copy": _copy(song, rel), "held": [], "tries": 0}
         # Saved before anything moves, so a restart part way never loses where a song went -
         # and if it can't be saved, nothing moves.
-        if not self._save(swap):
-            return self._list(name, song["id"], "couldnt", NOT_SAVED)
-        logger.info(f"Swapping {name}, which was heard clean")
-        return self._carry_on(swap, parts)
+        with self._running_lock:
+            self._running.add(swap["key"])
+        try:
+            if not self._save(swap):
+                return self._list(name, song["id"], "couldnt", NOT_SAVED)
+            logger.info(f"Swapping {name}, which was heard clean")
+            return self._carry_on(swap, parts)
+        finally:
+            with self._running_lock:
+                self._running.discard(swap["key"])
 
     def resume(self):
         """
@@ -380,7 +390,17 @@ class Swapper:
         but not yet fetched for goes on. Without the music folder they're all left for the next
         start, as nothing can be put back.
         """
-        saved = self.store.swaps()
+        with self._running_lock:
+            saved = [swap for swap in self.store.swaps() if swap.get("key") not in self._running]
+            self._running.update(swap.get("key") for swap in saved)
+        try:
+            self._resume_all(saved)
+        finally:
+            with self._running_lock:
+                self._running.difference_update(swap.get("key") for swap in saved)
+
+    def _resume_all(self, saved: List[Dict]):
+        """Carries on the saved swaps given, one at a time - see resume."""
         if not saved:
             return
         folder = self._folder()
