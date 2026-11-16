@@ -9,8 +9,10 @@ far for an artist it has never scanned, then each new one; never their back cata
 
 The stats give each top artist's SoulSync library id, which the watchlist can't take as it is, so the
 library is asked for the artist's provider ids and the artist added by those (see SoulSync.follow).
-Each new watchlist row is then checked to be the artist listened to, by name, and one which isn't is
-taken off again - kept in the record until it is, so a restart in between never leaves it there.
+Those are SoulSync's own ids for that library artist, as its own watch button uses, which is what makes
+the right artist followed. Each new watchlist row's name is also read back, and one which isn't the
+artist listened to is taken off again - kept in the record until it is - though as SoulSync stores the
+name sent, this is only a defence, and can't catch a wrong id.
 
 FollowWatcher, a thread, looks once an hour and once as it starts, and follows at the first look of
 each calendar month from 3 in the morning - on any day of it, so it also runs the day it's set up.
