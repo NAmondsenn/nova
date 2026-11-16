@@ -267,20 +267,35 @@ def test_a_goal_is_ruled_out_at_two_minutes_after_the_first_reading_which_showed
     assert said == [] and seen["waiting"] == {"home": 2, "away": 1, "reported": first}
     said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=first + 125)
     assert said == [("goals", "Goal ruled out. Notts County 2, Stevenage 1.")]
-    assert RULED_OUT_AFTER == 120
+    assert RULED_OUT_AFTER == 110
 
 
+# Home Assistant's last_reported drifts a few seconds round each minute, so the second reading is about 60 s after the
+# first and never near 110, while the third is about 120 s after it and always past it: a reading 62 s on is not enough
+# and one 118 s on is, though neither is exactly two minutes.
 @pytest.mark.parametrize("later, said", [
-    (RULED_OUT_AFTER - 1, False), (RULED_OUT_AFTER - 0.001, False), (RULED_OUT_AFTER, True), (RULED_OUT_AFTER + 1, True),
-    (RULED_OUT_AFTER * 5, True),
+    (62, False), (RULED_OUT_AFTER - 1, False), (RULED_OUT_AFTER - 0.001, False), (RULED_OUT_AFTER, True), (118, True),
+    (RULED_OUT_AFTER + 1, True), (RULED_OUT_AFTER * 5, True),
 ])
-def test_two_minutes_or_more_is_what_confirms_a_lower_score(later, said):
+def test_about_two_minutes_is_what_confirms_a_lower_score(later, said):
     first = NOW - 2000
     _, seen = _events(None, _match("in", "first_half", 2, 2))
     _, seen = _events(seen, _match("in", "first_half", 2, 1), reported=first)
     goals, seen = _events(seen, _match("in", "first_half", 2, 1), reported=first + later)
     assert goals == ([("goals", "Goal ruled out. Notts County 2, Stevenage 1.")] if said else [])
     assert (seen["waiting"] is None) == said
+
+
+def test_a_third_reading_a_little_under_two_minutes_on_says_it_and_a_second_a_little_over_a_minute_does_not():
+    # Readings which drifted: the second 62 s after the first and the third 118 s after it, as Home Assistant writes them.
+    first = NOW - 1000
+    _, seen = _events(None, _match("in", "first_half", 2, 2))
+    said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=first)
+    assert said == []
+    said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=first + 62)
+    assert said == [] and seen["waiting"] == {"home": 2, "away": 1, "reported": first}
+    said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=first + 118)
+    assert said == [("goals", "Goal ruled out. Notts County 2, Stevenage 1.")]
 
 
 def test_the_higher_score_back_in_between_drops_a_lower_one_waiting_and_the_two_minutes_start_again():
@@ -304,8 +319,8 @@ def test_a_reading_of_unknown_time_confirms_nothing_whatever_has_passed():
     _, seen = _events(seen, _match("in", "first_half", 2, 1), reported=first)
     said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=None)
     assert said == [] and seen["waiting"] == {"home": 2, "away": 1, "reported": first}
-    # The note is still there for a dated reading to confirm, and still two minutes from the first.
-    assert _events(seen, _match("in", "first_half", 2, 1), reported=first + 119)[0] == []
+    # The note is still there for a dated reading to confirm, and still about two minutes from the first.
+    assert _events(seen, _match("in", "first_half", 2, 1), reported=first + 109)[0] == []
     assert _events(seen, _match("in", "first_half", 2, 1), reported=first + 125)[0] == [
         ("goals", "Goal ruled out. Notts County 2, Stevenage 1.")]
 
@@ -363,7 +378,7 @@ def test_one_lower_look_and_then_the_old_score_again_says_nothing():
 def test_a_lower_score_waiting_is_dropped_when_the_next_look_is_something_else():
     _, seen = _events(None, _match("in", "first_half", 2, 2))
     _, seen = _events(seen, _match("in", "first_half", 2, 1), reported=READING_1)
-    # Another lower score waits in its turn, and is said only when a later reading shows it again.
+    # Another lower score waits in its turn, and is said only when a reading about two minutes later shows it again.
     said, seen = _events(seen, _match("in", "first_half", 1, 1), reported=READING_2)
     assert said == [] and seen["waiting"] == {"home": 1, "away": 1, "reported": READING_2}
     # A goal is compared with the score kept, not with the one which waited.
@@ -867,14 +882,31 @@ def test_a_lower_score_which_is_back_up_before_a_later_reading_confirms_it_says_
 
 
 def test_a_goal_ruled_out_is_said_at_125_seconds_only(tmp_path):
-    # A lower score at 0 s, again at 60 s and again at 125 s: said at the third reading, in the third look, only.
+    # A lower score on readings at 0 s, 60 s, 105 s and 125 s, each seen on one or two looks 30 s apart: said on the
+    # fourth reading, which is the sixth look at the lower score, and on no look before it.
     rig = Rig(tmp_path)
     _score_of_the_match_at(rig, 1, -30, NOW - 300)
-    for step, (at, reading) in enumerate(((0, NOW - 200), (30, NOW - 200), (60, NOW - 140), (90, NOW - 140), (120, NOW - 85))):
+    for step, (at, reading) in enumerate(((0, NOW - 200), (30, NOW - 200), (60, NOW - 140), (90, NOW - 140), (120, NOW - 95))):
         _score_of_the_match_at(rig, 0, at, reading)
         assert rig.said == [], step
     _score_of_the_match_at(rig, 0, 150, NOW - 75)
     assert rig.said == ["Goal ruled out. Notts County 1, Stevenage 0."]
+
+
+def test_a_restart_in_the_middle_of_the_wait_keeps_counting_from_the_first_reading(tmp_path):
+    rig = Rig(tmp_path)
+    _score_of_the_match_at(rig, 1, 0, READING_1 - 30)
+    _score_of_the_match_at(rig, 0, 30, READING_1)
+    assert rig.said == []
+    # A new watcher on the same file, as after a restart: the lower score is held from READING_1, not from here.
+    restarted = Rig(tmp_path)
+    _score_of_the_match_at(restarted, 0, 60, READING_2)
+    assert restarted.said == []
+    _score_of_the_match_at(restarted, 0, 90, READING_3)
+    assert restarted.said == ["Goal ruled out. Notts County 1, Stevenage 0."]
+    _score_of_the_match_at(restarted, 0, 120, READING_3)
+    _score_of_the_match_at(restarted, 0, 150, READING_4)
+    assert restarted.said == ["Goal ruled out. Notts County 1, Stevenage 0."] and rig.said == []
 
 
 def test_a_goal_is_not_ruled_out_on_a_reading_with_no_report_time(tmp_path):

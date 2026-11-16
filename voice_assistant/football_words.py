@@ -1004,17 +1004,18 @@ def said_match_report(answer: Dict, now: datetime, on_a_day: bool = False, again
     seasons = _seasons_looked_through(answer) if against else None
     other, other_id = _other_team_found(answer) if against else (None, None)
     own_id = _field(team, "id", str, None) if against else None
+    found = _field(answer, "match", dict, None)
+    # Built before the same team is said, so that a match of the wrong shape is refused whatever is said of it.
+    match = Match.from_home(found) if found is not None else None
     if own_id and own_id == other_id:
         # The two ids are one team, so whatever match is in the answer is the team's own and not one of two teams.
         return _same_team(team, name, against)
-    found = _field(answer, "match", dict, None)
-    if found is None:
+    if match is None:
         if seasons is not None:
             # A national side's one list has no seasons in it, so what was looked through is ESPN's results for it.
             looked = f"among ESPN's results for {name}" if seasons == 1 else f"listed in the last {seasons} seasons"
             return f"No match between {name} and {other} is {looked}."
         return f"No match is listed for {name}{' on that day' if on_a_day else ''}."
-    match = Match.from_home(found)
     # A match which hasn't started has nothing to note, as it has nothing which happened in it.
     unlisted = [_NO_SCORERS] if _scorers_unlisted(match) else []
     return "\n".join(_with_lag([said_match(match, now)] + unlisted + said_events(match) + (notes if _has_started(match) else []), [match]))

@@ -264,8 +264,9 @@ class Match:
         odds: The bookmaker's chances as whole percentages ("home", "draw", "away") and its
             "source", or None. Only in answers to a question, and only before kick-off.
         no_odds: Whether Home Assistant looked the odds up and ESPN lists none. False is only that
-            Home Assistant says nothing of it - a match from a team's schedule alone, or one asked
-            for before it said - so that nothing is said of its odds either way. Never with odds.
+            Home Assistant says nothing of it - a match from a team's schedule alone, or one from a
+            Home Assistant which doesn't mark them yet - so that nothing is said of its odds either way.
+            Never true with odds.
         events: What happened in it, in the order it happened: its goals, penalties, own goals, penalties
             missed and red cards. Only in answers to a question, and only once it has started; empty where
             Home Assistant gave none.

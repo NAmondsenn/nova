@@ -643,7 +643,7 @@ def test_no_odds_of_the_wrong_shape_refuses_the_answer(london, changes):
     bad = _found_match(**SUNDAY_AWAY, **changes)
     answers = [("team", _team_answer(next=[bad])), ("competition", _competition_answer([bad])), ("left", _left_answer(matches=[bad]))]
     for what, answer in answers:
-        with pytest.raises((KeyError, TypeError, ValueError)):
+        with pytest.raises((KeyError, TypeError, ValueError), match="no_odds"):
             {"team": said_team, "competition": said_competition, "left": said_left}[what](answer, AT)
         asked = {"team": {"team": "Liverpool"}, "competition": {"competition": "Champions League"},
                  "left": {"competition": "Carabao Cup", "about": "left"}}[what]
@@ -1364,6 +1364,24 @@ def test_a_team_asked_against_itself_is_said_so_end_to_end(london):
 def test_an_id_which_isnt_text_is_refused_for_the_other_team(london, found):
     with pytest.raises((KeyError, TypeError, ValueError), match="id"):
         said_match_report(_liverpool_answer(seasons=6, against=found), _after_the_match(), against="Liverpool FC")
+
+
+@pytest.mark.parametrize("own", [{"id": 364, "name": "Liverpool"}, {"id": ["364"], "name": "Liverpool"}], ids=["a number", "a list"])
+def test_an_id_which_isnt_text_is_refused_for_the_team_itself(london, own):
+    for match in ({}, {"match": _found_match(**NEWCASTLE_LIVERPOOL)}):
+        with pytest.raises((KeyError, TypeError, ValueError), match="id"):
+            said_match_report(_match_answer(team=own, seasons=6, against=LIVERPOOL_FC, **match), _after_the_match(),
+                              against="Liverpool FC")
+
+
+@pytest.mark.parametrize("match", [
+    {"id": "1"}, {**NEWCASTLE_LIVERPOOL, "state": "live"}, {**NEWCASTLE_LIVERPOOL, "home_score": "2"}, "Newcastle United 2, Liverpool 2",
+], ids=["a match with no kick-off", "a state outside the Contract", "a score which isn't a number", "text"])
+def test_a_match_of_the_wrong_shape_is_refused_even_in_an_answer_which_says_the_same_team(london, match):
+    # As for any answer: what is not the Contract's shape is refused, though the match is not what would be said.
+    assert said_match_report(_liverpool_answer(seasons=6, against=LIVERPOOL_FC), _after_the_match(), against="Liverpool FC")
+    with pytest.raises((KeyError, TypeError, ValueError)):
+        said_match_report(_liverpool_answer(seasons=6, against=LIVERPOOL_FC, match=match), _after_the_match(), against="Liverpool FC")
 
 
 @pytest.mark.parametrize("changes", [

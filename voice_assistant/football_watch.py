@@ -43,9 +43,11 @@ KEEP_FOR = 86400
 GAP = 300
 
 # Seconds a lower score has to hold, from the first reading which showed it, before it is said to be a goal ruled
-# out. Two readings a minute apart can both carry one old copy of the match from ESPN, so a second look at the
-# score going down is no proof of it.
-RULED_OUT_AFTER = 120
+# out. Two readings a minute apart can both carry one old copy of the match from ESPN, so the second reading is no
+# proof of it; the third is, about two minutes on. Home Assistant's last_reported drifts a few seconds round each
+# minute, so the limit is 110 rather than 120: the second reading (about 60) can never reach it and the third (about
+# 120) always does, where 120 itself would be missed by a reading at 118 and wait for the fourth, about three minutes on.
+RULED_OUT_AFTER = 110
 
 # The phases of a match which has started, as the Contract has them. One Home Assistant's side has
 # added since is one whose meaning isn't known, so it counts as none.
@@ -64,7 +66,7 @@ def _is_number(value) -> bool:
 
 def _is_waiting(waiting) -> bool:
     """
-    Whether something is the note of a lower score waiting for a later reading to confirm it, as _goals
+    Whether something is the note of a lower score waiting for a reading about two minutes later to confirm it, as _goals
     makes it: the two scores, each a whole number or None, and when Home Assistant wrote the reading
     which first showed them - {"home": 1, "away": None, "reported": 1800000000.0}.
     """
@@ -334,9 +336,10 @@ def _goals(before: Dict, match: Match, reported: Optional[float]) -> Tuple[Optio
     A score which has gone down is not said at once, as it may be an old copy of the match
     which Home Assistant gave: the higher score is kept, and the lower one noted as waiting,
     with when Home Assistant wrote the reading which first showed it. If a reading written
-    RULED_OUT_AFTER seconds or more after that one still shows that same lower score it is said,
-    as a goal ruled out; one in between which shows it changes nothing, so the time is always
-    counted from the first. If a reading shows anything else the note is dropped and that
+    RULED_OUT_AFTER seconds (about two minutes) or more after that one still shows that same lower
+    score it is said, as a goal ruled out; one in between which shows it changes nothing, so the
+    time is always counted from the first. A lower score first seen within about two minutes of
+    full time is never said, as the comparison stops at full time (see events). If a reading shows anything else the note is dropped and that
     reading is compared as usual. The same reading seen again confirms nothing, as Nova looks
     more often than Home Assistant writes the sensor, so the second look is usually the first
     one's reading; and nor does the next reading, a minute on, as two readings can both carry
@@ -444,7 +447,7 @@ def events(
     Said unprompted, a false or repeated announcement is worse than one missed, so a look
     which can't be trusted says nothing: an old copy of the match (an earlier state or phase
     than the record's, or no score where it had one) is passed over, the record keeping all
-    but the time of the look; a score which has gone down waits for a reading two minutes later (see _goals);
+    but the time of the look; a score which has gone down waits for a reading about two minutes later (see _goals);
     and a look with no known phase doesn't take the record's away, however old the record. A match
     which is off says nothing, and one which comes back from off is taken as it stands.
 
