@@ -282,7 +282,7 @@ def _scorers_unlisted(match: Match) -> bool:
     Returns:
         True for a match which has started, with a goal on its score and no goal, penalty or own goal among its
         events (a red card or a penalty missed doesn't count, as neither says who scored). False for a goalless
-        one, which has nothing to say of scorers, for one with no score, and for one with any goal listed, even
+        one, which has nothing to say of scorers, for one with no score on either side, and for one with any goal listed, even
         if not all of them are (which is said another way, see said_events).
     """
     goals = (match.home_score or 0) + (match.away_score or 0)

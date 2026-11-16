@@ -394,7 +394,9 @@ def test_a_running_score_left_out_is_said_to_be_left_out(london, changes):
                          ids=["no score", "no home score", "no away score"])
 def test_a_match_with_no_score_has_nothing_to_add_up_to(london, changes):
     # Its line says "no score listed", which is why none is said after each goal.
-    assert DONT_ADD_UP not in said_events(_m(**{**SPAIN_ENGLAND, **changes}))
+    said = said_events(_m(**{**SPAIN_ENGLAND, **changes}))
+    assert DONT_ADD_UP not in said
+    assert len(said) == len(SPAIN_ENGLAND["events"])
 
 
 def test_the_goals_listed_adding_up_to_the_score_say_nothing_of_it_and_no_goals_listed_say_it_another_way(london):
