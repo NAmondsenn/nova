@@ -47,6 +47,7 @@ GAP = 300
 # proof of it; the third is, about two minutes on. Home Assistant's last_reported drifts a few seconds round each
 # minute, so the limit is 110 rather than 120: the second reading (about 60) can never reach it and the third (about
 # 120) always does, where 120 itself would be missed by a reading at 118 and wait for the fourth, about three minutes on.
+# The reading which ends the match confirms a lower score waiting without them (see _goals), as no reading follows it.
 RULED_OUT_AFTER = 110
 
 # The phases of a match which has started, as the Contract has them. One Home Assistant's side has
@@ -329,7 +330,7 @@ def _starting(match: Match, now: float, lead: float, followed: Set[str]) -> Opti
     return Event("starting", f"{first} play {second} in {_minutes(math.ceil(left / 60))}.")
 
 
-def _goals(before: Dict, match: Match, reported: Optional[float]) -> Tuple[Optional[Event], Dict]:
+def _goals(before: Dict, match: Match, reported: Optional[float], over: bool = False) -> Tuple[Optional[Event], Dict]:
     """
     Says what a change in the score means.
 
@@ -338,19 +339,24 @@ def _goals(before: Dict, match: Match, reported: Optional[float]) -> Tuple[Optio
     with when Home Assistant wrote the reading which first showed it. If a reading written
     RULED_OUT_AFTER seconds (about two minutes) or more after that one still shows that same lower
     score it is said, as a goal ruled out; one in between which shows it changes nothing, so the
-    time is always counted from the first. A lower score first seen within about two minutes of
-    full time is never said, as the comparison stops at full time (see events). If a reading
-    shows anything else the note is dropped and that reading is compared as usual. The same
-    reading seen again confirms nothing, as Nova looks
+    time is always counted from the first. The reading which ends the match is the exception: it is
+    never an old copy of the match in play, and none follows it to confirm anything, so one written
+    after the first which showed the same lower score says it at once, though it is under two minutes
+    on (a goal ruled out at 89 minutes, then full time). A lower score first seen on the reading
+    which ends the match, or within about two minutes of it, is never said, as the comparison stops
+    at full time (see events). If a reading shows anything else the note is dropped and that reading
+    is compared as usual. The same reading seen again confirms nothing, as Nova looks
     more often than Home Assistant writes the sensor, so the second look is usually the first
-    one's reading; and nor does the next reading, a minute on, as two readings can both carry
-    the one old copy ESPN gave.
+    one's reading; and nor does the next reading, a minute on, while the match goes on, as two
+    readings can both carry the one old copy ESPN gave.
 
     Args:
         before: What was last seen of the match.
         match: The match as it is.
         reported: Epoch seconds when Home Assistant wrote the reading the match is from, or None
             where that isn't known: a lower score is then never noted or confirmed.
+        over: Whether this reading ends the match (it is over, or at full time), which then confirms a lower
+            score waiting if it was written after the one which first showed it.
 
     Returns:
         The event, or None if there is nothing to say, and the scores for the record to keep:
@@ -372,7 +378,9 @@ def _goals(before: Dict, match: Match, reported: Optional[float]) -> Tuple[Optio
         kept = {"home": before["home"], "away": before["away"]}
         waiting = before["waiting"]
         if waiting is not None and (waiting["home"], waiting["away"]) == (here["home"], here["away"]):
-            if reported is not None and reported - waiting["reported"] >= RULED_OUT_AFTER:
+            held = None if reported is None else reported - waiting["reported"]
+            # At the end of the match, any later reading will do, as nothing comes after it to confirm it.
+            if held is not None and (held >= RULED_OUT_AFTER or (over and held > 0)):
                 return Event("goals", f"Goal ruled out. {score}"), taken
             # The reading it was first seen on, one too soon after it, or one of unknown time: the note stays as
             # it was, with the first reading's time, which is what the two minutes are counted from.
@@ -450,7 +458,8 @@ def events(
     than the record's, or no score where it had one) is passed over, the record keeping all
     but the time of the look; a score which has gone down waits for a reading about two minutes later (see _goals);
     and a look with no known phase doesn't take the record's away, however old the record. A match
-    which is off says nothing, and one which comes back from off is taken as it stands.
+    which is off says nothing, and one which comes back from off is taken as it stands. A lower score waiting
+    when the reading which ends the match arrives and shows it is said as a goal ruled out, before full time.
 
     Args:
         before: What was last seen of the match (the record this gave last time), or None.
@@ -490,7 +499,8 @@ def events(
         kept_phase = phase or before["phase"]
     # A match which was off had no scores to compare with, so what it shows on coming back is taken as it stands.
     if recent and phase != "off" and before["state"] != "post" and before["phase"] != "off":
-        goals, scores = _goals(before, match, reported)
+        # A reading which ends the match is no old copy of it in play, so it settles a lower score waiting (see _goals).
+        goals, scores = _goals(before, match, reported, over=match.state == "post" or phase == "full_time")
         if goals:
             said.append(goals)
         if phase != before["phase"]:
