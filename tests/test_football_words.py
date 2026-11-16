@@ -596,8 +596,8 @@ def test_a_round_up_says_what_there_is_to_say_of_a_match_and_nothing_more(london
     # Red cards are said as they are, a penalty missed is not a goal, and with no goals there is no "Goals".
     assert said_competition(_competition_answer([_found_match(**no_goals)]), AT).split("\n")[0].endswith(
         "It was a draw. Red cards: Elliot Anderson (England) 63', Rodri (Spain) 70'.")
-    # A match with no events is said as it was before this round.
-    plain = _found_match(**{**SPAIN_ENGLAND, "events": []})
+    # A match with no events and no goals is said as it was before this round.
+    plain = _found_match(**{**SPAIN_ENGLAND, "home_score": 0, "away_score": 0, "winner": None, "events": []})
     assert said_competition(_competition_answer([plain]), AT).split("\n")[0] == said_match(_m(**plain), AT)
     # And one not started has none, whatever it is given.
     to_come = _found_match(**{**SPAIN_ENGLAND, "state": "pre", "phase": None, "clock": "", "home_score": None,
@@ -612,6 +612,44 @@ def test_a_round_up_with_no_player_says_the_minute_alone(london):
         {"minute": "30'", "kind": "red_card", "side": "away"}]}
     assert said_competition(_competition_answer([_found_match(**match)]), _after_the_match()).split("\n")[0].endswith(
         "It was a draw. Goals: 10' for England; 20' (pen) for Spain. Red card: England 30'.")
+
+
+# What a match with goals on its score and none among its events is said to have: BBC's Buxton 0, South Shields 2 has no
+# actions, and a board kept from before Home Assistant could give events has none for up to six hours.
+NO_SCORERS = "Its scorers aren't listed."
+RED_AND_MISSED = [{"minute": "63'", "kind": "red_card", "side": "away", "player": "Elliot Anderson"},
+                  {"minute": "80'", "kind": "penalty_missed", "side": "home", "player": "Mikel Oyarzabal"}]
+
+
+@pytest.mark.parametrize("events, after", [
+    ([], ""), (None, ""), (RED_AND_MISSED, " Red card: Elliot Anderson (England) 63'."),
+], ids=["an empty list", "no events key", "only a red card and a penalty missed"])
+def test_a_round_up_says_the_scorers_of_a_match_with_goals_and_no_goal_listed_arent_listed(london, events, after):
+    found = {key: value for key, value in SPAIN_ENGLAND.items() if key != "events"}
+    if events is not None:
+        found["events"] = events
+    line = said_competition(_competition_answer([found], days=["20261115"], competition=NATIONS_LEAGUE), _after_the_match()).split("\n")[0]
+    assert line == said_match(_m(**found), _after_the_match()) + after + " " + NO_SCORERS
+
+
+def test_a_round_up_says_the_scorers_of_a_match_in_play_with_a_goal_and_none_listed_arent_listed(london):
+    live = {**SPAIN_ENGLAND, "state": "in", "phase": "second_half", "clock": "66'", "home_score": 1, "away_score": 0,
+            "winner": None, "events": []}
+    lines = said_competition(_competition_answer([live], days=["20261115"]), _after_the_match()).split("\n")
+    assert lines == [said_match(_m(**live), _after_the_match()) + " " + NO_SCORERS, "Days with matches: Sunday the 15th of November.", LAG]
+
+
+def test_a_round_up_says_nothing_of_scorers_where_there_are_no_goals_or_the_goals_are_listed(london):
+    AT = _after_the_match()
+    goalless = {**SPAIN_ENGLAND, "home_score": 0, "away_score": 0, "winner": None}
+    for events in ([], None, RED_AND_MISSED):
+        found = {key: value for key, value in goalless.items() if key != "events"}
+        if events is not None:
+            found["events"] = events
+        assert NO_SCORERS not in said_competition(_competition_answer([found]), AT)
+    # Nor of a match whose goals are listed, nor of one still to come, which has no score.
+    assert NO_SCORERS not in said_competition(_competition_answer([_found_match(**SPAIN_ENGLAND)]), AT)
+    assert NO_SCORERS not in said_competition(_competition_answer([_found_match()]), AT)
 
 
 @pytest.mark.parametrize("name", [
@@ -922,12 +960,33 @@ def test_a_match_report_with_no_notes_or_events_is_the_match_alone(london):
     AT = _after_the_match()
     assert said_match_report(_match_answer(match=_found_match(**SPAIN_ENGLAND)), AT).split("\n")[-1] == (
         "75': a goal for Spain, scored by Nico Williams. Spain 2, England 3.")
-    bare = _found_match(**{**SPAIN_ENGLAND, "events": []})
+    bare = _found_match(**{**SPAIN_ENGLAND, "home_score": 0, "away_score": 0, "winner": None, "events": []})
     assert said_match_report(_match_answer(match=bare, notes=[]), AT) == said_match(_m(**bare), AT)
     # A match which hasn't started is said as it is, with its odds if it has them, and never with events.
     coming = _found_match(**{**SPAIN_ENGLAND, "state": "pre", "phase": None, "clock": "", "home_score": None,
                              "away_score": None, "winner": None, "kickoff": "2026-11-24T19:45:00+00:00"})
     assert said_match_report(_match_answer(match=coming), AT) == said_match(_m(**coming), AT)
+
+
+@pytest.mark.parametrize("events, then", [
+    ([], []), (None, []), (RED_AND_MISSED, ["63': a red card for Elliot Anderson of England.", "80': a penalty for Spain, missed by Mikel Oyarzabal."]),
+], ids=["an empty list", "no events key", "only a red card and a penalty missed"])
+def test_a_match_report_says_the_scorers_of_a_match_with_goals_and_no_goal_listed_arent_listed(london, events, then):
+    AT = _after_the_match()
+    found = {key: value for key, value in SPAIN_ENGLAND.items() if key != "events"}
+    if events is not None:
+        found["events"] = events
+    said = said_match_report(_match_answer(match=found, notes=[PENALTY_CONCEDED]), AT).split("\n")
+    # After the match line, then what is listed, then the notes.
+    assert said == [said_match(_m(**found), AT), NO_SCORERS, *then,
+                    "Note at 41': Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area."]
+
+
+def test_a_match_report_says_nothing_of_scorers_for_a_goalless_match_or_one_whose_goals_are_listed(london):
+    AT = _after_the_match()
+    goalless = {**SPAIN_ENGLAND, "home_score": 0, "away_score": 0, "winner": None, "events": []}
+    assert said_match_report(_match_answer(match=goalless), AT) == said_match(_m(**goalless), AT)
+    assert NO_SCORERS not in said_match_report(_match_answer(match=SPAIN_ENGLAND), AT)
 
 
 def test_a_match_report_of_a_match_which_has_not_started_says_no_notes(london):

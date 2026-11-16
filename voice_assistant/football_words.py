@@ -55,6 +55,10 @@ _OFF = "off"
 # The events which put a goal on the board, as the Contract has them. A penalty missed and a red card don't.
 _SCORING = ("goal", "penalty", "own_goal")
 
+# What is said of a match which has goals on its score and none among its events: the source gave no list of them, as
+# BBC's has none for a match without actions, or a board kept from before Home Assistant gave events has none.
+_NO_SCORERS = "Its scorers aren't listed."
+
 # A dash between two numbers, as in a score ("1-0") or a formation ("4-2-3-1"): whichever dash it is and with or without
 # spaces round it. The speech reads it out as "dash", so it is swapped for words - "to" in a score, a space in a
 # formation - and nothing else in what is said changes.
@@ -261,6 +265,23 @@ def _has_started(match: Match) -> bool:
     return match.state in ("in", "post")
 
 
+def _scorers_unlisted(match: Match) -> bool:
+    """
+    Whether a match has goals on its score and not one of them among its events, so that who scored is not known.
+
+    Args:
+        match: The match.
+
+    Returns:
+        True for a match which has started, with a goal on its score and no goal, penalty or own goal among its
+        events (a red card or a penalty missed doesn't count, as neither says who scored). False for a goalless
+        one, which has nothing to say of scorers, for one with no score, and for one with any goal listed, even
+        if not all of them are (which is said another way, see said_events).
+    """
+    goals = (match.home_score or 0) + (match.away_score or 0)
+    return _has_started(match) and goals > 0 and not any(event.kind in _SCORING for event in match.events)
+
+
 def _side_name(match: Match, side: str) -> str:
     """The name to say for a side of a match, as said_match names it: "home" or "away"."""
     return match.home if side == "home" else match.away
@@ -376,15 +397,15 @@ def _round_up_line(match: Match, now: datetime) -> str:
         now: The current time, aware and local.
 
     Returns:
-        The line, which has nothing after the match for one with no goals or red cards, or not started.
+        The line, which has nothing after the match for one with no goals or red cards, or not started. For one
+        which has goals on its score and none listed it ends "Its scorers aren't listed."
 
     Raises:
         KeyError: If the odds of the match lack a chance.
         TypeError: If any of them isn't a whole number.
     """
-    line = _asked_line(match, now)
-    goals = _goals_and_cards(match)
-    return f"{line} {goals}" if goals else line
+    parts = [_asked_line(match, now), _goals_and_cards(match), _NO_SCORERS if _scorers_unlisted(match) else ""]
+    return " ".join(part for part in parts if part)
 
 
 def _with_lag(lines: List[str], matches: Sequence[Match]) -> List[str]:
@@ -528,7 +549,8 @@ def said_competition(answer: Dict, now: datetime) -> str:
 
     Returns:
         A line naming the round of a cup if there is one; then, with matches, each on its own
-        line - with its goals and red cards after it, once it has started (see _goals_and_cards) -
+        line - with its goals and red cards after it, once it has started (see _goals_and_cards), and
+        that its scorers aren't listed where it has goals and none is -
         the days with matches (all of them, even where some matches were left out), that
         only some of the matches are listed if Home Assistant trimmed them, and LAG if a match
         is in play. With none, "No UEFA Champions League matches in those days."
@@ -838,7 +860,8 @@ def said_match_report(answer: Dict, now: datetime, on_a_day: bool = False) -> st
             as the answer doesn't carry the day.
 
     Returns:
-        Lines: the match, as said_match says it; what happened in it (see said_events); each of ESPN's notes
+        Lines: the match, as said_match says it; "Its scorers aren't listed." if it has goals on its score and
+        none listed; what happened in it (see said_events); each of ESPN's notes
         ("Note at 41': Penalty conceded by Pau Cubarsí (Spain) after a foul in the penalty area."), as with
         the events once the match has started and not before; and LAG as the last line if the match is in
         play. With no match, only that none is listed for the team - on that day, if one was asked about.
@@ -858,7 +881,8 @@ def said_match_report(answer: Dict, now: datetime, on_a_day: bool = False) -> st
         return f"No match is listed for {name}{' on that day' if on_a_day else ''}."
     match = Match.from_home(found)
     # A match which hasn't started has nothing to note, as it has nothing which happened in it.
-    return "\n".join(_with_lag([said_match(match, now)] + said_events(match) + (notes if _has_started(match) else []), [match]))
+    unlisted = [_NO_SCORERS] if _scorers_unlisted(match) else []
+    return "\n".join(_with_lag([said_match(match, now)] + unlisted + said_events(match) + (notes if _has_started(match) else []), [match]))
 
 
 def _asked_days(given) -> int:
