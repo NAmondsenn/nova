@@ -38,8 +38,10 @@ SENTENCE_TIMEOUT = 10.0
 # "Your 10 minute timer is done" every round until it's dismissed.
 RECENT_PHRASES = 8
 
-# A hyphen, the hyphens Unicode adds, an en dash or a minus sign, as Claude may write any.
-DASH = "[-‐‑–−]"
+# A hyphen or any of Unicode's hyphens and dashes from U+2010 to U+2015, as Claude may write
+# any - the same as football_words' _DIGIT_DASH, less the minus sign, which between two
+# numbers is a sum.
+DASH = r"[-‐-―]"
 
 
 def speakable(text: str) -> str:
@@ -59,8 +61,10 @@ def speakable(text: str) -> str:
         e.g. "from 2 PM until 10 PM", "7 oh 5 AM", "the 6 o'clock one", "until midnight",
         "England won 3 to 2", "4 2 3 1".
     """
-    # A run of three or more is a formation; two numbers are a score or a range.
-    text = re.sub(rf"\b\d+(?:\s*{DASH}\s*\d+){{2,}}\b", lambda match: " ".join(re.split(rf"\s*{DASH}\s*", match.group())), text)
+    # A run of three or more, written close up, is a formation; two numbers are a score or
+    # a range. Only the second allows spaces ("1 - 1"), or a dash in a sentence after a
+    # score ("won 2-0 - 3 points clear") would join three numbers.
+    text = re.sub(rf"\b\d+(?:{DASH}\d+){{2,}}\b", lambda match: " ".join(re.split(DASH, match.group())), text)
     text = re.sub(rf"\b(\d+)\s*{DASH}\s*(\d+)\b", r"\1 to \2", text)
     # The full stop of "a.m." goes too, unless it also ends the sentence.
     text = re.sub(r"\b12(?::00)?\s*([AaPp])\.?\s?[Mm]\b(?:\.(?=\s+[a-z]))?",

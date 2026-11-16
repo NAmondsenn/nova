@@ -323,7 +323,8 @@ def test_a_read_tools_answer_goes_back_to_claude():
     assert (result["response"], result["actions"], result["success"]) == ("Sunset's at 5:52 PM.", [], True)
     # The read is kept with what it gave, apart from the tools run - see _earlier_messages.
     assert (llm.history[-1]["assistant"], llm.history[-1]["tools"]) == ("Sunset's at 5:52 PM.", [])
-    assert llm.history[-1]["reads"] == [("home_status", {"about": "sunset"}, SUNSET)]
+    assert [(read["name"], read["input"], read["answer"]["content"]) for read in llm.history[-1]["reads"]] == \
+        [("home_status", {"about": "sunset"}, SUNSET)]
     # Tools may still be called in the round after a read.
     assert "tool_choice" not in second
 
@@ -545,6 +546,28 @@ def test_a_read_that_fails_tells_claude_so():
     answered, = llm.client.requests[1]["messages"][-1]["content"]
     assert (answered["tool_use_id"], answered["is_error"]) == ("t1", True)
     assert result["response"] == "Sorry, I couldn't check that."
+    # And it's still a failed read on the next turn, not one which said those words.
+    llm.client = FakeClient(_reply("You're welcome."))
+    llm.process_query("thanks")
+    kept, = llm.client.requests[0]["messages"][2]["content"]
+    assert (kept["content"], kept["is_error"]) == (llm_module.READ_FAILED, True)
+
+
+def test_reads_in_two_earlier_turns_have_their_own_ids_and_outlast_record_reply():
+    llm = _reader()
+    for asked in ("when's sunset?", "and sunrise?"):
+        llm.client = FakeClient([_reply("", _tool("home_status", use_id="t1", about=asked)), _reply("At six.")])
+        llm.process_query(asked, read=lambda action: SUNSET)
+    llm.record_reply("and sunrise?", "At six. Also, your timer's going.")
+    llm.client = FakeClient(_reply("You're welcome."))
+    llm.process_query("thanks")
+    sent = llm.client.requests[0]["messages"]
+    ids = [use["id"] for message in sent if message["role"] == "assistant" and isinstance(message["content"], list)
+           for use in message["content"]]
+    answered = [result["tool_use_id"] for message in sent if message["role"] == "user" and isinstance(message["content"], list)
+                for result in message["content"]]
+    assert len(ids) == len(set(ids)) == 2 and answered == ids
+    assert sent[7] == {"role": "assistant", "content": "At six. Also, your timer's going."}
 
 
 def test_a_failure_after_reading_runs_no_fallback_action():

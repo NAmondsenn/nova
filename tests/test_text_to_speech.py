@@ -277,8 +277,15 @@ def test_a_wav_can_still_be_written_for_trying_the_voice(tts, tmp_path):
     ("a 2–1 win", "a 2 to 1 win"), ("It finished 1 - 1.", "It finished 1 to 1."),
     ("highs of 10-12 degrees", "highs of 10 to 12 degrees"), ("the 2025-26 season", "the 2025 to 26 season"),
     ("They set up 4-2-3-1.", "They set up 4 2 3 1."),
-    # Words with a dash are left alone.
+    ("a 1‐0 win", "a 1 to 0 win"), ("a 1‑0 win", "a 1 to 0 win"), ("a 1‒0 win", "a 1 to 0 win"),
+    ("from 1.5-2 hours", "from 1.5 to 2 hours"),
+    # A dash in the sentence after a score is still a dash, not a third number.
+    ("Arsenal won 2-0 – 3 points clear.", "Arsenal won 2 to 0 – 3 points clear."),
+    # Before the time rules, or "2 o'clock-3 PM" would keep its dash.
+    ("Open 2:00-3:00 PM.", "Open 2 o'clock to 3 PM."),
+    # Words with a dash are left alone, and a minus sign between numbers is a sum.
     ("COVID-19 and Jay-Z", "COVID-19 and Jay-Z"), ("It's -3 degrees.", "It's -3 degrees."),
+    ("10 − 3", "10 − 3"),
 ])
 def test_times_are_written_so_piper_reads_them_properly(written, said):
     from voice_assistant.text_to_speech import speakable

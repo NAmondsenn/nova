@@ -275,12 +275,12 @@ class LLMHandler:
         messages = [{"role": "user", "content": turn["user"]}]
         reads = turn.get("reads") or []
         if reads:
-            uses = [{"type": "tool_use", "id": f"toolu_read_{number}_{index}", "name": name, "input": params}
-                    for index, (name, params, _) in enumerate(reads)]
+            uses = [{"type": "tool_use", "id": f"toolu_read_{number}_{index}", "name": read["name"], "input": read["input"]}
+                    for index, read in enumerate(reads)]
             messages.append({"role": "assistant", "content": uses})
+            # As it was sent, a failed read marked as one.
             messages.append({"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": use["id"], "content": answer or "Done."}
-                for use, (_, _, answer) in zip(uses, reads)]})
+                {**read["answer"], "tool_use_id": use["id"]} for use, read in zip(uses, reads)]})
         tools = turn.get("tools") or []
         if tools:
             uses = [{"type": "tool_use", "id": f"toolu_earlier_{number}_{index}", "name": name, "input": params}
@@ -603,7 +603,8 @@ class LLMHandler:
                     messages.append({"role": "assistant", "content": response.content})
                     answers = [self._read(use, read) for use in uses]
                     messages.append({"role": "user", "content": answers})
-                    read_so_far += [(use.name, dict(use.input), answer["content"]) for use, answer in zip(uses, answers)]
+                    read_so_far += [{"name": use.name, "input": dict(use.input or {}), "answer": answer}
+                                    for use, answer in zip(uses, answers)]
                 else:
                     break
                 # The last round may call no tool, so Claude says what it found in words.
