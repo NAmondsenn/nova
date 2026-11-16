@@ -102,7 +102,8 @@ def _link_move(src: str, dst: str) -> None:
     Raises:
         _Taken: dst exists.
         OSError: Anything else. If src could not be unlinked the new link is removed again,
-            unless src has gone or changed, when the link is kept as it may be the only copy.
+            unless src has gone or changed, when the link is kept as it may be the only copy,
+            or the new link has changed, when it is left alone; the message says so.
     """
     try:
         os.link(src, dst, follow_symlinks=False)
@@ -116,8 +117,13 @@ def _link_move(src: str, dst: str) -> None:
             same = os.path.samestat(os.lstat(src), linked)
         except OSError:
             same = False
+        # The same check for the new link: if it has been replaced since, it is not ours to remove.
+        try:
+            same = same and os.path.samestat(os.lstat(dst), linked)
+        except OSError:
+            same = False
         if not same:
-            raise
+            raise OSError(f"{error}; {dst} was left as it is") from error
         try:
             os.unlink(dst)
         except OSError as undo:
@@ -152,6 +158,8 @@ class MusicFolder:
             return "Nova can't write to the music folder"
         held = os.path.join(self.root, HELD)
         if os.path.lexists(held):
+            if os.path.islink(held):
+                return f"{HELD} in the music folder is a link, and Nova won't write through it"
             if not os.path.isdir(held):
                 return f"{HELD} in the music folder isn't a folder"
             if not os.access(held, os.W_OK | os.X_OK):
@@ -165,6 +173,9 @@ class MusicFolder:
         """
         held = os.path.join(self.root, HELD)
         count = 0
+        # A link here is never followed: os.walk would otherwise count whatever it points at.
+        if os.path.islink(held):
+            return 0
         for folder, _dirs, names in os.walk(held):
             for name in names:
                 if os.path.splitext(name)[1].lower() in AUDIO and _is_real_file(os.path.join(folder, name)):
@@ -188,11 +199,12 @@ class MusicFolder:
                 been put back; a file that couldn't be put back is named in the message.
         """
         rel = self._song(rel)
+        if os.path.splitext(rel)[1].lower() not in AUDIO:
+            raise MusicFolderError("that isn't an audio file")
         # Files with the audio's stem move with it; a link there is left alone, as only real files are moved.
         stem, extension = os.path.splitext(rel)
         sidecars = [ext for ext in SIDECARS if _is_real_file(os.path.join(self.root, stem + ext))]
         held_base = self._holding_folder()
-        self._make_folders(held_base, os.path.dirname(rel), None)
 
         for number in range(1, MAX_NAMES + 1):
             # A taken name gets a number before the extension, the sidecars with it so they share a stem:
@@ -201,8 +213,10 @@ class MusicFolder:
             moves = [(rel, numbered + extension)] + [(stem + ext, numbered + ext) for ext in sidecars]
             if any(os.path.lexists(os.path.join(held_base, to)) for _from, to in moves):
                 continue
+            for _from, to in moves:
+                self._make_folders(held_base, os.path.dirname(to), None)
             try:
-                self._move([(os.path.join(self.root, a), os.path.join(held_base, b)) for a, b in moves])
+                self._move([(os.path.join(self.root, a), os.path.join(held_base, b)) for a, b in moves], True)
             except _Taken:
                 continue
             return Held(original=rel, held=moves[0][1], sidecars=moves[1:])
@@ -228,12 +242,21 @@ class MusicFolder:
     def _put_back(self, held: Held) -> str:
         held_base = os.path.join(self.root, HELD)
         held_real = os.path.join(self._root_real(), HELD)
-        pairs = [(held.original, held.held)]
+        audio, audio_held = _clean(held.original), _clean(held.held)
+        pairs = [(audio, audio_held)]
         for original, held_rel in held.sidecars:
+            original, held_rel = _clean(original), _clean(held_rel)
+            # A Held is read back from a file, so a lyrics file that isn't the song's own (a different
+            # name, or "dir/a.lrc" for "a.mp3") is never trusted to go anywhere.
+            for path, song in ((original, audio), (held_rel, audio_held)):
+                stem, extension = os.path.splitext(path)
+                if stem != os.path.splitext(song)[0] or extension not in SIDECARS:
+                    raise MusicFolderError("a lyrics file in that record isn't the song's own")
+            if os.path.splitext(original)[1] != os.path.splitext(held_rel)[1]:
+                raise MusicFolderError("a lyrics file in that record isn't the song's own")
             pairs.append((original, held_rel))
         moves = []
         for index, (original, held_rel) in enumerate(pairs):
-            original, held_rel = _clean(original), _clean(held_rel)
             if original.split(os.sep)[0] == HELD:
                 raise MusicFolderError("that song's path is in the holding folder")
             source = os.path.join(held_base, held_rel)
@@ -247,9 +270,10 @@ class MusicFolder:
             moves.append((source, os.path.join(self.root, original)))
         if any(os.path.lexists(to) for _from, to in moves):
             return NEW_COPY
-        self._make_folders(self.root, os.path.dirname(os.path.normpath(held.original)), held_real)
+        for _from, to in moves:
+            self._make_folders(self.root, os.path.dirname(self._label(to)), held_real)
         try:
-            self._move(moves)
+            self._move(moves, False)
         except _Taken:
             return NEW_COPY
         return PUT_BACK
@@ -337,8 +361,13 @@ class MusicFolder:
                     or (avoid is not None and (real + os.sep).startswith(avoid + os.sep)):
                 raise MusicFolderError(f"{part} isn't a plain folder inside the music folder")
 
-    def _move(self, moves: List[Tuple[str, str]]) -> None:
+    def _move(self, moves: List[Tuple[str, str]], setting_aside: bool) -> None:
         """Moves each (from, to) in turn, and moves back any that already went if one fails.
+
+        Args:
+            moves: (from, to) full paths.
+            setting_aside: True if the files are going into the holding folder, False if out of it;
+                only for saying which way a file that couldn't be moved back was left.
 
         Raises:
             _Taken: A destination was taken and everything is back where it was.
@@ -360,7 +389,10 @@ class MusicFolder:
             try:
                 _link_move(destination, source)
             except (_Taken, OSError) as error:
-                stuck.append(f"{self._label(destination)} was not put back ({error})")
+                if setting_aside:
+                    stuck.append(f"{self._label(destination)} was left in the holding folder ({error})")
+                else:
+                    stuck.append(f"{self._label(destination)} couldn't be returned to the holding folder ({error})")
         if isinstance(failure, _Taken) and not stuck:
             raise failure
         reason = f"couldn't move the song: {failure}" if not isinstance(failure, _Taken) \

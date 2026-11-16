@@ -255,7 +255,7 @@ class TestSetAside:
             MusicFolder(str(root)).set_aside(song)
 
         # The audio is safe in the holding folder, and the message says so.
-        assert "not put back" in str(error.value)
+        assert "01 - Endless.mp3 was left in the holding folder" in str(error.value)
         assert ".nova-held" in str(error.value)
         assert (root / HELD / "Gunna/Album/01 - Endless.mp3").read_bytes() == b"mp3"
 
@@ -291,6 +291,41 @@ class TestSetAside:
         MusicFolder(str(root)).set_aside("a.mp3")
 
         assert seen == [{"follow_symlinks": False}]
+
+
+    def test_refuses_a_file_that_is_not_audio(self, root):
+        make(root, "a.lrc")
+        make(root, "b.jpg")
+
+        for rel in ("a.lrc", "b.jpg", "noextension"):
+            if rel == "noextension":
+                make(root, rel)
+            with pytest.raises(MusicFolderError, match="audio"):
+                MusicFolder(str(root)).set_aside(rel)
+
+        assert (root / "a.lrc").exists() and (root / "b.jpg").exists() and (root / "noextension").exists()
+        assert not (root / HELD).exists()
+
+    def test_an_unlink_that_fails_leaves_a_changed_link_alone(self, root, monkeypatch):
+        make(root, "a.mp3")
+        other = make(root, "other.bin", b"someone else's")
+        real_unlink = os.unlink
+
+        def fails_and_swaps(path, *args, **kwargs):
+            if str(path).endswith("/music/a.mp3"):
+                # Something replaces the new link while the old name can't be removed.
+                os.replace(other, root / HELD / "a.mp3")
+                raise PermissionError("read-only")
+            return real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "unlink", fails_and_swaps)
+
+        with pytest.raises(MusicFolderError, match="read-only"):
+            MusicFolder(str(root)).set_aside("a.mp3")
+
+        monkeypatch.setattr(os, "unlink", real_unlink)
+        assert (root / HELD / "a.mp3").read_bytes() == b"someone else's"
+        assert (root / "a.mp3").read_bytes() == b"audio"
 
 
 class TestPutBack:
@@ -446,6 +481,82 @@ class TestPutBack:
         assert (root / HELD / held.held).read_bytes() == b"mp3"
 
 
+class TestPutBackSidecars:
+    """A Held is stored as JSON, so a corrupt or edited one can reach put_back."""
+
+    @pytest.fixture
+    def waiting(self, root):
+        make(root, HELD + "/a.mp3", b"mp3")
+        make(root, HELD + "/a.lrc", b"lrc")
+        make(root, HELD + "/b.lrc", b"other lrc")
+        return root
+
+    def test_a_sidecar_path_through_a_folder_link_that_leaves_is_refused(self, waiting, tmp_path):
+        (tmp_path / "away").mkdir()
+        os.symlink(tmp_path / "away", waiting / "dir")
+        before = listing(waiting)
+
+        result = MusicFolder(str(waiting)).put_back(Held("a.mp3", "a.mp3", [("dir/a.lrc", "a.lrc")]))
+
+        assert result not in ("put back", "a new copy is there")
+        assert list((tmp_path / "away").iterdir()) == []
+        assert listing(waiting) == before
+
+    def test_a_sidecar_path_through_a_link_into_the_holding_folder_is_refused(self, waiting):
+        (waiting / HELD / "sub").mkdir()
+        os.symlink(waiting / HELD, waiting / "door")
+        before = listing(waiting)
+
+        result = MusicFolder(str(waiting)).put_back(Held("a.mp3", "a.mp3", [("door/sub/a.lrc", "a.lrc")]))
+
+        assert result not in ("put back", "a new copy is there")
+        assert listing(waiting) == before
+        assert list((waiting / HELD / "sub").iterdir()) == []
+
+    @pytest.mark.parametrize("sidecars", [
+        [("b.lrc", "b.lrc")],
+        [("a.lrc", "b.lrc")],
+        [("a.jpg", "a.jpg")],
+        [("a.mp3", "a.mp3")],
+        [("a.lrc", "a.txt")],
+        [("x/a.lrc", "a.lrc")],
+        [("a.lrc", "../a.lrc")],
+    ])
+    def test_a_sidecar_must_be_the_audios_stem_with_a_lyrics_extension(self, waiting, sidecars):
+        before = listing(waiting)
+
+        result = MusicFolder(str(waiting)).put_back(Held("a.mp3", "a.mp3", sidecars))
+
+        assert result not in ("put back", "a new copy is there")
+        assert listing(waiting) == before
+
+    def test_a_numbered_held_name_still_matches_its_own_stem(self, waiting):
+        make(waiting, HELD + "/a (2).mp3", b"two")
+        make(waiting, HELD + "/a (2).lrc", b"two lrc")
+
+        result = MusicFolder(str(waiting)).put_back(Held("a.mp3", "a (2).mp3", [("a.lrc", "a (2).lrc")]))
+
+        assert result == "put back"
+        assert (waiting / "a.lrc").read_bytes() == b"two lrc"
+
+    def test_a_failed_rollback_when_putting_back_says_it_could_not_go_back(self, waiting, monkeypatch):
+        real_link = os.link
+        calls = []
+
+        def breaks_after_the_first(src, dst, **kwargs):
+            calls.append(dst)
+            if len(calls) == 1:
+                return real_link(src, dst, **kwargs)
+            raise OSError("disk trouble")
+
+        monkeypatch.setattr(os, "link", breaks_after_the_first)
+
+        result = MusicFolder(str(waiting)).put_back(Held("a.mp3", "a.mp3", [("a.lrc", "a.lrc")]))
+
+        assert "a.mp3 couldn't be returned to the holding folder" in result
+        assert (waiting / "a.mp3").read_bytes() == b"mp3"
+
+
 class TestUsable:
     def test_a_writable_folder_is_usable(self, root):
         assert MusicFolder(str(root)).usable() is None
@@ -474,6 +585,12 @@ class TestUsable:
 
         assert MusicFolder(str(root)).usable()
 
+    def test_a_holding_folder_that_is_a_link_gives_a_reason(self, root, tmp_path):
+        (tmp_path / "away").mkdir()
+        os.symlink(tmp_path / "away", root / HELD)
+
+        assert "link" in MusicFolder(str(root)).usable()
+
 
 class TestHeldCount:
     def test_counts_audio_only(self, root):
@@ -483,6 +600,12 @@ class TestHeldCount:
         make(root, "outside.mp3")
 
         assert folder.held_count() == 4
+
+    def test_a_holding_folder_that_is_a_link_is_not_walked(self, root, tmp_path):
+        make(tmp_path, "away/a.mp3")
+        os.symlink(tmp_path / "away", root / HELD)
+
+        assert MusicFolder(str(root)).held_count() == 0
 
     def test_no_holding_folder_is_none_held(self, root):
         assert MusicFolder(str(root)).held_count() == 0
