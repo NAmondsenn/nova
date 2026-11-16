@@ -1738,10 +1738,23 @@ def test_a_match_with_no_team_and_a_day_finds_the_teams_match_in_its_now_as_well
 
 
 def test_a_match_with_no_team_and_today_as_the_day_is_as_with_no_day(london):
-    teams = [_team("364", "Liverpool", now=_found_match(**LIVE))]
+    # A match which kicked off before midnight and is still in play twenty minutes after it: today's, as the match in play
+    # always is, though it isn't one of the day's kick-offs, which is what it would have to be for any other day.
+    teams = [_team("364", "Liverpool", now=_found_match(**LIVE, kickoff="2026-11-12T23:30:00+00:00"))]
+    just_after_midnight = datetime(2026, 11, 13, 0, 20).astimezone()
     home = FakeHome(teams, answer=_match_answer())
-    _said(home, about="match", date="2026-11-13")
+    _said(home, now=just_after_midnight, about="match", date="2026-11-13")
     assert home.asked == [("match", "Liverpool", "20261113", 1)]
+    home = FakeHome(teams, answer=_match_answer())
+    _said(home, now=just_after_midnight, about="match")
+    assert home.asked == [("match", "Liverpool", "", 1)]
+    # Whereas for yesterday the match is among the day's kick-offs, and for the day before it isn't.
+    home = FakeHome(teams, answer=_match_answer())
+    _said(home, now=just_after_midnight, about="match", date="2026-11-12")
+    assert home.asked == [("match", "Liverpool", "20261112", 1)]
+    home = FakeHome(teams)
+    assert _said(home, now=just_after_midnight, about="match", date="2026-11-11") == {"success": True, "message": "Name a team for its match."}
+    assert home.asked == []
 
 
 @pytest.mark.parametrize("date, teams", [

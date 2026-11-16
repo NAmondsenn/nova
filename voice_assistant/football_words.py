@@ -39,7 +39,8 @@ NOT_A_NAME = "I didn't catch which team or competition."
 # What is said when line-ups are asked for with no team named and none of the followed teams has a match today.
 NO_LINEUP_TEAM = "None of the followed teams is playing today. Name a team for its line-up."
 
-# What is said when a match is asked about with no team named and none of the followed teams has one today.
+# What is said when a match is asked about with no team named and none of the followed teams has a match in play, or
+# over, on the day asked (today when no day is given): one still to come, or off, has nothing which happened in it.
 NO_MATCH_TEAM = "Name a team for its match."
 
 # How each phase of a match which has started is said. "off" (postponed, abandoned, cancelled)
@@ -1051,10 +1052,11 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
             with a team - its line-ups, whatever competition is given with it - or with neither a
             team nor a competition the followed team playing now or today; "match" - what happened in the
             team's match, with its goals, penalties, red cards and ESPN's notes - with a team, whatever
-            competition is given with it, or with neither the followed team playing now, else the one whose
-            match was over latest on the day (today, or the date), as a match not yet played has nothing
-            to say; but with a competition alone its matches, which come with their goals; any other value,
-            its matches.
+            competition is given with it, or with neither the followed team whose match is in play, else
+            the one whose match is over, on the day (today when no date is given; for another day a match
+            which kicked off on it), the latest to kick off first, as a match not yet played has nothing
+            to say; but with a competition alone its matches, which come with their goals; any other
+            value, its matches.
         date: The first day of a competition's matches, or the day of a team's match, as YYYY-MM-DD,
             or none for today (a team's match in play, else its last).
         days: How many days from it, or none for one.

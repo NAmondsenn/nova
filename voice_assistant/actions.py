@@ -1105,7 +1105,9 @@ class ActionExecutor:
                               "starting eleven and bench, 'match' for what happened in a team's match - its goals, "
                               "penalties, red cards and ESPN's notes, else 'matches'. Use 'lineups' with the team named, "
                               "even one of the user's own; with neither a team nor a competition, the followed team "
-                              "playing now or today. Reply with the side asked for, or both. 'match' is asked the same way, "
+                              "playing now or today. Reply with the side asked for, or both. 'match' is asked with the team "
+                              "named too; with neither a team nor a competition it is the followed team whose match is "
+                              "in play, else the one whose match is over, on the day (today when no date is given), "
                               "with the day in date if one was asked about."},
         date={"type": "string", "description": "The first day of a competition's matches, or the day of a team's match, as "
                                                 "YYYY-MM-DD. Leave out for today; a team's match is then the one in play, else its last."},
