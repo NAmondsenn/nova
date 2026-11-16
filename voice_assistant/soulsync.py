@@ -19,7 +19,7 @@ import difflib
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import requests
 
@@ -51,6 +51,15 @@ PICTURE_TYPES = ("image/jpeg", "image/png", "image/webp")
 # for past the live and demo versions. "Gary Numan - M.E." found the studio one,
 # then live and demo ones.
 SEARCH_LIMIT = 10
+
+# The providers SoulSync's watchlist keeps an artist's id for, as it names them, each with its column in a
+# watchlist row and in a library artist, in the order its own add of library artists tries them
+# (core/watchlist/source_picker.py, as read on 16 November). Amazon's is left out, as its scan never uses it.
+PROVIDERS = (("spotify", "spotify_artist_id", "spotify_artist_id"),
+             ("itunes", "itunes_artist_id", "itunes_artist_id"),
+             ("deezer", "deezer_artist_id", "deezer_id"),
+             ("discogs", "discogs_artist_id", "discogs_id"),
+             ("musicbrainz", "musicbrainz_artist_id", "musicbrainz_id"))
 
 # Why a song is on SoulSync's wishlist, as its own page shows.
 WISHLIST_REASON = "Asked for by voice through Nova"
@@ -576,6 +585,100 @@ class SoulSync:
             # Only the kind of error, as for a request: the address could hold the key's place.
             logger.warning(f"A SoulSync picture couldn't be fetched: {type(e).__name__}")
             return None
+
+    # Following artists, so SoulSync's watchlist downloads their new releases
+
+    def watched_artists(self) -> List[Dict]:
+        """
+        Every artist on SoulSync's watchlist.
+
+        Returns:
+            Each row as GET /api/watchlist/artists gives it: its own "id", "artist_name", and an id of
+            each provider SoulSync has one for, by the watchlist columns in PROVIDERS.
+
+        Raises:
+            SoulSyncError: If SoulSync couldn't be asked, or didn't give the list.
+        """
+        artists = self._read(*self._get("/api/watchlist/artists", REQUEST_TIMEOUT, {})).get("artists")
+        if not isinstance(artists, list):
+            logger.error("SoulSync's watchlist answered without its artists")
+            raise SoulSyncError()
+        return [artist for artist in artists if isinstance(artist, dict)]
+
+    def library_artist(self, artist_id: str) -> Optional[Dict]:
+        """
+        An artist of SoulSync's library, by the id its listening stats give - which, on a library read
+        from Navidrome, is Navidrome's and never only digits, so the watchlist can't take it as it is.
+
+        Args:
+            artist_id: The library artist's id.
+
+        Returns:
+            The artist as GET /api/v1/library/artists/<id> gives it, with its "name" and each
+            provider's id it has, by the library columns in PROVIDERS - or None if there's no such artist.
+
+        Raises:
+            SoulSyncError: If SoulSync couldn't be asked, or answered with an error.
+        """
+        status, answer = self._get(f"/api/v1/library/artists/{quote(str(artist_id), safe='')}", REQUEST_TIMEOUT, {})
+        if status == 404:
+            return None
+        data = self._read(status, answer).get("data")
+        artist = data.get("artist") if isinstance(data, dict) else None
+        return artist if isinstance(artist, dict) else None
+
+    def follow(self, artist: Dict) -> Optional[Dict]:
+        """
+        Puts a library artist on SoulSync's watchlist. It is added by the first of its provider ids in
+        SoulSync's own order, with that provider named - a bare number would be read as the primary
+        source's id, whichever provider's it is - then each of its other ids is linked to the same row.
+        SoulSync's scan tries each source in turn, and finds an artist it has no id for by searching that
+        source for the name and taking the first answer, so with every id it never has to guess.
+
+        Args:
+            artist: The artist as library_artist gives it.
+
+        Returns:
+            The artist's new watchlist row, or None if it has no provider id to add it by, or SoulSync
+            didn't list it after.
+
+        Raises:
+            SoulSyncError: If SoulSync couldn't be asked, or refused the add.
+        """
+        name = str(artist.get("name") or "").strip()
+        ids = [(source, str(artist[column]).strip()) for source, _, column in PROVIDERS
+               if str(artist.get(column) or "").strip()]
+        if not name or not ids:
+            return None
+        (source, artist_id), others = ids[0], ids[1:]
+        self._read(*self._send("/api/watchlist/add", REQUEST_TIMEOUT,
+                               {"artist_id": artist_id, "artist_name": name, "source": source}))
+        for other_source, other_id in others:
+            try:
+                self._read(*self._send(f"/api/watchlist/artist/{quote(artist_id, safe='')}/link-provider",
+                                       REQUEST_TIMEOUT, {"provider": other_source, "provider_id": other_id}))
+            except SoulSyncError:
+                # Followed all the same: the scan finds that source's id itself.
+                logger.warning(f"SoulSync didn't link a followed artist's {other_source} id")
+        column = dict((source, column) for source, column, _ in PROVIDERS)[source]
+        return next((row for row in self.watched_artists() if str(row.get(column) or "") == artist_id), None)
+
+    def unfollow(self, row: Dict):
+        """
+        Takes an artist off SoulSync's watchlist, by the first of its provider ids - SoulSync removes
+        every row holding it, which is only this one, as an add never makes a second row for an id.
+
+        Args:
+            row: The artist's watchlist row, as watched_artists or follow gives it.
+
+        Raises:
+            SoulSyncError: If SoulSync couldn't be asked, or refused.
+        """
+        artist_id = next((str(row[column]) for _, column, _ in PROVIDERS if row.get(column)), None)
+        if artist_id is None:
+            logger.error("A watchlist row with no provider id can't be removed")
+            return
+        self._read(*self._send("/api/watchlist/remove", REQUEST_TIMEOUT, {"artist_id": artist_id}))
 
     # What the assistant asks for
 

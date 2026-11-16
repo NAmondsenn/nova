@@ -319,6 +319,16 @@ wrapped:
   # file is public: set it on the settings page.
   link: ""
 
+new_music:
+  # New music for you, which SoulSync finds and downloads. Both are on the settings page, and used
+  # straight away.
+  # How many of your top artists of the last 12 months Nova follows on SoulSync's watchlist, so their
+  # new releases download - see voice_assistant/following.py. Done once a month, from 3 in the
+  # morning, and only ever adding: an artist you stop playing stays followed. 0 switches it off.
+  follow_top_artists: 25
+  # The playlist "find me something new" plays: one SoulSync makes and refreshes each week.
+  playlist: "Discovery Shuffle"
+
 mqtt:
   # Home Assistant's MQTT broker - the Mosquitto add-on - through which Nova is a
   # device of its own in Home Assistant, with its controls and its room there. See

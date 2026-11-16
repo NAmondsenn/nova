@@ -704,3 +704,95 @@ def test_picture_never_raises(soulsync, http, monkeypatch):
     http.fail = None
     monkeypatch.setattr(network, "online", lambda: False)
     assert soulsync.picture("/api/navidrome/cover/abc") is None
+
+
+# The watchlist, which following the top artists uses - in the shapes the live check of 16 November recorded
+
+WATCHED = f"{URL}/api/watchlist/artists"
+WATCH_ADD = f"{URL}/api/watchlist/add"
+WATCH_REMOVE = f"{URL}/api/watchlist/remove"
+
+
+def _watched_row(row_id, name, **ids):
+    """A row as GET /api/watchlist/artists lists it, with no provider id but those given."""
+    row = {"id": row_id, "artist_name": name, "spotify_artist_id": None, "itunes_artist_id": None,
+           "deezer_artist_id": None, "discogs_artist_id": None, "musicbrainz_artist_id": None,
+           "amazon_artist_id": None, "include_albums": True}
+    return dict(row, **ids)
+
+
+LIBRARY_ARTIST = {"id": "abcDEF123ghiJKL456mnoP", "name": "Made Up Artist", "spotify_artist_id": None,
+                  "itunes_artist_id": "1001", "deezer_id": "1002", "discogs_id": None, "musicbrainz_id": "mb-made-up",
+                  "amazon_id": "am-made-up"}
+
+
+def test_watched_artists_are_read_from_the_watchlist(soulsync, http):
+    rows = [_watched_row(7, "Made Up Artist", deezer_artist_id="1002"), "not a row"]
+    http.pages[WATCHED] = FakeResponse(200, {"success": True, "artists": rows})
+    assert soulsync.watched_artists() == rows[:1]
+    assert http.fetched == [(WATCHED, {}, {"Authorization": "Bearer the-key"}, {"stream": False, "redirects": True})]
+    assert http.timeouts == [REQUEST_TIMEOUT]
+
+
+@pytest.mark.parametrize("answer", [FakeResponse(200, {"success": True}), FakeResponse(500, {"success": False,
+                                                                                             "error": "made up"})])
+def test_a_watchlist_with_no_artists_list_is_an_error(soulsync, http, answer):
+    http.pages[WATCHED] = answer
+    with pytest.raises(SoulSyncError):
+        soulsync.watched_artists()
+
+
+def test_a_library_artist_is_read_by_its_id_and_none_when_its_not_there(soulsync, http):
+    http.pages[f"{URL}/api/v1/library/artists/abcDEF123ghiJKL456mnoP"] = FakeResponse(
+        *_envelope({"artist": LIBRARY_ARTIST, "albums": []}))
+    assert soulsync.library_artist("abcDEF123ghiJKL456mnoP") == LIBRARY_ARTIST
+    # An id is one part of the address, whatever it holds.
+    assert soulsync.library_artist("a/b c") is None
+    assert http.fetched[-1][0] == f"{URL}/api/v1/library/artists/a%2Fb%20c"
+
+
+def test_follow_adds_by_the_first_provider_id_with_its_source_then_links_the_rest(soulsync, http):
+    link = f"{URL}/api/watchlist/artist/1001/link-provider"
+    http.answers.update({WATCH_ADD: (200, {"success": True, "message": "Added"}),
+                         link: (200, {"success": True, "message": "Linked"})})
+    row = _watched_row(8, "Made Up Artist", itunes_artist_id="1001", deezer_artist_id="1002")
+    http.pages[WATCHED] = FakeResponse(200, {"success": True, "artists": [_watched_row(7, "Another"), row]})
+
+    assert soulsync.follow(LIBRARY_ARTIST) == row
+    # SoulSync's own order, Spotify then iTunes, Deezer, Discogs and MusicBrainz, with the source named, as a bare
+    # number is read as the primary source's id. Amazon's isn't one its scan uses.
+    assert [(url, body) for url, body, _ in http.posted] == [
+        (WATCH_ADD, {"artist_id": "1001", "artist_name": "Made Up Artist", "source": "itunes"}),
+        (link, {"provider": "deezer", "provider_id": "1002"}),
+        (link, {"provider": "musicbrainz", "provider_id": "mb-made-up"})]
+    assert set(http.timeouts) == {REQUEST_TIMEOUT}
+
+
+def test_follow_still_gives_the_row_when_a_link_is_refused(soulsync, http, caplog):
+    link = f"{URL}/api/watchlist/artist/1001/link-provider"
+    http.answers.update({WATCH_ADD: (200, {"success": True}),
+                         link: (409, {"success": False, "error": "Another watchlist artist ('Someone') has it"})})
+    row = _watched_row(8, "Made Up Artist", itunes_artist_id="1001")
+    http.pages[WATCHED] = FakeResponse(200, {"success": True, "artists": [row]})
+    assert soulsync.follow(LIBRARY_ARTIST) == row
+    assert "Someone" not in caplog.text and "Made Up" not in caplog.text
+
+
+def test_follow_with_no_provider_id_asks_nothing(soulsync, http):
+    assert soulsync.follow(dict(LIBRARY_ARTIST, itunes_artist_id=None, deezer_id="", musicbrainz_id=None)) is None
+    assert http.posted == [] and http.fetched == []
+
+
+def test_follow_refused_is_an_error(soulsync, http):
+    http.answers[WATCH_ADD] = (500, {"success": False, "error": "Failed to add artist to watchlist"})
+    with pytest.raises(SoulSyncError):
+        soulsync.follow(LIBRARY_ARTIST)
+
+
+def test_unfollow_removes_the_row_by_one_of_its_provider_ids(soulsync, http):
+    http.answers[WATCH_REMOVE] = (200, {"success": True, "message": "Removed artist from watchlist"})
+    soulsync.unfollow(_watched_row(8, "Made Up Artist", deezer_artist_id="1002", musicbrainz_artist_id="mb-x"))
+    assert [(url, body) for url, body, _ in http.posted] == [(WATCH_REMOVE, {"artist_id": "1002"})]
+    http.answers[WATCH_REMOVE] = (500, {"success": False, "error": "Failed to remove artist from watchlist"})
+    with pytest.raises(SoulSyncError):
+        soulsync.unfollow(_watched_row(8, "Made Up Artist", deezer_artist_id="1002"))

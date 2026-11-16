@@ -300,6 +300,8 @@ IN_AND_OUT = {
     ("usage", "search_price"): ([0, 10, 1000], [-1, 1001, True]),
     ("wrapped", "yearly_month"): ([1, 11, 12], [0, 13, 11.5, True]),
     ("wrapped", "link"): (["https://nova.example.com", ""], ["nova.example.com", "ftp://nova.example.com"]),
+    # 0 is no following.
+    ("new_music", "follow_top_artists"): ([0, 25, 50], [-1, 51, 2.5, True]),
 }
 
 
@@ -333,6 +335,14 @@ def test_the_repositorys_config_has_the_download_settings(tmp_path):
     assert (music["song_download_minutes"], music["album_download_minutes"]) == (10, 30)
     # No address until the user gives SoulSync's, so downloading says it isn't set up.
     assert config.section("soulsync")["url"] == ""
+
+
+def test_the_repositorys_config_has_the_new_music_settings(tmp_path):
+    new_music = Config(path=str(tmp_path / "none.yaml")).section("new_music")
+    assert new_music == {"follow_top_artists": 25, "playlist": "Discovery Shuffle"}
+    assert limit_problem("new_music", "follow_top_artists", 51) == "should be a whole number from 0 to 50"
+    # Any name, as it's a playlist's in Navidrome.
+    assert limit_problem("new_music", "playlist", "Daily Mix 1") is None
 
 
 def test_the_clock_displays_port_has_its_limit_and_is_off_unless_set(tmp_path):

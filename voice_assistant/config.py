@@ -105,6 +105,9 @@ LIMITS: Dict[Tuple[str, str], Limit] = {
     # The month the yearly Wrapped is made on the 1st of. Empty is no link in its notification.
     ("wrapped", "yearly_month"): Limit("number", 1, 12, True),
     ("wrapped", "link"): Limit("address"),
+    # 0 is no following. Over 50 reaches artists played a handful of times a year, whose every release
+    # would download.
+    ("new_music", "follow_top_artists"): Limit("number", 0, 50, True),
 }
 
 _TIME = re.compile(r"([01]\d|2[0-3]):[0-5]\d")

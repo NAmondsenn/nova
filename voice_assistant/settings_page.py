@@ -142,6 +142,9 @@ EDITABLE = [
     ("wrapped", "monthly", "A smaller one each month", "now"),
     ("wrapped", "yearly_month", "Month the yearly one is ready, on the 1st (12 for December)", "now"),
     ("wrapped", "link", "This page's address, for the link in Wrapped's notification", "now"),
+    ("new_music", "follow_top_artists", "How many of your top artists to follow for new releases (0 for none)",
+     "now"),
+    ("new_music", "playlist", "Playlist for 'find me something new'", "now"),
 ]
 # How the page says which each is.
 NOW = "Used straight away"

@@ -36,6 +36,7 @@ from voice_assistant.display_feed import DisplayFeed
 from voice_assistant.display_server import DisplayServer
 from voice_assistant.displays import Displays
 from voice_assistant.downloads import Downloads
+from voice_assistant.following import FollowWatcher
 from voice_assistant.football import Football
 from voice_assistant.football_watch import FootballChoices, FootballWatcher, user_home
 from voice_assistant.google_calendar import READ_FAILURES, GoogleCalendar
@@ -56,6 +57,7 @@ from voice_assistant.satellite_link import SOCKET_TIMEOUT, Stream
 from voice_assistant.satellite_passwords import SatellitePasswords, name_problem
 from voice_assistant.session import Session
 from voice_assistant.settings_page import SettingsPage
+from voice_assistant.soulsync import SoulSync
 from voice_assistant.text_to_speech import TextToSpeech
 from voice_assistant.usage import UsageLog
 from voice_assistant.usage_device import UsageDevice
@@ -365,6 +367,12 @@ class Brain:
         self.wrapped_store = WrappedStore(os.path.join(paths.DATA_DIR, "wrapped"))
         self.wrapped_watcher = WrappedWatcher(self.listening, self.wrapped_store, self.ntfy,
                                               lambda: self.config.section("wrapped"))
+        # His top artists of the last 12 months, followed on SoulSync's watchlist once a month so that their new
+        # releases download (see following.py), with SoulSync made at each look from the settings as they are
+        # then, as the downloads have it. Made with or without SoulSync, as it then does nothing. Started by run().
+        self.follow_watcher = FollowWatcher(
+            self.listening, lambda: SoulSync.from_config(self.config, os.getenv("SOULSYNC_API_KEY")),
+            os.path.join(paths.DATA_DIR, "following.json"), lambda: self.config.section("new_music"))
         # The brain's second device in Home Assistant, showing that snapshot - or None with no MQTT
         # broker set. Made here as it needs the listening stats. Started by run().
         self.music_device = MusicDevice.from_config(config, os.getenv("MQTT_PASSWORD"), self.listening)
@@ -1656,6 +1664,7 @@ class Brain:
             self.football_watcher.start()
         self.listening.start()
         self.wrapped_watcher.start()
+        self.follow_watcher.start()
         if self.media:
             self.media.start()
         if self.registry:
@@ -1736,6 +1745,7 @@ class Brain:
             self.batteries.stop()
         if self.football_watcher:
             self.football_watcher.stop()
+        self.follow_watcher.stop()
         self.wrapped_watcher.stop()
         self.listening.stop()
         if self.media:

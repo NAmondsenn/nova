@@ -38,6 +38,7 @@ from voice_assistant.batteries import Battery, BatteryChoices, BatteryWatcher
 from voice_assistant.config import Config
 from voice_assistant.displays import Displays
 from voice_assistant.downloads import Downloads
+from voice_assistant.following import FollowWatcher
 from voice_assistant.football import Football
 from voice_assistant.football_watch import FootballChoices, FootballWatcher
 from voice_assistant.google_calendar import GoogleCalendar
@@ -50,6 +51,7 @@ from voice_assistant.ntfy import Alert
 from voice_assistant.recording import RATE
 from voice_assistant.remote import RemoteSatellite
 from voice_assistant.satellite_passwords import SatellitePasswords
+from voice_assistant.soulsync import SoulSync
 from voice_assistant.usage import UsageLog
 from voice_assistant.usage_device import UsageDevice
 from voice_assistant.vad import LoudnessDetector
@@ -2801,6 +2803,38 @@ def test_the_wrapped_is_kept_in_the_data_folder_and_made_while_the_brain_runs(ma
     assert running == [True]
     assert not any(thread.name == "wrapped" for thread in threading.enumerate())
     assert brain.wrapped_watcher._thread is None
+
+
+def test_the_top_artists_are_followed_while_the_brain_runs(make_brain, tmp_path, monkeypatch):
+    monkeypatch.setenv("SOULSYNC_API_KEY", "made-up-key")
+    brain = make_brain(new_music={"follow_top_artists": 25, "playlist": "Discovery Shuffle"},
+                       soulsync={"url": "http://soulsync.local:8008"})
+    watcher = brain.follow_watcher
+    # Given the listening stats, a record in the data folder, SoulSync as set up now, and the settings as they are now.
+    assert isinstance(watcher, FollowWatcher) and watcher._listening is brain.listening
+    assert watcher._path == str(tmp_path / "following.json")
+    soulsync = watcher._soulsync()
+    assert isinstance(soulsync, SoulSync) and soulsync.url == "http://soulsync.local:8008"
+    assert soulsync._session.headers["Authorization"] == "Bearer made-up-key"
+    brain.apply_settings({("soulsync", "url"): ""})
+    assert watcher._soulsync() is None
+    assert watcher._settings()["follow_top_artists"] == 25
+    brain.apply_settings({("new_music", "follow_top_artists"): 10})
+    assert watcher._settings()["follow_top_artists"] == 10
+    assert watcher._thread is None
+    looked = threading.Event()
+    watcher.look = looked.set
+    running = []
+
+    def serve():
+        running.append(looked.wait(5) and any(thread.name == "following" and thread.is_alive()
+                                              for thread in threading.enumerate()))
+
+    brain.serve = serve
+    brain.run()
+    assert running == [True]
+    assert not any(thread.name == "following" for thread in threading.enumerate())
+    assert watcher._thread is None
 
 
 def test_the_listening_stats_are_given_the_soulsync_key(make_brain, monkeypatch):

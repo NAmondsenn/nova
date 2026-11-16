@@ -2013,6 +2013,27 @@ def test_the_wrapped_settings_are_on_the_page_and_used_straight_away(files):
     assert page.save_settings({"wrapped.link": ""}, LOGIN)["success"]
 
 
+def test_the_new_music_settings_are_on_the_page_and_used_straight_away(files):
+    page, running = _running(files)
+    shown = {setting["key"]: setting for setting in page.state()["settings"]}
+    assert shown["new_music.follow_top_artists"]["label"] == \
+        "How many of your top artists to follow for new releases (0 for none)"
+    assert shown["new_music.playlist"]["label"] == "Playlist for 'find me something new'"
+    assert shown["new_music.follow_top_artists"]["used"] == NOW and shown["new_music.playlist"]["used"] == NOW
+    assert (shown["new_music.follow_top_artists"]["value"], shown["new_music.follow_top_artists"]["min"],
+            shown["new_music.follow_top_artists"]["max"], shown["new_music.follow_top_artists"]["whole"]) == (25, 0, 50,
+                                                                                                           True)
+    assert shown["new_music.playlist"]["value"] == "Discovery Shuffle"
+
+    result = page.save_settings({"new_music.follow_top_artists": 0, "new_music.playlist": "Hidden Gems"}, LOGIN)
+    assert result == {"success": True, "message": "Saved. It's used straight away.", "restart_needed": False}
+    assert running.section("new_music") == {"follow_top_artists": 0, "playlist": "Hidden Gems"}
+    # A whole number from 0, switching the following off, to 50.
+    for wrong in (-1, 51, 2.5):
+        assert not page.save_settings({"new_music.follow_top_artists": wrong}, LOGIN)["success"], wrong
+    assert running.section("new_music")["follow_top_artists"] == 0
+
+
 def test_every_setting_on_the_page_has_a_group_of_its_own(files):
     # One under no group is shown under Other, as the spending alert and Claude's prices
     # were, rather than with the settings it goes with.
@@ -2023,6 +2044,7 @@ def test_every_setting_on_the_page_has_a_group_of_its_own(files):
               for name, line in re.findall(r'^\s*\["([^"]+)", (\[.*\])\],$', groups, re.M)}
     assert "usage." in starts["Claude"]
     assert starts["Football"] == ["football."]
+    assert "new_music." in starts["Music"]
     for section, name, *_ in page_module.EDITABLE:
         key = f"{section}.{name}"
         assert any(key.startswith(start) for prefixes in starts.values() for start in prefixes), key
