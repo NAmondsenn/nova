@@ -339,8 +339,9 @@ def _goals(before: Dict, match: Match, reported: Optional[float]) -> Tuple[Optio
     RULED_OUT_AFTER seconds (about two minutes) or more after that one still shows that same lower
     score it is said, as a goal ruled out; one in between which shows it changes nothing, so the
     time is always counted from the first. A lower score first seen within about two minutes of
-    full time is never said, as the comparison stops at full time (see events). If a reading shows anything else the note is dropped and that
-    reading is compared as usual. The same reading seen again confirms nothing, as Nova looks
+    full time is never said, as the comparison stops at full time (see events). If a reading
+    shows anything else the note is dropped and that reading is compared as usual. The same
+    reading seen again confirms nothing, as Nova looks
     more often than Home Assistant writes the sensor, so the second look is usually the first
     one's reading; and nor does the next reading, a minute on, as two readings can both carry
     the one old copy ESPN gave.
