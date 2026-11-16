@@ -12,8 +12,8 @@ import pytest
 import requests
 
 from voice_assistant import network
-from voice_assistant.soulsync import (MCP_TIMEOUT, REQUEST_TIMEOUT, SEARCH_TIMEOUT, AlbumRequest, Progress,
-                                      SongRequest, SoulSync, SoulSyncError, pick_album, pick_track)
+from voice_assistant.soulsync import (MCP_TIMEOUT, PICTURE_MOST, REQUEST_TIMEOUT, SEARCH_TIMEOUT, AlbumRequest,
+                                      Progress, SongRequest, SoulSync, SoulSyncError, pick_album, pick_track)
 
 URL = "http://soulsync.local:8008"
 RECORDED_TRACK_COUNT = 11
@@ -78,9 +78,18 @@ def _tool_error(text):
 
 
 class FakeResponse:
-    def __init__(self, status_code, body):
+    def __init__(self, status_code, body, headers=None, content=b""):
         self.status_code = status_code
         self.body = body
+        self.headers = headers or {}
+        self.content = content
+
+    def iter_content(self, chunk_size):
+        for start in range(0, len(self.content), chunk_size):
+            yield self.content[start:start + chunk_size]
+
+    def close(self):
+        pass
 
     def json(self):
         if self.body is None:
@@ -93,7 +102,8 @@ class FakeSoulSync:
     """
     Stands in for the requests.Session SoulSync is asked through: its REST API
     answers from the recorded shapes, by address, and its MCP server each tool from
-    a dict. Everything Nova asks of SoulSync is a POST, so it has no GET to answer.
+    a dict. Its stats and pictures are read with a GET: each is answered from a dict by
+    address, as a FakeResponse.
     """
 
     def __init__(self):
@@ -111,6 +121,16 @@ class FakeSoulSync:
         self.mcp_answer = None
         # An exception every request raises instead of being answered.
         self.fail = None
+        # Each GET as (address, params, headers, how it was asked), and what each address answers.
+        self.fetched = []
+        self.pages = {}
+
+    def get(self, url, params=None, timeout=None, stream=False, allow_redirects=True):
+        self.timeouts.append(timeout)
+        if self.fail:
+            raise self.fail
+        self.fetched.append((url, params, dict(self.headers), {"stream": stream, "redirects": allow_redirects}))
+        return self.pages.get(url) or FakeResponse(404, {"error": "not found"})
 
     def post(self, url, json=None, timeout=None):
         self.timeouts.append(timeout)
@@ -594,3 +614,93 @@ def test_half_set_up_is_logged_without_the_key_and_not_set_up_at_all_isnt(make_c
         SoulSync.from_config(make_config(soulsync={"url": "http://soulsync.local:8008"}), "")
         SoulSync.from_config(make_config(), None)
     assert len(caplog.records) == 2 and "the-key" not in caplog.text
+
+
+# Its stats and pictures
+
+COVER = b"\xff\xd8made-up-jpeg"
+
+
+def _picture(content=COVER, kind="image/jpeg", status=200):
+    return FakeResponse(status, None, {"Content-Type": kind}, content)
+
+
+def test_stats_get_sends_key_and_params(soulsync, http):
+    http.pages[f"{URL}/api/stats/cached"] = FakeResponse(200, {"success": True, "overview": {}})
+    assert soulsync.stats("/api/stats/cached", range="7d") == {"success": True, "overview": {}}
+    # A GET with the query as params, which requests puts after the "?", with the key as for a POST.
+    assert http.fetched == [(f"{URL}/api/stats/cached", {"range": "7d"}, {"Authorization": "Bearer the-key"},
+                             {"stream": False, "redirects": True})]
+    assert http.timeouts == [REQUEST_TIMEOUT]
+
+
+def test_stats_errors_are_read_as_every_other_answer_is(soulsync, http, caplog):
+    http.pages[f"{URL}/api/stats/year"] = FakeResponse(403, {"error": "forbidden"})
+    with pytest.raises(SoulSyncError) as refused:
+        soulsync.stats("/api/stats/year")
+    assert "key" in refused.value.reason
+    http.fail = requests.ConnectionError("http://soulsync.local:8008/?secret=the-key")
+    with pytest.raises(SoulSyncError) as down:
+        soulsync.stats("/api/stats/year")
+    assert down.value.reason == "SoulSync isn't answering."
+    # The kind of error only, which could hold the request and with it the key.
+    assert "ConnectionError" in caplog.text and "the-key" not in caplog.text
+
+
+def test_stats_without_a_network_is_not_answering(soulsync, http, monkeypatch):
+    monkeypatch.setattr(network, "online", lambda: False)
+    with pytest.raises(SoulSyncError) as down:
+        soulsync.stats("/api/stats/year")
+    assert down.value.reason == "SoulSync isn't answering."
+    assert http.fetched == []
+
+
+def test_picture_from_soulsync_path(soulsync, http):
+    http.pages[f"{URL}/api/navidrome/cover/abc"] = _picture()
+    assert soulsync.picture("/api/navidrome/cover/abc") == (COVER, "image/jpeg")
+    # With the key, which a cover needs; never following a redirect, which could take the key elsewhere.
+    assert http.fetched == [(f"{URL}/api/navidrome/cover/abc", None, {"Authorization": "Bearer the-key"},
+                             {"stream": True, "redirects": False})]
+
+
+def test_picture_from_soulsync_absolute_address(soulsync, http):
+    http.pages[f"{URL}/api/navidrome/cover/abc"] = _picture(kind="image/png; charset=binary")
+    assert soulsync.picture(f"{URL}/api/navidrome/cover/abc") == (COVER, "image/png")
+
+
+@pytest.mark.parametrize("url", [
+    "http://other.example/api/navidrome/cover/abc",
+    # The same host on another port, or another scheme, isn't SoulSync.
+    "http://soulsync.local:9999/api/navidrome/cover/abc",
+    "https://soulsync.local:8008/api/navidrome/cover/abc",
+    "//other.example/cover", "cover/abc", "", None])
+def test_picture_refused_for_another_address(soulsync, http, url):
+    http.pages[url] = _picture()
+    assert soulsync.picture(url) is None
+    assert http.fetched == []
+
+
+@pytest.mark.parametrize("answer", [
+    FakeResponse(404, None, {"Content-Type": "image/jpeg"}, COVER),
+    FakeResponse(302, None, {"Content-Type": "image/jpeg"}, COVER),
+    _picture(kind="text/html"),
+    _picture(kind="image/svg+xml"),
+    FakeResponse(200, None, {}, COVER),
+    _picture(content=b"x" * (PICTURE_MOST + 1)),
+], ids=["404", "redirect", "html", "svg", "no type", "600 KB"])
+def test_picture_refused(soulsync, http, answer):
+    http.pages[f"{URL}/api/navidrome/cover/abc"] = answer
+    assert soulsync.picture("/api/navidrome/cover/abc") is None
+
+
+def test_picture_at_the_most_is_taken(soulsync, http):
+    http.pages[f"{URL}/api/navidrome/cover/abc"] = _picture(content=b"x" * PICTURE_MOST, kind="image/webp")
+    assert soulsync.picture("/api/navidrome/cover/abc") == (b"x" * PICTURE_MOST, "image/webp")
+
+
+def test_picture_never_raises(soulsync, http, monkeypatch):
+    http.fail = requests.Timeout("slow")
+    assert soulsync.picture("/api/navidrome/cover/abc") is None
+    http.fail = None
+    monkeypatch.setattr(network, "online", lambda: False)
+    assert soulsync.picture("/api/navidrome/cover/abc") is None

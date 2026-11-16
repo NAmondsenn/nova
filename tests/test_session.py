@@ -254,8 +254,8 @@ def brain(tmp_path, monkeypatch, make_config):
     return SimpleNamespace(config=config, clock=Clock(config=config, start=False), memory=None,
                            routines=Routines(path=str(tmp_path / "routines.json")), ntfy=None, weather=None,
                            batteries=None, lists=None, pc=None, registry=None, calendar=None, media=None,
-                           downloads=None, football=None, usage=None, tts=FakePiper(), stt=FakeSpeechToText(),
-                           sounds_folder=Path(paths.SOUNDS_DIR))
+                           downloads=None, football=None, listening=None, wrapped_store=None, usage=None,
+                           tts=FakePiper(), stt=FakeSpeechToText(), sounds_folder=Path(paths.SOUNDS_DIR))
 
 
 @pytest.fixture
@@ -1860,6 +1860,15 @@ def test_a_sessions_local_rules_leave_football_to_claude(brain, make_session):
 
 def test_a_session_without_football_has_no_teams_for_its_local_rules(brain, make_session):
     assert make_session().intents.football is None
+
+
+def test_a_sessions_actions_read_listening_stats_from_the_brain(brain, make_session):
+    # One for the brain, so every satellite answers from the same snapshot of SoulSync's stats.
+    assert "get_listening" not in {tool["name"] for tool in make_session().llm.tools}
+    brain.listening = object()
+    session = make_session()
+    assert session.actions.listening is brain.listening
+    assert "get_listening" in {tool["name"] for tool in session.llm.tools}
 
 
 def test_a_sessions_actions_download_through_the_brain(brain, make_session):

@@ -41,10 +41,12 @@ from voice_assistant.football_watch import FootballChoices, FootballWatcher, use
 from voice_assistant.google_calendar import READ_FAILURES, GoogleCalendar
 from voice_assistant.ha_registry import REGISTRY_TIMEOUT, HomeRegistry, HomeSocket
 from voice_assistant.home_assistant import HomeAssistant
+from voice_assistant.listening import Listening
 from voice_assistant.lists import Lists
 from voice_assistant.logging_setup import TRANSCRIPT
 from voice_assistant.media_watch import MediaWatcher
 from voice_assistant.memory import Memory
+from voice_assistant.music_device import MusicDevice
 from voice_assistant.ntfy import RETOPIC, Ntfy
 from voice_assistant.pc import PCPower
 from voice_assistant.protocol import ProtocolError, Refused, admit
@@ -58,6 +60,7 @@ from voice_assistant.text_to_speech import TextToSpeech
 from voice_assistant.usage import UsageLog
 from voice_assistant.usage_device import UsageDevice
 from voice_assistant.weather import Weather
+from voice_assistant.wrapped import WrappedStore, WrappedWatcher
 
 logger = logging.getLogger(__name__)
 
@@ -351,6 +354,20 @@ class Brain:
         self.football = Football(self.home, self._football_settings) if self.home else None
         # What it says by itself of a followed team's match, from that same reading. Started by run().
         self.football_watcher = self._make_football_watcher() if self.home else None
+        # What SoulSync knows of what the user has listened to, kept as one snapshot which the voice tool
+        # (and what is built on it) answers from, so a question never waits on SoulSync. Made even with
+        # no SoulSync set up, as it then says so itself. Started by run().
+        self.listening = Listening(config, os.getenv("SOULSYNC_API_KEY"))
+        # The Wrapped of each month and year, saved as made (see wrapped.py): the store is what the Wrapped
+        # page and "what's my Wrapped" read, and the watcher makes each when it's due and tells the phone -
+        # through ntfy's phone topic, as the spending alert does. Made with or without ntfy, as the Wrapped
+        # is made either way. Started by run().
+        self.wrapped_store = WrappedStore(os.path.join(paths.DATA_DIR, "wrapped"))
+        self.wrapped_watcher = WrappedWatcher(self.listening, self.wrapped_store, self.ntfy,
+                                              lambda: self.config.section("wrapped"))
+        # The brain's second device in Home Assistant, showing that snapshot - or None with no MQTT
+        # broker set. Made here as it needs the listening stats. Started by run().
+        self.music_device = MusicDevice.from_config(config, os.getenv("MQTT_PASSWORD"), self.listening)
         # What's playing, for each satellite's wake word in its own room - see media_watch.py
         # and Session.playing_here. Started by run().
         self.media = MediaWatcher(self.home, on_change=self._send_states) if self.home else None
@@ -1626,6 +1643,8 @@ class Brain:
             self.ntfy.start()
         if self.usage_device:
             self.usage_device.start()
+        if self.music_device:
+            self.music_device.start()
         if self.settings_page:
             self.settings_page.start()
         if self.display_server and self.display_server.start():
@@ -1635,6 +1654,8 @@ class Brain:
             self.batteries.start()
         if self.football_watcher:
             self.football_watcher.start()
+        self.listening.start()
+        self.wrapped_watcher.start()
         if self.media:
             self.media.start()
         if self.registry:
@@ -1699,7 +1720,7 @@ class Brain:
         """
         Closes everything down in order - the clock, so nothing else starts ringing,
         and the downloads, so nothing more is said of them, then the batteries, the football
-        watcher, what's playing, the usage device, ntfy, the settings page and the clock
+        watcher, the listening stats, what's playing, the usage device, ntfy, the settings page and the clock
         displays' server and feed, then every satellite's session, so its device in Home
         Assistant and its music stop - and then the Piper process kept waiting for the next
         thing to say.
@@ -1715,12 +1736,16 @@ class Brain:
             self.batteries.stop()
         if self.football_watcher:
             self.football_watcher.stop()
+        self.wrapped_watcher.stop()
+        self.listening.stop()
         if self.media:
             self.media.stop()
         if self.registry:
             self.registry.stop()
         if self.usage_device:
             self.usage_device.stop()
+        if self.music_device:
+            self.music_device.stop()
         if self.ntfy:
             self.ntfy.stop()
         if self.settings_page:

@@ -72,12 +72,18 @@ FILES = {"/": ("settings.html", "text/html; charset=utf-8"),
          "/settings.js": ("settings.js", "text/javascript; charset=utf-8"),
          "/settings.css": ("settings.css", "text/css; charset=utf-8"),
          "/icon.svg": ("icon.svg", "image/svg+xml"),
+         # The Wrapped's story page - see wrapped.py - which asks /api/wrapped for what it shows.
+         "/wrapped": ("wrapped.html", "text/html; charset=utf-8"),
+         "/wrapped.js": ("wrapped.js", "text/javascript; charset=utf-8"),
+         "/wrapped.css": ("wrapped.css", "text/css; charset=utf-8"),
          # Outfit, by The Outfit Project Authors, under the SIL Open Font License -
          # see web/Outfit-OFL.txt.
          "/Outfit.woff2": ("Outfit.woff2", "font/woff2")}
 
 # The files the page itself is made of, whose hash tells a page left open across an
-# update that it's out of date - see page_version.
+# update that it's out of date - see page_version. Not the Wrapped's: it is read once, as
+# it's opened, and asks for nothing after, so a change to it would only reload a settings
+# page for nothing.
 PAGE_FILES = ("settings.html", "settings.js", "settings.css")
 
 # Sent with every answer: nothing but the page's own files may run in it, no other
@@ -132,6 +138,10 @@ EDITABLE = [
     ("usage", "input_price", "Claude's price per million input tokens, in dollars", "now"),
     ("usage", "output_price", "Claude's price per million output tokens, in dollars", "now"),
     ("usage", "search_price", "Claude's price per 1,000 web searches, in dollars", "now"),
+    ("wrapped", "enabled", "Make a Wrapped of your listening", "now"),
+    ("wrapped", "monthly", "A smaller one each month", "now"),
+    ("wrapped", "yearly_month", "Month the yearly one is ready, on the 1st (12 for December)", "now"),
+    ("wrapped", "link", "This page's address, for the link in Wrapped's notification", "now"),
 ]
 # How the page says which each is.
 NOW = "Used straight away"
@@ -720,6 +730,46 @@ class SettingsPage:
         session, _ = self._session(satellite)
         music = session.music_player if session is not None else None
         return music.cover() if music is not None else None
+
+    def wrapped_state(self, key: Optional[str] = None) -> Optional[Dict]:
+        """
+        A saved Wrapped, for its story page, with the keys of all of them for its menu.
+
+        Args:
+            key: The Wrapped's, e.g. "2026" or "2026-11", or None for the newest.
+
+        Returns:
+            {"keys": newest first, "wrapped": the Wrapped as made, or None while there's none},
+            or None if a key was given and there's no Wrapped by it - or it isn't a key.
+        """
+        store = self.brain.wrapped_store
+        keys = store.keys() if store is not None else []
+        if key is None:
+            wrapped = store.load(keys[0]) if keys else None
+        else:
+            wrapped = store.load(key) if store is not None else None
+            if wrapped is None:
+                return None
+        # Whether the phone was told of it is the watcher's own.
+        if wrapped is not None:
+            wrapped = {name: value for name, value in wrapped.items() if name != "told"}
+        return {"keys": keys, "wrapped": wrapped}
+
+    def wrapped_picture(self, key: Optional[str], number: Optional[str]) -> Optional[Tuple[bytes, str]]:
+        """
+        One of a saved Wrapped's pictures, as an image and its type.
+
+        Args:
+            key: The Wrapped's.
+            number: The picture's number in it, as the page asked for it - a few digits.
+
+        Returns:
+            The picture, or None if there's none - or either isn't one.
+        """
+        store = self.brain.wrapped_store
+        if store is None or not isinstance(number, str) or not re.fullmatch(r"[0-9]{1,4}", number):
+            return None
+        return store.picture(key, int(number))
 
     def home_state(self, satellite: Optional[str] = None) -> Dict:
         """
@@ -2323,6 +2373,19 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(page.calendars_state())
         elif path == "/api/home-choices":
             self._send_json(page.home_choices_state())
+        elif path == "/api/wrapped":
+            found = page.wrapped_state((parse_qs(url.query).get("key") or [None])[0])
+            if found is None:
+                self._send_json({"success": False, "message": "There's no Wrapped by that name."}, 404)
+            else:
+                self._send_json(found)
+        elif path == "/api/wrapped/picture":
+            asked = parse_qs(url.query)
+            picture = page.wrapped_picture((asked.get("key") or [None])[0], (asked.get("n") or [None])[0])
+            if picture is None:
+                self._send_json({"success": False, "message": "There's no such picture."}, 404)
+            else:
+                self._send(200, *picture)
         elif path == "/api/cover":
             # Whatever's playing now - the page adds its id only so a new one is fetched.
             cover = page.cover(satellite)

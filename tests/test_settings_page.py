@@ -20,7 +20,7 @@ import time
 import urllib.error
 import urllib.request
 from types import SimpleNamespace
-from urllib.parse import parse_qs, parse_qsl, urlsplit
+from urllib.parse import parse_qs, parse_qsl, quote, urlsplit
 
 import pytest
 import requests
@@ -48,6 +48,7 @@ from voice_assistant.pc import PCPower
 from voice_assistant.routines import Routines
 from voice_assistant.settings_page import LATER, NOW, SettingsPage
 from voice_assistant.weather import Weather
+from voice_assistant.wrapped import WrappedStore
 
 LOGIN = "you@example.com"
 
@@ -247,7 +248,7 @@ class FakeBrain:
         self.clock, self.memory = FakeClock(), FakeMemory()
         self.ntfy = self.stt = self.routines = self.batteries = self.config = self.calendar = None
         self.home = self.lists = self.weather = self.pc = None
-        self.football = self.football_watcher = None
+        self.football = self.football_watcher = self.wrapped_store = None
         self.displays, self.display_server = NoDisplays(), None
         self._night = Ntfy("")
         self.ran = []
@@ -1981,6 +1982,37 @@ def test_the_spending_alert_and_claudes_prices_are_on_the_page_and_used_straight
     assert page.save_settings({"usage.daily_limit": 0}, LOGIN)["success"]
 
 
+def test_the_wrapped_settings_are_on_the_page_and_used_straight_away(files):
+    page, running = _running(files)
+    shown = {setting["key"]: setting for setting in page.state()["settings"]}
+    labels = {
+        "wrapped.enabled": "Make a Wrapped of your listening",
+        "wrapped.monthly": "A smaller one each month",
+        "wrapped.yearly_month": "Month the yearly one is ready, on the 1st (12 for December)",
+        "wrapped.link": "This page's address, for the link in Wrapped's notification",
+    }
+    for key, label in labels.items():
+        assert shown[key]["label"] == label and shown[key]["used"] == NOW, key
+    assert (shown["wrapped.enabled"]["kind"], shown["wrapped.enabled"]["value"]) == ("yes/no", True)
+    assert (shown["wrapped.monthly"]["kind"], shown["wrapped.monthly"]["value"]) == ("yes/no", True)
+    assert (shown["wrapped.yearly_month"]["value"], shown["wrapped.yearly_month"]["min"],
+            shown["wrapped.yearly_month"]["max"], shown["wrapped.yearly_month"]["whole"]) == (12, 1, 12, True)
+    # The repo is public, so the address is his to give, not config.yaml's.
+    assert shown["wrapped.link"]["value"] == ""
+
+    result = page.save_settings({"wrapped.enabled": False, "wrapped.monthly": False, "wrapped.yearly_month": 11,
+                                 "wrapped.link": "https://nova.example.com"}, LOGIN)
+    assert result == {"success": True, "message": "Saved. It's used straight away.", "restart_needed": False}
+    assert running.section("wrapped") == {"enabled": False, "monthly": False, "yearly_month": 11,
+                                          "link": "https://nova.example.com"}
+    # No month 13, and no link which isn't an address.
+    assert not page.save_settings({"wrapped.yearly_month": 13}, LOGIN)["success"]
+    assert not page.save_settings({"wrapped.yearly_month": 0}, LOGIN)["success"]
+    assert not page.save_settings({"wrapped.link": "nova.example.com"}, LOGIN)["success"]
+    assert running.section("wrapped")["yearly_month"] == 11
+    assert page.save_settings({"wrapped.link": ""}, LOGIN)["success"]
+
+
 def test_every_setting_on_the_page_has_a_group_of_its_own(files):
     # One under no group is shown under Other, as the spending alert and Claude's prices
     # were, rather than with the settings it goes with.
@@ -3616,3 +3648,99 @@ def test_a_login_with_the_old_password_never_outlives_a_change(npm, monkeypatch)
     said, token = logged_in[0]
     assert npm.password.check("a brand new page password")
     assert token is None or not npm.logins.check(token)
+
+
+# The Wrapped
+
+def _wrapped_store(files):
+    """Two saved Wrappeds, made up: October's with a picture, and November's, the newest, with two."""
+    store = WrappedStore(str(files / "wrapped"))
+    store.save({"key": "2026-10", "kind": "month", "plays": 300, "told": True,
+                "top_artists": [{"name": "Artist One", "plays": 40, "picture": 0}]}, [(b"october", "image/jpeg")])
+    store.save({"key": "2026-11", "kind": "month", "plays": 480, "told": False,
+                "top_artists": [{"name": "Artist Two", "plays": 50, "picture": 1}]},
+               [(b"first", "image/webp"), (b"second", "image/png")])
+    return store
+
+
+@pytest.fixture
+def wrapped_served(files, monkeypatch):
+    monkeypatch.setattr(page_module, "STOP_CHECK", 0.02)
+    page = _page(wrapped_store=_wrapped_store(files))
+    page.start()
+    yield page
+    page.stop()
+
+
+def test_wrapped_api_newest(wrapped_served):
+    status, headers, body = _ask(wrapped_served, "/api/wrapped")
+    answer = json.loads(body)
+    assert status == 200 and headers["Content-Type"] == "application/json"
+    assert answer["keys"] == ["2026-11", "2026-10"]
+    # Whether the phone was told is the watcher's own, not the page's.
+    assert answer["wrapped"] == {"key": "2026-11", "kind": "month", "plays": 480,
+                                 "top_artists": [{"name": "Artist Two", "plays": 50, "picture": 1}]}
+    status, _, body = _ask(wrapped_served, "/api/wrapped?key=2026-10")
+    assert status == 200 and json.loads(body)["wrapped"]["plays"] == 300
+    assert json.loads(body)["keys"] == ["2026-11", "2026-10"]
+    status, headers, body = _ask(wrapped_served, "/api/wrapped/picture?key=2026-11&n=1")
+    assert (status, headers["Content-Type"], body) == (200, "image/png", b"second")
+    status, headers, body = _ask(wrapped_served, "/api/wrapped/picture?key=2026-10&n=0")
+    assert (status, headers["Content-Type"], body) == (200, "image/jpeg", b"october")
+    for name, value in page_module.SAFETY_HEADERS.items():
+        assert headers[name] == value
+
+
+def test_wrapped_api_with_none_saved(served, files):
+    # None made yet, and the store's folder not made either.
+    served.brain.wrapped_store = WrappedStore(str(files / "wrapped"))
+    status, _, body = _ask(served, "/api/wrapped")
+    assert status == 200 and json.loads(body) == {"keys": [], "wrapped": None}
+
+
+def test_wrapped_key_checked(wrapped_served):
+    for key in ("../x", "2026-13x", "2025-01", "2026-11/../2026-10", "2026-11.json", "x"):
+        status, _, body = _ask(wrapped_served, f"/api/wrapped?key={quote(key)}")
+        assert status == 404 and not json.loads(body)["success"], key
+    for query in ("key=../x&n=0", "key=2026-13x&n=0", "key=2025-01&n=0", "key=2026-11&n=2", "key=2026-10&n=1",
+                  "key=2026-11&n=-1", "key=2026-11&n=x", "key=2026-11&n=1.0", "key=2026-11&n=", "key=2026-11",
+                  "n=0", "key=2026-11&n=99999999999999999999"):
+        status, _, body = _ask(wrapped_served, f"/api/wrapped/picture?{query}")
+        assert status == 404 and not json.loads(body)["success"], query
+
+
+def test_wrapped_needs_login(npm, files):
+    npm.brain.wrapped_store = _wrapped_store(files)
+    # The page itself is open before a login, as the settings page's own files are.
+    for path in ("/wrapped", "/wrapped?key=2026-10", "/wrapped.js", "/wrapped.css", "/Outfit.woff2"):
+        assert _through_npm(npm, path)[0] == 200, path
+    # What it shows isn't.
+    for path in ("/api/wrapped", "/api/wrapped?key=2026-10", "/api/wrapped/picture?key=2026-11&n=0"):
+        status, _, body = _through_npm(npm, path)
+        assert (status, json.loads(body)) == (401, {"success": False, "message": "Log in first."}), path
+    _, token = _log_in(npm)
+    status, _, body = _through_npm(npm, "/api/wrapped", cookie=token)
+    assert status == 200 and json.loads(body)["wrapped"]["key"] == "2026-11"
+    assert _through_npm(npm, "/api/wrapped/picture?key=2026-11&n=0", cookie=token)[2] == b"first"
+    # On the tailnet, only the logins allowed.
+    assert _ask(npm, "/api/wrapped", login="someone@else.com")[0] == 403
+    assert _ask(npm, "/api/wrapped/picture?key=2026-11&n=0", login=None)[0] == 403
+
+
+def test_wrapped_files_served(wrapped_served):
+    status, headers, page = _ask(wrapped_served, "/wrapped?key=2026-10")
+    assert status == 200 and headers["Content-Type"] == "text/html; charset=utf-8"
+    for name, value in page_module.SAFETY_HEADERS.items():
+        assert headers[name] == value
+    # Its own script and style, and nothing inline, which its Content-Security-Policy wouldn't run or use.
+    assert b'<script src="wrapped.js" defer></script>' in page and b'href="wrapped.css"' in page
+    assert re.findall(rb"<script[^>]*>", page) == [b'<script src="wrapped.js" defer>']
+    assert b"<style" not in page and b" style=" not in page and b"http" not in page
+    status, headers, script = _ask(wrapped_served, "/wrapped.js")
+    assert status == 200 and headers["Content-Type"] == "text/javascript; charset=utf-8"
+    assert b'"/api/wrapped' in script and b'"/api/wrapped/picture' in script and b"innerHTML" not in script
+    status, headers, style = _ask(wrapped_served, "/wrapped.css")
+    assert status == 200 and headers["Content-Type"] == "text/css; charset=utf-8"
+    assert b'url("Outfit.woff2")' in style and b"prefers-reduced-motion" in style
+    # Not one of the settings page's own files, so changing it never reloads a settings page left open.
+    assert not any(name.startswith("wrapped") for name in page_module.PAGE_FILES)

@@ -286,6 +286,37 @@ def test_whats_sent_goes_to_the_topic_tagged_as_novas():
                                "headers": {"Authorization": "Bearer tk_secret"}}]
 
 
+def test_ntfy_click_sent():
+    session = FakeSession()
+    ntfy, _ = _ntfy(session=session)
+
+    assert ntfy.send("clipboard", "Your 2026 Wrapped is ready.", title="Wrapped",
+                     click="https://nova.example.com/wrapped?key=2026")
+    assert session.posted[0]["json"] == {"topic": "clipboard", "message": "Your 2026 Wrapped is ready.",
+                                         "tags": ["nova"], "title": "Wrapped",
+                                         "click": "https://nova.example.com/wrapped?key=2026"}
+
+
+def test_no_link_no_click():
+    session = FakeSession()
+    ntfy, _ = _ntfy(session=session)
+
+    assert ntfy.send("clipboard", "Hello", click="")
+    assert "click" not in session.posted[0]["json"]
+
+
+def test_a_click_is_sent_on_the_thread_send_soon_starts():
+    session = FakeSession()
+    ntfy, _ = _ntfy(session=session)
+
+    sent = threading.Event()
+    real = ntfy.send
+    ntfy.send = lambda *args, **kwargs: (real(*args, **kwargs), sent.set())
+    ntfy.send_soon("clipboard", "Hello", title="Hi", click="https://nova.example.com/wrapped?key=2026")
+    assert sent.wait(5)
+    assert session.posted[0]["json"]["click"] == "https://nova.example.com/wrapped?key=2026"
+
+
 def test_sending_says_when_it_didnt_work():
     ntfy, _ = _ntfy(session=FakeSession(posted_status=403))
     assert not ntfy.send("clipboard", "Hello")

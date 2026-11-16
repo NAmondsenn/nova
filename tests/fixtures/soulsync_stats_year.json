@@ -1,0 +1,256 @@
+{
+  "success": true,
+  "cached": true,
+  "has_data": true,
+  "period": {
+    "start": "2025-12-01",
+    "end": "2026-11-15",
+    "label": "Dec 2025 to Nov 2026",
+    "months": 12
+  },
+  "totals": {
+    "active_days": 90,
+    "albums": 40,
+    "artists": 30,
+    "minutes": 3000,
+    "plays": 900,
+    "tracks": 200
+  },
+  "months": [
+    {
+      "label": "Nov 2026",
+      "month": "2026-11",
+      "minutes": 900,
+      "plays": 300,
+      "top_artist": "Artist One"
+    },
+    {
+      "label": "Oct 2026",
+      "month": "2026-10",
+      "minutes": 700,
+      "plays": 250,
+      "top_artist": null
+    }
+  ],
+  "top_artists": [
+    {
+      "name": "Artist One",
+      "image_url": "/api/navidrome/cover/artist-one",
+      "id": "art-one",
+      "global_listeners": null,
+      "global_playcount": null,
+      "soul_id": "soul-one",
+      "plays": 200,
+      "months_on_top": 4
+    },
+    {
+      "name": "Artist Two",
+      "image_url": "/api/navidrome/cover/artist-two",
+      "id": "art-two",
+      "global_listeners": null,
+      "global_playcount": null,
+      "soul_id": "soul-two",
+      "plays": 170,
+      "months_on_top": 4
+    },
+    {
+      "name": "Artist Three",
+      "image_url": "/api/navidrome/cover/artist-three",
+      "id": "art-three",
+      "global_listeners": null,
+      "global_playcount": null,
+      "soul_id": "soul-three",
+      "plays": 140,
+      "months_on_top": 3
+    },
+    {
+      "name": "Artist Four",
+      "image_url": "/api/navidrome/cover/artist-four",
+      "id": "art-four",
+      "global_listeners": null,
+      "global_playcount": null,
+      "soul_id": "soul-four",
+      "plays": 110,
+      "months_on_top": 3
+    },
+    {
+      "name": "Artist Five",
+      "image_url": "/api/navidrome/cover/artist-five",
+      "id": "art-five",
+      "global_listeners": null,
+      "global_playcount": null,
+      "soul_id": "soul-five",
+      "plays": 80,
+      "months_on_top": 2
+    }
+  ],
+  "top_albums": [
+    {
+      "name": "Album One",
+      "artist": "Artist One",
+      "plays": 80,
+      "image_url": "/api/navidrome/cover/album-one",
+      "id": "alb-one",
+      "artist_id": "art-one"
+    },
+    {
+      "name": "Album Two",
+      "artist": "Artist Two",
+      "plays": 70,
+      "image_url": "/api/navidrome/cover/album-two",
+      "id": "alb-two",
+      "artist_id": "art-two"
+    },
+    {
+      "name": "Album Three",
+      "artist": "Artist Three",
+      "plays": 60,
+      "image_url": "/api/navidrome/cover/album-three",
+      "id": "alb-three",
+      "artist_id": "art-three"
+    },
+    {
+      "name": "Album Four",
+      "artist": "Artist Four",
+      "plays": 50,
+      "image_url": "/api/navidrome/cover/album-four",
+      "id": "alb-four",
+      "artist_id": "art-four"
+    },
+    {
+      "name": "Album Five",
+      "artist": "Artist Five",
+      "plays": 40,
+      "image_url": "/api/navidrome/cover/album-five",
+      "id": "alb-five",
+      "artist_id": "art-five"
+    }
+  ],
+  "top_tracks": [
+    {
+      "name": "Song A",
+      "artist": "Artist One",
+      "album": "Album One",
+      "plays": 40,
+      "first_played": "2026-10-12",
+      "last_played": "2026-11-14",
+      "image_url": "/api/navidrome/cover/album-one",
+      "id": "trk-a",
+      "artist_id": "art-one"
+    },
+    {
+      "name": "Song B",
+      "artist": "Artist Two",
+      "album": "Album Two",
+      "plays": 35,
+      "first_played": "2026-10-12",
+      "last_played": "2026-11-14",
+      "image_url": "/api/navidrome/cover/album-two",
+      "id": "trk-b",
+      "artist_id": "art-two"
+    },
+    {
+      "name": "Song C",
+      "artist": "Artist Three",
+      "album": "Album Three",
+      "plays": 30,
+      "first_played": "2026-10-12",
+      "last_played": "2026-11-14",
+      "image_url": "/api/navidrome/cover/album-three",
+      "id": "trk-c",
+      "artist_id": "art-three"
+    },
+    {
+      "name": "Song D",
+      "artist": "Artist Four",
+      "album": "Album Four",
+      "plays": 25,
+      "first_played": "2026-10-12",
+      "last_played": "2026-11-14",
+      "image_url": "/api/navidrome/cover/album-four",
+      "id": "trk-d",
+      "artist_id": "art-four"
+    },
+    {
+      "name": "Song E",
+      "artist": "Artist Five",
+      "album": "Album Five",
+      "plays": 20,
+      "first_played": "2026-10-12",
+      "last_played": "2026-11-14",
+      "image_url": "/api/navidrome/cover/album-five",
+      "id": "trk-e",
+      "artist_id": "art-five"
+    }
+  ],
+  "discoveries": [
+    {
+      "name": "Artist Seven",
+      "plays": 20,
+      "first_played": "2026-11-02",
+      "image_url": "/api/navidrome/cover/artist-seven",
+      "id": "art-seven",
+      "global_listeners": null,
+      "global_playcount": null,
+      "soul_id": "soul-seven"
+    },
+    {
+      "name": "Artist Eight",
+      "plays": 18,
+      "first_played": "2026-11-02",
+      "image_url": "/api/navidrome/cover/artist-eight",
+      "id": "art-eight",
+      "global_listeners": null,
+      "global_playcount": null,
+      "soul_id": "soul-eight"
+    },
+    {
+      "name": "Artist Nine",
+      "plays": 16,
+      "first_played": "2026-11-02",
+      "image_url": "/api/navidrome/cover/artist-nine",
+      "id": "art-nine",
+      "global_listeners": null,
+      "global_playcount": null,
+      "soul_id": "soul-nine"
+    },
+    {
+      "name": "Artist Ten",
+      "plays": 14,
+      "first_played": "2026-11-02",
+      "image_url": "/api/navidrome/cover/artist-ten",
+      "id": "art-ten",
+      "global_listeners": null,
+      "global_playcount": null,
+      "soul_id": "soul-ten"
+    },
+    {
+      "name": "Artist Eleven",
+      "plays": 12,
+      "first_played": "2026-11-02",
+      "image_url": "/api/navidrome/cover/artist-eleven",
+      "id": "art-eleven",
+      "global_listeners": null,
+      "global_playcount": null,
+      "soul_id": "soul-eleven"
+    },
+    {
+      "name": "Artist Twelve",
+      "plays": 10,
+      "first_played": "2026-11-02",
+      "image_url": "/api/navidrome/cover/artist-twelve",
+      "id": "art-twelve",
+      "global_listeners": null,
+      "global_playcount": null,
+      "soul_id": "soul-twelve"
+    }
+  ],
+  "peak_day": {
+    "date": "2026-11-13",
+    "plays": 30
+  },
+  "top_hour": {
+    "hour": 18,
+    "plays": 150
+  }
+}

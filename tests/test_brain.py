@@ -42,7 +42,10 @@ from voice_assistant.football import Football
 from voice_assistant.football_watch import FootballChoices, FootballWatcher
 from voice_assistant.google_calendar import GoogleCalendar
 from voice_assistant.ha_registry import HomeRegistry
+from voice_assistant.listening import Listening
+from voice_assistant.wrapped import WrappedStore, WrappedWatcher
 from voice_assistant.media_watch import MediaWatcher
+from voice_assistant.music_device import MusicDevice
 from voice_assistant.ntfy import Alert
 from voice_assistant.recording import RATE
 from voice_assistant.remote import RemoteSatellite
@@ -249,10 +252,10 @@ def make_brain(tmp_path, monkeypatch, make_config, passwords):
     # has ended, and every session with it - each satellite's own thread forgets its
     # session as the brain lets it go. One a test put in by hand has no such thread.
     for brain in made:
-        listening = getattr(brain, "listening", None)
-        if listening is not None:
-            listening.join(5)
-            assert not listening.is_alive(), "The thread which listened for satellites outlived stop()"
+        serving_thread = getattr(brain, "serving_thread", None)
+        if serving_thread is not None:
+            serving_thread.join(5)
+            assert not serving_thread.is_alive(), "The thread which listened for satellites outlived stop()"
             assert wait_for(lambda: not brain.sessions), f"stop() left sessions: {sorted(brain.sessions)}"
 
 
@@ -263,8 +266,8 @@ def brain(make_brain):
 
 def serving(brain):
     """Has the brain listen for satellites, on a thread of its own, as run() does on the main one."""
-    brain.listening = threading.Thread(target=brain.serve, daemon=True)
-    brain.listening.start()
+    brain.serving_thread = threading.Thread(target=brain.serve, daemon=True)
+    brain.serving_thread.start()
     assert wait_for(lambda: brain.port)
 
 
@@ -2751,6 +2754,60 @@ def test_the_football_thread_runs_while_the_brain_does_and_stops_with_it(make_br
     assert brain.football_watcher._thread is None
 
 
+def test_the_listening_stats_are_read_while_the_brain_runs_and_stop_with_it(make_brain):
+    # Made with or without Home Assistant, as it says itself when SoulSync isn't set up.
+    brain = make_brain()
+    assert isinstance(brain.listening, Listening)
+    assert brain.listening._thread is None
+    # Nothing here may reach a real SoulSync.
+    refreshed = threading.Event()
+    brain.listening.refresh = refreshed.set
+    running = []
+
+    def serve():
+        # It reads as soon as it starts, so a thread which is there but never reads is found out.
+        running.append(refreshed.wait(5) and any(thread.name == "listening" and thread.is_alive()
+                                                 for thread in threading.enumerate()))
+
+    brain.serve = serve
+    brain.run()
+    assert running == [True]
+    assert not any(thread.name == "listening" for thread in threading.enumerate())
+    assert brain.listening._thread is None
+
+
+def test_the_wrapped_is_kept_in_the_data_folder_and_made_while_the_brain_runs(make_brain, tmp_path):
+    brain = make_brain(wrapped={"enabled": True, "monthly": True, "yearly_month": 12, "link": ""})
+    assert isinstance(brain.wrapped_store, WrappedStore) and isinstance(brain.wrapped_watcher, WrappedWatcher)
+    brain.wrapped_store.save({"key": "2026-11"}, [(b"x", "image/png")])
+    assert os.path.exists(tmp_path / "wrapped" / "2026-11.json")
+    # The watcher is given the listening stats, ntfy's phone and the settings as they are now.
+    assert brain.wrapped_watcher._listening is brain.listening and brain.wrapped_watcher._ntfy is brain.ntfy
+    assert brain.wrapped_watcher._settings()["yearly_month"] == 12
+    brain.apply_settings({("wrapped", "yearly_month"): 11})
+    assert brain.wrapped_watcher._settings()["yearly_month"] == 11
+    assert brain.wrapped_watcher._thread is None
+    looked = threading.Event()
+    brain.wrapped_watcher.look = looked.set
+    running = []
+
+    def serve():
+        # It looks as soon as it starts, so a thread which is there but never looks is found out.
+        running.append(looked.wait(5) and any(thread.name == "wrapped" and thread.is_alive()
+                                              for thread in threading.enumerate()))
+
+    brain.serve = serve
+    brain.run()
+    assert running == [True]
+    assert not any(thread.name == "wrapped" for thread in threading.enumerate())
+    assert brain.wrapped_watcher._thread is None
+
+
+def test_the_listening_stats_are_given_the_soulsync_key(make_brain, monkeypatch):
+    monkeypatch.setenv("SOULSYNC_API_KEY", "made-up-key")
+    assert make_brain().listening._key == "made-up-key"
+
+
 def test_the_registry_is_read_while_the_brain_runs_and_stops_with_it(make_brain, home_assistant_token):
     brain = make_brain(home_assistant=HOME_ASSISTANT)
     # Nothing here may reach a real Home Assistant.
@@ -3026,17 +3083,26 @@ def test_with_an_mqtt_host_the_usage_device_shows_the_brains_log(make_brain):
     assert isinstance(brain.usage_device, UsageDevice) and brain.usage_device.usage is brain.usage
 
 
+def test_without_an_mqtt_host_there_is_no_music_device(make_brain):
+    assert make_brain(usage=USAGE).music_device is None
+
+
+def test_with_an_mqtt_host_the_music_device_shows_the_listening_stats(make_brain):
+    brain = make_brain(usage=USAGE, mqtt={"host": "10.10.0.50", "port": 1883, "username": "nova"})
+    assert isinstance(brain.music_device, MusicDevice) and brain.music_device.listening is brain.listening
+
+
 class Device:
     """Stands in for the usage device, noting that it was started and stopped."""
 
-    def __init__(self, closed):
-        self.closed = closed
+    def __init__(self, closed, name="usage"):
+        self.closed, self.name = closed, name
 
     def start(self):
-        self.closed.append("usage started")
+        self.closed.append(f"{self.name} started")
 
     def stop(self):
-        self.closed.append("usage stopped")
+        self.closed.append(f"{self.name} stopped")
 
 
 def test_the_usage_device_starts_and_stops_with_the_brain(stopping):
@@ -3045,3 +3111,11 @@ def test_the_usage_device_starts_and_stops_with_the_brain(stopping):
     with pytest.raises(SystemExit):
         stopping.run()
     assert stopping.closed == ["usage started", "clock", "usage stopped", "bedroom", "tts"]
+
+
+def test_the_music_device_starts_and_stops_with_the_brain(stopping):
+    stopping.music_device = Device(stopping.closed, "music")
+    stopping.serve = stopping.shutdown
+    with pytest.raises(SystemExit):
+        stopping.run()
+    assert stopping.closed == ["music started", "clock", "music stopped", "bedroom", "tts"]
