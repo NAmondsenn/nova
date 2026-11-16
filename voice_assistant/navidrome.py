@@ -22,6 +22,7 @@ import subprocess
 import threading
 import unicodedata
 from typing import Dict, Iterator, List, Optional, Tuple
+from urllib.parse import quote
 
 import numpy as np
 import requests
@@ -64,6 +65,10 @@ NOT_AUTHORISED = 50
 
 # How big a cover is asked for, in pixels a side, for the settings page.
 COVER_SIZE = 300
+
+# Seconds to wait for a whole song's file, fetched at once for listening to it: a
+# 50 MB FLAC takes a few seconds on the local network, far more than REQUEST_TIMEOUT.
+AUDIO_TIMEOUT = 120
 
 # Words too common in playlist names to tell one from another on their own. Asked
 # for "light songs" - Whisper's "liked songs" - "Car Songs" was played, on the
@@ -272,6 +277,8 @@ class NavidromeLibrary:
         self.username = username
         self._password = password
         self._session = requests.Session()
+        # The native API's token, from signing in to it once - see song_file.
+        self._native_token: Optional[str] = None
 
     # Talking to Navidrome
 
@@ -321,6 +328,22 @@ class NavidromeLibrary:
         if isinstance(error, (requests.ConnectionError, requests.Timeout)):
             return "I can't reach Navidrome right now."
         return "Navidrome had a problem with that."
+
+    @staticmethod
+    def _cant_ask(what: str, error: Exception) -> NavidromeError:
+        """
+        The error to raise when Navidrome couldn't be asked for something: the kind of
+        error and any HTTP status, never the error itself, which can hold the address
+        and with it the token - "Couldn't ask Navidrome for the song's file: HTTPError 500".
+        It's raised "from None", so a traceback doesn't show the original either.
+        """
+        if isinstance(error, NavidromeError):
+            return NavidromeError(f"Couldn't ask Navidrome for {what}: {error}", error.code)
+        if isinstance(error, ValueError):
+            return NavidromeError(f"Couldn't read Navidrome's answer for {what}")
+        status = getattr(getattr(error, "response", None), "status_code", None)
+        return NavidromeError(f"Couldn't ask Navidrome for {what}: {type(error).__name__}"
+                              + (f" {status}" if status else ""))
 
     def _search(self, query: str, songs: int = 0, albums: int = 0, artists: int = 0) -> Dict:
         return self._call("search3", query=query, songCount=songs, albumCount=albums,
@@ -408,6 +431,135 @@ class NavidromeLibrary:
                 self._failure_message(e)
             return False
         return True
+
+    # What a song is, for listening to it (decision 0019)
+
+    def _native_sign_in(self) -> str:
+        """
+        Signs in to Navidrome's own API, which the Subsonic signing doesn't open, and
+        keeps the token it hands out.
+
+        Raises:
+            requests.RequestException: If Navidrome couldn't be reached.
+            NavidromeError: If it refused the username or password, or gave no token.
+        """
+        response = self._session.post(f"{self.url}/auth/login",
+                                      json={"username": self.username, "password": self._password},
+                                      timeout=REQUEST_TIMEOUT)
+        if response.status_code == 401:
+            raise NavidromeError("Navidrome didn't accept the username or password", WRONG_LOGIN)
+        response.raise_for_status()
+        body = response.json()
+        token = body.get("token") if isinstance(body, dict) else None
+        if not isinstance(token, str) or not token:
+            raise NavidromeError("Navidrome's sign-in gave no token")
+        self._native_token = token
+        return token
+
+    def song_file(self, song_id: str) -> Dict:
+        """
+        Where a song's file really is, from Navidrome's own API. The Subsonic path is
+        built from the tags - "Gunna/The Last Wun (explicit)/01 - Endless.mp3" - and
+        isn't where the file is.
+
+        It signs in once and keeps the token, signing in again only when Navidrome no
+        longer takes it - after a restart of Navidrome, say.
+
+        Args:
+            song_id: Navidrome's id for the song.
+
+        Returns:
+            Dict with the file's 'path' as Navidrome gives it, relative to its library
+            ("Gunna/The Last Wun/endless.mp3"), its 'size' in bytes, and 'updated',
+            Navidrome's updatedAt as given ("2026-11-15T10:00:00Z").
+
+        Raises:
+            NavidromeError: If Navidrome couldn't be asked, refused, or answered without
+                them. Its message never holds the address, token or password.
+        """
+        try:
+            if not network.online():
+                raise requests.ConnectionError("No network connection")
+            # Quoted whole, so an id can only ever name a song: "../auth/login" is asked
+            # for as "..%2Fauth%2Flogin", not as another address.
+            address = f"{self.url}/api/song/{quote(song_id, safe='')}"
+            # A 401 is a token Navidrome no longer takes, so it's signed in again - once,
+            # so a token it won't take even fresh is an error rather than a loop.
+            for fresh in (False, True):
+                token = self._native_sign_in() if fresh or not self._native_token else self._native_token
+                response = self._session.get(address, headers={"x-nd-authorization": f"Bearer {token}"},
+                                             timeout=REQUEST_TIMEOUT)
+                if response.status_code != 401:
+                    break
+                self._native_token = None
+            response.raise_for_status()
+            song = response.json()
+        except (requests.RequestException, NavidromeError, ValueError) as e:
+            raise self._cant_ask("the song's file", e) from None
+        path, size, updated = (song.get("path"), song.get("size"), song.get("updatedAt")) \
+            if isinstance(song, dict) else (None, None, None)
+        if not isinstance(path, str) or not path or isinstance(size, bool) or not isinstance(size, int) \
+                or not isinstance(updated, str):
+            raise NavidromeError("Navidrome's answer for the song's file had no path, size or time")
+        return {"path": path, "size": size, "updated": updated}
+
+    def audio(self, song_id: str) -> bytes:
+        """
+        A song's file as it's stored - FLAC as FLAC - rather than converted, so what's
+        listened to is what's in the library.
+
+        Args:
+            song_id: Navidrome's id for the song.
+
+        Returns:
+            The file's bytes.
+
+        Raises:
+            NavidromeError: If Navidrome couldn't be asked, or sent something other than
+                audio - an error, say, which the stream sends as JSON. Its message never
+                holds the address or token.
+        """
+        try:
+            if not network.online():
+                raise requests.ConnectionError("No network connection")
+            response = self._session.get(f"{self.url}/rest/stream",
+                                         params={**self._sign_in(), "id": song_id, "format": "raw"},
+                                         timeout=AUDIO_TIMEOUT)
+            response.raise_for_status()
+        except requests.RequestException as e:
+            raise self._cant_ask("the song's audio", e) from None
+        if not response.headers.get("Content-Type", "").startswith("audio"):
+            raise NavidromeError("Navidrome sent something other than audio for the song")
+        return response.content
+
+    def lyrics(self, song_id: str) -> Optional[str]:
+        """
+        A song's lyrics as Navidrome has them, from the .lrc or .txt beside it - or its
+        tags.
+
+        Args:
+            song_id: Navidrome's id for the song.
+
+        Returns:
+            The lines of the first copy with any words, joined with newlines - one copy
+            only, as a .lrc and a .txt beside the same song would count every swear
+            twice. None for a song with none, or one Navidrome refuses to say.
+
+        Raises:
+            NavidromeError: If Navidrome couldn't be asked. Its message never holds the
+                address or token.
+        """
+        try:
+            body = self._call("getLyricsBySongId", id=song_id)
+        except NavidromeError:
+            return None
+        except (requests.RequestException, ValueError) as e:
+            raise self._cant_ask("the lyrics", e) from None
+        for entry in (body.get("lyricsList") or {}).get("structuredLyrics") or []:
+            lines = [line.get("value") or "" for line in entry.get("line") or []]
+            if any(line.strip() for line in lines):
+                return "\n".join(lines)
+        return None
 
 
 class NavidromePlayer(NavidromeLibrary):

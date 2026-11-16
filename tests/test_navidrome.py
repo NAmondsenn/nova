@@ -21,8 +21,8 @@ np = pytest.importorskip("numpy")
 
 from voice_assistant import network
 from voice_assistant import volume as volume_module
-from voice_assistant.navidrome import (CLEAN_VERSIONS, VERSIONS, NavidromeLibrary, NavidromePlayer, best, is_clean,
-                                       likeness, marked_clean, split_by, version_of)
+from voice_assistant.navidrome import (CLEAN_VERSIONS, VERSIONS, WRONG_LOGIN, NavidromeError, NavidromeLibrary,
+                                       NavidromePlayer, best, is_clean, likeness, marked_clean, split_by, version_of)
 from voice_assistant.volume import VolumeControl
 
 
@@ -786,3 +786,221 @@ def test_the_page_is_offered_the_playlists_by_name(make_player):
     assert player.playlists() == ["Chill", "workout"]
     player._session.answers["getPlaylists"] = requests.ConnectionError("down")
     assert player.playlists() == []
+
+
+# What Navidrome says of a song's file, sound and lyrics, for listening (decision 0019)
+
+class FakeHttp:
+    """One answer from Navidrome's native API or its stream: a status, and JSON or bytes."""
+
+    def __init__(self, status=200, body=None, content=b"", kind="application/json"):
+        self.status_code = status
+        self.body = body
+        self.content = content
+        self.headers = {"Content-Type": kind}
+
+    def json(self):
+        if self.body is None:
+            raise ValueError("no json")
+        return self.body
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            # As requests words it, with the whole signed address.
+            raise requests.HTTPError(f"{self.status_code} Error for url: http://navidrome.local:4533/rest/stream"
+                                     f"?u=nova&t=abc123token&s=salt", response=self)
+
+
+class FakeNative:
+    """
+    Stands in for Navidrome's native API: a sign-in which hands out a token, and the
+    songs, answered only for the token handed out last.
+    """
+
+    def __init__(self, songs=None, password="secret"):
+        self.songs = songs or {}
+        self.password = password
+        self.token = None
+        self.signed_in = 0
+        self.asked = []
+
+    def post(self, url, json=None, timeout=None):
+        assert url == "http://navidrome.local:4533/auth/login" and timeout
+        if json != {"username": "nova", "password": self.password}:
+            return FakeHttp(401, {"error": "Invalid username or password"})
+        self.signed_in += 1
+        self.token = f"tok-{self.signed_in}"
+        return FakeHttp(200, {"id": "u1", "name": "Nova", "token": self.token})
+
+    def get(self, url, headers=None, timeout=None, params=None):
+        assert timeout and params is None
+        song_id = url.rsplit("/api/song/", 1)[1]
+        self.asked.append((song_id, headers))
+        if headers != {"x-nd-authorization": f"Bearer {self.token}"}:
+            return FakeHttp(401, {"error": "Not authenticated"})
+        answer = self.songs.get(song_id)
+        if isinstance(answer, Exception):
+            raise answer
+        if answer is None:
+            return FakeHttp(404, {"error": "data not found"})
+        return answer if isinstance(answer, FakeHttp) else FakeHttp(200, answer)
+
+
+def _song_answer(path, size=1234, updated="2026-11-15T10:00:00Z"):
+    return {"id": "s", "title": "Endless", "path": path, "size": size, "updatedAt": updated,
+            "libraryPath": "/music"}
+
+
+def _native_library(native):
+    library = NavidromeLibrary("http://navidrome.local:4533/", "nova", "secret")
+    library._session = native
+    return library
+
+
+def test_a_songs_file_is_read_from_the_native_api_signed_in_once():
+    native = FakeNative({"a1": _song_answer("Gunna/The Last Wun/endless.mp3"),
+                         "b2": _song_answer("Drake/Song.flac", 99, "2026-11-16T09:30:00.123Z")})
+    library = _native_library(native)
+    assert library.song_file("a1") == {"path": "Gunna/The Last Wun/endless.mp3", "size": 1234,
+                                       "updated": "2026-11-15T10:00:00Z"}
+    assert library.song_file("b2") == {"path": "Drake/Song.flac", "size": 99, "updated": "2026-11-16T09:30:00.123Z"}
+    assert native.signed_in == 1
+    assert native.asked[-1] == ("b2", {"x-nd-authorization": "Bearer tok-1"})
+
+
+def test_a_songs_file_signs_in_again_when_the_token_has_run_out():
+    native = FakeNative({"a1": _song_answer("A/a.mp3")})
+    library = _native_library(native)
+    library.song_file("a1")
+    # Navidrome forgets the token - a restart of it, or the session timing out.
+    native.token = "tok-gone"
+    assert library.song_file("a1")["path"] == "A/a.mp3"
+    assert native.signed_in == 2
+    assert [headers["x-nd-authorization"] for _, headers in native.asked] == ["Bearer tok-1", "Bearer tok-1",
+                                                                             "Bearer tok-2"]
+
+
+def test_a_songs_id_cant_reach_another_address():
+    native = FakeNative({"..%2Fauth%2Flogin": _song_answer("A/a.mp3")})
+    assert _native_library(native).song_file("../auth/login")["path"] == "A/a.mp3"
+
+
+@pytest.mark.parametrize("native, says", [
+    (FakeNative(password="other"), "accept"),
+    (FakeNative({"a1": FakeHttp(500, {"error": "boom"})}), "500"),
+    (FakeNative({}), "404"),
+    (FakeNative({"a1": FakeHttp(200, None)}), "read"),
+    (FakeNative({"a1": FakeHttp(200, {"size": 3})}), "path"),
+    (FakeNative({"a1": requests.ConnectionError(
+        "HTTPConnectionPool(host='navidrome.local', port=4533): /api/song/a1 x-nd-authorization: Bearer tok-1")}),
+     "ConnectionError"),
+])
+def test_a_songs_file_which_cant_be_read_is_an_error_naming_no_address_token_or_password(native, says):
+    library = _native_library(native)
+    with pytest.raises(NavidromeError) as raised:
+        library.song_file("a1")
+    text = str(raised.value)
+    assert says in text
+    for secret in ("secret", "tok-1", "navidrome.local", "4533", "http"):
+        assert secret not in text
+    # Nothing behind it to show the address in a traceback either.
+    assert raised.value.__cause__ is None and (raised.value.__context__ is None or raised.value.__suppress_context__)
+
+
+def test_a_token_refused_straight_after_signing_in_is_an_error_not_a_loop():
+    native = FakeNative({"a1": _song_answer("A/a.mp3")})
+    # Navidrome hands out tokens it then won't take - a clock far off, say.
+    native.get = lambda url, headers=None, timeout=None, params=None: FakeHttp(401, {"error": "Not authenticated"})
+    with pytest.raises(NavidromeError) as raised:
+        _native_library(native).song_file("a1")
+    assert "401" in str(raised.value) and "tok-" not in str(raised.value)
+    assert native.signed_in == 2
+
+
+def test_a_wrong_password_for_the_native_api_is_the_wrong_login_code():
+    with pytest.raises(NavidromeError) as raised:
+        _native_library(FakeNative(password="other")).song_file("a1")
+    assert raised.value.code == WRONG_LOGIN
+
+
+def test_a_songs_file_isnt_asked_for_with_no_network(monkeypatch):
+    monkeypatch.setattr(network, "online", lambda: False)
+    native = FakeNative({"a1": _song_answer("A/a.mp3")})
+    with pytest.raises(NavidromeError):
+        _native_library(native).song_file("a1")
+    assert native.signed_in == 0 and native.asked == []
+
+
+class FakeStream:
+    def __init__(self, answer):
+        self.answer = answer
+        self.asked = []
+
+    def get(self, url, params=None, timeout=None):
+        self.asked.append((url, dict(params), timeout))
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+
+def test_a_songs_sound_is_its_file_as_stored(make_library):
+    library = make_library()
+    library._session = FakeStream(FakeHttp(content=b"fLaC...", kind="audio/flac"))
+    assert library.audio("a1") == b"fLaC..."
+    url, params, timeout = library._session.asked[0]
+    assert url == "http://navidrome.local:4533/rest/stream" and timeout == 120
+    assert params["id"] == "a1" and params["format"] == "raw" and "maxBitRate" not in params
+    # Signed as every other request: a salted hash, never the password.
+    assert params["u"] == "nova" and params["t"] == hashlib.md5(("secret" + params["s"]).encode()).hexdigest()
+    assert "p" not in params and "secret" not in str(params)
+
+
+@pytest.mark.parametrize("answer, says", [
+    (FakeHttp(200, {"subsonic-response": {"status": "failed"}}), "audio"),
+    (FakeHttp(404, content=b""), "404"),
+    (requests.Timeout("Read timed out: http://navidrome.local:4533/rest/stream?t=abc123token"), "Timeout"),
+])
+def test_a_songs_sound_which_cant_be_had_is_an_error_naming_no_address_or_token(make_library, answer, says):
+    library = make_library()
+    library._session = FakeStream(answer)
+    with pytest.raises(NavidromeError) as raised:
+        library.audio("a1")
+    assert says in str(raised.value)
+    assert "abc123token" not in str(raised.value) and "navidrome.local" not in str(raised.value)
+    assert raised.value.__cause__ is None and (raised.value.__context__ is None or raised.value.__suppress_context__)
+
+
+def _lyrics_answer(*entries):
+    return {"lyricsList": {"structuredLyrics": [
+        {"displayArtist": "Gunna", "displayTitle": "Endless", "lang": "eng", "synced": False,
+         "line": [{"value": value} for value in lines]} for lines in entries]}}
+
+
+def test_a_songs_lyrics_are_its_lines(make_library):
+    library = make_library({"getLyricsBySongId": _lyrics_answer(["Oh my God", "", "what the fuck"])})
+    assert library.lyrics("a1") == "Oh my God\n\nwhat the fuck"
+    assert library._session.requests[0] == ("getLyricsBySongId", library._session.requests[0][1])
+    assert library._session.requests[0][1]["id"] == "a1"
+
+
+def test_only_one_copy_of_a_songs_lyrics_is_read(make_library):
+    # A .lrc and a .txt both beside a song would count every swear twice.
+    library = make_library({"getLyricsBySongId": _lyrics_answer([], ["first copy"], ["second copy"])})
+    assert library.lyrics("a1") == "first copy"
+
+
+@pytest.mark.parametrize("answer", [
+    {"lyricsList": {"structuredLyrics": []}},
+    {"lyricsList": {}},
+    _lyrics_answer(["", "  "]),
+    {"status": "failed", "error": {"code": 70, "message": "Song not found"}},
+])
+def test_a_song_without_lyrics_has_none(make_library, answer):
+    assert make_library({"getLyricsBySongId": answer}).lyrics("a1") is None
+
+
+def test_lyrics_which_cant_be_asked_for_are_an_error_naming_no_token(make_library):
+    library = make_library({"getLyricsBySongId": requests.ConnectionError("http://nd/rest/x?t=abc123token")})
+    with pytest.raises(NavidromeError) as raised:
+        library.lyrics("a1")
+    assert "abc123token" not in str(raised.value) and "ConnectionError" in str(raised.value)
