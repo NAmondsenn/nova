@@ -319,6 +319,26 @@ wrapped:
   # file is public: set it on the settings page.
   link: ""
 
+clean_check:
+  # Nova judges a song clean or explicit by listening to it against its lyrics - see
+  # docs/decisions/0019. A song whose lyrics have fewer swears than this is not judged.
+  lyric_minimum: 3
+  # The share of the lyrics' swears which must be heard for a song to be explicit, from 0 to 1.
+  # Set from a test on real songs: change it only with another.
+  explicit_share: 0.35
+  # At or under this share heard, a song is clean, from 0 to 1. In between is unsure, left
+  # alone and listed. See docs/decisions/0019.
+  clean_share: 0.15
+  # How many more times Nova asks SoulSync for another version of a clean song, from 0 to 5.
+  # See docs/decisions/0019.
+  swap_tries: 2
+  # Where Navidrome's music is on this machine, so Nova can find a song's file. See
+  # docs/decisions/0019.
+  music_folder: "/mnt/music"
+  # The SoulSync profile Nova signs in as to take away a swapped song's old row. Its password
+  # goes in ~/.config/nova/.env as SOULSYNC_ADMIN_PASSWORD. See docs/decisions/0019.
+  soulsync_admin: ""
+
 mqtt:
   # Home Assistant's MQTT broker - the Mosquitto add-on - through which Nova is a
   # device of its own in Home Assistant, with its controls and its room there. See

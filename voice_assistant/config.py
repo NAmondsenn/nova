@@ -105,6 +105,14 @@ LIMITS: Dict[Tuple[str, str], Limit] = {
     # The month the yearly Wrapped is made on the 1st of. Empty is no link in its notification.
     ("wrapped", "yearly_month"): Limit("number", 1, 12, True),
     ("wrapped", "link"): Limit("address"),
+    # Decision 0019. 0 tries is a clean song left as it is, and more than 5 would be asking SoulSync again
+    # and again for a version which is not coming. A song with fewer than 1 swear has nothing to hear, and
+    # past 20 hardly any song would be judged. A share is a part of the song's swears, so from 0 to 1.
+    # The music folder and the SoulSync profile are free text, and have no limit as Navidrome's user has none.
+    ("clean_check", "swap_tries"): Limit("number", 0, 5, True),
+    ("clean_check", "lyric_minimum"): Limit("number", 1, 20, True),
+    ("clean_check", "explicit_share"): Limit("number", 0, 1),
+    ("clean_check", "clean_share"): Limit("number", 0, 1),
 }
 
 _TIME = re.compile(r"([01]\d|2[0-3]):[0-5]\d")

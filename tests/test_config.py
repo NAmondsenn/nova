@@ -300,6 +300,11 @@ IN_AND_OUT = {
     ("usage", "search_price"): ([0, 10, 1000], [-1, 1001, True]),
     ("wrapped", "yearly_month"): ([1, 11, 12], [0, 13, 11.5, True]),
     ("wrapped", "link"): (["https://nova.example.com", ""], ["nova.example.com", "ftp://nova.example.com"]),
+    # 0 is no new try for a clean song, and 3 or more lyric swears are what there is to hear.
+    ("clean_check", "swap_tries"): ([0, 2, 5], [-1, 6, 2.5, True]),
+    ("clean_check", "lyric_minimum"): ([1, 3, 20], [0, 21, 3.5, True]),
+    ("clean_check", "explicit_share"): ([0, 0.35, 1], [-0.1, 1.1, True]),
+    ("clean_check", "clean_share"): ([0, 0.15, 1], [-0.1, 1.1, True]),
 }
 
 
@@ -333,6 +338,17 @@ def test_the_repositorys_config_has_the_download_settings(tmp_path):
     assert (music["song_download_minutes"], music["album_download_minutes"]) == (10, 30)
     # No address until the user gives SoulSync's, so downloading says it isn't set up.
     assert config.section("soulsync")["url"] == ""
+
+
+def test_the_repositorys_config_has_the_clean_check_settings(tmp_path):
+    clean_check = Config(path=str(tmp_path / "none.yaml")).section("clean_check")
+    assert clean_check == {"lyric_minimum": 3, "explicit_share": 0.35, "clean_share": 0.15, "swap_tries": 2,
+                           "music_folder": "/mnt/music", "soulsync_admin": ""}
+    # Each setting with a limit is inside it, and the two with none (the folder, the profile) take any text.
+    for name, value in clean_check.items():
+        assert limit_problem("clean_check", name, value) is None, name
+    assert limit_problem("clean_check", "music_folder", "/anywhere") is None
+    assert limit_problem("clean_check", "soulsync_admin", "any name") is None
 
 
 def test_the_clock_displays_port_has_its_limit_and_is_off_unless_set(tmp_path):
