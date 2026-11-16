@@ -1068,8 +1068,8 @@ def test_get_football_offers_lineups():
     assert "Reply with the side asked for, or both" in about["description"]
     # Line-ups are only ever said from what Home Assistant gave, as the rest are.
     # So are who is left in a cup, the ground and the odds: odds from memory would be a made-up figure.
-    assert ("fixtures, scores, results, tables, line-ups, who is left, the ground and the odds only from that, "
-            "never from memory") in description
+    assert ("fixtures, scores, results, what happened in a match (goals, scorers, red cards), tables, line-ups, "
+            "who is left, the ground and the odds only from that, never from memory") in description
     # Neither scorers nor line-ups are what it hasn't got now: yellow cards are one thing it still hasn't.
     missing = description.split("hasn't got", 1)[1].split(".", 1)[0]
     assert "yellow cards" in missing and "scorers" not in missing and "line-ups" not in missing
@@ -1088,9 +1088,14 @@ def test_get_football_offers_what_happened_in_a_match():
     # A round-up of a competition on a day is its matches with a date, not a team's match.
     assert "'what happened in the Champions League yesterday?' is a competition with a date" in description
     assert "what happened in a match" in description
-    # The speech reads digits joined by a dash as "dash".
-    assert ("Say a score as 'Spain 2, England 3' or in words, never as digits joined by a dash, which is read out as 'dash'."
-            in description)
+    # The speech reads digits joined by a dash as "dash", whether a score or a formation.
+    assert ("Say a score as 'Spain 2, England 3' or in words, and never write digits joined by a dash - a score or a "
+            "formation - which is read out as 'dash'.") in description
+    # What ESPN's notes don't say is not said, though a late winner is worked out from the minutes and the score.
+    assert ("Say a mistake cost a game only where one of ESPN's notes says what happened; a late winner or equaliser "
+            "may be worked out from the minutes and the score.") in description
+    # 'Who scored' is a question of a match.
+    assert "'who scored for Stevenage?'" in description
     # What round two added stays.
     assert "line-ups" in description and "never from memory" in description
 

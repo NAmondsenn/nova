@@ -151,8 +151,19 @@ def test_no_announcement_has_a_score_as_digits_joined_by_a_dash():
             full_time = _match("post", "full_time", 2, 2, winner=winner, shootout=shootout, extra_time=extra_time)
             said += [message for _, message in _events(seen, full_time)[0]]
     assert len(said) == 6 and said[0] == "Full time. Notts County 2, Stevenage 2. Notts County won on penalties, 5 to 4."
-    _, level = _events(None, _match("in", "first_half", 0, 0))
-    said += [message for _, message in _events(level, _match("in", "second_half", 1, 1))[0]]
+    # The rest are said too: starting, a goal for either side and for both, half time and the second half.
+    for kind, before, after in (
+            ("starting", None, _match(minutes=10)),
+            ("goals", _match("in", "first_half", 1, 1), _match("in", "first_half", 2, 1)),
+            ("goals", _match("in", "first_half", 1, 1), _match("in", "first_half", 1, 2)),
+            ("goals", _match("in", "first_half", 1, 1), _match("in", "first_half", 2, 2)),
+            ("half_time", _match("in", "first_half", 2, 1), _match("in", "half_time", 2, 1)),
+            ("second_half", _match("in", "half_time", 2, 1), _match("in", "second_half", 2, 1))):
+        _, record = _events(None, before) if before else (None, None)
+        sentences = _events(record, after)[0]
+        assert [sentence[0] for sentence in sentences] == [kind]
+        said += [message for _, message in sentences]
+    assert len(said) == 12
     assert not [words for words in said if re.search(r"\d\s*[-\u2010-\u2015\u2212]\s*\d", words)]
 
 

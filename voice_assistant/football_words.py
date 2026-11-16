@@ -54,9 +54,10 @@ _OFF = "off"
 # The events which put a goal on the board, as the Contract has them. A penalty missed and a red card don't.
 _SCORING = ("goal", "penalty", "own_goal")
 
-# A score as ESPN's notes write it, "1-0": the dash between two numbers, whichever dash it is and with or without spaces
-# round it, which the speech reads out as "dash". Said as "1 to 0", with nothing else in the note changed.
-_SCORE_DASH = re.compile(r"(?<=\d)\s*[-\u2010-\u2015\u2212]\s*(?=\d)")
+# A dash between two numbers, as in a score ("1-0") or a formation ("4-2-3-1"): whichever dash it is and with or without
+# spaces round it. The speech reads it out as "dash", so it is swapped for words - "to" in a score, a space in a
+# formation - and nothing else in what is said changes.
+_DIGIT_DASH = re.compile(r"(?<=\d)\s*[-\u2010-\u2015\u2212]\s*(?=\d)")
 
 # Only in these phases is the source's clock (ESPN's, or BBC's label) a minute ("67'"). In the others it is
 # a word for the card ("HT"), which isn't said as the phase is.
@@ -678,9 +679,10 @@ def _said_side(side: Dict) -> Tuple[Set[str], str]:
 
     Returns:
         The names the side is known by (its short name and its full one), so that it can be
-        placed in the match; and the words, e.g. "Liverpool's starting eleven (4-2-3-1): Alisson,
+        placed in the match; and the words, e.g. "Liverpool's starting eleven (4 2 3 1): Alisson,
         Frimpong and so on. Bench: Mamardashvili and Gomez.", with no brackets where there is
-        no formation and "none listed" for an empty bench.
+        no formation and "none listed" for an empty bench. The formation's dashes are said as spaces, as
+        the speech would read them out ("4-2-3-1" as "four dash two dash three dash one").
 
     Raises:
         KeyError: If a key is missing.
@@ -694,7 +696,7 @@ def _said_side(side: Dict) -> Tuple[Set[str], str]:
     starters, bench = _names(side, "starters"), _names(side, "bench")
     if not starters:
         raise ValueError(f"a side is only listed once its line-up is out, but {name} has no starters")
-    shape = f" ({formation})" if formation else ""
+    shape = f" ({_DIGIT_DASH.sub(' ', formation)})" if formation else ""
     bench_said = _and_list(bench) or "none listed"
     return {short, name}, f"{_possessive(name)} starting eleven{shape}: {_and_list(starters)}. Bench: {bench_said}."
 
@@ -820,7 +822,7 @@ def _said_note(found: Dict) -> str:
     minute, text = _field(found, "minute", str), _field(found, "text", str)
     if not minute or not text:
         raise ValueError(f"a note needs a minute and a text, not {found!r}")
-    return f"Note at {minute}: {_SCORE_DASH.sub(' to ', text)}"
+    return f"Note at {minute}: {_DIGIT_DASH.sub(' to ', text)}"
 
 
 def said_match_report(answer: Dict, now: datetime, on_a_day: bool = False) -> str:
@@ -960,45 +962,72 @@ def _said_answer(what: str, answer: Dict, now: datetime, on_a_day: bool = False)
     return {"team": said_team, "competition": said_competition, "left": said_left, "lineups": said_lineups}[what](answer, now)
 
 
-def _team_playing(reading: Reading, now: datetime, bbc_last: bool = True) -> Optional[Team]:
+def _team_playing(reading: Reading, now: datetime, for_match: bool = False, day: Optional[date] = None) -> Optional[Team]:
     """
-    Picks the followed team whose line-up or match is most likely asked for with no team named.
+    Picks the followed team whose line-up, or whose match for what happened in it, is most likely asked
+    for with no team named.
 
     Args:
         reading: What the sensor said, which Football.read() gave.
         now: The current time, aware and local, for which day is today.
-        bbc_last: Whether a team whose match is from BBC Sport (its id begins "bbc:") comes after one
-            whose isn't. It does for a line-up, as BBC's matches never have any; it doesn't for what
-            happened in a match, as BBC's have events.
+        for_match: Whether what happened in a match is asked about, not a line-up. The two are chosen
+            differently, as a line-up is for a match which is about to start and what happened is for one
+            which has.
+        day: With for_match, the day asked about, or None for today.
 
     Returns:
-        The team whose match is in play; else the one whose match is still to come today, the
-        earliest first, as its line-up is the one which is about to come out; else the one
-        whose match was today and is over, the earliest first; or None where no team has a
-        match today. Within each of those, with bbc_last, a team whose match is from BBC Sport comes
-        after one whose isn't, however early its kick-off: South Shields, first in the box, don't win
-        over Stevenage, whose line-up there is to say. Two in play, or two kicking off together, go by
-        the box's order. With none but BBC's, one of those is picked as before. Only teams which
-        aren't stale count, as a stale team's match is an old copy.
+        For a line-up: the team whose match is in play; else the one whose match is still to come today, the
+        earliest first, as its line-up is the one which is about to come out; else the one whose match was
+        today and is over, the earliest first; or None where no team has a match today. Within each of those a
+        team whose match is from BBC Sport (its id begins "bbc:") comes after one whose isn't, however early
+        its kick-off, as BBC's matches never have line-ups: South Shields, first in the box, don't win over
+        Stevenage, whose line-up there is to say. Two in play, or two kicking off together, go by the box's
+        order. With none but BBC's, one of those is picked as before.
+        For a match: the team whose match is in play; else the one whose match on the day is over, the
+        latest to kick off first, as it is the one which has just been played; or None where no team has one.
+        A match still to come, or off, is left out, as nothing has happened in it - Liverpool's at eight is
+        not what to say of at six, when Stevenage's at three is over. A match from BBC ranks as any other,
+        as BBC's have events. For a day other than today, a team's match is the one of its now or its last
+        which kicked off on that day.
+        Only teams which aren't stale count, as a stale team's match is an old copy.
 
     Raises:
-        FootballUnavailable: If no team which isn't stale has a match today but one which is stale
+        FootballUnavailable: If no team which isn't stale has a match to choose from but one which is stale
             may have, so that nobody playing can't be said.
     """
     fresh = [team for team in reading.teams if not team.stale]
-    with_match = [team for team in fresh if team.now is not None]
+    today = now.astimezone().date()
+    asked_day = day or today
 
-    def from_bbc(team: Team) -> bool:
-        """Whether the team's match is from BBC Sport and so is to rank last, as it has no line-ups."""
-        return bbc_last and team.now.id.startswith("bbc:")
+    def on_the_day(match: Match) -> bool:
+        """Whether the match kicked off on the day asked about, by the local clock."""
+        return match.kickoff.astimezone().date() == asked_day
 
-    playing = [team for team in with_match if _in_play(team.now)]
+    def its_match(team: Team) -> Optional[Match]:
+        """The team's match to choose from: its now, which is in play or today; or, for another day, its one on it."""
+        if asked_day == today:
+            return team.now
+        return next((match for match in ([team.now] if team.now else []) + list(team.last) if on_the_day(match)), None)
+
+    def ranks_last(match: Match) -> bool:
+        """Whether the match is from BBC Sport and so comes after the others, as it has no line-up."""
+        return not for_match and match.id.startswith("bbc:")
+
+    found = [(team, its_match(team)) for team in fresh]
+    with_match = [(team, match) for team, match in found if match is not None]
+    playing = [(team, match) for team, match in with_match if _in_play(match)]
     if playing:
         # min takes the first of equals, so the box's order stands between two of the same source.
-        return min(playing, key=from_bbc)
-    today = [team for team in with_match if team.now.kickoff.astimezone().date() == now.astimezone().date()]
-    if today:
-        return min(today, key=lambda team: (not _to_come(team.now), from_bbc(team), team.now.kickoff))
+        return min(playing, key=lambda chosen: ranks_last(chosen[1]))[0]
+    if for_match:
+        over = [(team, match) for team, match in with_match if match.state == "post" and not _is_off(match) and on_the_day(match)]
+        # max takes the first of equals, so the box's order stands between two which kicked off together.
+        if over:
+            return max(over, key=lambda chosen: chosen[1].kickoff)[0]
+    else:
+        today_matches = [(team, match) for team, match in with_match if on_the_day(match)]
+        if today_matches:
+            return min(today_matches, key=lambda chosen: (not _to_come(chosen[1]), ranks_last(chosen[1]), chosen[1].kickoff))[0]
     if len(fresh) < len(reading.teams):
         raise _cant_get("a followed team's matches are an old copy", logging.WARNING)
     return None
@@ -1020,10 +1049,12 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
             what happened in a team's match.
         about: "table" or "left" with a competition - its table or who is still in it; "lineups"
             with a team - its line-ups, whatever competition is given with it - or with neither a
-            team nor a competition the followed team playing now or today; "match" the same way - what
-            happened in the team's match, with its goals, penalties, red cards and ESPN's notes - but
-            with a competition alone its matches, which come with their goals; any other value, its
-            matches.
+            team nor a competition the followed team playing now or today; "match" - what happened in the
+            team's match, with its goals, penalties, red cards and ESPN's notes - with a team, whatever
+            competition is given with it, or with neither the followed team playing now, else the one whose
+            match was over latest on the day (today, or the date), as a match not yet played has nothing
+            to say; but with a competition alone its matches, which come with their goals; any other value,
+            its matches.
         date: The first day of a competition's matches, or the day of a team's match, as YYYY-MM-DD,
             or none for today (a team's match in play, else its last).
         days: How many days from it, or none for one.
@@ -1036,7 +1067,7 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
         it can't get while saying the rest, and including line-ups with no team named where no
         team is followed, which say so ("No teams are followed."), as the overview does; and, for a
         match with no team named, that a team is to be named where none of the followed teams has
-        a match today.
+        a match in play or over on the day.
         {"success": False, "message": what to say} where football can't be got: CANT_GET, also
         for any answer of the wrong shape (logged at warning level), for an overview where every
         followed team is stale, and for line-ups or a match with no team named where a team which
@@ -1050,6 +1081,7 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
     if now is None:
         now = datetime.now().astimezone()
     try:
+        asked_date = _asked_date(date)
         if not team and not competition and _kind(about) in ("lineups", "match"):
             # Line-ups, or what happened in a match, asked for with no team are for the followed team playing, in
             # the place of the overview below.
@@ -1057,9 +1089,10 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
             if not reading.teams:
                 # Nobody is followed, which is not that none of them is playing: said as the overview says it.
                 return {"success": True, "message": said_followed(reading, now)}
-            # A match from BBC Sport has events, though never line-ups, so only for line-ups does it come last.
+            # What happened is chosen differently from a line-up, and for a day asked about (see _team_playing).
             lineups = _kind(about) == "lineups"
-            playing = _team_playing(reading, now, bbc_last=lineups)
+            day = datetime.strptime(asked_date, "%Y%m%d").date() if asked_date and not lineups else None
+            playing = _team_playing(reading, now, for_match=not lineups, day=day)
             if playing is None:
                 return {"success": True, "message": NO_LINEUP_TEAM if lineups else NO_MATCH_TEAM}
             # By the entry of the box which found it, the one name Home Assistant is known to find it by.
@@ -1073,7 +1106,6 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
                 raise _cant_get("a followed team's matches are an old copy", logging.WARNING)
             return {"success": True, "message": said_followed(replace(reading, teams=fresh), now, stale)}
         what, name = _question(team, competition, about)
-        asked_date = _asked_date(date)
         answer = football.ask(what, name, asked_date, _asked_days(days))
         # Only a day which was sent on is one asked about: text which isn't a day is none.
         return {"success": True, "message": _said_answer(what, answer, now, on_a_day=bool(asked_date))}
