@@ -83,6 +83,10 @@ VERSIONS = ("clean", "edited", "radio edit", "censored", "live", "remix", "acous
             "slowed", "karaoke", "demo")
 CLEAN_VERSIONS = ("clean", "edited", "radio edit", "censored")
 
+# What may follow a clean version's word, in its part of a name, and leave it a clean
+# version: "(Clean Album Version)", "(Clean Lyrics)", "(Clean Advance Copy)".
+CLEAN_TAILS = ("album", "version", "edit", "edition", "lyrics", "advance copy")
+
 # Where a name says which version it is: a bracketed part, round or square, or what
 # follows a spaced dash - a hyphen, an en dash or an em dash, as tags have each of
 # them: "Gooba - Radio Edit", "Gooba \u2013 Radio Edit".
@@ -187,14 +191,15 @@ def _says_version(part: str, version: str) -> bool:
     """
     Whether a bracketed or dashed part of a name says it's this version.
 
-    A clean version's word must end the part, bar "album", "version", "edit" or
-    "edition": "(Clean)", "(Clean Album Version)" and "(Radio Edit)" say so, but
+    A clean version's word must end the part, bar CLEAN_TAILS: "(Clean)", "(Clean
+    Album Version)", "(Clean Lyrics)" and "(Radio Edit)" say so, but
     "(feat. Clean Bandit)" and "(Clean Bandit Remix)" only credit an artist called
     Clean. Taking those for clean versions would have an explicit song reported as
     a clean one.
     """
     if version in CLEAN_VERSIONS:
-        return re.search(rf"(?:^| ){version}(?: (?:album|version|edit|edition))*$", normalise(part)) is not None
+        tails = "|".join(CLEAN_TAILS)
+        return re.search(rf"(?:^| ){version}(?: (?:{tails}))*$", normalise(part)) is not None
     return _names_version(part, version)
 
 
@@ -206,10 +211,10 @@ def version_of(name: str) -> Optional[str]:
     word is only part of the title, so Taylor Swift's "Clean" and "Edited
     Highlights" are no version of anything.
 
-    A clean version's word counts only when nothing but "album", "version", "edit"
-    or "edition" comes after it in its part: "(Clean Version)", "(Edited Album
-    Version)" and "(Live - Radio Edit)" are clean versions, but "(feat. Clean
-    Bandit)" is no version and "(Clean Bandit Remix)" is a remix.
+    A clean version's word counts only when nothing but CLEAN_TAILS comes after it
+    in its part: "(Clean Version)", "(Clean Lyrics)", "(Edited Album Version)" and
+    "(Live - Radio Edit)" are clean versions, but "(feat. Clean Bandit)" is no
+    version and "(Clean Bandit Remix)" is a remix.
 
     Args:
         name: A song's title or an album's name.

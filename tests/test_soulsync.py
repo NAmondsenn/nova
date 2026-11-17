@@ -355,7 +355,9 @@ def test_another_version_of_a_song_isnt_picked(name):
 
 @pytest.mark.parametrize("name, album", [
     ("Gooba (Clean)", "GOOBA"), ("Gooba - Radio Edit", "GOOBA"), ("Gooba [Edited]", "GOOBA"),
-    ("Gooba (Censored Version)", "GOOBA"), ("Gooba", "GOOBA (Clean)"), ("Gooba", {"name": "GOOBA - Clean Version"})])
+    ("Gooba (Censored Version)", "GOOBA"), ("Gooba", "GOOBA (Clean)"), ("Gooba", {"name": "GOOBA - Clean Version"}),
+    ("Gooba (Clean Lyrics)", "GOOBA"), ("Gooba", "GOOBA (Clean Advance Copy)"),
+    ("Gooba [Clean Lyrics Version]", "GOOBA"), ("Gooba", {"name": "GOOBA - Clean Advance Copy"})])
 def test_a_clean_version_of_a_song_is_never_picked(name, album):
     assert pick_track([_track(name, "6ix9ine", album)], "Gooba", "6ix9ine") is None
 

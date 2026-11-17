@@ -291,6 +291,12 @@ def test_a_clean_version_says_so_and_nothing_more():
                  "Gooba (Censored)"):
         assert marked_clean(name), name
     assert version_of("Gooba (Censored)") == "censored"
+    # As are the labels' "clean lyrics" and "clean advance copy".
+    for name in ("Gooba (Clean Lyrics)", "Gooba [Clean Advance Copy]", "Gooba - Clean Lyrics"):
+        assert marked_clean(name), name
+    assert version_of("Gooba (clean lyrics)") == "clean"
+    assert is_clean({"title": "Gooba", "album": "Day69 (Clean Advance Copy)"})
+    assert not marked_clean("Gooba (Clean Lyrics Bandit)") and not marked_clean("Gooba (Clean Copy Cat)")
     # Still not a credit to Clean Bandit, nor their remix.
     assert not marked_clean("Gooba (feat. Clean Bandit)") and not marked_clean("Gooba (Clean Bandit Remix)")
 
