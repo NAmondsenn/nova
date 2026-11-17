@@ -602,26 +602,166 @@ def test_a_wider_title_soulsync_finds_is_the_copy_watched_for(make_swapper, musi
     assert fakes.ears.heard == [([f"id-{love_rel}"], False)]
 
 
-def test_every_try_coming_down_clean_keeps_the_last_and_holds_the_rest(make_swapper, music, store):
+FOURTH_HELD = f"{HELD}/Gunna/The Last Wun/endless (4).mp3"
+
+
+def _every_try_clean(make_swapper):
+    """A swapper whose three tries each bring a clean copy where the original was."""
     swapper = make_swapper(ears=FakeEars(["clean", "clean", "clean"]))
+    swapper.fakes.soulsync.lands = [(30, ENDLESS_REL, f"clean try {number}".encode()) for number in (1, 2, 3)]
+    return swapper
+
+
+def test_every_try_coming_down_clean_puts_the_original_back_and_holds_every_copy(make_swapper, music, store):
+    swapper = _every_try_clean(make_swapper)
     fakes = swapper.fakes
-    fakes.soulsync.lands = [(30, ENDLESS_REL, f"clean try {number}".encode()) for number in (1, 2, 3)]
 
     outcome = swapper.swap(_endless(fakes.library), ENDLESS_WANTED, None, quiet=True)
 
     # Two tries more than the first fetch: three in all.
-    assert outcome == "only_clean"
+    assert outcome == "only_clean" and outcome.reason == "3 copies came down clean"
     assert fakes.soulsync.requested == ["deezer-1", "deezer-2", "deezer-3"]
     assert len(fakes.admin.forgot) == 3 and len(fakes.ears.heard) == 3
-    # The copy each earlier try brought stays held, numbered beside the first; the last is kept.
-    assert read(music, f"{HELD}/{ENDLESS_REL}") == b"clean endless"
-    assert read(music, f"{HELD}/Gunna/The Last Wun/endless (2).mp3") == b"clean try 1"
-    assert read(music, f"{HELD}/Gunna/The Last Wun/endless (3).mp3") == b"clean try 2"
-    assert read(music, ENDLESS_REL) == b"clean try 3"
+    # His own copy, and its lyrics, are back where they were (seen live on 17 Nov: his FLAC was left
+    # held and the last try's MP3, as clean, kept in its place). Every copy the tries brought is held.
+    assert read(music, ENDLESS_REL) == b"clean endless"
+    assert read(music, "Gunna/The Last Wun/endless.lrc") == b"[00:01] lyrics"
+    assert not os.path.exists(os.path.join(music, HELD, ENDLESS_REL))
+    assert read(music, SECOND_HELD) == b"clean try 1"
+    assert read(music, THIRD_HELD) == b"clean try 2"
+    assert read(music, FOURTH_HELD) == b"clean try 3"
     assert [entry["name"] for entry in store.listed("only_clean")] == ["Gunna - endless"]
-    # The copy kept is listed by its id, for the library check.
+    # The last try's copy is listed by its id, for the library check.
     assert store.listed("only_clean")[0]["kept"] == [f"id-{ENDLESS_REL}"]
     assert store.swaps() == [] and store.listed("swapped") == []
+
+
+def _copies(music):
+    """Every song file in the music folder, .nova-held's too, by what's in it."""
+    found = []
+    for folder, _folders, names in os.walk(music):
+        found += [read(folder, name) for name in names if name.endswith(".mp3")]
+    return sorted(found)
+
+
+def test_no_copy_is_lost_at_any_step_of_an_only_clean_ending(make_swapper, music, store, monkeypatch):
+    swapper = _every_try_clean(make_swapper)
+    seen = []
+    real = store.save_swap
+
+    def save_swap(swap):
+        # Whatever has been in the music folder is still somewhere in it as each step is saved.
+        now = _copies(music)
+        assert set(seen) <= set(now)
+        seen.extend(copy for copy in now if copy not in seen)
+        real(swap)
+
+    monkeypatch.setattr(store, "save_swap", save_swap)
+
+    assert swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True) == "only_clean"
+
+    assert _copies(music) == [b"clean endless", b"clean try 1", b"clean try 2", b"clean try 3"]
+    assert read(music, ENDLESS_REL) == b"clean endless"
+
+
+@pytest.mark.parametrize("stage", ["setting_aside", "putting_back"])
+def test_a_restart_part_way_through_an_only_clean_ending_puts_the_original_back(make_swapper, music, store,
+                                                                               monkeypatch, stage):
+    # Nova stops just after the last try's copy is saved as to be set aside, or once it is.
+    swapper = _every_try_clean(make_swapper)
+    real = store.save_swap
+
+    def save_swap(swap):
+        real(swap)
+        if swap.get("rejected") and swap["stage"] == stage:
+            swapper.stop()
+
+    monkeypatch.setattr(store, "save_swap", save_swap)
+
+    assert swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True) == "stopped"
+    [saved] = store.swaps()
+    assert saved["rejected"]["kind"] == "only_clean"
+
+    again = make_swapper(admin=None)
+    again.resume()
+
+    assert read(music, ENDLESS_REL) == b"clean endless" and read(music, FOURTH_HELD) == b"clean try 3"
+    assert store.swaps() == [] and again.fakes.soulsync.requested == []
+    assert store.listed("only_clean")[0]["kept"] == [f"id-{ENDLESS_REL}"]
+
+
+class GoneWithTheThirdTry(FakeEars):
+    """Hears as FakeEars does, but the original is emptied from .nova-held by hand as the third try is heard."""
+
+    def __init__(self, music, kinds):
+        super().__init__(kinds)
+        self.music = music
+
+    def hear_copies(self, copies, download=False):
+        if len(self.heard) == 2:
+            os.remove(os.path.join(self.music, HELD, ENDLESS_REL))
+        return super().hear_copies(copies, download)
+
+
+def test_an_original_gone_from_the_holding_folder_has_the_last_copy_set_aside_put_back_instead(
+        make_swapper, music, store):
+    # Setting the last try's copy aside to put the original back must never leave the library without
+    # the song. The last try files its copy under a name of its own, so it isn't held under the
+    # original's freed name.
+    other = "Gunna/The Last Wun/endless 2.mp3"
+    swapper = make_swapper(ears=GoneWithTheThirdTry(music, ["clean"]))
+    swapper.fakes.soulsync.lands = [(30, ENDLESS_REL, b"clean try 1"), (30, ENDLESS_REL, b"clean try 2"),
+                                    (30, other, b"clean try 3")]
+
+    outcome = swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    assert outcome == "couldnt"
+    assert outcome.reason == (f"3 copies came down clean, and the original has gone from {HELD}, so the copy "
+                              "set aside last was put back")
+    assert read(music, other) == b"clean try 3" and not os.path.exists(os.path.join(music, HELD, other))
+    assert read(music, SECOND_HELD) == b"clean try 1" and read(music, THIRD_HELD) == b"clean try 2"
+    assert store.swaps() == []
+
+
+def test_a_later_clean_copy_which_cant_be_set_aside_has_the_original_put_back_beside_it(make_swapper, music, store,
+                                                                                       monkeypatch):
+    other = "Gunna/The Last Wun/endless 2.mp3"
+    swapper = make_swapper(ears=FakeEars(["clean"]))
+    swapper.fakes.soulsync.lands = [(30, other, b"clean try 1")]
+    real = MusicFolder.set_aside
+
+    def set_aside(self, rel):
+        if rel == other:
+            raise MusicFolderError("couldn't move the song: disk trouble")
+        return real(self, rel)
+
+    monkeypatch.setattr(MusicFolder, "set_aside", set_aside)
+
+    outcome = swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    assert outcome == "couldnt" and outcome.reason == "couldn't move the song: disk trouble"
+    assert read(music, ENDLESS_REL) == b"clean endless" and read(music, other) == b"clean try 1"
+    assert not os.path.exists(os.path.join(music, HELD, ENDLESS_REL)) and store.swaps() == []
+
+
+@pytest.mark.parametrize("ending", ["not in time", "not found"])
+def test_a_later_try_which_ends_the_swap_puts_the_original_back(make_swapper, music, store, ending):
+    # The first try came down clean, and the next didn't land or couldn't be asked for: his own copy
+    # goes back, never the clean one the first try brought, which stays held.
+    swapper = make_swapper(ears=FakeEars(["clean"]))
+    fakes = swapper.fakes
+    fakes.soulsync.lands = [(30, ENDLESS_REL, b"clean try 1"), None]
+    if ending == "not found":
+        fakes.admin.on_forget = lambda: len(fakes.admin.forgot) == 2 and setattr(
+            fakes.soulsync, "find_fails", SoulSyncError(NOT_FOUND))
+
+    swapper.swap(_endless(fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    assert read(music, ENDLESS_REL) == b"clean endless"
+    assert read(music, "Gunna/The Last Wun/endless.lrc") == b"[00:01] lyrics"
+    assert not os.path.exists(os.path.join(music, HELD, ENDLESS_REL))
+    assert read(music, SECOND_HELD) == b"clean try 1"
+    assert store.swaps() == []
 
 
 def test_no_tries_more_is_one_fetch(make_swapper, make_config, music):
@@ -1402,7 +1542,8 @@ def test_a_swap_watching_is_carried_on_without_an_admin_profile(make_swapper, mu
 
 
 def test_a_clean_copy_found_without_an_admin_profile_is_left_in_the_library(make_swapper, music, store):
-    # It would need forgetting before another try, so it isn't moved at all.
+    # It would need forgetting before another try, so it isn't moved at all; it's where the original was,
+    # so the original stays held beside it.
     _stopped_while_watching(make_swapper)
     [saved] = store.swaps()
 
@@ -1413,7 +1554,9 @@ def test_a_clean_copy_found_without_an_admin_profile_is_left_in_the_library(make
 
     assert read(music, ENDLESS_REL) == b"clean try 1" and read(music, f"{HELD}/{ENDLESS_REL}") == b"clean endless"
     assert not os.path.exists(os.path.join(music, HELD, "Gunna/The Last Wun/endless (2).mp3"))
-    assert store.swaps() == [] and store.listed("couldnt")[0]["reason"] == "SoulSync admin profile isn't set up"
+    assert store.swaps() == []
+    assert store.listed("couldnt")[0]["reason"] == ("SoulSync admin profile isn't set up, and a new file is where "
+                                                    f"it was, so both are kept: the new file, and the old copy in {HELD}")
 
 
 def test_swaps_left_for_later_are_logged_once_until_that_changes(make_swapper, store, music, tmp_path, caplog):
