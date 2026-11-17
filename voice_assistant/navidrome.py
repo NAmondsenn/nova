@@ -80,7 +80,7 @@ GENERIC_PLAYLIST_WORDS = {"songs", "song", "music", "playlist", "playlists", "mi
 # and the ones which are only the same thing with the swearing taken out. Navidrome
 # has no field for them, so they're read from the names - see version_of.
 VERSIONS = ("clean", "edited", "radio edit", "censored", "live", "remix", "acoustic", "instrumental", "sped up",
-            "slowed", "karaoke")
+            "slowed", "karaoke", "demo")
 CLEAN_VERSIONS = ("clean", "edited", "radio edit", "censored")
 
 # Where a name says which version it is: a bracketed part, round or square, or what

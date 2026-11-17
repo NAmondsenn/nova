@@ -85,10 +85,10 @@ CLEAN_EDITION_WORDS = CLEAN_VERSIONS
 OTHER_VERSIONS = tuple(version for version in VERSIONS if version not in CLEAN_VERSIONS)
 
 # The versions of a song which aren't the one asked for unless they're named: an
-# album's, a demo - a search for M.E. found "M.E. (Demo Version)" as well as the
-# studio one - and an unplugged one. A part ending in "mix" is one too: see
-# _another_version. Only for picking: navidrome.VERSIONS, which "play" uses, is as it was.
-SONG_VERSIONS = OTHER_VERSIONS + ("demo", "unplugged")
+# album's (a demo among them - a search for M.E. found "M.E. (Demo Version)" as well
+# as the studio one) and an unplugged one. A part ending in "mix" is one too: see
+# _another_version.
+SONG_VERSIONS = OTHER_VERSIONS + ("unplugged",)
 
 # The parts which name the song itself, not another version of it: on an electronic
 # release, "Strobe (Original Mix)" is the original.

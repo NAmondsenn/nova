@@ -386,6 +386,33 @@ def test_a_live_version_isnt_the_song_asked_for(make_library):
     assert _ids(library.find_songs("Dreams Remix", "Fleetwood Mac")) == ["6"]
 
 
+def test_a_demo_is_a_version_of_a_song(make_library):
+    assert version_of("Dreams (Demo)") == "demo" and version_of("Dreams - Demo Version") == "demo"
+    assert version_of("Demolition Man") is None and version_of("Dreams (Demon)") is None
+    # Not the song asked for, so a demo in the library doesn't count as having the song
+    # for a download, unless the demo itself was asked for.
+    library = make_library(_songs_found([
+        {"id": "5", "title": "Dreams (Demo)", "artist": "Fleetwood Mac", "album": "Rumours Deluxe"},
+    ]))
+    assert library.find_songs("Dreams", "Fleetwood Mac") == []
+    assert _ids(library.find_songs("Dreams Demo", "Fleetwood Mac")) == ["5"]
+
+
+def test_play_takes_the_plain_song_over_its_demo(make_player):
+    player = make_player({"search3": lambda params: {"searchResult3": {"song": [
+        {"id": "5", "title": "Dreams (Demo)", "artist": "Fleetwood Mac"},
+        {"id": "6", "title": "Dreams", "artist": "Fleetwood Mac"}]}}})
+    assert player.play("Dreams by Fleetwood Mac", search_type="track")["message"] == "Playing Dreams by Fleetwood Mac"
+    assert _playing(player).song["id"] == "6"
+
+
+def test_play_still_plays_a_demo_when_its_all_there_is(make_player):
+    player = make_player({"search3": lambda params: {"searchResult3": {"song": [
+        {"id": "5", "title": "Dreams (Demo)", "artist": "Fleetwood Mac"}]}}})
+    assert player.play("Dreams by Fleetwood Mac", search_type="track")["success"] is True
+    assert _playing(player).song["id"] == "5"
+
+
 def test_a_clean_version_is_always_one_of_the_songs_found(make_library):
     library = make_library(_songs_found([
         {"id": "7", "title": "Dreams - Radio Edit", "artist": "Fleetwood Mac"},
