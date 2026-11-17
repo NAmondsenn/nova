@@ -1,7 +1,7 @@
 """
 Music Folder Module
 Sets a clean song aside in a hidden holding folder inside the user's music folder, and puts
-it back (decision 0019, section 4, step 1). It is the only code in Nova that touches the
+it back (decision 0022, section 4, step 1). It is the only code in Nova that touches the
 music files, so it keeps to three rules: it never deletes a file, never overwrites one, and
 never moves anything outside the music folder or anywhere but `.nova-held/` and back.
 

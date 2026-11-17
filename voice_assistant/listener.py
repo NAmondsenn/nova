@@ -1,7 +1,7 @@
 """
 Listener Module.
 
-Hears the words in a whole song, to judge it clean or explicit (decision 0019, section 2).
+Hears the words in a whole song, to judge it clean or explicit (decision 0022, section 2).
 The listening is done by a worker process of its own (listen_worker), at the lowest
 priority, with its own copy of Nemotron and two threads: the brain's speech to text keeps
 its model, and what the user says to Nova is never slowed by a song being heard.

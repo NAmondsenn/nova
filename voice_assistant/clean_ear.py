@@ -1,7 +1,7 @@
 """
 Clean Ear Module
 The rules which judge whether a song is clean or explicit from how many of its lyric swears
-a speech model heard, from section 1 of decision 0019 (docs/decisions/0019-clean-songs-by-ear.md).
+a speech model heard, from section 1 of decision 0022 (docs/decisions/0022-clean-songs-by-ear.md).
 
 Pure: it is given the lyrics and what was heard, reads no file, network or clock, and says
 the same in any time zone. Getting the lyrics, listening to the song and swapping a clean

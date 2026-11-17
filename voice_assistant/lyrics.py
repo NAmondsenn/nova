@@ -1,6 +1,6 @@
 """
 Lyrics Module
-Finds a song's lyrics, for listening to it against them (decision 0019): Navidrome's first,
+Finds a song's lyrics, for listening to it against them (decision 0022): Navidrome's first,
 which it reads from the .lrc or .txt SoulSync saves beside a song, else LRCLIB's - a free,
 public lyrics library, searched by title and artist.
 

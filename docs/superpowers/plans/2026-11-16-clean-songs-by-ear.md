@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 (Nova's brain venv), requests, numpy, sherpa-onnx (already installed), ffmpeg (already on the brain), Navidrome Subsonic and native APIs, SoulSync REST (key) and its admin session, LRCLIB, pytest on the Pi.
 
-**Spec:** `docs/decisions/0019-clean-songs-by-ear.md` (extends `docs/decisions/0012-music-fetched-by-voice.md`).
+**Spec:** `docs/decisions/0022-clean-songs-by-ear.md` (extends `docs/decisions/0012-music-fetched-by-voice.md`).
 
 ## Global Constraints
 
@@ -53,7 +53,7 @@ Not for a subagent. With SoulSync's key, read-only:
   - `@dataclass Verdict: kind: str` ("explicit" | "clean" | "unsure" | "too_few" | "not_judged"), `expected: int`, `heard: int`, `reason: str = ""`
   - `@dataclass Thresholds: minimum: int = 3, explicit_share: float = 0.35, clean_share: float = 0.15` and `Thresholds.from_config(config) -> Thresholds` reading `clean_check.lyric_minimum`, `.explicit_share`, `.clean_share`
   - `def judge(lyrics: Optional[str], transcript: Optional[str], thresholds: Thresholds) -> Verdict`
-- config.yaml `clean_check:` keys: `lyric_minimum: 3`, `explicit_share: 0.35`, `clean_share: 0.15`, `swap_tries: 2`, `music_folder: "/mnt/music"`, `soulsync_admin: ""` (the SoulSync profile Nova signs in as), each with a comment pointing at decision 0019.
+- config.yaml `clean_check:` keys: `lyric_minimum: 3`, `explicit_share: 0.35`, `clean_share: 0.15`, `swap_tries: 2`, `music_folder: "/mnt/music"`, `soulsync_admin: ""` (the SoulSync profile Nova signs in as), each with a comment pointing at decision 0022.
 - LIMITS: `("clean_check", "swap_tries"): Limit("number", 0, 5, True)`, `("clean_check", "lyric_minimum"): Limit("number", 1, 20, True)`, `("clean_check", "explicit_share")` and `("clean_check", "clean_share")`: `Limit("number", 0, 1)`. Music folder and admin profile take free text (check how the file's other free-text keys are held).
 
 - [ ] **Step 1: Failing tests** in `tests/test_clean_ear.py`:
@@ -242,7 +242,7 @@ One commit each, each with a test failing on the old code:
 ### Task 11: docs
 
 **Files:**
-- Modify: `README.md` (music section), `docs/troubleshooting.md`, `docs/release-checklist.md` (new checks 25a to 25f: a clean download swapped; every try clean; a re-fetch that never lands; restart mid-swap; the library check and its lists; the holding folder count), `docs/decisions/0012-music-fetched-by-voice.md` (a line at the top of section 4 pointing to 0019), the roadmap if it lists music.
+- Modify: `README.md` (music section), `docs/troubleshooting.md`, `docs/release-checklist.md` (new checks 25a to 25f: a clean download swapped; every try clean; a re-fetch that never lands; restart mid-swap; the library check and its lists; the holding folder count), `docs/decisions/0012-music-fetched-by-voice.md` (a line at the top of section 4 pointing to 0022), the roadmap if it lists music.
 - [ ] Every fixed sentence in the docs matches the code word for word; no em dashes (`git diff -U0 -- README.md docs/ | grep -nP '\x{2014}'` finds nothing); set-up says: the music folder share (pve2 `mp1`), the SoulSync admin profile and its password under Keys, and that `.nova-held` is emptied by hand.
 - [ ] Commit "Document clean songs found by ear".
 

@@ -16,7 +16,7 @@ What lands is heard before anything is said of it, and a clean copy is swapped f
 explicit one (clean_swap.py): its labels - "(clean)" on an album, Navidrome's explicit
 mark - are never believed, as SoulSync's tagging gets them wrong both ways. What the
 library already has is judged by what Nova heard of it, too. See
-docs/decisions/0019-clean-songs-by-ear.md.
+docs/decisions/0022-clean-songs-by-ear.md.
 """
 
 import logging
@@ -103,7 +103,7 @@ ALBUM_MINUTES = 30
 NAVIDROME_ERRORS = (requests.RequestException, NavidromeError, ValueError)
 
 # What's said of a song which landed and was heard, when it isn't plainly downloaded - see
-# decision 0019, section 3. A clean copy is never called downloaded.
+# decision 0022, section 3. A clean copy is never called downloaded.
 UNSURE = "{name} has been downloaded, but I couldn't tell if it's the clean version."
 NOT_CHECKED = "{name} has been downloaded, but I couldn't check it for a clean version."
 # Why an album's clean tracks couldn't be swapped, when every try for each came down clean.
@@ -436,6 +436,15 @@ class Downloads:
             return None
         settings = self.config.section("navidrome")
         return NavidromeLibrary(settings["url"].strip(), settings["username"].strip(), os.getenv("NAVIDROME_PASSWORD"))
+
+    def library(self) -> Optional[NavidromeLibrary]:
+        """
+        A NavidromeLibrary to look in from the settings as they are now - a new one for each
+        caller, as a requests session isn't safe to share between threads - or None if
+        Navidrome isn't set up. For "what's new", which reads Navidrome as a download does, and
+        for the new-music playlist (see new_music.py).
+        """
+        return self._library()
 
     def problem(self) -> Optional[str]:
         """

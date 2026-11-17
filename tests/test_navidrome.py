@@ -13,6 +13,7 @@ import shutil
 import threading
 import time
 import wave
+from datetime import datetime, timezone
 
 import pytest
 import requests
@@ -601,6 +602,122 @@ def test_no_album_is_no_tracks(make_library):
     assert [endpoint for endpoint, _ in library._session.requests] == ["search3", "search3"]
 
 
+def test_the_new_music_playlist_is_only_ever_the_exact_name(make_player):
+    # A near miss shares a word with the name but isn't it: it must not play as the new music.
+    answers = {
+        "getPlaylists": {"playlists": {"playlist": [{"id": "p1", "name": "Gym Shuffle"},
+                                                    {"id": "p2", "name": "Discovery Weekly"}]}},
+        "getPlaylist": {"playlist": {"entry": SONGS}},
+    }
+    player = make_player(answers)
+    result = player.play_playlist("Discovery Shuffle", exact=True)
+    assert result["success"] is False and result["missing"] is True and player._queue == []
+    # Said aloud it still finds the closest, as it always has.
+    assert make_player(answers).play_playlist("discovery shuffle")["success"] is True
+
+    # The exact one plays, however it's cased or punctuated, and only its own songs.
+    answers["getPlaylists"]["playlists"]["playlist"].append({"id": "p3", "name": "discovery  shuffle!"})
+    exact = make_player(answers)
+    assert exact.play_playlist("Discovery Shuffle", exact=True) == {"success": True,
+                                                                    "message": "Playing discovery  shuffle!"}
+    # Liked songs are no playlist, so a setting naming them finds none.
+    assert make_player({"getStarred2": {"starred2": {"song": SONGS}}, "getPlaylists": {}}).play_playlist(
+        "liked songs", exact=True)["missing"] is True
+
+
+def test_the_new_music_playlist_nova_makes_comes_before_anothers_of_the_name(make_player):
+    # Another user's public one of the same name is listed first, as Navidrome may: Nova's own plays.
+    answers = {
+        "getPlaylists": {"playlists": {"playlist": [{"id": "p1", "name": "New Music", "owner": "someone"},
+                                                    {"id": "p2", "name": "New Music", "owner": "Nova"}]}},
+        "getPlaylist": lambda params: {"playlist": {"entry": SONGS if params["id"] == "p2" else []}},
+    }
+    player = make_player(answers)
+    assert player.play_playlist("New Music", exact=True)["success"] is True
+    assert [asked["id"] for endpoint, asked in player._session.requests if endpoint == "getPlaylist"] == ["p2"]
+
+
+def test_the_new_music_playlist_nova_made_plays_by_its_id_and_never_another_of_the_name(make_player):
+    # His own of the same name, the same owner, is listed first: only the recorded id plays.
+    answers = {
+        "getPlaylists": {"playlists": {"playlist": [{"id": "p1", "name": "New Music", "owner": "Nova"},
+                                                    {"id": "p2", "name": "new music!", "owner": "Nova"}]}},
+        "getPlaylist": lambda params: {"playlist": {"entry": SONGS if params["id"] == "p2" else []}},
+    }
+    player = make_player(answers)
+    assert player.play_playlist("New Music", exact=True, playlist_id="p2") == {"success": True,
+                                                                              "message": "Playing new music!"}
+    assert [asked["id"] for endpoint, asked in player._session.requests if endpoint == "getPlaylist"] == ["p2"]
+
+    # Gone, it is missing, and the one of the same name isn't played in its place.
+    gone = make_player(answers)
+    result = gone.play_playlist("New Music", exact=True, playlist_id="p9")
+    assert result["success"] is False and result["missing"] is True and gone._queue == []
+    assert not [1 for endpoint, _ in gone._session.requests if endpoint == "getPlaylist"]
+
+
+def test_newest_albums_since(make_library):
+    # Newest first, as Navidrome lists them, with the fractional seconds and Z it writes - and one a
+    # little before the cut off, which isn't kept. Offsets are the same moment wherever the clock is.
+    since = datetime(2026, 11, 9, 12, 0, tzinfo=timezone.utc).timestamp()
+    library = make_library({"getAlbumList2": {"albumList2": {"album": [
+        {"id": "a1", "name": "Blue Hours", "artist": "Band One", "songCount": 10, "created": "2026-11-15T20:01:02.123456789Z"},
+        {"id": "a2", "name": "Low Tide", "artist": "Band Two", "songCount": 8, "created": "2026-11-09T12:00:00Z"},
+        {"id": "a3", "name": "Plain Sight", "artist": "Band Two", "songCount": 6, "created": "2026-11-09T13:30:00+01:00"},
+        {"id": "a4", "name": "Old News", "artist": "Band Three", "songCount": 12, "created": "2026-11-09T11:59:59Z"},
+        {"id": "a5", "name": "No Date", "artist": "Band Four", "songCount": 3}]}}})
+    found, whole = library.newest_albums(since)
+    assert [(album["id"], album["name"], album["artist"], album["songCount"]) for album in found] == [
+        ("a1", "Blue Hours", "Band One", 10), ("a2", "Low Tide", "Band Two", 8), ("a3", "Plain Sight", "Band Two", 6)]
+    assert whole is True
+    # One page was enough, as it reached back past the time.
+    assert [(endpoint, asked["type"], asked["size"], asked["offset"])
+            for endpoint, asked in library._session.requests] == [("getAlbumList2", "newest", 200, 0)]
+
+
+def test_newest_albums_with_none_in_the_library(make_library):
+    assert make_library({"getAlbumList2": {"albumList2": {}}}).newest_albums(0) == ([], True)
+
+
+def _newest_pages(total, newer):
+    """Navidrome's newest albums, a page at a time: total of them, the first newer of which came in this week."""
+    def answer(params):
+        start, size = int(params["offset"]), int(params["size"])
+        return {"albumList2": {"album": [
+            {"id": f"n{n}", "name": f"Album {n}", "artist": f"Band {n % 7}", "songCount": 2,
+             "created": "2026-11-15T10:00:00Z" if n < newer else "2026-10-01T10:00:00Z"}
+            for n in range(start, min(start + size, total))]}}
+    return answer
+
+
+def test_newest_albums_are_read_page_by_page_past_the_first(make_library):
+    # 450 came in this week: past the first page and the second, so all three pages are read, and no more.
+    since = datetime(2026, 11, 9, tzinfo=timezone.utc).timestamp()
+    library = make_library({"getAlbumList2": _newest_pages(1000, 450)})
+    found, whole = library.newest_albums(since)
+    assert (len(found), whole) == (450, True)
+    assert [album["id"] for album in found[:2]] == ["n0", "n1"] and found[-1]["id"] == "n449"
+    assert [asked["offset"] for _, asked in library._session.requests] == [0, 200, 400]
+    # A library which runs out on a short page is all read too, with nothing older in it.
+    found, whole = make_library({"getAlbumList2": _newest_pages(250, 250)}).newest_albums(since)
+    assert (len(found), whole) == (250, True)
+
+
+def test_newest_albums_stop_after_the_most_pages_and_say_theres_more(make_library):
+    since = datetime(2026, 11, 9, tzinfo=timezone.utc).timestamp()
+    library = make_library({"getAlbumList2": _newest_pages(10_000, 10_000)})
+    found, whole = library.newest_albums(since)
+    assert (len(found), whole) == (20 * 200, False)
+    assert len(library._session.requests) == 20
+
+
+def test_a_playlist_which_isnt_there_is_marked_missing(make_player):
+    player = make_player({"getPlaylists": {"playlists": {"playlist": [{"id": "p1", "name": "Chill"}]}}})
+    result = player.play_playlist("Discovery Shuffle")
+    assert result["success"] is False and result["missing"] is True
+    assert result["message"] == "I couldn't find a playlist called Discovery Shuffle."
+
+
 def test_a_scan_is_asked_for_and_a_refusal_is_logged(make_library, caplog):
     assert make_library({"startScan": {"scanStatus": {"scanning": True}}}).start_scan() is True
     refused = make_library({"startScan": {"status": "failed", "error": {"code": 50, "message": "not authorized"}}})
@@ -886,7 +1003,7 @@ def test_the_page_is_offered_the_playlists_by_name(make_player):
     assert player.playlists() == []
 
 
-# What Navidrome says of a song's file, sound and lyrics, for listening (decision 0019)
+# What Navidrome says of a song's file, sound and lyrics, for listening (decision 0022)
 
 class FakeHttp:
     """One answer from Navidrome's native API or its stream: a status, and JSON or bytes."""

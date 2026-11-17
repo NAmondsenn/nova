@@ -39,6 +39,7 @@ from voice_assistant.display_feed import DisplayFeed
 from voice_assistant.display_server import DisplayServer
 from voice_assistant.displays import Displays
 from voice_assistant.downloads import Downloads
+from voice_assistant.following import FollowWatcher
 from voice_assistant.football import Football
 from voice_assistant.football_watch import FootballChoices, FootballWatcher, user_home
 from voice_assistant.google_calendar import READ_FAILURES, GoogleCalendar
@@ -53,6 +54,7 @@ from voice_assistant.media_watch import MediaWatcher
 from voice_assistant.memory import Memory
 from voice_assistant.music_device import MusicDevice
 from voice_assistant.music_folder import MusicFolder
+from voice_assistant.new_music import NewMusicPlaylist
 from voice_assistant.ntfy import RETOPIC, Ntfy
 from voice_assistant.pc import PCPower
 from voice_assistant.protocol import ProtocolError, Refused, admit
@@ -372,6 +374,17 @@ class Brain:
         self.wrapped_store = WrappedStore(os.path.join(paths.DATA_DIR, "wrapped"))
         self.wrapped_watcher = WrappedWatcher(self.listening, self.wrapped_store, self.ntfy,
                                               lambda: self.config.section("wrapped"))
+        # His top artists of the last 12 months, followed on SoulSync's watchlist once a month so that their new
+        # releases download (see following.py), with SoulSync made at each look from the settings as they are
+        # then, as the downloads have it. Made with or without SoulSync, as it then does nothing. Started by run().
+        self.follow_watcher = FollowWatcher(
+            self.listening, lambda: SoulSync.from_config(self.config, os.getenv("SOULSYNC_API_KEY")),
+            os.path.join(paths.DATA_DIR, "following.json"), lambda: self.config.section("new_music"))
+        # Nova's own playlist in Navidrome of what came in lately, made each morning (see new_music.py), with
+        # Navidrome from the settings as they are then, as the downloads have it. Started by run().
+        self.new_music_playlist = NewMusicPlaylist(lambda: self.downloads.library(),
+                                                   os.path.join(paths.DATA_DIR, "new_music.json"),
+                                                   lambda: self.config.section("new_music"))
         # The brain's second device in Home Assistant, showing that snapshot - or None with no MQTT
         # broker set. Made here as it needs the listening stats. Started by run().
         self.music_device = MusicDevice.from_config(config, os.getenv("MQTT_PASSWORD"), self.listening)
@@ -401,7 +414,7 @@ class Brain:
                            on_change=self._alarms_changed.set, can_hear=lambda satellite: satellite in self._caught_up,
                            let_in=lambda satellite: not self._gone_from_file(satellite), config=config, start=False)
         # Each download heard before it's said, and a clean one swapped for an explicit copy
-        # - see clean_swap.py and docs/decisions/0019. One store of what's been heard, one
+        # - see clean_swap.py and docs/decisions/0022. One store of what's been heard, one
         # listening worker and one Navidrome library to hear through, which the downloads and
         # the library check share: the worker takes a song at a time, and Navidrome limits
         # sign-ins.
@@ -1688,6 +1701,8 @@ class Brain:
             self.football_watcher.start()
         self.listening.start()
         self.wrapped_watcher.start()
+        self.follow_watcher.start()
+        self.new_music_playlist.start()
         if self.media:
             self.media.start()
         if self.registry:
@@ -1776,6 +1791,8 @@ class Brain:
             self.batteries.stop()
         if self.football_watcher:
             self.football_watcher.stop()
+        self.new_music_playlist.stop()
+        self.follow_watcher.stop()
         self.wrapped_watcher.stop()
         self.listening.stop()
         if self.media:

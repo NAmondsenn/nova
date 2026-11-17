@@ -1,7 +1,7 @@
 """
 Clean Swap Test
 Checks how a song is heard against its lyrics (Ears) and how a clean one is swapped (Swapper) -
-decision 0019, sections 1 to 4 - with fakes in place of Navidrome, SoulSync, its admin, the
+decision 0022, sections 1 to 4 - with fakes in place of Navidrome, SoulSync, its admin, the
 lyrics, ffmpeg and the listening worker, the music folder and the store in the test's own
 folder. The model is never loaded and nothing real is asked.
 """
@@ -345,7 +345,7 @@ def test_one_library_is_kept_for_listening_until_its_settings_change(make_config
     assert library() is None
 
 
-# Swapping a clean song - decision 0019, section 4. The music folder is a real folder in the
+# Swapping a clean song - decision 0022, section 4. The music folder is a real folder in the
 # test's own, and the fake Navidrome lists what's in it, as Navidrome does once its watcher or
 # a scan has seen it.
 

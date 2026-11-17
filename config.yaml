@@ -321,25 +321,44 @@ wrapped:
 
 clean_check:
   # Nova judges a song clean or explicit by listening to it against its lyrics - see
-  # docs/decisions/0019. A song whose lyrics have fewer swears than this is not judged.
+  # docs/decisions/0022. A song whose lyrics have fewer swears than this is not judged.
   lyric_minimum: 3
   # The share of the lyrics' swears which must be heard for a song to be explicit, from 0 to 1.
   # Set from a test on real songs: change it only with another.
   explicit_share: 0.35
   # At or under this share heard, a song is clean, from 0 to 1. In between is unsure, left
-  # alone and listed. See docs/decisions/0019.
+  # alone and listed. See docs/decisions/0022.
   clean_share: 0.15
   # How many more times Nova asks SoulSync for another version of a clean song, from 0 to 5.
-  # See docs/decisions/0019.
+  # See docs/decisions/0022.
   swap_tries: 2
   # Where Navidrome's music is on this machine, so Nova can find a song's file: a full path
-  # starting /, or empty for none. See docs/decisions/0019.
+  # starting /, or empty for none. See docs/decisions/0022.
   music_folder: "/mnt/music"
   # The SoulSync profile Nova signs in as to take away a swapped song's old row: a second
   # profile with admin rights, made in SoulSync's own Settings. Its password goes under Keys on
   # the settings page as SOULSYNC_ADMIN_PASSWORD (or in ~/.config/nova/.env), never here. See
-  # docs/decisions/0019.
+  # docs/decisions/0022.
   soulsync_admin: ""
+
+new_music:
+  # New music for you, which SoulSync finds and downloads. All three are on the settings page.
+  # How many of your top artists of the last 12 months Nova follows on SoulSync's watchlist, so their
+  # new releases download - see voice_assistant/following.py. Done once a month, from 3 in the
+  # morning, and only ever adding: an artist you stop playing stays followed. 0 switches it off.
+  # A change is used at the next following: this month's if it isn't done yet, or else next
+  # month's, as a month's following is done once - so a rise after it waits for next month.
+  follow_top_artists: 25
+  # The playlist "find me something new" plays, which Nova makes in Navidrome and replaces each
+  # morning from 6 with the songs that came into the library in the last `days` days, newest
+  # first, up to 500 - see voice_assistant/new_music.py. Nova's own: it only ever changes the playlist
+  # it made itself, found by the id it noted when it made it - never one you made, even of this name -
+  # and makes it public so your own user sees it. If you delete it, Nova makes it again; a new name is
+  # made the next morning, and the old one is left for you to delete. The name needs a letter from A
+  # to Z or a digit in it.
+  playlist: "New Music"
+  # How many days back the playlist reaches, from 1 to 60. Used at the next morning's making.
+  days: 14
 
 mqtt:
   # Home Assistant's MQTT broker - the Mosquitto add-on - through which Nova is a

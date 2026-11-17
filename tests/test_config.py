@@ -308,6 +308,10 @@ IN_AND_OUT = {
     # Empty is no music folder, so nothing is swapped; a relative one would depend on where Nova started.
     ("clean_check", "music_folder"): (["/mnt/music", "/srv/media/music", ""],
                                       ["mnt/music", "music", "~/music", "/mnt/\0music", 5, None]),
+    # 0 is no following.
+    ("new_music", "follow_top_artists"): ([0, 25, 50], [-1, 51, 2.5, True]),
+    ("new_music", "days"): ([1, 14, 60], [0, 61, 2.5, True]),
+    ("new_music", "playlist"): (["New Music", "", "  ", "Mix 2"], ["!!!", "\U0001F3B5", 5]),
 }
 
 
@@ -353,6 +357,20 @@ def test_the_repositorys_config_has_the_clean_check_settings(tmp_path):
     assert limit_problem("clean_check", "music_folder", "/anywhere") is None
     assert limit_problem("clean_check", "music_folder", "music") == "should be a folder's full path, starting /"
     assert limit_problem("clean_check", "soulsync_admin", "any name") is None
+
+
+def test_the_repositorys_config_has_the_new_music_settings(tmp_path):
+    new_music = Config(path=str(tmp_path / "none.yaml")).section("new_music")
+    # Nova's own playlist of what arrived in the last fortnight, as SoulSync's discovery playlists never reach Navidrome.
+    assert new_music == {"follow_top_artists": 25, "playlist": "New Music", "days": 14}
+    assert limit_problem("new_music", "follow_top_artists", 51) == "should be a whole number from 0 to 50"
+    # Any name, as it's a playlist's in Navidrome.
+    assert limit_problem("new_music", "playlist", "Daily Mix 1") is None
+    # Nova tells its playlist by the words of its name, so one of only punctuation, emoji or other scripts is refused.
+    for fine in ("Daily Mix 1", "  Fresh In!  ", "Musique \u00e9t\u00e9", "", "  "):
+        assert limit_problem("new_music", "playlist", fine) is None
+    for bad in ("!!!", "\U0001F3B5", " - ", "\u30cb\u30e5\u30fc", 5, None):
+        assert limit_problem("new_music", "playlist", bad) == "should have a letter from A to Z or a digit in it"
 
 
 def test_the_clock_displays_port_has_its_limit_and_is_off_unless_set(tmp_path):

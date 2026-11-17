@@ -1,7 +1,7 @@
 """
 Music Folder Test
 Checks that a song is set aside inside the music folder and put back without ever deleting,
-overwriting or leaving the folder (decision 0019, section 4, step 1). Everything happens in
+overwriting or leaving the folder (decision 0022, section 4, step 1). Everything happens in
 pytest's temporary folders, never in a real music folder.
 """
 

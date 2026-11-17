@@ -1,4 +1,4 @@
-# 0019: Clean songs found by ear, and swapped
+# 0022: Clean songs found by ear, and swapped
 
 **Context.** Decision 0012 made "a clean version reported as downloaded" a must-not, and judged it by labels: Navidrome's `explicitStatus` and clean words in a title or album name. A library clean-up on 15 and 16 Nov 2026 showed the labels lie both ways:
 

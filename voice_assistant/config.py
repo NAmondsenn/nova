@@ -42,7 +42,7 @@ POSITIVE = {("batteries", "check_every"), ("batteries", "stale_after"),
 
 class Limit(NamedTuple):
     """What a setting may be: its form, and for a number, its range."""
-    form: str  # "number", "time", "address", "topic", "topics", "host" or "path".
+    form: str  # "number", "time", "address", "topic", "topics", "playlist", "host" or "path".
     low: Optional[float] = None
     high: Optional[float] = None
     whole: bool = False
@@ -105,7 +105,7 @@ LIMITS: Dict[Tuple[str, str], Limit] = {
     # The month the yearly Wrapped is made on the 1st of. Empty is no link in its notification.
     ("wrapped", "yearly_month"): Limit("number", 1, 12, True),
     ("wrapped", "link"): Limit("address"),
-    # Decision 0019. 0 tries is a clean song left as it is, and more than 5 would be asking SoulSync again
+    # Decision 0022. 0 tries is a clean song left as it is, and more than 5 would be asking SoulSync again
     # and again for a version which is not coming. A song with fewer than 1 swear has nothing to hear, and
     # past 20 hardly any song would be judged. A share is a part of the song's swears, so from 0 to 1.
     # The music folder is a full path, or empty for none: "music" would be wherever Nova happened to start.
@@ -115,6 +115,14 @@ LIMITS: Dict[Tuple[str, str], Limit] = {
     ("clean_check", "explicit_share"): Limit("number", 0, 1),
     ("clean_check", "clean_share"): Limit("number", 0, 1),
     ("clean_check", "music_folder"): Limit("path"),
+    # 0 is no following. Over 50 reaches artists played a handful of times a year, whose every release
+    # would download.
+    ("new_music", "follow_top_artists"): Limit("number", 0, 50, True),
+    # Two months of arrivals is already more than the playlist's 500 songs most weeks.
+    ("new_music", "days"): Limit("number", 1, 60, True),
+    # Nova tells its playlist from the others by the words of its name, so a name of only punctuation, emoji
+    # or letters outside A to Z has none to go by.
+    ("new_music", "playlist"): Limit("playlist"),
 }
 
 _TIME = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
@@ -241,6 +249,11 @@ def limit_problem(section: str, name: str, value: Any) -> Optional[str]:
     if limit.form == "address":
         ok = isinstance(value, str) and (value == "" or re.match(r"https?://.", value))
         return None if ok else "should be an address starting http:// or https://"
+    if limit.form == "playlist":
+        # Imported here: navidrome.py is heavy, and only a playlist's name needs it.
+        from voice_assistant.navidrome import normalise
+        ok = isinstance(value, str) and (value.strip() == "" or normalise(value) != "")
+        return None if ok else "should have a letter from A to Z or a digit in it"
     if limit.form in ("topic", "topics"):
         topics = value if limit.form == "topics" else [value]
         ok = isinstance(topics, list) and all(

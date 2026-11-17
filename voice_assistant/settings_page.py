@@ -106,7 +106,7 @@ EDITABLE = [
     ("music", "song_download_minutes", "Minutes to wait for a song to download", "now"),
     ("music", "album_download_minutes", "Minutes to wait for an album to download", "now"),
     ("soulsync", "url", "SoulSync's address", "now"),
-    # Read at each song, so straight away - see docs/decisions/0019. The thresholds were set
+    # Read at each song, so straight away - see docs/decisions/0022. The thresholds were set
     # from a test on real songs, so they stay in config.yaml.
     ("clean_check", "swap_tries", "Tries to swap a clean song", "now"),
     ("clean_check", "music_folder", "Music folder", "now"),
@@ -147,6 +147,11 @@ EDITABLE = [
     ("wrapped", "monthly", "A smaller one each month", "now"),
     ("wrapped", "yearly_month", "Month the yearly one is ready, on the 1st (12 for December)", "now"),
     ("wrapped", "link", "This page's address, for the link in Wrapped's notification", "now"),
+    ("new_music", "follow_top_artists",
+     "How many of your top artists to follow for new releases, once a month (0 for none; a change is used at the "
+     "next following)", "now"),
+    ("new_music", "playlist", "Playlist for 'find me something new', which Nova makes each morning", "now"),
+    ("new_music", "days", "Days of new music it holds", "now"),
 ]
 # How the page says which each is.
 NOW = "Used straight away"
@@ -863,7 +868,7 @@ class SettingsPage:
         """
         The Clean songs block, under Music: how the library check is going, or when it last
         finished, the songs it found and how many wait in the holding folder - see
-        CleanCheck.state and docs/decisions/0019.
+        CleanCheck.state and docs/decisions/0022.
         """
         return self.brain.clean_check.state()
 

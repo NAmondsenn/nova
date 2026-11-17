@@ -12,15 +12,17 @@ import requests
 
 from voice_assistant import football_watch, storage
 from voice_assistant.football import CANT_GET, NOT_SET_UP, Football, FootballUnavailable, Match, Reading, Team
-from voice_assistant.football_watch import GAP, KINDS, FootballChoices, FootballWatcher, events, user_home
+from voice_assistant.football_watch import (
+    GAP, KINDS, RULED_OUT_AFTER, FootballChoices, FootballWatcher, events, user_home)
 from voice_assistant.home_assistant import FOOTBALL_TEAMS
 
 # An instant well away from any change of clock, so that a test passes in whichever time zone it runs.
 NOW = 1_800_000_000.0
 
-# When Home Assistant wrote the sensor for three readings running, each later than the one before: what tells
-# a reading from the same one seen again, as Nova looks more often than Home Assistant writes it.
-READING_1, READING_2, READING_3 = NOW - 90, NOW - 60, NOW - 30
+# When Home Assistant wrote the sensor for four readings running, a minute apart as it does: what tells a reading
+# from the same one seen again, as Nova looks more often than Home Assistant writes it. The first and the third
+# are two minutes apart, which is how long a lower score has to hold to be a goal ruled out.
+READING_1, READING_2, READING_3, READING_4 = NOW - 180, NOW - 120, NOW - 60, NOW
 
 
 def _match(state="pre", phase=None, home_score=None, away_score=None, minutes=None, **more):
@@ -82,10 +84,12 @@ def test_goals():
     assert said == [("goals", "Goal for Notts County. Notts County 1, Stevenage 1.")]
     said, seen = _events(seen, _match("in", "first_half", 2, 2))
     assert said == [("goals", "Goals for both sides. Notts County 2, Stevenage 2.")]
-    # A score which goes down may be an old copy, so it is said only when a later reading shows it again.
+    # A score which goes down may be an old copy, so it is said only when a reading two minutes later still shows it.
     said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=READING_1)
     assert said == []
     said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=READING_2)
+    assert said == []
+    said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=READING_3)
     assert said == [("goals", "Goal ruled out. Notts County 2, Stevenage 1.")]
 
 
@@ -238,16 +242,87 @@ def test_a_goal_which_flickers_away_and_back_is_said_once():
     assert _events(seen, _match("in", "first_half", 0, 1), reported=READING_2)[0] == []
 
 
-def test_a_goal_ruled_out_is_said_once_it_is_seen_on_two_readings_running():
+def test_a_goal_ruled_out_is_said_once_the_lower_score_has_held_for_two_minutes():
     _, seen = _events(None, _match("in", "first_half", 2, 2))
     said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=READING_1)
     assert said == []
     # The higher score is kept meanwhile, and the lower one is noted as waiting, with the reading it was first on.
     assert (seen["home"], seen["away"], seen["waiting"]) == (2, 2, {"home": 2, "away": 1, "reported": READING_1})
+    # A reading a minute on shows it again and changes nothing: the two minutes are counted from the first reading.
     said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=READING_2)
+    assert said == [] and (seen["home"], seen["away"], seen["waiting"]) == (2, 2, {"home": 2, "away": 1, "reported": READING_1})
+    said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=READING_3)
     assert said == [("goals", "Goal ruled out. Notts County 2, Stevenage 1.")]
     assert (seen["home"], seen["away"], seen["waiting"]) == (2, 1, None)
-    assert _events(seen, _match("in", "first_half", 2, 1), reported=READING_3)[0] == []
+    assert _events(seen, _match("in", "first_half", 2, 1), reported=READING_4)[0] == []
+
+
+def test_a_goal_is_ruled_out_at_two_minutes_after_the_first_reading_which_showed_it_and_not_before():
+    # Review of round five: a lower score seen at 0 s, again at 60 s, again at 125 s is a goal ruled out at 125 s only.
+    first = NOW - 1000
+    _, seen = _events(None, _match("in", "first_half", 2, 2))
+    said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=first)
+    assert said == []
+    said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=first + 60)
+    assert said == [] and seen["waiting"] == {"home": 2, "away": 1, "reported": first}
+    said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=first + 125)
+    assert said == [("goals", "Goal ruled out. Notts County 2, Stevenage 1.")]
+    assert RULED_OUT_AFTER == 110
+
+
+# Home Assistant's last_reported drifts a few seconds round each minute, so the second reading is about 60 s after the
+# first and never near 110, while the third is about 120 s after it and always past it: a reading 62 s on is not enough
+# and one 118 s on is, though neither is exactly two minutes.
+@pytest.mark.parametrize("later, said", [
+    (62, False), (RULED_OUT_AFTER - 1, False), (RULED_OUT_AFTER - 0.001, False), (RULED_OUT_AFTER, True), (118, True),
+    (RULED_OUT_AFTER + 1, True), (RULED_OUT_AFTER * 5, True),
+])
+def test_about_two_minutes_is_what_confirms_a_lower_score(later, said):
+    first = NOW - 2000
+    _, seen = _events(None, _match("in", "first_half", 2, 2))
+    _, seen = _events(seen, _match("in", "first_half", 2, 1), reported=first)
+    goals, seen = _events(seen, _match("in", "first_half", 2, 1), reported=first + later)
+    assert goals == ([("goals", "Goal ruled out. Notts County 2, Stevenage 1.")] if said else [])
+    assert (seen["waiting"] is None) == said
+
+
+def test_a_third_reading_a_little_under_two_minutes_on_says_it_and_a_second_a_little_over_a_minute_does_not():
+    # Readings which drifted: the second 62 s after the first and the third 118 s after it, as Home Assistant writes them.
+    first = NOW - 1000
+    _, seen = _events(None, _match("in", "first_half", 2, 2))
+    said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=first)
+    assert said == []
+    said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=first + 62)
+    assert said == [] and seen["waiting"] == {"home": 2, "away": 1, "reported": first}
+    said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=first + 118)
+    assert said == [("goals", "Goal ruled out. Notts County 2, Stevenage 1.")]
+
+
+def test_the_higher_score_back_in_between_drops_a_lower_one_waiting_and_the_two_minutes_start_again():
+    first = NOW - 1000
+    _, seen = _events(None, _match("in", "first_half", 2, 2))
+    _, seen = _events(seen, _match("in", "first_half", 2, 1), reported=first)
+    said, seen = _events(seen, _match("in", "first_half", 2, 2), reported=first + 60)
+    assert said == [] and seen["waiting"] is None
+    # Not a goal ruled out at 125 s, which is after the first reading but is not two minutes of it holding.
+    said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=first + 125)
+    assert said == [] and seen["waiting"] == {"home": 2, "away": 1, "reported": first + 125}
+    said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=first + 180)
+    assert said == []
+    said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=first + 250)
+    assert said == [("goals", "Goal ruled out. Notts County 2, Stevenage 1.")]
+
+
+def test_a_reading_of_unknown_time_confirms_nothing_whatever_has_passed():
+    first = NOW - 1000
+    _, seen = _events(None, _match("in", "first_half", 2, 2))
+    _, seen = _events(seen, _match("in", "first_half", 2, 1), reported=first)
+    said, seen = _events(seen, _match("in", "first_half", 2, 1), reported=None)
+    assert said == [] and seen["waiting"] == {"home": 2, "away": 1, "reported": first}
+    # The note is still there for a dated reading to confirm, and still about two minutes from the first.
+    assert _events(seen, _match("in", "first_half", 2, 1), reported=first + 109)[0] == []
+    assert _events(seen, _match("in", "first_half", 2, 1), reported=first + 125)[0] == [
+        ("goals", "Goal ruled out. Notts County 2, Stevenage 1.")]
 
 
 def test_a_lower_score_seen_again_on_the_same_reading_is_not_a_goal_ruled_out():
@@ -259,11 +334,13 @@ def test_a_lower_score_seen_again_on_the_same_reading_is_not_a_goal_ruled_out():
     assert said == []
     said, record = events(seen, down, NOW + 30, 900, {"285"}, READING_1)
     assert said == [] and record == {**seen, "at": NOW + 30}
-    # Only a later reading, still showing it, says it - and says it once.
-    said, seen = _events(record, down, reported=READING_2)
+    # Only a reading two minutes later, still showing it, says it - and says it once.
+    said, record = _events(record, down, reported=READING_2)
+    assert said == []
+    said, seen = _events(record, down, reported=READING_3)
     assert said == [("goals", "Goal ruled out. Notts County 2, Stevenage 1.")]
-    assert _events(seen, down, reported=READING_2)[0] == []
     assert _events(seen, down, reported=READING_3)[0] == []
+    assert _events(seen, down, reported=READING_4)[0] == []
 
 
 def test_a_lower_score_which_is_the_old_score_again_on_a_later_reading_says_nothing_at_all():
@@ -301,13 +378,109 @@ def test_one_lower_look_and_then_the_old_score_again_says_nothing():
 def test_a_lower_score_waiting_is_dropped_when_the_next_look_is_something_else():
     _, seen = _events(None, _match("in", "first_half", 2, 2))
     _, seen = _events(seen, _match("in", "first_half", 2, 1), reported=READING_1)
-    # Another lower score waits in its turn, and is said only when a later reading shows it again.
+    # Another lower score waits in its turn, and is said only when a reading about two minutes later shows it again.
     said, seen = _events(seen, _match("in", "first_half", 1, 1), reported=READING_2)
     assert said == [] and seen["waiting"] == {"home": 1, "away": 1, "reported": READING_2}
     # A goal is compared with the score kept, not with the one which waited.
     said, seen = _events(seen, _match("in", "first_half", 3, 2), reported=READING_3)
     assert said == [("goals", "Goal for Notts County. Notts County 3, Stevenage 2.")]
     assert seen["waiting"] is None
+
+
+def _ruled_out_just_before_full_time():
+    """A lower score noted at 89 minutes, on the first reading which showed it: the record before the full-time reading."""
+    _, seen = _events(None, _match("in", "second_half", 2, 2))
+    said, seen = _events(seen, _match("in", "second_half", 2, 1), reported=READING_1)
+    assert said == [] and seen["waiting"] == {"home": 2, "away": 1, "reported": READING_1}
+    return seen
+
+
+def test_the_full_time_reading_confirms_a_lower_score_waiting_and_says_it_once_before_full_time():
+    # Decision 4 of 0021: the lower score was noted at 89 minutes, and the next reading, a minute on, is the full-time
+    # one, which is never an old copy of the match in play - it confirms the score, as nothing is looked at after it.
+    seen = _ruled_out_just_before_full_time()
+    full_time = _match("post", "full_time", 2, 1, winner="home")
+    said, seen = _events(seen, full_time, reported=READING_2)
+    assert said == [("goals", "Goal ruled out. Notts County 2, Stevenage 1."),
+                    ("full_time", "Full time. Notts County 2, Stevenage 1.")]
+    assert (seen["home"], seen["away"], seen["waiting"], seen["state"]) == (2, 1, None, "post")
+    # Said once: the looks after it are of a match which was over, and the same reading seen again is nothing new.
+    assert _events(seen, full_time, reported=READING_2)[0] == []
+    assert _events(seen, full_time, reported=READING_3)[0] == []
+
+
+def test_the_full_time_reading_confirms_a_lower_score_waiting_after_extra_time_as_well():
+    seen = _ruled_out_just_before_full_time()
+    said, _ = _events(seen, _match("post", "full_time", 2, 1, winner="home", extra_time=True), reported=READING_2)
+    assert said == [("goals", "Goal ruled out. Notts County 2, Stevenage 1."),
+                    ("full_time", "Full time, after extra time. Notts County 2, Stevenage 1.")]
+
+
+def test_a_full_time_reading_two_minutes_on_says_goal_ruled_out_once_not_twice():
+    # The usual confirmation (110 seconds or more) and the full-time one are the same reading here: one line, before full time.
+    seen = _ruled_out_just_before_full_time()
+    said, _ = _events(seen, _match("post", "full_time", 2, 1, winner="home"), reported=READING_1 + RULED_OUT_AFTER)
+    assert said == [("goals", "Goal ruled out. Notts County 2, Stevenage 1."),
+                    ("full_time", "Full time. Notts County 2, Stevenage 1.")]
+
+
+def test_the_full_time_reading_showing_the_higher_score_again_says_no_goal_ruled_out():
+    # The lower score was an old copy: full time is said with the score it was, and the note is dropped.
+    seen = _ruled_out_just_before_full_time()
+    said, seen = _events(seen, _match("post", "full_time", 2, 2, winner=None), reported=READING_2)
+    assert said == [("full_time", "Full time. Notts County 2, Stevenage 2.")]
+    assert (seen["home"], seen["away"], seen["waiting"]) == (2, 2, None)
+
+
+def test_a_full_time_reading_showing_another_lower_score_is_not_the_one_waiting():
+    seen = _ruled_out_just_before_full_time()
+    said, seen = _events(seen, _match("post", "full_time", 1, 1, winner=None), reported=READING_2)
+    assert said == [("full_time", "Full time. Notts County 1, Stevenage 1.")]
+
+
+def test_a_lower_score_waiting_is_not_confirmed_by_a_full_time_reading_of_unknown_time():
+    # Without when it was written it can't be told from the reading which first showed the lower score.
+    seen = _ruled_out_just_before_full_time()
+    said, _ = _events(seen, _match("post", "full_time", 2, 1, winner="home"), reported=None)
+    assert said == [("full_time", "Full time. Notts County 2, Stevenage 1.")]
+
+
+@pytest.mark.parametrize("later", [0, -30])
+def test_a_full_time_reading_no_later_than_the_one_which_showed_the_lower_score_confirms_nothing(later):
+    seen = _ruled_out_just_before_full_time()
+    said, _ = _events(seen, _match("post", "full_time", 2, 1, winner="home"), reported=READING_1 + later)
+    assert said == [("full_time", "Full time. Notts County 2, Stevenage 1.")]
+
+
+def test_a_lower_score_first_seen_on_the_full_time_reading_is_not_said_as_ruled_out():
+    # Nothing was waiting, so nothing is confirmed: the comparison stops at full time, as it always did.
+    _, seen = _events(None, _match("in", "second_half", 2, 2))
+    said, _ = _events(seen, _match("post", "full_time", 2, 1, winner="home"), reported=READING_2)
+    assert said == [("full_time", "Full time. Notts County 2, Stevenage 1.")]
+
+
+def test_a_lower_score_waiting_is_not_confirmed_by_a_reading_which_is_not_the_end_of_the_match():
+    # Half time is no full time: only the two minutes confirm a score before it, as ever.
+    _, seen = _events(None, _match("in", "first_half", 2, 2))
+    _, seen = _events(seen, _match("in", "first_half", 2, 1), reported=READING_1)
+    said, seen = _events(seen, _match("in", "half_time", 2, 1), reported=READING_2)
+    assert said == [("half_time", "Half time. Notts County 2, Stevenage 1.")]
+    assert seen["waiting"] == {"home": 2, "away": 1, "reported": READING_1}
+
+
+def test_an_over_match_with_no_known_phase_confirms_a_lower_score_waiting_too():
+    # It is the match being over, not its phase, which makes a reading no old copy of the match in play.
+    seen = _ruled_out_just_before_full_time()
+    said, _ = _events(seen, _match("post", None, 2, 1, winner="home"), reported=READING_2)
+    assert said == [("goals", "Goal ruled out. Notts County 2, Stevenage 1.")]
+
+
+def test_a_reading_at_full_time_confirms_a_lower_score_waiting_whatever_state_it_says():
+    # "Full time." is said by the phase alone, so a goal ruled out has to be said before it whichever state came with it.
+    seen = _ruled_out_just_before_full_time()
+    said, _ = _events(seen, _match("in", "full_time", 2, 1), reported=READING_2)
+    assert said == [("goals", "Goal ruled out. Notts County 2, Stevenage 1."),
+                    ("full_time", "Full time. Notts County 2, Stevenage 1.")]
 
 
 def test_an_older_pre_look_in_the_middle_of_a_match_is_an_old_copy():
@@ -782,9 +955,13 @@ def test_a_goal_ruled_out_is_said_on_a_later_reading_never_on_the_same_one_seen_
     # may be ESPN's old copy of the match, and it says nothing and is not written.
     _score_of_the_match_at(rig, 0, 60, READING_2)
     assert rig.said == [] and len(saved) == saves
+    # A reading a minute later is not enough either, and it is the first reading's two minutes which are counted.
     _score_of_the_match_at(rig, 0, 90, READING_3)
-    assert rig.said == ["Goal ruled out. Notts County 1, Stevenage 0."]
     _score_of_the_match_at(rig, 0, 120, READING_3)
+    assert rig.said == []
+    _score_of_the_match_at(rig, 0, 150, READING_4)
+    assert rig.said == ["Goal ruled out. Notts County 1, Stevenage 0."]
+    _score_of_the_match_at(rig, 0, 180, READING_4)
     assert len(rig.said) == 1
 
 
@@ -793,10 +970,39 @@ def test_a_lower_score_which_is_back_up_before_a_later_reading_confirms_it_says_
     _score_of_the_match_at(rig, 1, 0, READING_1)
     _score_of_the_match_at(rig, 0, 30, READING_2)
     _score_of_the_match_at(rig, 0, 60, READING_2)
+    _score_of_the_match_at(rig, 0, 90, READING_3)
     # The old copy was passed over: when the score is back there is no goal ruled out and no second goal for Stevenage.
-    _score_of_the_match_at(rig, 1, 90, READING_3)
-    _score_of_the_match_at(rig, 1, 120, NOW)
+    _score_of_the_match_at(rig, 1, 120, READING_4)
+    _score_of_the_match_at(rig, 1, 150, NOW + 60)
     assert rig.said == []
+
+
+def test_a_goal_ruled_out_is_said_at_125_seconds_only(tmp_path):
+    # A lower score on readings at 0 s, 60 s, 105 s and 125 s, each seen on one or two looks 30 s apart: said on the
+    # fourth reading, which is the sixth look at the lower score, and on no look before it.
+    rig = Rig(tmp_path)
+    _score_of_the_match_at(rig, 1, -30, NOW - 300)
+    for step, (at, reading) in enumerate(((0, NOW - 200), (30, NOW - 200), (60, NOW - 140), (90, NOW - 140), (120, NOW - 95))):
+        _score_of_the_match_at(rig, 0, at, reading)
+        assert rig.said == [], step
+    _score_of_the_match_at(rig, 0, 150, NOW - 75)
+    assert rig.said == ["Goal ruled out. Notts County 1, Stevenage 0."]
+
+
+def test_a_restart_in_the_middle_of_the_wait_keeps_counting_from_the_first_reading(tmp_path):
+    rig = Rig(tmp_path)
+    _score_of_the_match_at(rig, 1, 0, READING_1 - 30)
+    _score_of_the_match_at(rig, 0, 30, READING_1)
+    assert rig.said == []
+    # A new watcher on the same file, as after a restart: the lower score is held from READING_1, not from here.
+    restarted = Rig(tmp_path)
+    _score_of_the_match_at(restarted, 0, 60, READING_2)
+    assert restarted.said == []
+    _score_of_the_match_at(restarted, 0, 90, READING_3)
+    assert restarted.said == ["Goal ruled out. Notts County 1, Stevenage 0."]
+    _score_of_the_match_at(restarted, 0, 120, READING_3)
+    _score_of_the_match_at(restarted, 0, 150, READING_4)
+    assert restarted.said == ["Goal ruled out. Notts County 1, Stevenage 0."] and rig.said == []
 
 
 def test_a_goal_is_not_ruled_out_on_a_reading_with_no_report_time(tmp_path):
@@ -804,6 +1010,39 @@ def test_a_goal_is_not_ruled_out_on_a_reading_with_no_report_time(tmp_path):
     for step, away_score in enumerate((1, 0, 0, 0)):
         _score_of_the_match_at(rig, away_score, 30 * step, None)
     assert rig.said == []
+
+
+def test_a_goal_ruled_out_just_before_full_time_is_said_once_and_before_full_time(tmp_path):
+    rig = Rig(tmp_path)
+    _score_of_the_match_at(rig, 1, 0, READING_1)
+    # The lower score at 89 minutes waits; the same reading seen again on the next look says nothing.
+    _score_of_the_match_at(rig, 0, 30, READING_2)
+    _score_of_the_match_at(rig, 0, 60, READING_2)
+    assert rig.said == []
+    # The reading a minute on is full time, which confirms it where the two minutes have not yet passed.
+    full_time = _team("285", "Stevenage", now=_match("post", "full_time", 1, 0, winner="home"))
+    rig.look(full_time, at=NOW + 90, reported=READING_3)
+    assert rig.said == ["Goal ruled out. Notts County 1, Stevenage 0.", "Full time. Notts County 1, Stevenage 0."]
+    rig.look(full_time, at=NOW + 120, reported=READING_3)
+    rig.look(full_time, at=NOW + 150, reported=READING_4)
+    assert len(rig.said) == 2
+    assert (rig.choices.seen("401")["home"], rig.choices.seen("401")["away"], rig.choices.seen("401")["waiting"]) == (1, 0, None)
+
+
+def test_full_time_with_the_goal_back_says_no_goal_ruled_out(tmp_path):
+    rig = Rig(tmp_path)
+    _score_of_the_match_at(rig, 1, 0, READING_1)
+    _score_of_the_match_at(rig, 0, 30, READING_2)
+    rig.look(_team("285", "Stevenage", now=_match("post", "full_time", 1, 1)), at=NOW + 60, reported=READING_3)
+    assert rig.said == ["Full time. Notts County 1, Stevenage 1."]
+
+
+def test_full_time_after_a_lower_score_on_a_reading_with_no_report_time_says_nothing_of_it(tmp_path):
+    rig = Rig(tmp_path)
+    _score_of_the_match_at(rig, 1, 0, None)
+    _score_of_the_match_at(rig, 0, 30, None)
+    rig.look(_team("285", "Stevenage", now=_match("post", "full_time", 1, 0, winner="home")), at=NOW + 60, reported=None)
+    assert rig.said == ["Full time. Notts County 1, Stevenage 0."]
 
 
 def test_a_record_of_the_old_shape_in_the_file_is_taken_as_a_match_never_seen(tmp_path):

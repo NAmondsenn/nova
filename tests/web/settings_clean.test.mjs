@@ -1,5 +1,5 @@
 // The settings page's Clean songs block - see voice_assistant/web/settings.js and
-// docs/decisions/0019.
+// docs/decisions/0022.
 //
 // The page's own script is run in a context of its own, over a small stand-in for the
 // page: just enough of the DOM for what the block draws, and a fetch which keeps what was

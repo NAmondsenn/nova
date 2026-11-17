@@ -1,4 +1,4 @@
-"""Tests for the rules which judge a song clean or explicit from how many of its lyric swears are heard (decision 0019)."""
+"""Tests for the rules which judge a song clean or explicit from how many of its lyric swears are heard (decision 0022)."""
 
 import logging
 
@@ -98,7 +98,7 @@ def test_shares_the_wrong_way_round_take_both_defaults_with_a_warning(shares, ca
 
 
 def test_the_module_names_its_section_of_the_decision():
-    assert "section 1 of decision 0019" in clean_ear.__doc__
+    assert "section 1 of decision 0022" in clean_ear.__doc__
 
 
 def test_the_thresholds_are_those_the_judging_uses():

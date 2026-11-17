@@ -1,6 +1,6 @@
 """
 Lyrics Test
-Checks where a song's lyrics are found for listening to it (decision 0019): Navidrome
+Checks where a song's lyrics are found for listening to it (decision 0022): Navidrome
 first, then LRCLIB's search. Fakes stand in for both, so nothing is ever sent to either.
 """
 

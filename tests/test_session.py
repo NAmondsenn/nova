@@ -254,7 +254,7 @@ def brain(tmp_path, monkeypatch, make_config):
     return SimpleNamespace(config=config, clock=Clock(config=config, start=False), memory=None,
                            routines=Routines(path=str(tmp_path / "routines.json")), ntfy=None, weather=None,
                            batteries=None, lists=None, pc=None, registry=None, calendar=None, media=None,
-                           downloads=None, football=None, listening=None, wrapped_store=None, usage=None,
+                           downloads=None, football=None, listening=None, wrapped_store=None, usage=None, new_music_playlist=None,
                            tts=FakePiper(), stt=FakeSpeechToText(), sounds_folder=Path(paths.SOUNDS_DIR))
 
 
@@ -1875,6 +1875,11 @@ def test_a_sessions_actions_download_through_the_brain(brain, make_session):
     # One for the brain, so the same thing asked for on two satellites is requested once.
     brain.downloads = object()
     assert make_session().actions.downloads is brain.downloads
+
+
+def test_a_sessions_actions_read_the_settings_as_they_are_then(brain, make_session):
+    # So "find me something new" plays the playlist the settings page names at the time.
+    assert make_session().actions.config is brain.config
 
 
 def test_a_sessions_claude_records_into_the_brains_usage_log(brain, make_session):

@@ -1,7 +1,7 @@
 """
 Clean Store Module
 What Nova has heard of each song, the lists the settings page shows, the swaps in progress and
-the library check's progress, kept in one JSON file in the data folder (decision 0019,
+the library check's progress, kept in one JSON file in the data folder (decision 0022,
 sections 4 and 5).
 
 A swap's saved state says which file was moved where, so a restart can carry it on or put the

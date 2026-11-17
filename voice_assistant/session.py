@@ -228,7 +228,8 @@ class Session:
                                       ntfy=brain.ntfy, satellite=satellite.name, batteries=brain.batteries,
                                       lists=brain.lists, pc=brain.pc, calendar=brain.calendar,
                                       downloads=brain.downloads, football=brain.football,
-                                      listening=brain.listening, wrapped=brain.wrapped_store)
+                                      listening=brain.listening, wrapped=brain.wrapped_store, config=config,
+                                      new_music=brain.new_music_playlist)
 
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.

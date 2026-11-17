@@ -1,6 +1,6 @@
 """
 Listener Test
-Checks the worker a song is listened to in (decision 0019, section 2): how it's started,
+Checks the worker a song is listened to in (decision 0022, section 2): how it's started,
 spoken to, restarted after a failure and closed. Small fake workers written into tmp_path
 stand in for it, so the real model is never loaded.
 """

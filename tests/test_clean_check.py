@@ -1,6 +1,6 @@
 """
 Clean Check Test
-Checks the library check (decision 0019, section 5): which songs it hears, that it swaps the
+Checks the library check (decision 0022, section 5): which songs it hears, that it swaps the
 clean ones quietly, that it saves its progress after each song and carries on after a restart,
 that it stops after the song it's on, and that a download's hearing goes first - with fakes in
 place of Navidrome, the Ears and the Swapper, and the store and music folder in the test's own

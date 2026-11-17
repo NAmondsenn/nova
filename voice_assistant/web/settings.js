@@ -49,7 +49,7 @@ const FOOTBALL_SWITCHES = [
 
 // How the library check for clean songs is going. A song takes about half a minute to
 // hear, with no GPU, so every ten seconds shows each one it's on while a check runs; with
-// none running, once a minute is enough to see a download's swap listed. See docs/decisions/0019.
+// none running, once a minute is enough to see a download's swap listed. See docs/decisions/0022.
 const CLEAN_RUNNING_EVERY = 10000;
 const CLEAN_EVERY = 60000;
 
@@ -142,7 +142,7 @@ const VOLUMES = {
 // The settings, grouped by what they're for. One that's under none of these goes
 // under Other, so a new setting turns up on the page without it changing.
 const GROUPS = [
-  ["Music", ["music.", "navidrome.", "soulsync.", "spotify.", "clean_check."]],
+  ["Music", ["music.", "navidrome.", "soulsync.", "spotify.", "clean_check.", "new_music."]],
   ["Wrapped", ["wrapped."]],
   ["Football", ["football."]],
   ["Voice", ["voice."]],

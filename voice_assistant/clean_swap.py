@@ -1,7 +1,7 @@
 """
 Clean Swap Module
 Hears a song against its lyrics to judge it clean or explicit (Ears), and swaps a clean copy
-for an explicit one (Swapper), for a download and for the library check - decision 0019,
+for an explicit one (Swapper), for a download and for the library check - decision 0022,
 sections 1 to 4.
 
 Ears fetches what it needs from Navidrome - the file's size and time, the lyrics, the sound -

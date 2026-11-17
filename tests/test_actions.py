@@ -1032,7 +1032,7 @@ def test_home_status_is_only_offered_with_home_assistant():
     assert "home_status" not in offered(ActionExecutor())
     assert ActionExecutor().execute(Action("home_status", {"about": "sunset"})).say == "Home Assistant isn't set up yet."
     # These are the tools whose answers go back to Claude rather than being said.
-    assert ActionExecutor().read_tools() == ["downloads_waiting", "home_status", "get_football", "get_listening",
+    assert ActionExecutor().read_tools() == ["downloads_waiting", "whats_new", "home_status", "get_football", "get_listening",
                                             "get_wrapped"]
 
 
@@ -1086,11 +1086,12 @@ def test_get_football_offers_what_happened_in_a_match():
     assert ("'match' for who scored or what happened in a team's match - its goals, penalties, red cards and ESPN's notes"
             in properties["about"]["description"])
     # It is asked with the team named, even one of the user's own; with none, it is the followed team whose match is in
-    # play, else over, on the day, which is the date (today when none is given): not the line-ups' way, which is the
-    # match about to start.
+    # play, else over, on the day, which is the date (today when none is given), or with no date the one just played:
+    # not the line-ups' way, which is the match about to start. A day asked about, last night's too, goes in date.
     assert ("'match' is asked with the team named too; with neither a team nor a competition it is the followed team "
             "whose match is in play, else the one whose match is over, on the day (today when no date is given), "
-            "with the day in date if one was asked about") in properties["about"]["description"]
+            "or with no date the one just played (last night's, until the next morning), "
+            "with the day in date if one was asked about, last night's included.") in properties["about"]["description"]
     assert "asked the same way" not in properties["about"]["description"]
     assert "the day of a team's match" in properties["date"]["description"]
     # A round-up of a competition on a day is its matches with a date, not a team's match.
@@ -1106,6 +1107,18 @@ def test_get_football_offers_what_happened_in_a_match():
     assert "'who scored for Stevenage?'" in description
     # What round two added stays.
     assert "line-ups" in description and "never from memory" in description
+
+
+def test_get_football_asks_for_a_competition_as_it_is_properly_called():
+    schema = {tool["name"]: tool for tool in ActionExecutor(football=SimpleNamespace(names=list)).tool_schemas()}["get_football"]
+    description = schema["description"]
+    # ESPN calls the EFL Cup the Carabao Cup and the European Championship "EURO": Claude is to name one as it is properly
+    # called where it knows it, as Nova keeps no list of competitions to put it right.
+    assert ("Name a competition as it is properly called where you know it, such as the Carabao Cup for the EFL Cup."
+            in description)
+    # It stays with what the tool says of the team or competition asked about, which is where a name is given.
+    assert description.index("Name a competition as it is properly called") > description.index("Give the team or the competition asked about")
+    assert "putting right a name that was clearly misheard" in description
 
 
 def test_get_football_hands_everything_it_was_given_to_the_words(monkeypatch):
@@ -1748,3 +1761,201 @@ def test_get_listening_hands_what_it_was_given_to_the_words(monkeypatch):
     assert (result.ok, result.say) == (True, "A week of facts.")
     executor.execute(Action("get_listening", {}, from_model=True))
     assert given == [(listening, "month", "songs"), (listening, None, None)]
+
+
+# New music - see navidrome.NavidromeLibrary.newest_albums
+
+class FakePlaylistPlayer:
+    """Stands in for NavidromePlayer's play_playlist, with the playlists it's given - or whatever is said of one."""
+
+    name = "Navidrome"
+    needs_internet = False
+
+    def __init__(self, playlists=(), reply=None):
+        self.playlists = list(playlists)
+        self.reply = reply
+        self.played = []
+
+    def play_playlist(self, name, exact=False, playlist_id=None):
+        assert exact is True
+        self.played.append(name if playlist_id is None else (name, playlist_id))
+        if self.reply is not None:
+            return dict(self.reply)
+        if name in self.playlists:
+            return {"success": True, "message": f"Playing {name}"}
+        return {"success": False, "missing": True, "message": f"I couldn't find a playlist called {name}."}
+
+
+FIND_NEW = Action("find_new_music", from_model=True)
+
+
+def test_find_new_music_plays_setting(make_executor, make_config):
+    config = make_config(new_music={"playlist": "Discovery Shuffle"})
+    player = FakePlaylistPlayer(["Discovery Shuffle", "Fresh Finds"])
+    executor = make_executor(player, config=config)
+    result = executor.execute(FIND_NEW)
+    assert (result.ok, result.say) == (True, "Playing Discovery Shuffle")
+    # The setting is read at each call, so a change on the settings page is used straight away.
+    config.apply({("new_music", "playlist"): "Fresh Finds"})
+    assert executor.execute(FIND_NEW).say == "Playing Fresh Finds"
+    assert player.played == ["Discovery Shuffle", "Fresh Finds"]
+
+
+class FakeNewMusic:
+    """Stands in for NewMusicPlaylist's record of the playlist Nova made, by the name it was made under."""
+
+    def __init__(self, made):
+        self.made = made
+
+    def playlist_id(self, name):
+        return self.made.get(name)
+
+
+def test_find_new_music_plays_the_playlist_nova_made_by_its_id(make_executor, make_config):
+    config = make_config(new_music={"playlist": "New Music"})
+    player = FakePlaylistPlayer(["New Music"])
+    executor = make_executor(player, config=config, new_music=FakeNewMusic({"New Music": "pl7"}))
+    assert executor.execute(FIND_NEW).ok is True
+    # Under another name there is no record yet, so the exact name is asked for, as before.
+    config.apply({("new_music", "playlist"): "Fresh Finds"})
+    executor.execute(FIND_NEW)
+    assert player.played == [("New Music", "pl7"), "Fresh Finds"]
+
+
+def test_find_new_music_with_the_recorded_playlist_gone_says_it_isnt_made(make_executor, make_config):
+    config = make_config(new_music={"playlist": "New Music"})
+    # The player says it is missing as Navidrome's does, and an own playlist of the name isn't looked for.
+    player = FakePlaylistPlayer(reply={"success": False, "missing": True, "message": "I couldn't find it."})
+    result = make_executor(player, config=config, new_music=FakeNewMusic({"New Music": "pl7"})).execute(FIND_NEW)
+    assert (result.ok, result.say) == (
+        False, "Your new-music playlist isn't made yet; Nova makes it each morning from what's arrived.")
+    assert player.played == [("New Music", "pl7")]
+
+
+def test_find_new_music_is_offered_with_the_music_and_not_without(make_executor, make_config):
+    config = make_config(new_music={"playlist": "Discovery Shuffle"})
+    offered = {schema["name"]: schema for schema in make_executor(FakePlaylistPlayer(), config=config).tool_schemas()}
+    assert offered["find_new_music"]["input_schema"]["required"] == []
+    assert "something new" in offered["find_new_music"]["description"]
+    assert "find_new_music" not in {schema["name"] for schema in make_executor(config=config).tool_schemas()}
+    assert make_executor(config=config).execute(FIND_NEW).say == "The music isn't available right now."
+
+
+def test_new_music_playlist_missing(make_executor, make_config):
+    config = make_config(new_music={"playlist": "Discovery Shuffle"})
+    result = make_executor(FakePlaylistPlayer(), config=config).execute(FIND_NEW)
+    assert (result.ok, result.say) == (
+        False, "Your new-music playlist isn't made yet; Nova makes it each morning from what's arrived.")
+
+
+def test_new_music_playlist_not_found_is_only_said_when_navidrome_answered(make_executor, make_config):
+    # A Navidrome which couldn't be asked says so itself, rather than that the playlist isn't there.
+    config = make_config(new_music={"playlist": "Discovery Shuffle"})
+    player = FakePlaylistPlayer(reply={"success": False, "message": "I can't reach Navidrome right now."})
+    assert make_executor(player, config=config).execute(FIND_NEW).say == "I can't reach Navidrome right now."
+
+
+def test_find_new_music_spotify_player(make_executor, make_config):
+    config = make_config(new_music={"playlist": "Discovery Shuffle"})
+    spotify = FakeSpotify(playing=False)
+    spotify.play_playlist = lambda name: spotify.calls.append(("play_playlist", name))
+    result = make_executor(spotify, config=config).execute(FIND_NEW)
+    assert result.ok is False
+    assert result.say == "New music plays from Navidrome, and Spotify is your music player right now."
+    assert spotify.calls == []
+
+
+def test_find_new_music_with_no_playlist_set(make_executor, make_config):
+    player = FakePlaylistPlayer(["Discovery Shuffle"])
+    for config in (make_config(new_music={"playlist": "  "}), make_config(), None):
+        result = make_executor(player, config=config).execute(FIND_NEW)
+        assert (result.ok, result.say) == (False, "No new-music playlist is set. It goes in Settings, under Music.")
+    assert player.played == []
+
+
+class FakeNewestLibrary:
+    """Stands in for NavidromeLibrary's newest_albums, noting the time it was asked from."""
+
+    def __init__(self, albums=(), error=None, whole=True):
+        self.albums = list(albums)
+        self.error = error
+        self.whole = whole
+        self.asked = []
+
+    def newest_albums(self, since):
+        self.asked.append(since)
+        if self.error:
+            raise self.error
+        return list(self.albums), self.whole
+
+
+def _whats_new(make_executor, library, days=None, now=1_800_000_000.0, monkeypatch=None):
+    from voice_assistant import actions as actions_module
+    monkeypatch.setattr(actions_module.time, "time", lambda: now)
+    executor = make_executor(downloads=SimpleNamespace(library=lambda: library))
+    return executor.execute(Action("whats_new", {} if days is None else {"days": days}, from_model=True))
+
+
+def album(artist, songs, name="An Album"):
+    return {"name": name, "artist": artist, "songCount": songs}
+
+
+def test_whats_new_counts_and_names(make_executor, monkeypatch):
+    library = FakeNewestLibrary([album("Band A", 10), album("Band B", 4), album("Band A", 8), album("Band C", 12),
+                                 album("Band D", 1), album("Band E", 2), album("Band F", 3)])
+    result = _whats_new(make_executor, library, monkeypatch=monkeypatch)
+    assert result.ok
+    # 7 albums, 40 songs, and the five artists with the most songs, most first.
+    assert result.say == ("7 albums and 40 songs have come into your library in the last 7 days. "
+                          "Most songs: Band A, Band C, Band B, Band F and Band E.")
+    # The last seven days, as seconds before now.
+    assert library.asked == [1_800_000_000.0 - 7 * 86400]
+
+
+def test_whats_new_says_one_album_in_the_singular(make_executor, monkeypatch):
+    result = _whats_new(make_executor, FakeNewestLibrary([album("Band A", 1)]), days=1, monkeypatch=monkeypatch)
+    # Two things counted together have come, however few of each.
+    assert result.say == "1 album and 1 song have come into your library in the last day. Most songs: Band A."
+
+
+def test_whats_new_says_at_least_when_there_were_more_than_were_read(make_executor, monkeypatch):
+    library = FakeNewestLibrary([album("Band A", 10), album("Band B", 4)], whole=False)
+    result = _whats_new(make_executor, library, days=31, monkeypatch=monkeypatch)
+    assert result.say == ("At least 2 albums and 14 songs have come into your library in the last 31 days. "
+                          "Most songs: Band A and Band B.")
+
+
+def test_whats_new_none(make_executor, monkeypatch):
+    result = _whats_new(make_executor, FakeNewestLibrary(), monkeypatch=monkeypatch)
+    assert (result.ok, result.say) == (True, "Nothing new has come into your library in the last 7 days.")
+
+
+@pytest.mark.parametrize("asked, used", [(1, 1), (31, 31), (0, 1), (-3, 1), (45, 31), ("3", 3), ("lots", 7), (None, 7),
+                                         (2.0, 2)])
+def test_whats_new_days_bounds(make_executor, monkeypatch, asked, used):
+    library = FakeNewestLibrary()
+    executor_days = {} if asked is None else {"days": asked}
+    from voice_assistant import actions as actions_module
+    monkeypatch.setattr(actions_module.time, "time", lambda: 1_800_000_000.0)
+    make_executor(downloads=SimpleNamespace(library=lambda: library)).execute(
+        Action("whats_new", executor_days, from_model=True))
+    assert library.asked == [1_800_000_000.0 - used * 86400]
+
+
+def test_whats_new_is_read_by_claude_and_needs_downloads(make_executor):
+    executor = make_executor(downloads=SimpleNamespace(library=lambda: None))
+    schema = {schema["name"]: schema for schema in executor.tool_schemas()}["whats_new"]
+    assert "whats_new" in executor.read_tools()
+    assert "this week" in schema["description"]
+    assert schema["input_schema"]["required"] == []
+    assert "whats_new" not in {schema["name"] for schema in make_executor().tool_schemas()}
+    assert make_executor().execute(Action("whats_new")).say == "Downloading music isn't set up."
+
+
+def test_whats_new_when_navidrome_isnt_set_up_or_cant_be_asked(make_executor, monkeypatch):
+    result = _whats_new(make_executor, None, monkeypatch=monkeypatch)
+    assert (result.ok, result.say) == (False, "Navidrome isn't set up yet.")
+    result = _whats_new(make_executor, FakeNewestLibrary(error=requests.ConnectionError("http://nd/rest/x?t=abc123token")),
+                        monkeypatch=monkeypatch)
+    assert (result.ok, result.say) == (False, "I can't reach Navidrome right now.")
+    assert "abc123token" not in result.say

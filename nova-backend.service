@@ -45,7 +45,7 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=__HOME__/.config/nova __HOME__/.local/share/nova
-# The music folder, where clean songs are set aside in .nova-held (decision 0019). The "-"
+# The music folder, where clean songs are set aside in .nova-held (decision 0022). The "-"
 # lets the brain start when the share isn't mounted. A different music folder needs its own
 # line, added with "systemctl edit nova-backend" so a re-install keeps it.
 ReadWritePaths=-/mnt/music

@@ -355,7 +355,7 @@ def test_a_song_is_requested_then_said_downloaded_once_navidrome_has_it(watching
     assert ears.heard == [("1", True)] and swapper.swaps == []
 
 
-# What landed, heard (decision 0019, section 3)
+# What landed, heard (decision 0022, section 3)
 
 def test_a_copy_named_clean_but_heard_explicit_is_downloaded(watching, clock, said, ears, swapper):
     # SoulSync's tagging calls explicit songs clean, so a name is never believed.
@@ -1556,3 +1556,12 @@ def test_the_offer_is_only_for_a_song_or_album_and_can_be_switched_off(watching,
     set_up.apply({("soulsync", "url"): ""})
     assert downloads.offer("Gooba by 6ix9ine", "track") is None
     assert _watches() == []
+
+
+def test_the_library_is_navidrome_as_set_up_now(set_up, make_config, said):
+    # For "what's new", which looks in Navidrome as a download does: a new one each time, from the settings then.
+    downloads = Downloads(set_up, lambda satellite, message: None)
+    first = downloads.library()
+    assert (first.url, first.username) == ("http://navidrome.local:4533", "nova")
+    assert downloads.library() is not first
+    assert Downloads(make_config(), lambda satellite, message: None).library() is None

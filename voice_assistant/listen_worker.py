@@ -1,7 +1,7 @@
 """
 Listen Worker Module.
 
-The process songs are listened to in, to judge them clean or explicit (decision 0019,
+The process songs are listened to in, to judge them clean or explicit (decision 0022,
 section 2). Nova starts it through listener.Listener, at the lowest priority, with its own
 copy of Nemotron: a thread inside the brain couldn't be given a lower priority than the
 rest of it, and sharing the brain's own model would hold up what the user says to Nova.
@@ -29,7 +29,7 @@ from voice_assistant.nemotron import RATE, Nemotron
 def hear(model, samples: np.ndarray) -> str:
     """
     What's sung in a song, given to the model a second at a time from start to end - the
-    way the spike behind decision 0019's thresholds listened, so they hold.
+    way the spike behind decision 0022's thresholds listened, so they hold.
 
     Args:
         model: The Nemotron, or anything with its start, add and finish.

@@ -1,6 +1,6 @@
 """
 Clean Check Module
-The library check (decision 0019, section 5): every song in Navidrome heard against its lyrics,
+The library check (decision 0022, section 5): every song in Navidrome heard against its lyrics,
 one at a time, in the background, and each one heard clean swapped quietly for an explicit copy.
 
 Only songs which are new, or whose file has changed since they were last judged, are heard. A
