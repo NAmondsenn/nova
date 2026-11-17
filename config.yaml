@@ -332,8 +332,8 @@ clean_check:
   # How many more times Nova asks SoulSync for another version of a clean song, from 0 to 5.
   # See docs/decisions/0019.
   swap_tries: 2
-  # Where Navidrome's music is on this machine, so Nova can find a song's file. See
-  # docs/decisions/0019.
+  # Where Navidrome's music is on this machine, so Nova can find a song's file: a full path
+  # starting /, or empty for none. See docs/decisions/0019.
   music_folder: "/mnt/music"
   # The SoulSync profile Nova signs in as to take away a swapped song's old row: a second
   # profile with admin rights, made in SoulSync's own Settings. Its password goes under Keys on

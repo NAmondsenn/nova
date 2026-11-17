@@ -305,6 +305,9 @@ IN_AND_OUT = {
     ("clean_check", "lyric_minimum"): ([1, 3, 20], [0, 21, 3.5, True]),
     ("clean_check", "explicit_share"): ([0, 0.35, 1], [-0.1, 1.1, True]),
     ("clean_check", "clean_share"): ([0, 0.15, 1], [-0.1, 1.1, True]),
+    # Empty is no music folder, so nothing is swapped; a relative one would depend on where Nova started.
+    ("clean_check", "music_folder"): (["/mnt/music", "/srv/media/music", ""],
+                                      ["mnt/music", "music", "~/music", "/mnt/\0music", 5, None]),
 }
 
 
@@ -344,10 +347,11 @@ def test_the_repositorys_config_has_the_clean_check_settings(tmp_path):
     clean_check = Config(path=str(tmp_path / "none.yaml")).section("clean_check")
     assert clean_check == {"lyric_minimum": 3, "explicit_share": 0.35, "clean_share": 0.15, "swap_tries": 2,
                            "music_folder": "/mnt/music", "soulsync_admin": ""}
-    # Each setting with a limit is inside it, and the two with none (the folder, the profile) take any text.
+    # Each setting with a limit is inside it; the folder is any full path, and the profile any text.
     for name, value in clean_check.items():
         assert limit_problem("clean_check", name, value) is None, name
     assert limit_problem("clean_check", "music_folder", "/anywhere") is None
+    assert limit_problem("clean_check", "music_folder", "music") == "should be a folder's full path, starting /"
     assert limit_problem("clean_check", "soulsync_admin", "any name") is None
 
 

@@ -42,7 +42,7 @@ POSITIVE = {("batteries", "check_every"), ("batteries", "stale_after"),
 
 class Limit(NamedTuple):
     """What a setting may be: its form, and for a number, its range."""
-    form: str  # "number", "time", "address", "topic", "topics" or "host".
+    form: str  # "number", "time", "address", "topic", "topics", "host" or "path".
     low: Optional[float] = None
     high: Optional[float] = None
     whole: bool = False
@@ -108,11 +108,13 @@ LIMITS: Dict[Tuple[str, str], Limit] = {
     # Decision 0019. 0 tries is a clean song left as it is, and more than 5 would be asking SoulSync again
     # and again for a version which is not coming. A song with fewer than 1 swear has nothing to hear, and
     # past 20 hardly any song would be judged. A share is a part of the song's swears, so from 0 to 1.
-    # The music folder and the SoulSync profile are free text, and have no limit as Navidrome's user has none.
+    # The music folder is a full path, or empty for none: "music" would be wherever Nova happened to start.
+    # The SoulSync profile is free text, and has no limit, as Navidrome's user has none.
     ("clean_check", "swap_tries"): Limit("number", 0, 5, True),
     ("clean_check", "lyric_minimum"): Limit("number", 1, 20, True),
     ("clean_check", "explicit_share"): Limit("number", 0, 1),
     ("clean_check", "clean_share"): Limit("number", 0, 1),
+    ("clean_check", "music_folder"): Limit("path"),
 }
 
 _TIME = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
@@ -245,6 +247,9 @@ def limit_problem(section: str, name: str, value: Any) -> Optional[str]:
             isinstance(topic, str) and (_TOPIC.fullmatch(topic) or (limit.form == "topic" and topic == ""))
             for topic in topics)
         return None if ok else "should be an ntfy topic: letters, digits, hyphens and underscores"
+    if limit.form == "path":
+        ok = isinstance(value, str) and (value == "" or (os.path.isabs(value) and "\0" not in value))
+        return None if ok else "should be a folder's full path, starting /"
     ok = isinstance(value, str) and _HOST.fullmatch(value)
     return None if ok else "should be a host name or address, without http://"
 
