@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 import requests
 
-from voice_assistant import clean_swap
+from voice_assistant import clean_store, clean_swap
 from voice_assistant.clean_ear import Verdict
 from voice_assistant.clean_store import CleanStore
 from voice_assistant.clean_swap import Ears, Outcome, Swapper, listening_library
@@ -829,6 +829,29 @@ def test_a_swap_which_cant_be_saved_before_moving_moves_nothing(make_swapper, mu
 
     assert outcome == "couldnt" and outcome.reason == "Nova couldn't save the swap's progress"
     assert read(music, ENDLESS_REL) == b"clean endless" and not os.path.exists(os.path.join(music, HELD))
+
+
+def test_a_store_that_couldnt_be_read_moves_nothing(swap_config, music, tmp_path, monkeypatch):
+    # Its file may hold swaps with songs in .nova-held: nothing moves until it can be read.
+    path = tmp_path / "clean_songs.json"
+    path.write_text('{"swaps": []}')
+    def unreadable_file(*args, **kwargs):
+        raise PermissionError("Permission denied")
+    monkeypatch.setattr(clean_store.storage, "load_json", unreadable_file)
+    unreadable = CleanStore(str(path))
+    monkeypatch.undo()
+    clock = FakeTime()
+    library = FakeNavidrome(music, clock)
+    admin = FakeAdmin()
+    swapper = Swapper(swap_config, FakeEars(), lambda: MusicFolder(music), lambda: FakeSoulSync(music, clock),
+                      lambda: admin, lambda: library, unreadable, lambda satellite, message: None,
+                      now=clock.now, wait=clock.wait)
+
+    outcome = swapper.swap(_endless(library), ENDLESS_WANTED, None, quiet=True)
+
+    assert outcome == "couldnt" and outcome.reason == "Nova couldn't save the swap's progress"
+    assert read(music, ENDLESS_REL) == b"clean endless" and not os.path.exists(os.path.join(music, HELD))
+    assert admin.forgot == [] and path.read_text() == '{"swaps": []}'
 
 
 def test_a_swap_which_cant_be_saved_once_moved_carries_on(make_swapper, music, store, monkeypatch, caplog):

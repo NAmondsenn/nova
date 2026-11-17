@@ -229,7 +229,7 @@ def test_a_swap_without_a_key_is_refused(tmp_path):
 def test_the_checks_progress_survives_a_reload(tmp_path):
     path = str(tmp_path / "clean_songs.json")
     state = {"running": True, "done": 112, "total": 398, "current": "Gunna - Endless",
-             "queue": ["a", "b", "c"], "last_finished": "2026-11-15T20:00:00"}
+             "queue": ["a", "b", "c"], "last_finished": 1763236800.0}
     CleanStore(path).save_check(state)
 
     assert CleanStore(path).check() == state
@@ -344,7 +344,27 @@ def test_a_store_which_cant_be_saved_raises_and_keeps_its_state(tmp_path, monkey
     assert [s["key"] for s in CleanStore(path).swaps()] == ["a"]
 
 
-def test_an_unwritable_file_leaves_the_old_one_whole(tmp_path):
+def test_an_unwritable_file_leaves_the_old_one_whole(tmp_path, monkeypatch):
+    path = tmp_path / "clean_songs.json"
+    store = CleanStore(str(path))
+    store.save_swap(swap("a"))
+    before = path.read_text()
+
+    # The save itself fails part way, after the new file was begun beside the old one.
+    def disk_full(descriptor):
+        raise OSError("disk full")
+    monkeypatch.setattr(storage.os, "fsync", disk_full)
+
+    with pytest.raises(OSError):
+        store.save_check({"done": 3})
+
+    monkeypatch.undo()
+    assert path.read_text() == before
+    assert store.check() == {}
+    assert sorted(os.listdir(tmp_path)) == ["clean_songs.json"]
+
+
+def test_a_check_that_cant_be_made_json_leaves_the_old_file_whole(tmp_path):
     path = tmp_path / "clean_songs.json"
     store = CleanStore(str(path))
     store.save_swap(swap("a"))
@@ -353,9 +373,62 @@ def test_an_unwritable_file_leaves_the_old_one_whole(tmp_path):
     with pytest.raises(TypeError):
         store.save_check({"bad": object()})
 
+    assert path.read_text() == before and store.check() == {}
+
+
+def test_a_file_that_cant_be_read_is_neither_set_aside_nor_written_over(tmp_path, monkeypatch, caplog):
+    # Unreadable for a while (a permissions slip, a disk error), not corrupt: the swaps in it
+    # say where songs are held, so starting empty must never replace it.
+    path = tmp_path / "clean_songs.json"
+    path.write_text(json.dumps({"swaps": [swap("a")]}))
+    before = path.read_text()
+
+    def unreadable(*args, **kwargs):
+        raise PermissionError("Permission denied")
+    monkeypatch.setattr(clean_store.storage, "load_json", unreadable)
+
+    with caplog.at_level(logging.ERROR):
+        store = CleanStore(str(path))
+
+    assert store.swaps() == [] and "clean_songs.json" in caplog.text
+    with pytest.raises(OSError):
+        store.save_swap(swap("b"))
+    with pytest.raises(OSError):
+        store.add("swapped", "A")
     assert path.read_text() == before
-    assert store.check() == {}
     assert sorted(os.listdir(tmp_path)) == ["clean_songs.json"]
+
+
+def test_a_corrupt_file_that_cant_be_set_aside_isnt_written_over(tmp_path, monkeypatch):
+    path = tmp_path / "clean_songs.json"
+    path.write_text("{not json")
+
+    def refuse(*args, **kwargs):
+        raise OSError("read-only")
+    monkeypatch.setattr(clean_store.os, "rename", refuse)
+    store = CleanStore(str(path))
+
+    with pytest.raises(OSError):
+        store.add("swapped", "A")
+    assert path.read_text() == "{not json"
+
+
+def test_verdicts_and_check_fields_of_the_wrong_type_are_dropped_on_loading(tmp_path):
+    path = tmp_path / "clean_songs.json"
+    good = {"size": 1, "updated": UPDATED, "name": "A", "verdict": {"kind": "clean", "expected": 5, "heard": 0,
+                                                                     "reason": ""}}
+    path.write_text(json.dumps({
+        "verdicts": {"a": good, "b": "junk", "c": [1], "d": {"size": 1, "verdict": "clean"}},
+        "check": {"running": "yes", "paused": False, "done": "3", "total": 5, "current": 7, "queue": None,
+                  "last_finished": 1763000000.0, "error": None}}))
+
+    store = CleanStore(str(path))
+
+    assert store.verdict("a") == good
+    assert [store.verdict(key) for key in "bcd"] == [None, None, None]
+    assert not store.known("b", 1, UPDATED)
+    assert store.check() == {"paused": False, "total": 5, "queue": None, "last_finished": 1763000000.0,
+                             "error": None}
 
 
 def test_two_threads_adding_at_once_lose_nothing(tmp_path):

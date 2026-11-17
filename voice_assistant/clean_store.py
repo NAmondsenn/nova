@@ -31,6 +31,11 @@ KINDS = ("swapped", "only_clean", "unsure", "couldnt")
 # A list never grows past this; the oldest entries fall off the end.
 LIST_LIMIT = 200
 
+# The type each field of the check's saved progress must have; one that hasn't is left out,
+# so a hand-edited "done": "3" can't break the check.
+CHECK_TYPES = {"running": (bool,), "paused": (bool,), "done": (int,), "total": (int,), "current": (str, type(None)),
+               "queue": (list, type(None)), "last_finished": (int, float, type(None)), "error": (str, type(None))}
+
 
 class CleanStore:
     """
@@ -46,6 +51,9 @@ class CleanStore:
         """
         self.path = path
         self._lock = threading.RLock()
+        # Set when the file is there but couldn't be read or set aside: it may hold swaps with
+        # songs in .nova-held, so it's never written over, and nothing is saved until a restart.
+        self._no_saves = False
         self._state = self._load()
 
     def verdict(self, song_id: str) -> Optional[Dict]:
@@ -205,7 +213,14 @@ class CleanStore:
             self._keep("check", copy.deepcopy(state))
 
     def _keep(self, part: str, value: Any):
-        """Saves the whole file with one part changed, and only then keeps the change."""
+        """
+        Saves the whole file with one part changed, and only then keeps the change.
+
+        Raises:
+            OSError if it couldn't be saved, or the file couldn't be read as Nova started.
+        """
+        if self._no_saves:
+            raise OSError(f"{self.path} couldn't be read, so it isn't written over")
         new = dict(self._state)
         # Through JSON, so what is held is what a reload would give: a Held's sidecar
         # tuples are lists then, and should be before as well.
@@ -217,15 +232,23 @@ class CleanStore:
         """
         Returns:
             What the file holds, with each part of the right type: a part which isn't starts
-            empty with a warning. A file which can't be read, or isn't a dictionary, is set
-            aside and everything starts empty.
+            empty with a warning. A file which isn't JSON, or isn't a dictionary, is set aside
+            and everything starts empty. One which can't be read at all starts empty too, but
+            is left as it is and never saved over.
         """
         state = {"verdicts": {}, "lists": {kind: [] for kind in KINDS}, "swaps": [], "check": {}}
         try:
             saved = storage.load_json(self.path, {})
-        except (OSError, ValueError) as e:
+        except ValueError as e:
             logger.warning(f"Couldn't read {self.path}, starting empty: {e}")
             self._set_aside()
+            return state
+        except OSError as e:
+            # Not corrupt but unreadable for now, e.g. PermissionError: its swaps may be the only
+            # record of where songs are held, so it's left whole for the next start to read.
+            logger.error(f"Couldn't read {self.path} ({type(e).__name__}), so nothing is saved to it "
+                         f"until Nova restarts")
+            self._no_saves = True
             return state
         if not isinstance(saved, dict):
             logger.warning(f"{self.path} isn't a dictionary, starting empty")
@@ -238,6 +261,19 @@ class CleanStore:
                     state[part] = saved[part]
                 else:
                     logger.warning(f"{self.path} has a '{part}' which isn't a dictionary, so it starts empty")
+        # A verdict that isn't a dictionary, or whose verdict isn't, would break known() and the check.
+        verdicts = {song_id: record for song_id, record in state["verdicts"].items()
+                    if isinstance(record, dict) and isinstance(record.get("verdict", {}), dict)}
+        if len(verdicts) != len(state["verdicts"]):
+            logger.warning(f"{self.path} had {len(state['verdicts']) - len(verdicts)} unusable verdicts, left out")
+        state["verdicts"] = verdicts
+        check = {field: value for field, value in state["check"].items()
+                 if field not in CHECK_TYPES or (isinstance(value, CHECK_TYPES[field])
+                                                 and not (isinstance(value, bool) and bool not in CHECK_TYPES[field]))}
+        if len(check) != len(state["check"]):
+            logger.warning(f"{self.path} had check fields of the wrong type, left out: "
+                           f"{sorted(set(state['check']) - set(check))}")
+        state["check"] = check
         if "lists" in saved:
             if isinstance(saved["lists"], dict):
                 for kind in KINDS:
@@ -263,7 +299,7 @@ class CleanStore:
         """
         Renames an unreadable file to clean_songs.json.bad, or .bad.1, .bad.2 and so on if one is
         already there, so a file is never overwritten and can still be looked at. If it can't be
-        renamed it is left, and the next save replaces it.
+        renamed it is left, and nothing is saved over it until a restart.
         """
         target = self.path + ".bad"
         number = 0
@@ -273,7 +309,8 @@ class CleanStore:
         try:
             os.rename(self.path, target)
         except OSError as e:
-            logger.warning(f"Couldn't set {self.path} aside: {e}")
+            logger.error(f"Couldn't set {self.path} aside, so nothing is saved to it until Nova restarts: {e}")
+            self._no_saves = True
         else:
             logger.warning(f"Kept the unreadable file as {target}")
 
