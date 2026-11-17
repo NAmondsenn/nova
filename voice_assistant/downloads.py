@@ -106,6 +106,12 @@ NAVIDROME_ERRORS = (requests.RequestException, NavidromeError, ValueError)
 # decision 0022, section 3. A clean copy is never called downloaded.
 UNSURE = "{name} has been downloaded, but I couldn't tell if it's the clean version."
 NOT_CHECKED = "{name} has been downloaded, but I couldn't check it for a clean version."
+# What's said of a song whose swap ended with the new copy set aside and the clean original put
+# back: it isn't "downloaded", as what's in the library is what was there before.
+UNSURE_BACK = ("{name} came down again, but not plainly explicit, so you've still got the clean version. "
+               "The new copy is set aside.")
+NOT_CHECKED_BACK = ("{name} came down again, but I couldn't check the new copy, so you've still got the clean "
+                    "version. The new copy is set aside.")
 # Why an album's clean tracks couldn't be swapped, when every try for each came down clean.
 ONLY_CLEAN = "SoulSync only brought clean copies"
 
@@ -115,14 +121,30 @@ def song_limit(config) -> float:
     return float(config.section("music").get("song_download_minutes", SONG_MINUTES)) * 60
 
 
+def _set_aside(outcome: str) -> bool:
+    """
+    Whether an outcome is a swap's whose new copy was set aside, the original put back: an
+    Outcome, which has a reason, of "unsure" or "not_judged". A plain "unsure" or "not_judged" is
+    the verdict of a copy heard on landing, before any swap, and is kept as it came.
+    """
+    return outcome in ("unsure", "not_judged") and hasattr(outcome, "reason")
+
+
+def _kind(outcome: str) -> str:
+    """An outcome as an album counts it: a set-aside "unsure" or "not_judged" is counted apart."""
+    return f"{outcome}_back" if _set_aside(outcome) else str(outcome)
+
+
 def swap_said(name: str, outcome: str, reason: Optional[str] = None) -> str:
     """
-    What's said of a song which landed clean, once its swap is over (clean_swap.Swapper).
+    What's said of a song which landed clean, once its swap is over (clean_swap.Swapper), or
+    which was heard unsure or not judged on landing.
 
     Args:
         name: The song as it's named in what's said, e.g. "endless by Gunna".
-        outcome: How the swap ended - "swapped", "only_clean", "unsure", "not_judged", or
-            "couldnt" with its reason.
+        outcome: How the swap ended - "swapped", "only_clean", "unsure" or "not_judged" (the new
+            copy set aside, the original put back), or "couldnt" with its reason - or, a plain
+            word, how a copy heard on landing was judged: "unsure" or "not_judged", kept.
         reason: Why it couldn't be swapped, in place of the outcome's own.
 
     Returns:
@@ -133,10 +155,10 @@ def swap_said(name: str, outcome: str, reason: Optional[str] = None) -> str:
         return f"{name} has been downloaded."
     if outcome == "only_clean":
         return f"{name} only came down clean, so I've kept it."
-    if outcome == "unsure":
-        return UNSURE.format(name=name)
-    if outcome == "not_judged":
-        return NOT_CHECKED.format(name=name)
+    if outcome in ("unsure", "not_judged"):
+        if _set_aside(outcome):
+            return (UNSURE_BACK if outcome == "unsure" else NOT_CHECKED_BACK).format(name=name)
+        return (UNSURE if outcome == "unsure" else NOT_CHECKED).format(name=name)
     # The reason may be SoulSync's own sentence, with its full stop.
     reason = (reason or getattr(outcome, "reason", "") or "").strip().rstrip(".")
     return (f"{name} has been downloaded, but it's the clean version, and I couldn't swap it"
@@ -346,12 +368,13 @@ def _album_said(lead: str, outcomes: Counter, already_had: bool = False) -> str:
     Args:
         lead: "X has been downloaded." or "Only N of the M tracks of X came down."
         outcomes: How many tracks ended each way - "downloaded", "swapped", "only_clean",
-            "couldnt", "unsure" or "not_judged".
+            "couldnt", "unsure" or "not_judged" (heard on landing and kept), or "unsure_back" or
+            "not_judged_back" (the new copy of a swap set aside, the clean original put back).
         already_had: Whether the clean tracks were Navidrome's already, swapped on a yes to
             the explicit album, when they "are" clean rather than "came down" clean.
     """
     said = [lead]
-    for kind in ("swapped", "only_clean", "couldnt", "unsure", "not_judged"):
+    for kind in ("swapped", "only_clean", "couldnt", "unsure", "not_judged", "unsure_back", "not_judged_back"):
         count = outcomes.get(kind, 0)
         if not count:
             continue
@@ -368,9 +391,15 @@ def _album_said(lead: str, outcomes: Counter, already_had: bool = False) -> str:
         elif kind == "unsure":
             said.append(f"I couldn't tell if {_of_its_tracks(count, False)} "
                         f"{'is the clean version' if one else 'are clean versions'}.")
-        else:
+        elif kind == "not_judged":
             said.append(f"I couldn't check {_of_its_tracks(count, False)} for "
                         f"{'a clean version' if one else 'clean versions'}.")
+        else:
+            # The new copy was set aside and the clean one put back: nothing came down as explicit.
+            still = "it's still the clean version" if one else "they're still the clean versions"
+            said.append(f"{_of_its_tracks(count, True)} came down again"
+                        + (f" but not plainly explicit, so {still}." if kind == "unsure_back"
+                           else f", but I couldn't check {it}, so {still}."))
     return " ".join(said)
 
 
@@ -1043,7 +1072,7 @@ class Downloads:
             outcome = self._heard_track([track], satellite)
             if outcome == "stopped":
                 return ""
-            outcomes[outcome] += 1
+            outcomes[_kind(outcome)] += 1
             if outcome == "couldnt":
                 reasons.append((getattr(outcome, "reason", "") or "swapping isn't set up").strip().rstrip("."))
         # "Downloaded" only once something was: with nothing swapped, the library is as
@@ -1076,7 +1105,7 @@ class Downloads:
             outcome = self._heard_track(copies, satellite)
             if outcome == "stopped":
                 return ""
-            outcomes[outcome] += 1
+            outcomes[_kind(outcome)] += 1
         return _album_said(lead, outcomes)
 
     def _heard_track(self, copies: List[Dict], satellite: Optional[str]) -> str:

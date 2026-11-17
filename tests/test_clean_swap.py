@@ -21,7 +21,7 @@ from voice_assistant.clean_store import CleanStore
 from voice_assistant.clean_swap import Ears, Outcome, Swapper, listening_library
 from voice_assistant.downloads import Wanted, swap_said
 from voice_assistant.listener import ListenError
-from voice_assistant.music_folder import HELD, MusicFolder
+from voice_assistant.music_folder import HELD, MusicFolder, MusicFolderError
 from voice_assistant.navidrome import NavidromeError, NavidromeLibrary
 from voice_assistant.soulsync import (ADMIN_REFUSED, KEY_REFUSED, NOT_FORGOTTEN, NOT_FOUND, SongRequest,
                                       SoulSyncError)
@@ -748,7 +748,7 @@ SECOND_HELD = f"{HELD}/Gunna/The Last Wun/endless (2).mp3"
 THIRD_HELD = f"{HELD}/Gunna/The Last Wun/endless (3).mp3"
 
 
-@pytest.mark.parametrize("kind, listed", [("unsure", None), ("not_judged", "couldnt")])
+@pytest.mark.parametrize("kind, listed", [("unsure", "unsure"), ("not_judged", "couldnt")])
 def test_a_new_copy_not_heard_explicit_is_set_aside_and_the_original_put_back(make_swapper, music, store, kind,
                                                                            listed):
     swapper = make_swapper(ears=FakeEars([kind]))
@@ -767,13 +767,15 @@ def test_a_new_copy_not_heard_explicit_is_set_aside_and_the_original_put_back(ma
     assert len(fakes.soulsync.requested) == 1 and store.swaps() == []
     # Navidrome is asked to scan, to list the original again.
     assert len(fakes.library.scans) >= 2
-    if listed:
+    # Listed with the original's id, and the ids of the copies set aside, so the library check doesn't swap
+    # the song again every night (it skips them for thirty days).
+    [entry] = store.listed(listed)
+    assert entry["song_id"] == f"id-{ENDLESS_REL}" and entry["kept"] == [f"id-{ENDLESS_REL}"] and entry["at"] == AT
+    if kind == "not_judged":
         assert outcome.reason == "listening took too long"
-        assert store.listed(listed)[0]["reason"] == "couldn't check the copy SoulSync brought: listening took too long"
-        assert store.listed(listed)[0]["at"] == AT
+        assert entry["reason"] == "couldn't check the copy SoulSync brought: listening took too long"
     else:
-        # Ears lists an unsure copy as it hears it; the swap doesn't list it a second time.
-        assert outcome.reason == "heard 2 of its 10 swears" and store.listed("unsure") == []
+        assert outcome.reason == "heard 2 of its 10 swears" and entry["reason"] == outcome.reason
 
 
 def test_an_unsure_new_copy_after_a_clean_one_puts_the_original_back_and_keeps_the_clean_copy_held(
@@ -808,8 +810,9 @@ def test_every_new_copy_a_try_brought_is_set_aside_when_none_is_explicit(make_sw
     assert store.swaps() == []
 
 
-def test_an_explicit_new_copy_is_still_swapped_in(make_swapper, music, store):
-    swapper = make_swapper(ears=FakeEars(["too_few"]))
+@pytest.mark.parametrize("kind", ["explicit", "too_few"])
+def test_an_explicit_new_copy_is_still_swapped_in(make_swapper, music, store, kind):
+    swapper = make_swapper(ears=FakeEars([kind]))
     swapper.fakes.soulsync.lands = [(30, ENDLESS_REL, b"new endless")]
 
     outcome = swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True)
@@ -892,6 +895,122 @@ def test_an_original_which_cant_be_put_back_keeps_the_swap_and_is_put_back_at_th
     assert again.said == []
 
 
+def test_two_rejected_copies_are_all_listed_for_the_library_check(make_swapper, music, store):
+    swapper = make_swapper(ears=FakeEars(["unsure"]))
+    other = "Gunna/The Last Wun/endless 2.mp3"
+    swapper.fakes.soulsync.lands = [[(30, ENDLESS_REL, b"unsure a"), (30, other, b"unsure b")]]
+
+    swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    assert sorted(store.listed("unsure")[0]["kept"]) == sorted([f"id-{ENDLESS_REL}", f"id-{other}"])
+
+
+@pytest.mark.parametrize("ears, lands", [(["explicit"], [(30, ENDLESS_REL, b"explicit endless")]),
+                                         (["clean"], [(30, ENDLESS_REL, b"clean try")] * 3),
+                                         (["unsure"], [(30, ENDLESS_REL, b"unsure endless")])])
+def test_a_songs_earlier_couldnt_entry_goes_when_its_swap_finally_ends(make_swapper, music, store, ears, lands):
+    # A put-back which failed was listed at once; the entry mustn't stay once the swap has ended another way.
+    swapper = make_swapper(ears=FakeEars(ears))
+    swapper.fakes.soulsync.lands = list(lands)
+    store.add("couldnt", "Gunna - endless", "it couldn't be put back", song_id=f"id-{ENDLESS_REL}")
+    store.add("couldnt", "Other", "why", song_id="other-id")
+
+    outcome = swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    assert outcome != "couldnt"
+    assert [entry["name"] for entry in store.listed("couldnt")] == ["Other"]
+
+
+def test_a_rejected_copy_which_cant_be_set_aside_puts_the_original_back_when_its_path_is_free(
+        make_swapper, music, store, monkeypatch):
+    swapper = make_swapper(ears=FakeEars(["unsure"]))
+    first, second = "Gunna/The Last Wun/endless 2.mp3", "Gunna/The Last Wun/endless 3.mp3"
+    swapper.fakes.soulsync.lands = [[(30, first, b"unsure a"), (30, second, b"unsure b")]]
+    real = MusicFolder.set_aside
+
+    def set_aside(self, rel):
+        if rel == second:
+            raise MusicFolderError("couldn't move the song: disk trouble")
+        return real(self, rel)
+
+    monkeypatch.setattr(MusicFolder, "set_aside", set_aside)
+
+    outcome = swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    # The first copy is held and the original's path is free, so the original goes back; the other copy
+    # stays in the library, and both are listed for the library check.
+    assert outcome == "couldnt" and outcome.reason == "couldn't move the song: disk trouble"
+    assert read(music, ENDLESS_REL) == b"clean endless" and read(music, f"{HELD}/{first}") == b"unsure a"
+    assert read(music, second) == b"unsure b" and store.swaps() == []
+    assert sorted(store.listed("couldnt")[0]["kept"]) == sorted([f"id-{first}", f"id-{second}"])
+
+
+def test_a_rejected_copy_which_cant_be_set_aside_keeps_both_when_a_new_file_is_in_the_originals_place(
+        make_swapper, music, store, monkeypatch):
+    swapper = make_swapper(ears=FakeEars(["unsure"]))
+    swapper.fakes.soulsync.lands = [(30, ENDLESS_REL, b"unsure a")]
+    real = MusicFolder.set_aside
+    calls = []
+
+    def set_aside(self, rel):
+        calls.append(rel)
+        if len(calls) == 2:
+            raise MusicFolderError("couldn't move the song: disk trouble")
+        return real(self, rel)
+
+    monkeypatch.setattr(MusicFolder, "set_aside", set_aside)
+
+    outcome = swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    assert outcome == "couldnt" and "a new file is where it was, so both are kept" in outcome.reason
+    assert read(music, ENDLESS_REL) == b"unsure a" and read(music, f"{HELD}/{ENDLESS_REL}") == b"clean endless"
+    assert store.swaps() == []
+
+
+def test_a_rejected_copy_navidrome_cant_find_the_file_of_is_handled_as_one_which_cant_be_set_aside(
+        make_swapper, music, store, monkeypatch):
+    swapper = make_swapper(ears=FakeEars(["unsure"]))
+    fakes = swapper.fakes
+    fakes.soulsync.lands = [(30, ENDLESS_REL, b"unsure a")]
+    real = fakes.library.song_file
+    calls = []
+
+    def song_file(song_id):
+        calls.append(song_id)
+        if len(calls) > 1:
+            raise NavidromeError("Couldn't ask Navidrome for the song's file: HTTPError 500")
+        return real(song_id)
+
+    monkeypatch.setattr(fakes.library, "song_file", song_file)
+
+    outcome = swapper.swap(_endless(fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    # Nothing of the new copy moved, so it keeps its place, and both are kept, as the original can't go back.
+    assert outcome == "couldnt" and outcome.reason.startswith("couldn't find the copy SoulSync brought")
+    assert "a new file is where it was" in outcome.reason
+    assert read(music, ENDLESS_REL) == b"unsure a" and read(music, f"{HELD}/{ENDLESS_REL}") == b"clean endless"
+    assert store.swaps() == []
+
+
+def test_a_restart_between_moving_a_rejected_copy_and_saving_where_keeps_the_copies_not_yet_moved_recorded(
+        make_swapper, music, store):
+    other = _rejected_saved(store, music)
+    # The first copy moved, as set_aside would have, before the swap could save where.
+    put(music, SECOND_HELD, read(music, ENDLESS_REL))
+    os.remove(os.path.join(music, ENDLESS_REL))
+    swapper = make_swapper()
+
+    swapper.resume()
+
+    # The original goes back; the copy which never moved stays in the library, and is on the list with the
+    # first, so the library check leaves both alone.
+    assert read(music, ENDLESS_REL) == b"clean endless" and read(music, other) == b"unsure b"
+    assert store.swaps() == []
+    [entry] = store.listed("couldnt")
+    assert entry["reason"] == f"set aside, but where wasn't saved - look in {HELD}"
+    assert sorted(entry["kept"]) == sorted([f"id-{ENDLESS_REL}", f"id-{other}"])
+
+
 def _rejected_saved(store, music, second=False):
     """
     A swap stopped part way through setting aside the copies of a try heard unsure: the original
@@ -911,7 +1030,8 @@ def _rejected_saved(store, music, second=False):
     copies = [{"id": f"id-{ENDLESS_REL}", "title": "endless", "artist": "Gunna", "rel": ENDLESS_REL},
               {"id": f"id-{other}", "title": "endless", "artist": "Gunna", "rel": other}]
     store.save_swap(_saved(tries=1, track_id="deezer-1", held=held, quiet=True,
-                           rejected={"kind": "unsure", "reason": "heard 2 of its 10 swears", "listed": None},
+                           rejected={"kind": "unsure", "reason": "heard 2 of its 10 swears", "listed": None,
+                                     "ids": [copy["id"] for copy in copies]},
                            copy=copies[1] if second else copies[0], pending=[] if second else copies[1:]))
     return other
 
@@ -946,8 +1066,8 @@ def test_a_restart_once_every_rejected_copy_is_aside_puts_the_original_back(make
     assert read(music, ENDLESS_REL) == b"clean endless" and read(music, SECOND_HELD) == b"unsure a"
     assert store.swaps() == []
     assert store.listed("couldnt")[0]["reason"] == "couldn't check the copy SoulSync brought: listening took too long"
-    assert swapper.said == [("kitchen", "endless by Gunna has been downloaded, but I couldn't check it for a "
-                                        "clean version.")]
+    assert swapper.said == [("kitchen", "endless by Gunna came down again, but I couldn't check the new copy, so "
+                                        "you've still got the clean version. The new copy is set aside.")]
 
 
 def test_navidrome_out_of_reach_before_asking_again_puts_the_song_back(make_swapper, music, store):
@@ -1390,9 +1510,11 @@ def test_a_restart_between_moving_a_later_copy_and_saving_it_puts_the_last_saved
 @pytest.mark.parametrize("outcome, said", [
     (Outcome("swapped"), "endless by Gunna has been downloaded."),
     (Outcome("only_clean"), "endless by Gunna only came down clean, so I've kept it."),
-    (Outcome("unsure"), "endless by Gunna has been downloaded, but I couldn't tell if it's the clean version."),
+    (Outcome("unsure"), "endless by Gunna came down again, but not plainly explicit, so you've still got the clean "
+                        "version. The new copy is set aside."),
     (Outcome("not_judged", "listening took too long"),
-     "endless by Gunna has been downloaded, but I couldn't check it for a clean version."),
+     "endless by Gunna came down again, but I couldn't check the new copy, so you've still got the clean version. "
+     "The new copy is set aside."),
     (Outcome("couldnt", "Navidrome still lists it"),
      "endless by Gunna has been downloaded, but it's the clean version, and I couldn't swap it: Navidrome still "
      "lists it."),

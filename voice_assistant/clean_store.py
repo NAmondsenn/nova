@@ -149,6 +149,26 @@ class CleanStore:
             lists[kind] = copy.deepcopy(entries[:LIST_LIMIT])
             self._keep("lists", lists)
 
+    def discard(self, kind: str, song_id: str):
+        """
+        Takes a song off a list by its Navidrome id, so a song which has since ended another way
+        isn't on two. One not there is no error.
+
+        Args:
+            kind: "swapped", "only_clean", "unsure" or "couldnt".
+            song_id: The id the entry was added with.
+
+        Raises:
+            ValueError for any other kind. OSError if it couldn't be saved; the store is as it was.
+        """
+        _check_kind(kind)
+        with self._lock:
+            entries = [e for e in self._state["lists"][kind] if e.get("song_id") != song_id]
+            if len(entries) != len(self._state["lists"][kind]):
+                lists = dict(self._state["lists"])
+                lists[kind] = entries
+                self._keep("lists", lists)
+
     def swaps(self) -> List[Dict]:
         """
         Returns:

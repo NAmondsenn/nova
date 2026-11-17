@@ -193,6 +193,22 @@ def test_an_entry_saved_before_entries_had_times_is_left_without_one(tmp_path):
     assert [e.get("at") for e in store.listed("swapped")] == [1763000000, None]
 
 
+def test_an_entry_can_be_dropped_by_its_song_id(tmp_path):
+    path = str(tmp_path / "clean_songs.json")
+    store = CleanStore(path)
+    store.add("couldnt", "A", "why", song_id="a1")
+    store.add("couldnt", "B", "why", song_id="b1")
+    store.add("swapped", "A", "", song_id="a1")
+
+    store.discard("couldnt", "a1")
+    store.discard("couldnt", "nobody")
+
+    assert [e["name"] for e in CleanStore(path).listed("couldnt")] == ["B"]
+    assert [e["name"] for e in CleanStore(path).listed("swapped")] == ["A"]
+    with pytest.raises(ValueError):
+        store.discard("nonsense", "a1")
+
+
 def test_the_same_name_can_be_on_two_lists(tmp_path):
     store = CleanStore(str(tmp_path / "clean_songs.json"))
     store.add("swapped", "A", "one")

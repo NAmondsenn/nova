@@ -303,6 +303,53 @@ def test_a_copy_kept_as_only_clean_isnt_swapped_again(make_check, store):
     assert check.fakes.ears.heard == [] and check.fakes.swapper.swaps == []
 
 
+DAY = 86400
+# The clock the check is made with, in make_check.
+CHECK_NOW = 1763290000.0
+
+
+@pytest.mark.parametrize("kind, song_id, kept", [("unsure", "d1", ["d2"]), ("couldnt", "d1", ["d2"]),
+                                                 ("unsure", "x1", ["d1"]), ("couldnt", "x1", ["d1"])])
+def test_a_song_whose_swap_ended_rejected_isnt_swapped_by_the_next_check(make_check, store, kind, song_id, kept):
+    # The original clean copy was put back after the new copy was heard unsure or not at all: swapping it
+    # again every night would fetch the same unsure copy every night. Its id, or a rejected copy's, is known.
+    store.set_verdict("d1", 4096, "2026-11-16T10:00:00Z", CLEAN, "Travis Scott - SICKO MODE (Clean)")
+    store.add(kind, "Travis Scott - SICKO MODE (Clean)", "heard 2 of its 10 swears", song_id=song_id, kept=kept,
+              at=CHECK_NOW - 29 * DAY)
+    check = make_check(library=FakeLibrary({"Astro": [SICKO]}))
+
+    check.start()
+
+    assert finished(check)["total"] == 0
+    assert check.fakes.ears.heard == [] and check.fakes.swapper.swaps == []
+
+
+def test_a_song_whose_swap_ended_rejected_is_tried_once_more_after_thirty_days(make_check, store):
+    store.set_verdict("d1", 4096, "2026-11-16T10:00:00Z", CLEAN, "Travis Scott - SICKO MODE (Clean)")
+    store.add("unsure", "Travis Scott - SICKO MODE (Clean)", "heard 2 of its 10 swears", song_id="d1", kept=["d2"],
+              at=CHECK_NOW - 31 * DAY)
+    check = make_check(library=FakeLibrary({"Astro": [SICKO]}))
+
+    check.start()
+
+    assert finished(check)["total"] == 1
+    assert check.fakes.swapper.swaps == [("d1", Wanted("SICKO MODE", "Travis Scott", "track"), None, True)]
+
+
+def test_an_entry_without_copies_or_a_time_doesnt_hold_a_swap_back(make_check, store):
+    # Ears' own unsure entry and a plain couldnt keep no copies, and one with copies but no time is old.
+    store.set_verdict("d1", 4096, "2026-11-16T10:00:00Z", CLEAN, "Travis Scott - SICKO MODE (Clean)")
+    store.add("unsure", "Other", "heard 2 of its 10 swears", song_id="d1", at=CHECK_NOW)
+    store.add("couldnt", "Travis Scott - SICKO MODE (Clean)", "Navidrome still lists it", song_id="d1")
+    store.add("couldnt", "Another", "why", song_id="d1", kept=["d1"], at=None)
+    check = make_check(library=FakeLibrary({"Astro": [SICKO]}))
+
+    check.start()
+    finished(check)
+
+    assert check.fakes.swapper.swaps == [("d1", Wanted("SICKO MODE", "Travis Scott", "track"), None, True)]
+
+
 @pytest.mark.parametrize("swap", [{"song_id": "d1"}, {"song_id": "x1", "copy": {"id": "d1"}},
                                   {"song_id": "x1", "copy": {"id": "x2"}, "pending": [{"id": "d1"}]}])
 def test_a_song_a_saved_swap_is_handling_is_left_to_it(make_check, store, swap):

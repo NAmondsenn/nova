@@ -34,6 +34,10 @@ logger = logging.getLogger(__name__)
 # How many albums Navidrome is asked for at a time - the most getAlbumList2 gives.
 PAGE = 500
 
+# How long a song whose swap ended with the original put back, as the new copy wasn't heard
+# explicit, is left alone before a swap is tried once more: 30 days, in seconds.
+REJECTED_FOR = 30 * 24 * 3600
+
 # Seconds between looks at whether a download is still being heard, while the check waits.
 BUSY_POLL = 5
 
@@ -352,13 +356,26 @@ class CleanCheck:
 
     def _only_clean(self) -> Set[str]:
         """
-        The ids of the songs which only came down clean: the copy swapped, and the copies kept,
-        which SoulSync may have filed elsewhere, under another id.
+        The ids of the songs a swap isn't made of again: those which only came down clean (the
+        copy swapped, and the copies kept, which SoulSync may have filed elsewhere, under
+        another id), and those whose swap ended with the original put back, as the new copy
+        wasn't heard explicit - the original, and the copies set aside - for REJECTED_FOR, after
+        which a swap may bring a better copy. Without them the check would fetch the same
+        unsure copy every night.
         """
         ids = set()
         for entry in self._store.listed("only_clean"):
             ids.add(entry.get("song_id"))
             ids.update(entry.get("kept") or ())
+        # Only a rejected swap's entries keep copies, on the unsure and couldn't swap lists; one from
+        # before entries had times, or without one, counts as old.
+        recent = self._now() - REJECTED_FOR
+        for kind in ("unsure", "couldnt"):
+            for entry in self._store.listed(kind):
+                at = entry.get("at")
+                if entry.get("kept") and isinstance(at, (int, float)) and at > recent:
+                    ids.add(entry.get("song_id"))
+                    ids.update(entry["kept"])
         return ids
 
     def _todo(self, library: NavidromeLibrary, song: Dict, only_clean: Set[str]) -> Optional[str]:
