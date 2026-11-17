@@ -618,8 +618,11 @@ class SoulSync:
         data = self._read(status, answer).get("data")
         tracks = data.get("tracks") if isinstance(data, dict) else None
         tracks = [track for track in tracks if isinstance(track, dict)] if isinstance(tracks, list) else []
+        # An album of nothing but marks, "!!!", normalises to "", as would any album SoulSync
+        # lists as "???": no album to prefer.
+        want = normalise(album) if album else ""
         on_album = [track for track in tracks
-                    if album and normalise(_name_of(track.get("album"))) == normalise(album)]
+                    if want and normalise(_name_of(track.get("album"))) == want]
         track = (on_album and pick_track(on_album, title, artist)) or pick_track(tracks, title, artist)
         if track is None:
             raise SoulSyncError(NOT_FOUND)
@@ -872,6 +875,8 @@ class SoulSyncAdmin:
         Raises:
             SoulSyncError: If the path isn't one inside the music folder, SoulSync
                 couldn't be asked, refused the admin profile, or couldn't remove the row.
+                With several rows for the file, those before the one that failed may
+                already be removed: a raise doesn't mean nothing was forgotten.
         """
         rel = posixpath.normpath(rel_path) if rel_path else ""
         # A path from the root, or out of the music folder, would match nothing of the

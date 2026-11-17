@@ -255,6 +255,13 @@ def test_a_song_on_the_album_named_is_preferred(soulsync, http):
     assert http.posted[0][1] == http.posted[1][1] == {"query": "Travis Scott - SICKO MODE", "limit": 10}
 
 
+def test_an_album_of_nothing_but_marks_doesnt_narrow_the_pick(soulsync, http):
+    # "!!!" normalises to nothing, as does an album SoulSync lists as "???": not the same album.
+    single, unnamed = _track("SICKO MODE", "Travis Scott", "SICKO MODE"), _track("SICKO MODE", "Travis Scott", "???")
+    http.answers[SEARCH] = _found(single, unnamed)
+    assert soulsync.find_song("SICKO MODE", "Travis Scott", "!!!").track == single
+
+
 def test_a_song_on_no_album_named_is_still_found_on_another(soulsync, http):
     # Only on the single, and a clean version on the album, which is never taken.
     single = _track("SICKO MODE", "Travis Scott", "SICKO MODE")
