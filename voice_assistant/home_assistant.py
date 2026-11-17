@@ -47,6 +47,12 @@ Football is Home Assistant's, from ESPN, which Nova never calls itself: it reads
 sensor, asks one shell command a question and writes one text box - see FOOTBALL_TEAMS,
 football_ask and FOOTBALL_BOX, the only three names it knows of.
 
+Journeys are Home Assistant's too, from its Google Maps Travel Time: Nova asks how long it
+takes to get from one zone or person to another - never where anyone is, as it holds no
+position, only the zones' ids and names - see zones and journey. Both of its actions are asked
+through _call_service, which only lets them be given zones, people and places cut down by
+journey_place, never anything else.
+
 The weather is Home Assistant's own, Met's for its home location - see weather.py. The
 calendar isn't Home Assistant's: Nova reads it from Google itself - see google_calendar.py.
 """
@@ -106,15 +112,21 @@ DEFAULT_AGENT = "conversation.home_assistant"
 # and a room with one is given as its other lights instead (see set_lights).
 # The one text box Nova writes is football's list of teams, FOOTBALL_BOX, and no other. The
 # one shell command is football_ask, given nothing but its own few fields and no target.
+# Google Maps Travel Time's two actions only ever ask how long a journey takes: given its
+# config entry's id, an origin and a destination - each a zone or a person, or a place cut down
+# by journey_place - and, for the one by road, foot or bicycle, a mode and a time of day. No
+# target, and never another of its services, which could change its entry.
 SERVICES = {"light": ("turn_on", "turn_off"), "script": ("turn_on",), "scene": ("turn_on",),
             "weather": ("get_forecasts",), "todo": ("add_item", "update_item", "get_items"),
             "notify": re.compile(r"mobile_app_[a-z0-9_]+"), "button": ("press",),
-            "input_text": ("set_value",), "shell_command": ("football_ask",)}
+            "input_text": ("set_value",), "shell_command": ("football_ask",),
+            "google_travel_time": ("get_travel_times", "get_transit_times")}
 BY_AREA = ("light",)
-UNTARGETED = ("notify", "shell_command")
+UNTARGETED = ("notify", "shell_command", "google_travel_time")
 # The services Nova asks for an answer from - only reads, which change nothing. Each is
 # still only called if SERVICES has it too, and always with its answer asked for.
-RETURNS = {("weather", "get_forecasts"), ("todo", "get_items"), ("shell_command", "football_ask")}
+RETURNS = {("weather", "get_forecasts"), ("todo", "get_items"), ("shell_command", "football_ask"),
+           ("google_travel_time", "get_travel_times"), ("google_travel_time", "get_transit_times")}
 
 # Football, which Home Assistant has from ESPN: the sensor of the teams followed, with their
 # matches; the box of their names, which Nova writes to follow or unfollow one; and how long
@@ -142,6 +154,60 @@ def football_name(name: str) -> str:
     """
     kept = "".join(char for char in name if char.isalnum() or char.isspace() or char in ".&/-")
     return " ".join(kept.split())[:FOOTBALL_NAME_LENGTH].rstrip()
+
+
+# Journeys, which Home Assistant works out with Google Maps Travel Time: how it's travelled,
+# how long to wait for Google - slower than Home Assistant is - and the most of a place said
+# that goes on to Google, as one which isn't a zone is sent as it was said.
+JOURNEY_MODES = ("driving", "walking", "bicycling", "transit")
+JOURNEY_TIMEOUT = 10
+JOURNEY_PLACE_LENGTH = 80
+# How long the Travel Time config entry's id is kept before Home Assistant is asked again.
+JOURNEY_ENTRY_SECONDS = 300
+# What a journey's end may be: a zone or a person, by entity id...
+JOURNEY_ENTITY = re.compile(r"(zone|person)\.[a-z0-9_]+")
+# ...and what any other entity id looks like, which is never one to ask Google about.
+ANY_ENTITY = re.compile(r"[a-z_]+\.[a-z0-9_]+")
+# A time on a clear road, as Google words it: "20 mins", "1 hour 5 mins", "2 hours".
+CLEAR_ROAD = re.compile(r"(?:(\d+) hours?)?(?: ?(\d+) mins?)?")
+
+
+class NoJourneys(ValueError):
+    """Home Assistant has no loaded Google Maps Travel Time entry, so no journey can be asked."""
+
+
+def journey_place(words: str) -> str:
+    """
+    Cuts a place's name down to what may go to Google Maps.
+
+    Args:
+        words: The place, as it was said.
+
+    Returns:
+        Its letters of any alphabet, digits, spaces and , . ' & / - only, one space at a time
+        and at most JOURNEY_PLACE_LENGTH characters. Nothing, for words with none of them.
+    """
+    kept = "".join(char for char in words if char.isalnum() or char.isspace() or char in ",.'&/-")
+    return " ".join(kept.split())[:JOURNEY_PLACE_LENGTH].rstrip()
+
+
+def _journey_end(place) -> bool:
+    """Whether a journey's origin or destination is one _call_service may send on."""
+    if not isinstance(place, str):
+        return False
+    if JOURNEY_ENTITY.fullmatch(place):
+        return True
+    # A place said: only what journey_place leaves as it was, and never another entity's id,
+    # which would send a light's or a lock's name to Google as if it were a place.
+    return bool(place) and place == journey_place(place) and not ANY_ENTITY.fullmatch(place)
+
+
+def _clear_seconds(words) -> Optional[int]:
+    """Google's wording of a time on a clear road - "1 hour 5 mins" - in seconds, or None if it isn't one."""
+    found = CLEAR_ROAD.fullmatch(words.strip()) if isinstance(words, str) else None
+    if not found or not any(found.groups()):
+        return None
+    return int(found.group(1) or 0) * 3600 + int(found.group(2) or 0) * 60
 
 # How far "dim" and "brighten" move a light, in points of brightness. 30 is steps that
 # can be told apart across a room - 10 isn't - and a light at 40% takes two to go dark.
@@ -517,6 +583,9 @@ class HomeAssistant:
         # and those found too deep to walk, each said once until it's been put right.
         self._unreadable: Set[str] = set()
         self._too_deep: Set[str] = set()
+        # The Travel Time config entry's id and when it stops being kept - see _travel_entry.
+        self._travel_entry_id: Optional[str] = None
+        self._travel_entry_until = 0.0
         self._session = requests.Session()
         self._session.headers.update({"Authorization": f"Bearer {token}"})
 
@@ -606,10 +675,13 @@ class HomeAssistant:
             return CANT_REACH
         return "Home Assistant had a problem with that."
 
-    def states(self) -> List[Dict]:
+    def states(self, timeout: Optional[float] = None) -> List[Dict]:
         """
         Every entity's state, as /api/states has them - read afresh each time, so a lock
         added a minute ago is refused too.
+
+        Args:
+            timeout: Seconds to wait for Home Assistant, or None for REQUEST_TIMEOUT.
 
         Raises:
             requests.RequestException: If Home Assistant couldn't be asked.
@@ -617,7 +689,7 @@ class HomeAssistant:
                 a dict. Those aren't taken for none: a door cover would then have no device
                 class, and pass for a blind.
         """
-        states = self._request("GET", "/api/states").json()
+        states = self._request("GET", "/api/states", timeout=timeout).json()
         if not isinstance(states, list) or not all(
                 isinstance(state, dict) and isinstance(state.get("attributes", {}), dict) for state in states):
             raise ValueError("Home Assistant's states aren't a list of states")
@@ -695,6 +767,92 @@ class HomeAssistant:
         if not isinstance(printed, dict):
             raise ValueError("Home Assistant's football command didn't print a JSON object")
         return printed
+
+    def _travel_entry(self) -> str:
+        """
+        The id of Home Assistant's loaded Google Maps Travel Time entry, which its two
+        actions are asked with - found over the WebSocket, and kept for JOURNEY_ENTRY_SECONDS.
+
+        Raises:
+            NoJourneys: If there's no entry in the loaded state. That isn't kept, so the
+                entry is looked for again with the next question.
+            requests.ConnectionError: If the WebSocket couldn't be used.
+            ValueError: If its answer isn't a list of entries.
+        """
+        if self._travel_entry_id and time.monotonic() < self._travel_entry_until:
+            return self._travel_entry_id
+        try:
+            answer = self.socket.call([{"type": "config_entries/get", "domain": "google_travel_time"}])
+        except HomeSocketError as e:
+            raise requests.ConnectionError(f"Home Assistant's WebSocket couldn't be used: {e}") from e
+        entries = answer[0] if isinstance(answer, list) and len(answer) == 1 else None
+        if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+            raise ValueError("Home Assistant's Travel Time entries aren't a list of them")
+        for entry in entries:
+            found = entry.get("entry_id")
+            if (entry.get("state") == "loaded" and isinstance(found, str)
+                    and re.fullmatch(r"[0-9A-Za-z_-]{1,64}", found)):
+                self._travel_entry_id = found
+                self._travel_entry_until = time.monotonic() + JOURNEY_ENTRY_SECONDS
+                return found
+        self._travel_entry_id = None
+        raise NoJourneys("Home Assistant has no loaded Google Maps Travel Time entry")
+
+    def journey(self, origin: str, destination: str, mode: str = "driving",
+                departure: Optional[str] = None) -> Optional[Dict]:
+        """
+        Asks Home Assistant how long a journey takes - which asks Google Maps, as Nova
+        never does - through google_travel_time.get_travel_times, or get_transit_times
+        for public transport.
+
+        Args:
+            origin: Where from: a zone's or a person's entity id, e.g. "zone.home" - or a
+                place as it was said, if it's only what journey_place leaves of it.
+            destination: Where to, as origin is.
+            mode: One of JOURNEY_MODES.
+            departure: A time of day, "HH:MM", to leave at - or None for now. Only goes
+                with "driving", as the others have no use for it: it's left out for them.
+
+        Returns:
+            {"seconds": how long it takes, with the traffic expected, "clear_seconds": how
+            long on a clear road, or None if Google didn't say, "metres": how far} for the
+            first route - or None if Google found none, as for a place it can't find.
+
+        Raises:
+            NoJourneys: If Home Assistant has no loaded Google Maps Travel Time entry.
+            NotAllowed: If _call_service refuses it, as it does for a place which isn't
+                one it may send on.
+            ValueError: If mode isn't one of the four, or departure isn't a time of day, or
+                the answer isn't of the right shape, or a duration or distance in it isn't
+                a number of 0 or more.
+            requests.RequestException: If Home Assistant couldn't be asked, or didn't
+                answer within JOURNEY_TIMEOUT.
+        """
+        if mode not in JOURNEY_MODES:
+            raise ValueError(f"{mode!r} isn't a way to travel")
+        if departure is not None and not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", departure):
+            raise ValueError(f"{departure!r} isn't a time of day")
+        data = {"config_entry_id": self._travel_entry(), "origin": origin, "destination": destination}
+        if mode != "transit":
+            data["mode"] = mode
+            if departure and mode == "driving":
+                data["departure_time"] = f"{departure}:00"
+        service = "get_transit_times" if mode == "transit" else "get_travel_times"
+        answer = self._call_service("google_travel_time", service, data, returns=True, timeout=JOURNEY_TIMEOUT)
+        routes = answer.get("routes") if isinstance(answer, dict) else None
+        if not isinstance(routes, list) or not all(isinstance(route, dict) for route in routes):
+            raise ValueError("Home Assistant's answer from Google Maps isn't a list of routes")
+        if not routes:
+            return None
+        route = routes[0]
+        numbers = []
+        for key in ("duration", "distance_meters"):
+            number = route.get(key)
+            if isinstance(number, bool) or not isinstance(number, (int, float)) or not 0 <= number < math.inf:
+                raise ValueError(f"Google Maps' {key} isn't a number of 0 or more")
+            numbers.append(round(number))
+        return {"seconds": numbers[0], "clear_seconds": _clear_seconds(route.get("static_duration_text")),
+                "metres": numbers[1]}
 
     def set_football_teams(self, value: str) -> None:
         """
@@ -1683,7 +1841,11 @@ class HomeAssistant:
                 light, one Nova never works (see _never_worked) - or, for
                 todo.update_item, anything but marking a thing completed - or, for
                 input_text, anything but FOOTBALL_BOX alone - or, for shell_command, any
-                field but football_ask's own: what, name, date, days and against.
+                field but football_ask's own: what, name, date, days and against - or, for
+                google_travel_time, anything but a loaded entry's id with an origin and a
+                destination, each a zone or a person or a place which journey_place leaves
+                as it is (and not another entity), and, for get_travel_times alone, a mode
+                of driving, walking or bicycling and a departure_time of a time of day.
             requests.RequestException: If Home Assistant couldn't be asked.
         """
         entities = data.get("entity_id")
@@ -1710,7 +1872,9 @@ class HomeAssistant:
                 # Never another text box, which could hold a setting something else reads.
                 or (domain == "input_text" and entities != [FOOTBALL_BOX])
                 # Only what the script is asked, never a field it might take for a command.
-                or (domain == "shell_command" and not set(data) <= {"what", "name", "date", "days", "against"})):
+                or (domain == "shell_command" and not set(data) <= {"what", "name", "date", "days", "against"})
+                # Only a journey, asked of zones, people and places - never a field either could take for more.
+                or (domain == "google_travel_time" and not self._journey_asked_properly(service, data))):
             logger.warning(f"Refused to call {domain}.{service} with {data}")
             raise NotAllowed(f"{domain}.{service}")
         response = self._request("POST", f"/api/services/{domain}/{service}" + ("?return_response" if returns else ""),
@@ -1721,6 +1885,19 @@ class HomeAssistant:
         if not isinstance(answer, dict):
             raise ValueError(f"Home Assistant's answer from {domain}.{service} isn't one")
         return answer.get("service_response")
+
+    @staticmethod
+    def _journey_asked_properly(service: str, data: Dict) -> bool:
+        """Whether data is only what a Travel Time action may be given - see _call_service."""
+        keys = {"config_entry_id", "origin", "destination"}
+        if service == "get_travel_times":
+            keys |= {"mode", "departure_time"}
+        entry, departure = data.get("config_entry_id"), data.get("departure_time", "00:00:00")
+        return (set(data) <= keys and {"config_entry_id", "origin", "destination"} <= set(data)
+                and isinstance(entry, str) and bool(re.fullmatch(r"[0-9A-Za-z_-]{1,64}", entry))
+                and _journey_end(data["origin"]) and _journey_end(data["destination"])
+                and data.get("mode", "driving") in JOURNEY_MODES[:3]
+                and isinstance(departure, str) and bool(re.fullmatch(r"[0-2][0-9]:[0-5][0-9]:00", departure)))
 
     def _pressable(self, entity_id: str) -> bool:
         """
@@ -2015,6 +2192,30 @@ class HomeAssistant:
             logger.warning(f"Can't see what {name} does, as {why}, so it isn't run by voice or from the "
                            f"settings page")
         self._unreadable.add(name)
+
+    def zones(self, timeout: Optional[float] = None) -> List[Dict]:
+        """
+        Home Assistant's zones, by id and name only - never where they are or how big.
+
+        Args:
+            timeout: Seconds to wait for Home Assistant, or None for REQUEST_TIMEOUT.
+
+        Returns:
+            Each as {"id", "name"}, e.g. {"id": "zone.work", "name": "Work"} - the name its
+            friendly_name, else the id's last part.
+
+        Raises:
+            requests.RequestException: If Home Assistant couldn't be asked.
+            ValueError: If its states can't be read.
+        """
+        zones = []
+        for state in self.states(timeout=timeout):
+            entity = state.get("entity_id")
+            if not isinstance(entity, str) or not entity.startswith("zone."):
+                continue
+            name = state.get("attributes", {}).get("friendly_name")
+            zones.append({"id": entity, "name": name if isinstance(name, str) and name else entity.split(".", 1)[1]})
+        return zones
 
     def weather_entities(self) -> List[Dict]:
         """

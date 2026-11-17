@@ -941,6 +941,10 @@ def test_the_wider_rule_comes_back_once_both_answer(make_home, caplog):
         assert len(said()) == 3 and level == "WARNING" and "debugging" in message and "timed out" in message
 
 
+# What google_travel_time.get_travel_times may be given, for the tests to spoil one thing of.
+GOOD_JOURNEY = {"config_entry_id": "e", "origin": "zone.home", "destination": "zone.work", "mode": "driving"}
+
+
 @pytest.mark.parametrize("domain, service, data", [
     ("lock", "unlock", {"entity_id": "lock.front_door"}),
     ("cover", "open_cover", {"entity_id": "cover.garage"}),
@@ -957,6 +961,13 @@ def test_the_wider_rule_comes_back_once_both_answer(make_home, caplog):
     ("shell_command", "macbook_sleep", {}),
     ("shell_command", "football_ask", {"entity_id": "light.lamp"}),
     ("shell_command", "football_ask", {"what": "team", "command": "rm"}),
+    ("google_travel_time", "get_travel_times", {**GOOD_JOURNEY, "entity_id": "zone.work"}),
+    ("google_travel_time", "get_travel_times", {**GOOD_JOURNEY, "destination": "light.lamp"}),
+    ("google_travel_time", "get_travel_times", {**GOOD_JOURNEY, "destination": "x" * 81}),
+    ("google_travel_time", "get_travel_times", {**GOOD_JOURNEY, "mode": "flying"}),
+    ("google_travel_time", "get_travel_times", {**GOOD_JOURNEY, "departure_time": "now"}),
+    ("google_travel_time", "get_travel_times", {**GOOD_JOURNEY, "command": "rm"}),
+    ("google_travel_time", "reload", {}),
 ])
 def test_only_the_services_nova_calls_are_ever_called(make_home, domain, service, data):
     home = make_home({f"/api/services/{domain}/{service}": []})
@@ -1000,6 +1011,7 @@ def test_the_forecast_is_asked_for_its_answer_through_the_allowlist(make_home):
     ("weather", "get_forecasts", {"entity_id": "weather.forecast_home", "type": "daily"}, False),
     ("todo", "get_items", {"entity_id": "todo.shopping_list"}, False),
     ("shell_command", "football_ask", {"what": "team", "name": "Arsenal"}, False),
+    ("google_travel_time", "get_travel_times", GOOD_JOURNEY, False),
 ])
 def test_an_answer_is_only_asked_of_what_both_lists_allow(make_home, domain, service, data, returns):
     home = make_home({f"/api/services/{domain}/{service}" + ("?return_response" if returns else ""): {}})
@@ -1250,6 +1262,197 @@ def test_the_football_command_takes_the_other_team_among_its_own_fields(make_hom
     data = {"what": "match", "name": "Liverpool", "date": "", "days": 1, "against": "Newcastle"}
     assert home._call_service("shell_command", "football_ask", data, returns=True)["returncode"] == 0
     assert home._session.requests == [("POST", ASK, {"json": data})]
+
+
+# Journeys, which Home Assistant has from Google Maps Travel Time.
+TRAVEL = "/api/services/google_travel_time/get_travel_times?return_response"
+TRANSIT = "/api/services/google_travel_time/get_transit_times?return_response"
+ROUTE = {"duration": 1053, "duration_text": "18 mins", "static_duration_text": "20 mins",
+         "distance_meters": 14027, "distance_text": "14.0 km"}
+LOADED = [{"entry_id": "entry1", "state": "loaded", "title": "Work"}]
+
+
+class FakeEntries:
+    """Stands in for the WebSocket's answer about Travel Time's config entries."""
+
+    def __init__(self, entries):
+        self.entries = entries
+        self.calls = []
+
+    def call(self, messages):
+        self.calls.append(messages)
+        if isinstance(self.entries, Exception):
+            raise self.entries
+        return [self.entries]
+
+
+def _journeys_home(make_home, answers, entries=LOADED):
+    home = make_home(answers)
+    home.socket = FakeEntries(entries)
+    return home
+
+
+def _travel(routes):
+    """What a Travel Time action answers with return_response."""
+    return {"changed_states": [], "service_response": {"routes": routes}}
+
+
+def test_a_journey_is_asked_through_the_allowlist(make_home):
+    home = _journeys_home(make_home, {TRAVEL: _travel([ROUTE])})
+    assert home.journey("zone.home", "zone.work") == {"seconds": 1053, "clear_seconds": 1200, "metres": 14027}
+    assert home._session.requests == [("POST", TRAVEL, {"json": {
+        "config_entry_id": "entry1", "origin": "zone.home", "destination": "zone.work", "mode": "driving"}})]
+    assert home.socket.calls == [[{"type": "config_entries/get", "domain": "google_travel_time"}]]
+    assert home._session.timeouts == [home_assistant.JOURNEY_TIMEOUT]
+    assert home_assistant.JOURNEY_TIMEOUT > REQUEST_TIMEOUT
+
+
+def test_the_entry_is_kept_for_a_while_and_then_asked_for_again(make_home, monkeypatch):
+    home = _journeys_home(make_home, {TRAVEL: _travel([ROUTE])})
+    now = [1000.0]
+    monkeypatch.setattr(home_assistant.time, "monotonic", lambda: now[0])
+    home.journey("zone.home", "zone.work")
+    now[0] += 299
+    home.journey("zone.home", "zone.work")
+    assert len(home.socket.calls) == 1
+    now[0] += 2
+    home.journey("zone.home", "zone.work")
+    assert len(home.socket.calls) == 2
+
+
+def test_a_journey_at_a_time_of_day_asks_for_it(make_home):
+    home = _journeys_home(make_home, {TRAVEL: _travel([ROUTE])})
+    home.journey("zone.home", "zone.work", departure="08:05")
+    home.journey("zone.home", "zone.work", mode="walking", departure="08:05")
+    first, second = (sent["json"] for _, _, sent in home._session.requests)
+    assert first["departure_time"] == "08:05:00" and first["mode"] == "driving"
+    assert second["mode"] == "walking" and "departure_time" not in second
+
+
+@pytest.mark.parametrize("mode", ["walking", "bicycling"])
+def test_a_journey_on_foot_or_by_bicycle_is_asked_with_its_mode(make_home, mode):
+    home = _journeys_home(make_home, {TRAVEL: _travel([ROUTE])})
+    home.journey("zone.home", "zone.work", mode)
+    assert home._session.requests[0][2]["json"]["mode"] == mode
+
+
+def test_public_transport_asks_the_transit_action(make_home):
+    home = _journeys_home(make_home, {TRANSIT: _travel([ROUTE])})
+    assert home.journey("zone.home", "zone.work", "transit", departure="08:05")["seconds"] == 1053
+    assert home._session.requests == [("POST", TRANSIT, {"json": {
+        "config_entry_id": "entry1", "origin": "zone.home", "destination": "zone.work"}})]
+
+
+@pytest.mark.parametrize("mode, departure", [("flying", None), ("driving", "8am"), ("driving", "25:00"), ("driving", "08:05:00")])
+def test_a_way_to_travel_or_a_time_which_isnt_one_is_refused(make_home, mode, departure):
+    home = _journeys_home(make_home, {})
+    with pytest.raises(ValueError):
+        home.journey("zone.home", "zone.work", mode, departure)
+    assert home._session.requests == [] and home.socket.calls == []
+
+
+def test_no_route_is_none_and_a_bad_answer_raises(make_home):
+    home = _journeys_home(make_home, {TRAVEL: _travel([])})
+    assert home.journey("zone.home", "Nowhere in particular") is None
+    for answer in (_travel([{**ROUTE, "duration": "soon"}]),
+                   _travel([{"duration": 1053, "static_duration_text": "20 mins"}]),
+                   _travel([{**ROUTE, "duration": -1}]), _travel([{**ROUTE, "distance_meters": True}]),
+                   _travel(["a route"]), {"service_response": "no"}, {"service_response": {"routes": "no"}}):
+        home = _journeys_home(make_home, {TRAVEL: answer})
+        with pytest.raises(ValueError):
+            home.journey("zone.home", "zone.work")
+
+
+@pytest.mark.parametrize("words, seconds", [
+    ("20 mins", 1200), ("1 min", 60), ("1 hour 5 mins", 3900), ("2 hours", 7200), ("soon", None), (None, None),
+    ("", None), ("5 mins 1 hour", None)])
+def test_the_time_on_a_clear_road_is_read_from_its_words(make_home, words, seconds):
+    route = {key: value for key, value in ROUTE.items() if key != "static_duration_text"}
+    home = _journeys_home(make_home, {TRAVEL: _travel([{**route, **({} if words is None else {"static_duration_text": words})}])})
+    assert home.journey("zone.home", "zone.work")["clear_seconds"] == seconds
+
+
+@pytest.mark.parametrize("entries", [[], [{"entry_id": "entry1", "state": "setup_error"}],
+                                     [{"state": "loaded"}], [{"entry_id": "a b; rm", "state": "loaded"}]])
+def test_without_a_loaded_entry_there_are_no_journeys(make_home, entries):
+    home = _journeys_home(make_home, {TRAVEL: _travel([ROUTE])}, entries)
+    with pytest.raises(home_assistant.NoJourneys):
+        home.journey("zone.home", "zone.work")
+    assert home._session.requests == []
+
+
+def test_a_loaded_entry_is_found_among_others(make_home):
+    entries = [{"entry_id": "old", "state": "setup_error"}, {"entry_id": "entry2", "state": "loaded"}]
+    home = _journeys_home(make_home, {TRAVEL: _travel([ROUTE])}, entries)
+    home.journey("zone.home", "zone.work")
+    assert home._session.requests[0][2]["json"]["config_entry_id"] == "entry2"
+
+
+@pytest.mark.parametrize("entries", [HomeSocketError("timed out"), "no", ["no"]])
+def test_entries_which_cant_be_read_are_a_failure_not_no_journeys(make_home, entries):
+    home = _journeys_home(make_home, {TRAVEL: _travel([ROUTE])}, entries)
+    with pytest.raises((requests.ConnectionError, ValueError)) as caught:
+        home.journey("zone.home", "zone.work")
+    assert not isinstance(caught.value, home_assistant.NoJourneys) and home._session.requests == []
+
+
+@pytest.mark.parametrize("data", [
+    {**GOOD_JOURNEY, "entity_id": "zone.work"}, {**GOOD_JOURNEY, "destination": "light.lamp"},
+    {**GOOD_JOURNEY, "origin": "person.nathaniel; rm"}, {**GOOD_JOURNEY, "destination": "x" * 81},
+    {**GOOD_JOURNEY, "destination": ""}, {**GOOD_JOURNEY, "destination": " Work"}, {**GOOD_JOURNEY, "mode": "flying"},
+    {**GOOD_JOURNEY, "mode": "transit"}, {**GOOD_JOURNEY, "departure_time": "now"},
+    {**GOOD_JOURNEY, "departure_time": "08:05:30"}, {**GOOD_JOURNEY, "departure_time": None},
+    {**GOOD_JOURNEY, "command": "rm"}, {**GOOD_JOURNEY, "units": "imperial"}, {**GOOD_JOURNEY, "config_entry_id": "a b"},
+    {**GOOD_JOURNEY, "config_entry_id": "x" * 65}, {**GOOD_JOURNEY, "origin": 5},
+    {key: value for key, value in GOOD_JOURNEY.items() if key != "origin"},
+    {key: value for key, value in GOOD_JOURNEY.items() if key != "config_entry_id"},
+])
+def test_a_journey_is_only_ever_asked_of_what_it_may_be(make_home, data):
+    # Asked for its answer, as it's meant to be, so it's the data which is refused.
+    home = make_home({TRAVEL: _travel([ROUTE])})
+    with pytest.raises(NotAllowed):
+        home._call_service("google_travel_time", "get_travel_times", data, returns=True)
+    assert home._session.requests == []
+
+
+def test_the_transit_action_takes_no_mode_or_time(make_home):
+    home = make_home({TRANSIT: _travel([ROUTE])})
+    for extra in ({"mode": "driving"}, {"departure_time": "08:05:00"}):
+        with pytest.raises(NotAllowed):
+            home._call_service("google_travel_time", "get_transit_times", {**GOOD_JOURNEY, **extra}, returns=True)
+    assert home._session.requests == []
+
+
+@pytest.mark.parametrize("place", ["zone.home", "person.sam", "Work", "the Metrocentre", "Gran's, 1-2 Main St. & co/x"])
+def test_a_journey_may_be_asked_of_a_zone_a_person_or_a_place(make_home, place):
+    home = make_home({TRAVEL: _travel([ROUTE])})
+    data = {**GOOD_JOURNEY, "origin": place}
+    assert home._call_service("google_travel_time", "get_travel_times", data, returns=True) == {"routes": [ROUTE]}
+    assert home._session.requests == [("POST", TRAVEL, {"json": data})]
+
+
+def test_zones_are_names_and_ids_only(make_home):
+    states = [_thing("light.lamp", "Lamp"),
+              {"entity_id": "zone.home", "state": "0",
+               "attributes": {"friendly_name": "Home", "latitude": 1.5, "longitude": 2.5, "radius": 100}},
+              {"entity_id": "zone.work", "state": "0",
+               "attributes": {"friendly_name": "Work", "latitude": 3.5, "longitude": 4.5, "radius": 50}}]
+    home = make_home({"/api/states": states})
+    assert home.zones() == [{"id": "zone.home", "name": "Home"}, {"id": "zone.work", "name": "Work"}]
+
+
+def test_a_zone_without_a_name_is_named_by_its_id(make_home):
+    home = make_home({"/api/states": [{"entity_id": "zone.gran_s", "state": "0", "attributes": {"radius": 100}}]})
+    assert home.zones(timeout=2) == [{"id": "zone.gran_s", "name": "gran_s"}]
+    assert home._session.timeouts == [2]
+
+
+@pytest.mark.parametrize("words, kept", [
+    ("  the  Metrocentre; rm -rf ", "the Metrocentre rm -rf"), ("x" * 200, "x" * 80), ("{}", ""),
+    ("Gran's, 1-2 Main St. & co/x", "Gran's, 1-2 Main St. & co/x"), ("Bodø\tGlimt", "Bodø Glimt"),
+    ("a" * 79 + " b", "a" * 79)])
+def test_a_place_is_cut_down_to_what_may_be_asked(words, kept):
+    assert home_assistant.journey_place(words) == kept
 
 
 @pytest.mark.parametrize("failure, said", [
