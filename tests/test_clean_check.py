@@ -18,9 +18,10 @@ from voice_assistant import clean_check
 from voice_assistant.clean_check import CleanCheck
 from voice_assistant.clean_ear import Verdict
 from voice_assistant.clean_store import CleanStore
-from voice_assistant.clean_swap import NO_ADMIN, Outcome, Swapper
+from voice_assistant.clean_swap import NO_ADMIN, Ears, Outcome, Swapper
 from voice_assistant.downloads import Wanted
 from voice_assistant.music_folder import HELD, MusicFolder
+from voice_assistant.navidrome import NavidromeError
 
 FILE = {"size": 4096, "updated": "2026-11-16T10:00:00Z"}
 
@@ -38,22 +39,34 @@ CLEAN = Verdict("clean", 10, 1)
 class FakeLibrary:
     """Stands in for Navidrome: its albums, a page at a time, each album's songs, and each song's file."""
 
-    def __init__(self, albums, files=None, fails=None):
+    def __init__(self, albums, files=None, fails=None, failures=1000):
         self.albums = albums
         self.files = files or {}
         self.fails = fails
+        # How many times listing fails before it works.
+        self.failures = failures
         self.pages = []
+        self.audio_asked = []
+        # Set by a test to run as an album's songs are asked for.
+        self.on_album = None
 
     def _call(self, endpoint, **params):
         assert endpoint == "getAlbumList2" and params["type"] == "alphabeticalByName"
         self.pages.append(params["offset"])
-        if self.fails:
+        if self.fails and self.failures:
+            self.failures -= 1
             raise self.fails
         names = sorted(self.albums)[params["offset"]:params["offset"] + params["size"]]
         return {"status": "ok", "albumList2": {"album": [{"id": name, "name": name} for name in names]}}
 
     def _album_songs(self, album_id):
+        if self.on_album:
+            self.on_album()
         return self.albums[album_id]
+
+    def audio(self, song_id):
+        self.audio_asked.append(song_id)
+        return b"made-up audio"
 
     def song_file(self, song_id):
         return {"path": f"Artist/One/{song_id}.mp3", **self.files.get(song_id, FILE)}
@@ -77,7 +90,10 @@ class FakeEars:
         self.heard.append(song["id"])
         if self.on_hear:
             self.on_hear(song)
-        return self.verdicts.get(song["id"], EXPLICIT)
+        verdict = self.verdicts.get(song["id"], EXPLICIT)
+        if isinstance(verdict, list):
+            return verdict.pop(0) if len(verdict) > 1 else verdict[0]
+        return verdict
 
 
 class FakeSwapper:
@@ -159,12 +175,19 @@ def test_a_check_hears_only_new_or_changed_songs_and_quietly_swaps_a_clean_one(m
     assert state["current"] is None and state["last_finished"] == 1763290000.0
 
 
-def test_a_songs_lyrics_are_left_to_ears_so_a_song_with_too_few_swears_is_passed_over(make_check):
-    # Ears reads the lyrics before fetching any sound: the check just moves on.
-    check = make_check(ears=FakeEars({"e1": Verdict("too_few", 2, 0)}))
+def test_a_song_with_too_few_swears_is_passed_over_without_listening(make_check, make_config, store):
+    # Ears reads the lyrics before fetching any sound: one swear is nothing to bleep.
+    library = FakeLibrary({"Gunna": [ENDLESS]})
+    listener = SimpleNamespace(lock=threading.RLock(), transcribe=lambda *args, **kwargs: pytest.fail("listened"))
+    ears = Ears(make_config(), lambda: library, listener,
+                lambda _library: SimpleNamespace(for_song=lambda song: ("fuck this\nla la", "navidrome")), store)
+    check = make_check(library=library, ears=ears)
+
     check.start()
-    finished(check)
-    assert check.fakes.swapper.swaps == []
+
+    assert finished(check)["done"] == 1
+    assert library.audio_asked == [] and check.fakes.swapper.swaps == []
+    assert store.verdict("e1")["verdict"]["kind"] == "too_few"
 
 
 @pytest.mark.parametrize("verdict", [Verdict("unsure", 10, 2), Verdict("not_judged", 0, 0, "no lyrics")])
@@ -220,6 +243,57 @@ def test_the_page_sees_the_lists_and_how_many_songs_are_held(make_check, store, 
 
 def test_no_held_songs_are_counted_without_a_usable_music_folder(make_check, tmp_path):
     assert make_check(folder=str(tmp_path / "nowhere")).state()["held"] == 0
+
+
+def test_a_song_heard_clean_but_not_swapped_is_swapped_by_the_next_check_without_hearing_it(make_check, store):
+    # Its swap couldn't be made - with no music folder set, say - so it's tried again.
+    store.set_verdict("d1", 4096, "2026-11-16T10:00:00Z", CLEAN, "Travis Scott - SICKO MODE (Clean)")
+    store.add("couldnt", "Travis Scott - SICKO MODE (Clean)", "no music folder is set", song_id="d1")
+    check = make_check(library=FakeLibrary({"Astro": [SICKO]}))
+
+    check.start()
+    finished(check)
+
+    assert check.fakes.ears.heard == []
+    assert check.fakes.swapper.swaps == [("d1", Wanted("SICKO MODE", "Travis Scott", "track"), None, True)]
+
+
+def test_a_copy_kept_as_only_clean_isnt_swapped_again(make_check, store):
+    # SoulSync filed the last copy elsewhere, so it has an id of its own.
+    store.set_verdict("d2", 4096, "2026-11-16T10:00:00Z", CLEAN, "Travis Scott - SICKO MODE (Clean)")
+    store.add("only_clean", "Travis Scott - SICKO MODE (Clean)", "3 copies came down clean", song_id="d1",
+              kept=["d2"])
+    check = make_check(library=FakeLibrary({"Astro": [{**SICKO, "id": "d2"}]}))
+
+    check.start()
+
+    assert finished(check)["total"] == 0
+    assert check.fakes.ears.heard == [] and check.fakes.swapper.swaps == []
+
+
+@pytest.mark.parametrize("swap", [{"song_id": "d1"}, {"song_id": "x1", "copy": {"id": "d1"}},
+                                  {"song_id": "x1", "copy": {"id": "x2"}, "pending": [{"id": "d1"}]}])
+def test_a_song_a_saved_swap_is_handling_is_left_to_it(make_check, store, swap):
+    store.save_swap({"key": "k1", "name": "Travis Scott - SICKO MODE", "stage": "watching", **swap})
+    check = make_check(library=FakeLibrary({"Astro": [SICKO]}), ears=FakeEars({"d1": CLEAN}))
+
+    check.start()
+
+    assert finished(check)["done"] == 1
+    assert check.fakes.ears.heard == [] and check.fakes.swapper.swaps == []
+
+
+def test_the_page_sees_the_check_listing_then_checking(make_check):
+    check = make_check()
+    seen = []
+    check.fakes.library.on_album = lambda: seen.append((check.state()["phase"], check.state()["current"]))
+    check.fakes.ears.on_hear = lambda song: seen.append((check.state()["phase"], check.state()["current"]))
+
+    check.start()
+    state = finished(check)
+
+    assert seen[0] == ("listing", None) and seen[1] == ("checking", "Artist - Known")
+    assert state["phase"] is None
 
 
 # Starting and stopping
@@ -375,15 +449,111 @@ def test_a_swap_stopped_as_nova_stops_leaves_its_song_to_be_heard_again(make_che
 
 # Failures
 
-def test_a_library_which_cant_be_listed_ends_the_check_with_why(make_check, store):
-    check = make_check(library=FakeLibrary({}, fails=requests.ConnectionError("http://secret?t=token")))
+UNREACHABLE = Verdict("not_judged", 0, 0, "couldn't reach Navidrome (ConnectionError)")
+PAUSED = "Navidrome couldn't be reached, so the check stopped here and carries on next time."
+
+
+def test_a_library_out_of_reach_is_listed_again_each_minute_then_carried_on_next_time(make_check, store):
+    library = FakeLibrary({"One": [ENDLESS]}, fails=requests.ConnectionError("http://secret?t=token"))
+    check = make_check(library=library)
 
     check.start()
     state = finished(check)
 
-    assert state["running"] is False and state["last_finished"] is None
-    assert state["error"] == "couldn't list the songs in Navidrome (ConnectionError)"
+    # Tried, and ten times more a minute apart.
+    assert len(library.pages) == 11 and check.fakes.waits == [60] * 10
+    assert state["running"] is False and state["last_finished"] is None and state["error"] == PAUSED
+    assert state["paused"] is True and state["phase"] is None
     assert "token" not in str(store.check())
+
+    # Carried on as Nova starts again, once Navidrome is there.
+    library.failures = 0
+    again = make_check(library=library)
+    again.resume()
+    assert finished(again)["done"] == 1 and again.fakes.ears.heard == ["e1"]
+
+
+def test_a_library_which_answers_with_an_error_isnt_listed_again_till_next_time(make_check, store):
+    check = make_check(library=FakeLibrary({}, fails=NavidromeError("Wrong username or password", 40)))
+    check.start()
+    state = finished(check)
+
+    assert check.fakes.waits == [] and state["paused"] is True
+    assert state["error"] == ("Navidrome couldn't list the songs (Wrong username or password), "
+                              "so the check stopped here and carries on next time.")
+
+
+def test_a_song_heard_while_navidrome_is_out_of_reach_is_heard_again_each_minute(make_check):
+    check = make_check(ears=FakeEars({"a1": [UNREACHABLE, UNREACHABLE, EXPLICIT]}))
+
+    check.start()
+    state = finished(check)
+
+    assert check.fakes.ears.heard == ["a1", "a1", "a1", "b1", "c1", "d1", "e1"]
+    assert check.fakes.waits == [60, 60]
+    assert state["done"] == 5 and state["last_finished"] == 1763290000.0 and state["error"] is None
+
+
+def test_a_check_with_navidrome_gone_pauses_with_its_queue_and_carries_on_next_time(make_check, store):
+    # As after pve2 restarts, with the brain up before Navidrome: no song is used up, and the
+    # check isn't called finished.
+    ears = FakeEars({song: UNREACHABLE for song in ("a1", "b1", "c1", "d1", "e1")})
+    check = make_check(ears=ears)
+    library = check.fakes.library
+
+    check.start()
+    state = finished(check)
+
+    assert ears.heard == ["a1"] * 11 and check.fakes.waits == [60] * 10
+    assert state["running"] is False and state["paused"] is True and state["error"] == PAUSED
+    assert state["last_finished"] is None and state["done"] == 0 and state["total"] == 5
+    assert [song["id"] for song in store.check()["queue"]] == ["a1", "b1", "c1", "d1", "e1"]
+
+    # Carried on from its queue as Nova starts again, not listed afresh.
+    again = make_check(library=library)
+    again.resume()
+    state = finished(again)
+    assert again.fakes.ears.heard == ["a1", "b1", "c1", "d1", "e1"] and library.pages == [0]
+    assert state["done"] == 5 and state["paused"] is False and state["error"] is None
+
+
+def test_start_carries_a_paused_check_on_from_its_queue(make_check, store):
+    store.save_check({"running": False, "paused": True, "done": 3, "total": 5, "current": None,
+                      "queue": [SICKO, ENDLESS], "last_finished": None, "error": PAUSED})
+    check = make_check()
+
+    assert check.start()["success"] is True
+    state = finished(check)
+
+    assert check.fakes.ears.heard == ["d1", "e1"] and check.fakes.library.pages == []
+    assert state["done"] == 5 and state["total"] == 5
+
+
+def test_a_stop_while_waiting_for_navidrome_ends_the_check(make_check, store):
+    check = make_check(ears=FakeEars({"a1": UNREACHABLE}))
+
+    def wait(seconds):
+        check.stop()
+        return True
+
+    check._wait = wait
+    check.start()
+    state = finished(check)
+
+    assert check.fakes.ears.heard == ["a1"]
+    assert state["paused"] is False and store.check()["queue"] is None
+
+
+def test_a_surprise_part_way_ends_the_check_with_a_sentence(make_check):
+    check = make_check()
+
+    def odd():
+        raise RuntimeError("odd")
+
+    check.fakes.library.on_album = odd
+    check.start()
+
+    assert finished(check)["error"] == "Something went wrong part way through the check, so it stopped."
 
 
 def test_one_songs_surprise_doesnt_end_the_check(make_check):
