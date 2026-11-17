@@ -927,7 +927,7 @@ class NotInNavidrome:
 class NothingFound:
     """Stands in for Navidrome's library, which hasn't got anything either."""
 
-    def find_songs(self, title, artist):
+    def find_songs(self, title, artist, also=None):
         return []
 
     def find_album_tracks(self, title, artist):
@@ -937,7 +937,7 @@ class NothingFound:
 class HasGooba:
     """Stands in for Navidrome's library, which has Gooba by 6ix9ine."""
 
-    def find_songs(self, title, artist):
+    def find_songs(self, title, artist, also=None):
         return [{"id": "1", "title": "Gooba", "artist": "6ix9ine", "album": "Gooba", "explicitStatus": "explicit"}]
 
 

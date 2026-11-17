@@ -24,7 +24,7 @@ import os
 import threading
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import requests
@@ -152,11 +152,16 @@ class Wanted:
         title: The song's title or the album's name.
         artist: Its artist, or None if only the title was given.
         kind: "track" or "album".
+        also: For a song looked for in Navidrome, the title SoulSync found for it, which
+            may have more words than were asked for ("Endless Love" for "Endless"), and
+            is then the song asked for. Not part of what makes one request the same as
+            another.
     """
 
     title: str
     artist: Optional[str]
     kind: str
+    also: Optional[str] = field(default=None, compare=False)
 
     @classmethod
     def from_query(cls, query: str, search_type: Optional[str]) -> "Wanted":
@@ -787,7 +792,7 @@ class Downloads:
                 request = soulsync.request_album(wanted.title, wanted.artist)
             else:
                 request = soulsync.find_song(wanted.title, wanted.artist)
-                sought = Wanted(wanted.title, request.artist, "track")
+                sought = Wanted(wanted.title, request.artist, "track", request.title)
                 found = named[0] = Wanted(request.title, request.artist, "track")
                 self._name_as_found(wanted, found)
                 wanted = found
@@ -876,7 +881,7 @@ class Downloads:
         """Every copy of the song, or every track of the album, Navidrome has."""
         if wanted.kind == "album":
             return library.find_album_tracks(wanted.title, wanted.artist)
-        return library.find_songs(wanted.title, wanted.artist)
+        return library.find_songs(wanted.title, wanted.artist, also=wanted.also)
 
     def _had(self, library: NavidromeLibrary, wanted: Wanted) -> List[Dict]:
         """
@@ -914,8 +919,9 @@ class Downloads:
 
         Args:
             wanted: What was asked for, named as SoulSync found a song.
-            sought: What Navidrome is searched for - for a song, the title asked for and
-                SoulSync's artist, as SoulSync is asked for it again in a swap.
+            sought: What Navidrome is searched for - for a song, the title asked for,
+                SoulSync's artist and the title it found, as SoulSync is asked for it
+                again in a swap.
             request: The SongRequest or AlbumRequest SoulSync gave.
             new: What's new in Navidrome.
             satellite: The satellite that asked, or None.

@@ -418,12 +418,14 @@ class FakeNavidrome:
                     songs.append({"id": f"id-{rel}", "title": title, "artist": artist, "album": album})
         return songs
 
-    def find_songs(self, title, artist):
+    def find_songs(self, title, artist, also=None):
         if self.down:
             raise requests.ConnectionError("made-up refusal")
         if not self.stale:
             self.listed = self._read()
-        return [song for song in self.listed if song["title"] == title and artist in (None, song["artist"])]
+        # As the real library's: the title asked for, or the one SoulSync found for it.
+        return [song for song in self.listed
+                if song["title"] in (title, also) and artist in (None, song["artist"])]
 
     def song_file(self, song_id):
         rel = song_id[len("id-"):]
@@ -443,8 +445,10 @@ class FakeSoulSync:
     into the music folder the given seconds later - or several, given a list - or never, for None.
     """
 
-    def __init__(self, root, clock, lands=(), find_fails=None, request_fails=None):
+    def __init__(self, root, clock, lands=(), find_fails=None, request_fails=None, finds=None):
         self.root = root
+        # The title SoulSync finds whatever's asked for, if not the one asked for.
+        self.finds = finds
         self.clock = clock
         self.lands = list(lands)
         self.find_fails = find_fails
@@ -457,6 +461,7 @@ class FakeSoulSync:
         self.found.append((title, artist, album))
         if self.find_fails:
             raise self.find_fails
+        title = self.finds or title
         return SongRequest(title, artist, {"id": f"deezer-{len(self.found)}", "name": title})
 
     def request_song(self, request):
@@ -570,6 +575,26 @@ def test_a_clean_song_is_set_aside_forgotten_fetched_again_and_swapped(make_swap
     assert fakes.ears.heard == [([f"id-{ENDLESS_REL}"], True)]
     assert store.listed("swapped") == [{"name": "Gunna - endless", "reason": "", "song_id": f"id-{ENDLESS_REL}"}]
     assert store.swaps() == [] and swapper.said == []
+
+
+def test_a_wider_title_soulsync_finds_is_the_copy_watched_for(make_swapper, music, store):
+    # Asked for as "Endless", SoulSync finds Gunna's "Endless Love", which is the song swapped:
+    # its new copy is the one watched for, though its title has a word more than was asked for.
+    love_rel = "Gunna/The Last Wun/endless love.mp3"
+    put(music, love_rel, b"clean endless love")
+    swapper = make_swapper()
+    fakes = swapper.fakes
+    fakes.library.tags[love_rel] = ("Endless Love", "Gunna", "The Last Wun (explicit)")
+    fakes.library.tags[ENDLESS_REL] = ("Something Else", "Someone Else", "Another Album")
+    fakes.soulsync.finds = "Endless Love"
+    fakes.soulsync.lands = [(30, love_rel, b"explicit endless love")]
+    song = next(song for song in fakes.library.find_songs("Endless Love", "Gunna"))
+
+    outcome = swapper.swap(song, Wanted("Endless", "Gunna", "track"), None, quiet=True)
+
+    assert outcome == "swapped"
+    assert read(music, love_rel) == b"explicit endless love"
+    assert fakes.ears.heard == [([f"id-{love_rel}"], False)]
 
 
 def test_every_try_coming_down_clean_keeps_the_last_and_holds_the_rest(make_swapper, music, store):

@@ -588,15 +588,16 @@ class Swapper:
         except SoulSyncError as e:
             # Nothing was put on the wishlist, so there's nothing to take off it.
             return self._put_back(swap, parts, e.reason or "SoulSync couldn't be asked")
-        # Looked for by the title asked for and SoulSync's artist, as a download is - and only
-        # what isn't listed now counts.
-        before = self._listed(library, Wanted(swap["title"], request.artist, "track"))
+        # Looked for by the title asked for, SoulSync's artist and the title it found - which may
+        # have more words, "Endless Love" for "Endless" - as a download is, and only what isn't
+        # listed now counts.
+        before = self._listed(library, Wanted(swap["title"], request.artist, "track", request.title))
         if before is None:
             # Without it, a copy already there could be taken for the one asked for.
             return self._put_back(swap, parts, NAVIDROME_UNASKED)
         swap.update(stage=WATCHING, tries=swap["tries"] + 1, track_id=request.track.get("id"),
-                    sought_artist=request.artist, before=sorted(before), asked_at=self._now(),
-                    limit=song_limit(self.config))
+                    sought_artist=request.artist, sought_title=request.title, before=sorted(before),
+                    asked_at=self._now(), limit=song_limit(self.config))
         # Before asking, so a restart which comes before the answer still takes it off the wishlist.
         self._save(swap)
         try:
@@ -674,7 +675,7 @@ class Swapper:
         Returns:
             The new copies, or [] once the limit has passed without any; None if Nova is stopping.
         """
-        sought = Wanted(swap["title"], swap.get("sought_artist"), "track")
+        sought = Wanted(swap["title"], swap.get("sought_artist"), "track", swap.get("sought_title"))
         before = set(swap.get("before") or ())
         scanned = False
         while not self._wait(POLL_EVERY):
@@ -699,7 +700,7 @@ class Swapper:
     def _found(library: NavidromeLibrary, sought: Wanted) -> Optional[List[Dict]]:
         """The copies of a song Navidrome lists, or None if it couldn't be asked this time."""
         try:
-            return library.find_songs(sought.title, sought.artist)
+            return library.find_songs(sought.title, sought.artist, also=sought.also)
         except NAVIDROME_ERRORS as e:
             NavidromeLibrary._failure_message(e)
             logger.warning(f"Couldn't look for {sought.name} in Navidrome this time, so the swap waits on")

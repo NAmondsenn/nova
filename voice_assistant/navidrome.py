@@ -87,6 +87,10 @@ CLEAN_VERSIONS = ("clean", "edited", "radio edit", "censored")
 # version: "(Clean Album Version)", "(Clean Lyrics)", "(Clean Advance Copy)".
 CLEAN_TAILS = ("album", "version", "edit", "edition", "lyrics", "advance copy")
 
+# The words which start a credit, where one isn't bracketed: "Money In The Grave feat. Rick
+# Ross". "with" isn't one here, as "Stay With Me" is a title of its own.
+CREDIT_WORDS = ("feat", "ft", "featuring")
+
 # Where a name says which version it is: a bracketed part, round or square, or what
 # follows a spaced dash - a hyphen, an en dash or an em dash, as tags have each of
 # them: "Gooba - Radio Edit", "Gooba \u2013 Radio Edit".
@@ -254,30 +258,48 @@ def is_clean(track: Dict) -> bool:
     return marked_clean(track.get("title") or "") or marked_clean(track.get("album") or "")
 
 
-def _wider_title(name: str, title: str) -> bool:
+def _own_words(name: str) -> List[str]:
     """
-    Whether a song's title has words of its own which the title asked for hasn't, outside
-    its brackets and what follows a dash: "Endless Love" is wider than "Endless", and
-    another song. "Endless (feat. X)" and "Endless - 2011 Remaster" aren't wider, and nor
-    is "Sweet Dreams (Are Made of This)" for "Sweet Dreams".
+    The words of a song's title which are its own: not those in brackets, nor after a
+    spaced dash, nor after an unbracketed credit - "Gooba (Live - Radio Edit)" and "Money
+    In The Grave feat. Rick Ross" are "gooba" and "money in the grave". The brackets go
+    first, so a dash inside them doesn't cut the title short.
     """
-    own = normalise(BRACKETED.sub("", DASH.split(name, 1)[0])).split()
-    return not set(own) <= set(normalise(title).split())
+    words = normalise(DASH.split(BRACKETED.sub("", name), 1)[0]).split()
+    cut = next((index for index, word in enumerate(words) if index and word in CREDIT_WORDS), len(words))
+    return words[:cut]
 
 
-def _asked_for(item: Dict, name_key: str, title: str, artist: Optional[str]) -> bool:
+def _wider_title(name: str, titles: List[str]) -> bool:
+    """
+    Whether a song's title has words of its own (see _own_words) which none of the titles
+    wanted has: "Endless Love" is wider than "Endless", and another song. "Endless (feat.
+    X)" and "Endless - 2011 Remaster" aren't wider, and nor is "Sweet Dreams (Are Made of
+    This)" for "Sweet Dreams".
+
+    Args:
+        name: The song's title in the library.
+        titles: The titles it may be: the one asked for, and the one SoulSync found for it,
+            which may have more words - "Endless Love" for "Endless".
+    """
+    own = set(_own_words(name))
+    return not any(own <= set(normalise(title).split()) for title in titles)
+
+
+def _asked_for(item: Dict, name_key: str, title: str, artist: Optional[str], also: Optional[str] = None) -> bool:
     """
     Whether a song or album found is what was asked for: its name has every word of
     the title, it's by the artist if one was given, and it isn't a live version,
     remix or the like unless the title says so. A clean version always is, as the
     same thing without the swearing. A song isn't one with more words to its title,
     which is another song: "Endless Love" isn't "Endless". An album's name may have
-    more, as "Rumours (Deluxe Edition)" has.
+    more, as "Rumours (Deluxe Edition)" has. The song SoulSync found for it - also - may
+    have more words than was asked for, and then it is the one asked for.
     """
     name = item.get(name_key) or ""
     if likeness(name, title) < 2 or (artist and artist_likeness(item.get("artist") or "", artist) < 2):
         return False
-    if name_key == "title" and _wider_title(name, title):
+    if name_key == "title" and _wider_title(name, [title] + ([also] if also else [])):
         return False
     version = version_of(name)
     return version is None or version in CLEAN_VERSIONS or _names_version(title, version)
@@ -377,7 +399,8 @@ class NavidromeLibrary:
 
     # Finding what's there, for a download
 
-    def _matches(self, kind: str, most: int, name_key: str, title: str, artist: Optional[str]) -> List[Dict]:
+    def _matches(self, kind: str, most: int, name_key: str, title: str, artist: Optional[str],
+                 also: Optional[str] = None) -> List[Dict]:
         """
         The songs or albums a search finds which are what was asked for - see
         _asked_for. The title and artist are searched together, and the title alone
@@ -390,6 +413,7 @@ class NavidromeLibrary:
             name_key: "title" for a song, "name" for an album.
             title: The title or album as asked for.
             artist: The artist as asked for, or None.
+            also: The title SoulSync found for a song, if it has more words than was asked for.
 
         Raises:
             requests.RequestException: If Navidrome couldn't be reached.
@@ -397,12 +421,12 @@ class NavidromeLibrary:
         """
         for query in ([f"{title} {artist}", title] if artist else [title]):
             found = self._search(query, **{f"{kind}s": most}).get(kind) or []
-            matches = [item for item in found if _asked_for(item, name_key, title, artist)]
+            matches = [item for item in found if _asked_for(item, name_key, title, artist, also)]
             if matches:
                 return matches
         return []
 
-    def find_songs(self, title: str, artist: Optional[str]) -> List[Dict]:
+    def find_songs(self, title: str, artist: Optional[str], also: Optional[str] = None) -> List[Dict]:
         """
         The songs in Navidrome which are the one asked for - every copy, so a clean
         one and an explicit one are both there to tell apart with is_clean, but no
@@ -411,12 +435,15 @@ class NavidromeLibrary:
         Args:
             title: The song's title as asked for.
             artist: Its artist, or None if only the title was given.
+            also: The title SoulSync found for it, which may have more words than was
+                asked for: "Endless Love" for "Endless" is the song asked for, when
+                SoulSync found it, and no other song when it found "endless".
 
         Raises:
             requests.RequestException: If Navidrome couldn't be reached.
             NavidromeError: If it answered with an error.
         """
-        return self._matches("song", 20, "title", title, artist)
+        return self._matches("song", 20, "title", title, artist, also)
 
     def find_album_tracks(self, title: str, artist: Optional[str]) -> List[Dict]:
         """

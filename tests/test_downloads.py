@@ -159,7 +159,7 @@ class FakeLibrary:
         self.looked_for = []
         self.scans = []
 
-    def find_songs(self, title, artist):
+    def find_songs(self, title, artist, also=None):
         assert (title, artist) in self.names
         self.looked_for.append((title, artist))
         return list(_answer(self.songs))
@@ -1196,6 +1196,50 @@ def test_a_song_with_a_wider_title_isnt_had_so_the_one_asked_for_is_requested(wa
     assert _all_ended()
     assert soulsync.requested == [("Endless", "Gunna")]
     assert said[0] == ("kitchen", "Endless by Gunna requested.")
+
+
+def test_a_wider_title_soulsync_found_is_what_lands(watching, clock, said, ears):
+    # "Endless by Gunna" for which SoulSync, picking Gunna's own song with more words to it,
+    # found "Endless Love": it's the one waited for, heard and said downloaded.
+    arrived = []
+    clock.later.append((2 * POLL_EVERY, lambda: arrived.append(True)))
+
+    class Session:
+        def get(self, url, params=None, timeout=None, stream=False):
+            songs = [{"id": "l1", "title": "Endless Love", "artist": "Gunna", "album": "Made Up"}] if arrived else []
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"subsonic-response": {
+                "status": "ok", "searchResult3": {"song": songs}}})
+
+    library = NavidromeLibrary("http://navidrome.local:4533", "nova", "made-up-password")
+    library._session = Session()
+    found = SongRequest("Endless Love", "Gunna", {"id": "made-up-track", "name": "Endless Love", "artists": ["Gunna"]})
+
+    result = watching(FakeSoulSync(song=found), library)._watch(Wanted("Endless", "Gunna", "track"), "kitchen")
+
+    assert result == "Endless Love by Gunna has been downloaded."
+    assert said == [("kitchen", "Endless Love by Gunna requested."),
+                    ("kitchen", "Endless Love by Gunna has been downloaded.")]
+    assert ears.heard == [("l1", True)]
+
+
+def test_a_wider_title_already_there_is_only_had_when_soulsync_found_it(watching, clock, said):
+    class Session:
+        def get(self, url, params=None, timeout=None, stream=False):
+            songs = [{"id": "l1", "title": "Endless Love", "artist": "Gunna", "album": "Made Up"}]
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"subsonic-response": {
+                "status": "ok", "searchResult3": {"song": songs}}})
+
+    library = NavidromeLibrary("http://navidrome.local:4533", "nova", "made-up-password")
+    library._session = Session()
+    love = SongRequest("Endless Love", "Gunna", {"id": "made-up-track", "name": "Endless Love", "artists": ["Gunna"]})
+
+    assert watching(FakeSoulSync(song=love), library)._watch(Wanted("Endless", "Gunna", "track"), "kitchen") == (
+        "You've already got Endless Love by Gunna.")
+    # SoulSync finding the shorter one, Endless Love is another song, and "endless" is requested.
+    soulsync = FakeSoulSync(song=SongRequest("endless", "Gunna", {"id": "made-up-track", "name": "endless"}))
+    said.clear()
+    watching(soulsync, library)._watch(Wanted("Endless", "Gunna", "track"), "kitchen")
+    assert said[0] == ("kitchen", "endless by Gunna requested.") and soulsync.requested == [("endless", "Gunna")]
 
 
 def test_an_album_had_is_asked_for_and_named_as_navidrome_has_it_when_none_is_queued(watching, set_up, said):

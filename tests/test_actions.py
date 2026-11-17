@@ -1557,7 +1557,7 @@ class FakeNavidromePlayer:
 class EmptyLibrary:
     """Stands in for Navidrome's library, with nothing in it."""
 
-    def find_songs(self, title, artist):
+    def find_songs(self, title, artist, also=None):
         return []
 
     def find_album_tracks(self, title, artist):

@@ -492,6 +492,17 @@ def test_an_album_called_clean_is_its_title_not_an_edition():
     assert pick_album([album], "Clean", "Soccer Mommy") is album
 
 
+def test_a_demo_edition_isnt_the_album_asked_for_unless_its_named():
+    # A demo is another version, in the title, a note on the edition or MusicBrainz's secondary types.
+    studio = _candidate("Rumours", "Fleetwood Mac")
+    for demo in (_candidate("Rumours (Demo)", "Fleetwood Mac"), _candidate("Rumours - Demo", "Fleetwood Mac"),
+                 _candidate("Rumours", "Fleetwood Mac", disambiguation="demo"),
+                 _candidate("Rumours", "Fleetwood Mac", secondary_types=["Demo"])):
+        assert pick_album([demo], "Rumours", "Fleetwood Mac") is None
+        assert pick_album([demo, studio], "Rumours", "Fleetwood Mac") is studio
+        assert pick_album([demo], "Rumours Demo", "Fleetwood Mac") is demo
+
+
 def test_the_edition_with_the_swearing_left_in_is_picked_over_one_without():
     clean_deluxe = _candidate("Rumours", "Fleetwood Mac", disambiguation="clean, deluxe edition")
     deluxe = _candidate("Rumours", "Fleetwood Mac", disambiguation="deluxe edition")

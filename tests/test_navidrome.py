@@ -430,6 +430,30 @@ def test_a_song_with_more_words_to_its_title_isnt_the_song_asked_for(make_librar
     assert _ids(library.find_songs("Endless Love", "Gunna")) == ["20"]
 
 
+def test_a_dash_inside_brackets_doesnt_cut_a_title_short(make_library):
+    # "(Live - Radio Edit)" is one bracketed part, a radio edit: no words of the song's own.
+    library = make_library(_songs_found([{"id": "30", "title": "Gooba (Live - Radio Edit)", "artist": "6ix9ine"}]))
+    assert _ids(library.find_songs("Gooba", "6ix9ine")) == ["30"]
+
+
+def test_a_credit_with_no_brackets_isnt_part_of_a_title(make_library):
+    library = make_library(_songs_found([
+        {"id": "31", "title": "Money In The Grave feat. Rick Ross", "artist": "Drake"},
+        {"id": "32", "title": "Money In The Grave ft Rick Ross", "artist": "Drake"},
+        {"id": "33", "title": "Stay With Me", "artist": "Drake"},
+    ]))
+    assert _ids(library.find_songs("Money In The Grave", "Drake")) == ["31", "32"]
+    # "with" is only a credit in brackets: "Stay With Me" is no "Stay".
+    assert library.find_songs("Stay", "Drake") == []
+
+
+def test_the_title_soulsync_found_may_be_wider_than_the_one_asked_for(make_library):
+    library = make_library(_songs_found([{"id": "20", "title": "Endless Love", "artist": "Gunna"}]))
+    assert library.find_songs("Endless", "Gunna") == []
+    assert library.find_songs("Endless", "Gunna", also="endless") == []
+    assert _ids(library.find_songs("Endless", "Gunna", also="Endless Love")) == ["20"]
+
+
 def test_a_bracketed_end_to_a_title_is_still_its_title_when_the_rest_is_asked_for(make_library):
     library = make_library(_songs_found([
         {"id": "23", "title": "Sweet Dreams (Are Made of This)", "artist": "Eurythmics"}]))
