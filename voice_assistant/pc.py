@@ -4,7 +4,8 @@ Turning the user's PC on and off by voice, through Home Assistant - decision 13 
 docs/decisions/0008.
 
 The PC is a HASS.Agent device, found by its maker in the registry, never by the
-windows_pc_ in its entity ids, which the user can rename. Its buttons are found by what
+windows_pc_ in its entity ids, which the user can rename - and only one holding entities
+of HASS.Agent's own, as its integration's device for the same machine holds none. Its buttons are found by what
 each does (see ha_registry.button_kind), and only those in PC_KINDS are ever pressed - never
 its launchurl, which opens any web address. It's woken by the Wake-on-LAN integration's
 button: the only one, with one PC and one button, else the one chosen for it on the page.
@@ -89,16 +90,22 @@ def find_pcs(states: List[Dict], snapshot: Snapshot, wake: Dict[str, str]) -> Li
         wake: The Wake-on-LAN button chosen for each PC, by device id.
 
     Returns:
-        One for each HASS.Agent device, in the order the registry has them.
+        One for each HASS.Agent device with entities of HASS.Agent's own, in the order the
+        registry has them.
     """
     state_of = {state.get("entity_id"): str(state.get("state")) for state in states}
     buttons = snapshot.hass_agent_buttons()
-    devices = list(dict.fromkeys(device for device, _ in snapshot.hass_agent_commands.values()))
+    # Each device's own entities. One with none isn't a PC of its own: the HASS.Agent
+    # integration makes a second device for the same machine, under the same name, which
+    # holds only its media player - nothing to press, and nothing to say whether it's on.
+    own = {device: [entity for entity in snapshot.on_device(device)
+                    if snapshot.platform(entity) == HASS_AGENT_PLATFORM]
+           for device in dict.fromkeys(device for device, _ in snapshot.hass_agent_commands.values())}
+    devices = [device for device, entities in own.items() if entities]
     wake_buttons = snapshot.wake_buttons()
     pcs = []
     for device in devices:
-        entities = [entity for entity in snapshot.on_device(device)
-                    if snapshot.platform(entity) == HASS_AGENT_PLATFORM]
+        entities = own[device]
         chosen = wake.get(device)
         if len(devices) == 1 and len(wake_buttons) == 1:
             woken_by = wake_buttons[0]
