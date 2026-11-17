@@ -311,6 +311,48 @@ def test_the_check_handed_back_cant_change_the_store(tmp_path):
     assert store.check() == {"queue": ["a"]}
 
 
+def test_the_schedules_record_survives_a_reload(tmp_path):
+    path = str(tmp_path / "clean_songs.json")
+    record = {"night_done": "2026-11-17", "week_sent": "2026-W47", "note_at": 1763371800.0}
+    CleanStore(path).save_schedule(record)
+
+    assert CleanStore(path).schedule() == record
+
+
+def test_a_new_store_has_no_schedule_record(tmp_path):
+    assert CleanStore(str(tmp_path / "clean_songs.json")).schedule() == {}
+
+
+def test_the_schedule_handed_back_cant_change_the_store(tmp_path):
+    store = CleanStore(str(tmp_path / "clean_songs.json"))
+    store.save_schedule({"night_done": "2026-11-17"})
+
+    store.schedule()["night_done"] = "2026-11-18"
+
+    assert store.schedule() == {"night_done": "2026-11-17"}
+
+
+def test_schedule_fields_of_the_wrong_type_are_dropped_on_loading(tmp_path):
+    path = tmp_path / "clean_songs.json"
+    path.write_text(json.dumps({"schedule": {"night_done": 20261117, "week_sent": "2026-W47", "note_at": True},
+                                "check": {"done": 3}}))
+
+    store = CleanStore(str(path))
+
+    assert store.schedule() == {"week_sent": "2026-W47"}
+    assert store.check() == {"done": 3}
+
+
+def test_a_schedule_that_isnt_a_dictionary_starts_empty(tmp_path):
+    path = tmp_path / "clean_songs.json"
+    path.write_text(json.dumps({"schedule": ["2026-11-17"], "check": {"done": 3}}))
+
+    store = CleanStore(str(path))
+
+    assert store.schedule() == {}
+    assert store.check() == {"done": 3}
+
+
 def test_every_part_is_kept_together(tmp_path):
     path = str(tmp_path / "clean_songs.json")
     store = CleanStore(path)
@@ -318,6 +360,7 @@ def test_every_part_is_kept_together(tmp_path):
     store.add("swapped", "X")
     store.save_swap(swap())
     store.save_check({"done": 1})
+    store.save_schedule({"night_done": "2026-11-17"})
 
     again = CleanStore(path)
 
@@ -325,6 +368,7 @@ def test_every_part_is_kept_together(tmp_path):
     assert again.listed("swapped")
     assert again.swaps()
     assert again.check() == {"done": 1}
+    assert again.schedule() == {"night_done": "2026-11-17"}
 
 
 def test_the_file_is_readable_by_this_user_only(tmp_path):
