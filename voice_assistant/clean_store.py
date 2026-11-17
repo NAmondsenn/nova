@@ -18,7 +18,8 @@ import json
 import logging
 import os
 import threading
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Callable, Dict, List, Optional
 
 from voice_assistant import storage
 from voice_assistant.clean_ear import Verdict
@@ -44,12 +45,15 @@ class CleanStore:
     out is a copy.
     """
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, clock: Optional[Callable[[], float]] = None):
         """
         Args:
             path: The file to keep it all in, e.g. clean_songs.json in the data folder.
+            clock: Gives the time in epoch seconds, to stamp each list entry with when it was
+                added; the wall clock by default.
         """
         self.path = path
+        self._clock = clock or time.time
         self._lock = threading.RLock()
         # Set when the file is there but couldn't be read or set aside: it may hold swaps with
         # songs in .nova-held, so it's never written over, and nothing is saved until a restart.
@@ -129,13 +133,16 @@ class CleanStore:
             kind: "swapped", "only_clean", "unsure" or "couldnt".
             name: What the song is called, e.g. "Gunna - Endless".
             reason: Why, shown on the page, e.g. "SoulSync found no explicit copy".
-            **extra: Anything else the page shows, e.g. song_id or the time.
+            **extra: Anything else the page shows, e.g. song_id. The entry also gets "at", the
+                time it was added in epoch seconds, unless one is given here: the weekly note
+                counts the week's entries by it. Entries saved before this have none, and count
+                as old.
 
         Raises:
             ValueError for any other kind. OSError if it couldn't be saved; the store is as it was.
         """
         _check_kind(kind)
-        entry = {**extra, "name": name, "reason": reason}
+        entry = {"at": self._clock(), **extra, "name": name, "reason": reason}
         with self._lock:
             entries = [entry] + [e for e in self._state["lists"][kind] if e.get("name") != name]
             lists = dict(self._state["lists"])

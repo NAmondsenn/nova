@@ -100,7 +100,8 @@ def test_each_list_survives_a_reload(tmp_path, kind):
 
     entries = CleanStore(path).listed(kind)
 
-    assert entries == [{"name": "Gunna - Endless", "reason": "no explicit copy found", "song_id": "abc"}]
+    assert entries == [{"name": "Gunna - Endless", "reason": "no explicit copy found", "song_id": "abc",
+                        "at": entries[0]["at"]}]
 
 
 def test_the_lists_are_kept_apart(tmp_path):
@@ -138,8 +139,58 @@ def test_adding_a_name_again_moves_it_to_the_front_with_the_new_reason(tmp_path)
 
     store.add("couldnt", "A", "second reason")
 
-    assert store.listed("couldnt") == [{"name": "A", "reason": "second reason"},
-                                       {"name": "B", "reason": "other"}]
+    assert [(e["name"], e["reason"]) for e in store.listed("couldnt")] == [("A", "second reason"), ("B", "other")]
+    assert "song_id" not in store.listed("couldnt")[0]
+
+
+def test_an_entry_says_when_it_was_added_by_the_clock_the_store_was_given(tmp_path):
+    now = [1763000000]
+    store = CleanStore(str(tmp_path / "clean_songs.json"), clock=lambda: now[0])
+    store.add("swapped", "A")
+    now[0] += 60
+    store.add("swapped", "B")
+
+    assert [(e["name"], e["at"]) for e in store.listed("swapped")] == [("B", 1763000060), ("A", 1763000000)]
+    # Kept in the file, so a reload still says when.
+    assert CleanStore(str(tmp_path / "clean_songs.json")).listed("swapped")[1]["at"] == 1763000000
+
+
+def test_an_entry_is_stamped_with_the_wall_clock_by_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(clean_store.time, "time", lambda: 1763000123.7)
+    store = CleanStore(str(tmp_path / "clean_songs.json"))
+    store.add("unsure", "A")
+
+    assert store.listed("unsure")[0]["at"] == 1763000123.7
+
+
+def test_a_time_the_caller_gave_is_kept(tmp_path):
+    store = CleanStore(str(tmp_path / "clean_songs.json"), clock=lambda: 1763000000)
+    store.add("couldnt", "A", "why", at=1700000000)
+
+    assert store.listed("couldnt")[0]["at"] == 1700000000
+
+
+def test_adding_a_name_again_stamps_the_new_time(tmp_path):
+    now = [1763000000]
+    store = CleanStore(str(tmp_path / "clean_songs.json"), clock=lambda: now[0])
+    store.add("couldnt", "A", "first")
+    now[0] += 3600
+    store.add("couldnt", "A", "second")
+
+    assert [e["at"] for e in store.listed("couldnt")] == [1763003600]
+
+
+def test_an_entry_saved_before_entries_had_times_is_left_without_one(tmp_path):
+    # So it counts as old, as the weekly note counts only what has an "at" within its week.
+    path = str(tmp_path / "clean_songs.json")
+    with open(path, "w") as file:
+        json.dump({"lists": {"swapped": [{"name": "Old", "reason": ""}]}}, file)
+
+    store = CleanStore(path, clock=lambda: 1763000000)
+
+    assert store.listed("swapped") == [{"name": "Old", "reason": ""}]
+    store.add("swapped", "New")
+    assert [e.get("at") for e in store.listed("swapped")] == [1763000000, None]
 
 
 def test_the_same_name_can_be_on_two_lists(tmp_path):
