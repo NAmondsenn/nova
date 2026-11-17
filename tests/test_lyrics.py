@@ -147,6 +147,16 @@ def test_an_lrclib_result_10_seconds_off_is_the_song():
     assert Lyrics(FakeLibrary(None), session=lrclib).for_song(ENDLESS) == ("words", "lrclib")
 
 
+@pytest.mark.parametrize("artist", ["", "!!!", None])
+def test_a_song_with_no_artist_takes_nothing_from_lrclib(artist):
+    # An empty artist is "in" every artist LRCLIB names, so any song of the title would do.
+    lrclib = FakeLrclib(_found({"duration": 150, "plainLyrics": "someone else's words", "artistName": "Anyone"}))
+    song = {"id": "a1", "title": "Endless", "artist": artist, "duration": 150}
+
+    assert Lyrics(FakeLibrary(None), session=lrclib).for_song(song) == (None, "none")
+    assert lrclib.asked == []
+
+
 def test_a_song_of_no_known_length_takes_nothing_from_lrclib():
     lrclib = FakeLrclib(_found({"duration": 150, "plainLyrics": "words"}))
     song = {key: value for key, value in ENDLESS.items() if key != "duration"}

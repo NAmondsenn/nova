@@ -89,6 +89,9 @@ class Lyrics:
                  if isinstance(entry, dict) and entry.get("name")]
         artist = (names + [song.get("artist") or ""])[0]
         title = song.get("title") or ""
+        # No artist would be "in" every artist LRCLIB names, and any song of the title would do.
+        if not _plain(artist):
+            return None
         try:
             response = self._session.get(LRCLIB_SEARCH, params={"track_name": title, "artist_name": artist},
                                          headers={"User-Agent": USER_AGENT}, timeout=LRCLIB_TIMEOUT)
