@@ -167,7 +167,9 @@ test("each list with a song in it is shown, its songs by name with why", async (
   });
   await shown.context.loadClean();
   const lists = shown.node("clean-lists");
-  assert.equal(all(lists, "h3").map((heading) => heading.textContent).join(" | "), "Clean and swapped | Couldn't swap");
+  // Under the block's own h3, "Clean songs".
+  assert.equal(all(lists, "h4").map((heading) => heading.textContent).join(" | "), "Clean and swapped | Couldn't swap");
+  assert.equal(all(lists, "h3").length, 0);
   const rows = all(lists, "li").map((row) => all(row, "span").filter((span) => span.text).map((span) => span.text).join(" / "));
   assert.equal(rows.join(" | "),
     "Travis Scott - SICKO MODE | Gunna - endless / SoulSync found nothing | Artist - Two / Nova can't write to the music folder");
@@ -211,4 +213,20 @@ test("Stop asks first before dropping a paused check, and sends nothing if not",
   await dropped.context.loadClean();
   await dropped.node("clean-stop").click();
   assert.equal(dropped.asked.join(", "), "GET /api/clean, POST /api/clean/stop, GET /api/clean");
+});
+
+test("the check is looked at every 10 seconds while it runs, and every minute otherwise", async () => {
+  const before = page(CHECKING);
+  // Nothing known yet: the first look comes at once, then at the slower pace unless it's running.
+  assert.equal(before.context.cleanEvery(), 60000);
+  await before.context.loadClean();
+  assert.equal(before.context.cleanEvery(), 10000);
+
+  const idle = page({ ...CHECKING, running: false, phase: null, current: null });
+  await idle.context.loadClean();
+  assert.equal(idle.context.cleanEvery(), 60000);
+
+  const paused = page({ ...CHECKING, running: false, phase: null, paused: true, error: "Paused." });
+  await paused.context.loadClean();
+  assert.equal(paused.context.cleanEvery(), 60000);
 });

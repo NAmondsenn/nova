@@ -1192,6 +1192,14 @@ input[type="range"]:focus-visible::-moz-range-thumb {
   min-height: 44px;
 }
 
+/* A song's name, or why it's listed, as one long word ("Artist_-_A_Very_Long_Title.mp3")
+   wraps rather than pushing the row wider than a phone. */
+#clean-lists .name,
+#clean-lists .sub {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 /* The calendars under it are rows as the batteries are, then where new events go. */
 .calendars,
 .new-events { margin-top: 10px; }

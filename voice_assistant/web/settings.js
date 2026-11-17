@@ -48,8 +48,10 @@ const FOOTBALL_SWITCHES = [
 ];
 
 // How the library check for clean songs is going. A song takes about half a minute to
-// hear, with no GPU, so every ten seconds shows each one it's on. See docs/decisions/0019.
-const CLEAN_EVERY = 10000;
+// hear, with no GPU, so every ten seconds shows each one it's on while a check runs; with
+// none running, once a minute is enough to see a download's swap listed. See docs/decisions/0019.
+const CLEAN_RUNNING_EVERY = 10000;
+const CLEAN_EVERY = 60000;
 
 // The library check's lists, as the brain names them and as the page heads them.
 const CLEAN_LISTS = [
@@ -555,6 +557,7 @@ async function live() {
 
 // Runs work now, and again every so often while the page is in view - never two at
 // once, and not at all while it's hidden, so a phone left on the page isn't kept busy.
+// milliseconds can be a function, asked before each wait, for a pace which changes.
 function every(milliseconds, work) {
   let timer = null;
   let running = false;
@@ -567,7 +570,8 @@ function every(milliseconds, work) {
       await work();
     } finally {
       running = false;
-      if (!document.hidden) timer = setTimeout(run, milliseconds);
+      const wait = typeof milliseconds === "function" ? milliseconds() : milliseconds;
+      if (!document.hidden) timer = setTimeout(run, wait);
     }
   }
   document.addEventListener("visibilitychange", run);
@@ -1889,6 +1893,11 @@ async function loadClean() {
   showClean(cleanSongs);
 }
 
+// How long until the library check is looked at again: sooner while one is running.
+function cleanEvery() {
+  return cleanSongs && cleanSongs.running ? CLEAN_RUNNING_EVERY : CLEAN_EVERY;
+}
+
 // Check library and Stop. Stop drops a paused check, which can't be had back, so that's
 // asked first.
 function setUpClean() {
@@ -1922,7 +1931,8 @@ function showClean(state) {
       if (!state[kind].length) continue;
       const list = element("ul", undefined, "list batteries");
       list.append(...state[kind].map(cleanRow));
-      shown.push(element("h3", heading, "subheading"), list);
+      // h4, as the lists sit under the block's own h3, "Clean songs".
+      shown.push(element("h4", heading, "subheading"), list);
     }
     document.getElementById("clean-lists").replaceChildren(...shown);
   });
@@ -3019,7 +3029,7 @@ document.addEventListener("DOMContentLoaded", () => {
   every(HOME_EVERY, loadHome);
   every(BATTERIES_EVERY, loadBatteries);
   every(FOOTBALL_EVERY, loadFootball);
-  every(CLEAN_EVERY, loadClean);
+  every(cleanEvery, loadClean);
   every(CALENDARS_EVERY, loadCalendars);
   every(HOME_CHOICES_EVERY, loadHomeChoices);
   document.getElementById("also-send-box").addEventListener("change", (event) =>
