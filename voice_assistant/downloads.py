@@ -335,7 +335,7 @@ def _of_its_tracks(count: int, start: bool) -> str:
     return f"{count} of its tracks"
 
 
-def _album_said(lead: str, outcomes: Counter) -> str:
+def _album_said(lead: str, outcomes: Counter, already_had: bool = False) -> str:
     """
     What's said of an album once the tracks which came down are heard: the lead, then how
     many were swapped for explicit copies and how many weren't plainly downloaded, e.g.
@@ -347,6 +347,8 @@ def _album_said(lead: str, outcomes: Counter) -> str:
         lead: "X has been downloaded." or "Only N of the M tracks of X came down."
         outcomes: How many tracks ended each way - "downloaded", "swapped", "only_clean",
             "couldnt", "unsure" or "not_judged".
+        already_had: Whether the clean tracks were Navidrome's already, swapped on a yes to
+            the explicit album, when they "are" clean rather than "came down" clean.
     """
     said = [lead]
     for kind in ("swapped", "only_clean", "couldnt", "unsure", "not_judged"):
@@ -355,13 +357,14 @@ def _album_said(lead: str, outcomes: Counter) -> str:
             continue
         one = count == 1
         it = "it" if one else "them"
+        clean = ("is clean" if one else "are clean") if already_had else "came down clean"
         if kind == "swapped":
-            said.append(f"{_of_its_tracks(count, True)} came down clean, so I swapped {it} for the explicit "
+            said.append(f"{_of_its_tracks(count, True)} {clean}, so I swapped {it} for the explicit "
                         f"{'one' if one else 'ones'}.")
         elif kind == "only_clean":
             said.append(f"{_of_its_tracks(count, True)} only came down clean, so I've kept {it}.")
         elif kind == "couldnt":
-            said.append(f"{_of_its_tracks(count, True)} came down clean, and I couldn't swap {it}.")
+            said.append(f"{_of_its_tracks(count, True)} {clean}, and I couldn't swap {it}.")
         elif kind == "unsure":
             said.append(f"I couldn't tell if {_of_its_tracks(count, False)} "
                         f"{'is the clean version' if one else 'are clean versions'}.")
@@ -1044,7 +1047,7 @@ class Downloads:
         else:
             # None of them clean after all, or none that could be judged.
             lead = f"You've already got {wanted.name}."
-        return self._tell(satellite, _album_said(lead, outcomes))
+        return self._tell(satellite, _album_said(lead, outcomes, already_had=True))
 
     def _heard_album(self, lead: str, tracks: List[List[Dict]], satellite: Optional[str]) -> str:
         """

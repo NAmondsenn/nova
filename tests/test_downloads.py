@@ -1293,8 +1293,9 @@ def test_an_album_had_only_clean_with_none_queued_isnt_said_to_be_got(watching, 
 
 
 @pytest.mark.parametrize("kinds, outcomes, message", [
+    # Had, not just downloaded: its tracks "are" clean, rather than "came down" clean.
     ({"r5": "clean", "r6": "clean"}, {"r6": Outcome("only_clean")},
-     "Rumours by Fleetwood Mac has been downloaded. One of its tracks came down clean, so I swapped it for the "
+     "Rumours by Fleetwood Mac has been downloaded. One of its tracks is clean, so I swapped it for the "
      "explicit one. One of its tracks only came down clean, so I've kept it."),
     # Heard again first: tracks no longer clean aren't swapped, and with none, it's had.
     ({"r5": "explicit", "r6": "explicit"}, {}, "You've already got Rumours by Fleetwood Mac."),
@@ -1303,7 +1304,7 @@ def test_an_album_had_only_clean_with_none_queued_isnt_said_to_be_got(watching, 
      {"r5": Outcome("couldnt", "SoulSync admin profile isn't set up"),
       "r6": Outcome("couldnt", "SoulSync admin profile isn't set up")},
      "I couldn't download Rumours by Fleetwood Mac, so you've still got the clean version: SoulSync admin profile "
-     "isn't set up. 2 of its tracks came down clean, and I couldn't swap them."),
+     "isn't set up. 2 of its tracks are clean, and I couldn't swap them."),
     ({"r5": "clean", "r6": "clean"}, {"r5": Outcome("only_clean", "3 copies came down clean"),
                                       "r6": Outcome("only_clean", "3 copies came down clean")},
      "I couldn't download Rumours by Fleetwood Mac, so you've still got the clean version: SoulSync only brought "
@@ -1311,8 +1312,11 @@ def test_an_album_had_only_clean_with_none_queued_isnt_said_to_be_got(watching, 
     ({"r5": "unsure", "r6": "unsure"}, {},
      "You've already got Rumours by Fleetwood Mac. I couldn't tell if 2 of its tracks are clean versions."),
     ({"r5": "clean", "r6": "clean"}, {"r6": Outcome("couldnt", "Navidrome still lists it")},
-     "Rumours by Fleetwood Mac has been downloaded. One of its tracks came down clean, so I swapped it for the "
-     "explicit one. One of its tracks came down clean, and I couldn't swap it."),
+     "Rumours by Fleetwood Mac has been downloaded. One of its tracks is clean, so I swapped it for the "
+     "explicit one. One of its tracks is clean, and I couldn't swap it."),
+    ({"r5": "clean", "r6": "clean"}, {},
+     "Rumours by Fleetwood Mac has been downloaded. 2 of its tracks are clean, so I swapped them for the "
+     "explicit ones."),
 ])
 def test_a_yes_to_an_albums_explicit_tracks_swaps_each_track_heard_clean(watching, set_up, clock, said, store, ears,
                                                                          swapper, kinds, outcomes, message):
@@ -1333,7 +1337,7 @@ def test_a_yes_to_an_albums_explicit_tracks_swaps_each_track_heard_clean(watchin
     expected = [("r5", Wanted("Gold Dust Woman", "Fleetwood Mac", "track"), "kitchen", False),
                 ("r6", Wanted("Songbird", "Fleetwood Mac", "track"), "kitchen", False)]
     assert swapper.swaps == (expected if kinds["r5"] == "clean" else [])
-    assert "has been downloaded" not in message or "swapped it" in message
+    assert "has been downloaded" not in message or "so I swapped" in message
 
 
 def test_an_album_had_but_not_asked_for_in_words_is_only_said_to_be_got(watching, set_up, clock):
