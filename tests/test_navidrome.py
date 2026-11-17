@@ -413,6 +413,36 @@ def test_play_still_plays_a_demo_when_its_all_there_is(make_player):
     assert _playing(player).song["id"] == "5"
 
 
+def test_a_song_with_more_words_to_its_title_isnt_the_song_asked_for(make_library):
+    library = make_library(_songs_found([
+        {"id": "20", "title": "Endless Love", "artist": "Gunna"},
+        {"id": "21", "title": "Endless (feat. Someone)", "artist": "Gunna"},
+        {"id": "22", "title": "Endless - 2011 Remaster", "artist": "Gunna"},
+    ]))
+    # "Endless Love" is another song, but a credit or a remaster note is the same one.
+    assert _ids(library.find_songs("Endless", "Gunna")) == ["21", "22"]
+    assert _ids(library.find_songs("Endless Love", "Gunna")) == ["20"]
+
+
+def test_a_bracketed_end_to_a_title_is_still_its_title_when_the_rest_is_asked_for(make_library):
+    library = make_library(_songs_found([
+        {"id": "23", "title": "Sweet Dreams (Are Made of This)", "artist": "Eurythmics"}]))
+    assert _ids(library.find_songs("Sweet Dreams", "Eurythmics")) == ["23"]
+    assert _ids(library.find_songs("Sweet Dreams Are Made of This", "Eurythmics")) == ["23"]
+
+
+def test_play_still_finds_a_song_by_part_of_its_title(make_player):
+    player = make_player({"search3": lambda params: {"searchResult3": {"song": [
+        {"id": "23", "title": "Sweet Dreams (Are Made of This)", "artist": "Eurythmics"},
+        {"id": "20", "title": "Endless Love", "artist": "Gunna"}]}}})
+    assert player.play("Sweet Dreams", search_type="track")["message"] == (
+        "Playing Sweet Dreams (Are Made of This) by Eurythmics")
+    assert _playing(player).song["id"] == "23"
+    player = make_player({"search3": lambda params: {"searchResult3": {"song": [
+        {"id": "20", "title": "Endless Love", "artist": "Gunna"}]}}})
+    assert player.play("Endless", search_type="track")["message"] == "Playing Endless Love by Gunna"
+
+
 def test_a_clean_version_is_always_one_of_the_songs_found(make_library):
     library = make_library(_songs_found([
         {"id": "7", "title": "Dreams - Radio Edit", "artist": "Fleetwood Mac"},

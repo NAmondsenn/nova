@@ -249,15 +249,30 @@ def is_clean(track: Dict) -> bool:
     return marked_clean(track.get("title") or "") or marked_clean(track.get("album") or "")
 
 
+def _wider_title(name: str, title: str) -> bool:
+    """
+    Whether a song's title has words of its own which the title asked for hasn't, outside
+    its brackets and what follows a dash: "Endless Love" is wider than "Endless", and
+    another song. "Endless (feat. X)" and "Endless - 2011 Remaster" aren't wider, and nor
+    is "Sweet Dreams (Are Made of This)" for "Sweet Dreams".
+    """
+    own = normalise(BRACKETED.sub("", DASH.split(name, 1)[0])).split()
+    return not set(own) <= set(normalise(title).split())
+
+
 def _asked_for(item: Dict, name_key: str, title: str, artist: Optional[str]) -> bool:
     """
     Whether a song or album found is what was asked for: its name has every word of
     the title, it's by the artist if one was given, and it isn't a live version,
     remix or the like unless the title says so. A clean version always is, as the
-    same thing without the swearing.
+    same thing without the swearing. A song isn't one with more words to its title,
+    which is another song: "Endless Love" isn't "Endless". An album's name may have
+    more, as "Rumours (Deluxe Edition)" has.
     """
     name = item.get(name_key) or ""
     if likeness(name, title) < 2 or (artist and artist_likeness(item.get("artist") or "", artist) < 2):
+        return False
+    if name_key == "title" and _wider_title(name, title):
         return False
     version = version_of(name)
     return version is None or version in CLEAN_VERSIONS or _names_version(title, version)
@@ -385,7 +400,8 @@ class NavidromeLibrary:
     def find_songs(self, title: str, artist: Optional[str]) -> List[Dict]:
         """
         The songs in Navidrome which are the one asked for - every copy, so a clean
-        one and an explicit one are both there to tell apart with is_clean.
+        one and an explicit one are both there to tell apart with is_clean, but no
+        song with more words to its title: see _asked_for.
 
         Args:
             title: The song's title as asked for.

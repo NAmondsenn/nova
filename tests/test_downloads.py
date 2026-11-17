@@ -1177,6 +1177,27 @@ def test_something_already_had_is_never_requested(watching, set_up, clock, store
     assert soulsync.requested == [] and _watches() == []
 
 
+def test_a_song_with_a_wider_title_isnt_had_so_the_one_asked_for_is_requested(watching, set_up, clock, said, store):
+    # Navidrome, really asked, has only "Endless Love" - another song, and no reason to say
+    # "Endless" is already got.
+    class Session:
+        def get(self, url, params=None, timeout=None, stream=False):
+            songs = [{"id": "20", "title": "Endless Love", "artist": "Gunna", "album": "Made Up"}]
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"subsonic-response": {
+                "status": "ok", "searchResult3": {"song": songs}}})
+
+    library = NavidromeLibrary("http://navidrome.local:4533", "nova", "made-up-password")
+    library._session = Session()
+    soulsync = FakeSoulSync()
+    downloads = watching(soulsync, library, set_up)
+
+    assert downloads.download("Endless by Gunna", "track", "kitchen") == {
+        "success": True, "message": f"Asked SoulSync for Endless by Gunna. {SONG_ON_ITS_WAY}", "later": True}
+    assert _all_ended()
+    assert soulsync.requested == [("Endless", "Gunna")]
+    assert said[0] == ("kitchen", "Endless by Gunna requested.")
+
+
 def test_an_album_had_is_asked_for_and_named_as_navidrome_has_it_when_none_is_queued(watching, set_up, said):
     # "download rumours", which Navidrome has: SoulSync is asked all the same, as Navidrome
     # may have only some of it. Queuing none, it's had - named as Navidrome had it, not as
