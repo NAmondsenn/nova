@@ -336,6 +336,66 @@ def test_a_song_whose_swap_ended_rejected_is_tried_once_more_after_thirty_days(m
     assert check.fakes.swapper.swaps == [("d1", Wanted("SICKO MODE", "Travis Scott", "track"), None, True)]
 
 
+# The file Navidrome gives now differs from the one heard: after a put-back it records the file afresh.
+MOVED = {"size": 4096, "updated": "2026-11-17T05:00:00Z"}
+
+
+@pytest.mark.parametrize("song_id, kept", [("d1", ["d2"]), ("x1", ["d1"])])
+@pytest.mark.parametrize("kind", ["unsure", "couldnt"])
+def test_a_rejected_songs_file_changed_by_the_put_back_is_still_left_alone(make_check, store, kind, song_id, kept):
+    store.set_verdict("d1", 4096, "2026-11-16T10:00:00Z", CLEAN, "Travis Scott - SICKO MODE (Clean)")
+    store.add(kind, "Travis Scott - SICKO MODE (Clean)", "heard 2 of its 10 swears", song_id=song_id, kept=kept,
+              at=CHECK_NOW - 29 * DAY)
+    check = make_check(library=FakeLibrary({"Astro": [SICKO]}, files={"d1": MOVED}))
+
+    check.start()
+
+    assert finished(check)["total"] == 0
+    assert check.fakes.ears.heard == [] and check.fakes.swapper.swaps == []
+
+
+def test_a_rejected_songs_changed_file_is_heard_again_after_thirty_days(make_check, store):
+    store.set_verdict("d1", 4096, "2026-11-16T10:00:00Z", CLEAN, "Travis Scott - SICKO MODE (Clean)")
+    store.add("unsure", "Travis Scott - SICKO MODE (Clean)", "heard 2 of its 10 swears", song_id="d1", kept=["d2"],
+              at=CHECK_NOW - 31 * DAY)
+    check = make_check(library=FakeLibrary({"Astro": [SICKO]}, files={"d1": MOVED}),
+                       ears=FakeEars({"d1": CLEAN}))
+
+    check.start()
+    finished(check)
+
+    assert check.fakes.ears.heard == ["d1"]
+    assert check.fakes.swapper.swaps == [("d1", Wanted("SICKO MODE", "Travis Scott", "track"), None, True)]
+
+
+@pytest.mark.parametrize("song_id, kept", [("d1", []), ("x1", ["d1"])])
+def test_a_song_which_only_came_down_clean_is_never_swapped_again_whatever_its_file_says(make_check, store, song_id,
+                                                                                         kept):
+    store.set_verdict("d1", 4096, "2026-11-16T10:00:00Z", CLEAN, "Travis Scott - SICKO MODE (Clean)")
+    store.add("only_clean", "Travis Scott - SICKO MODE (Clean)", "3 copies came down clean", song_id=song_id,
+              kept=kept, at=CHECK_NOW - 400 * DAY)
+    check = make_check(library=FakeLibrary({"Astro": [SICKO]}, files={"d1": MOVED}), ears=FakeEars({"d1": CLEAN}))
+
+    check.start()
+
+    assert finished(check)["total"] == 0
+    assert check.fakes.ears.heard == [] and check.fakes.swapper.swaps == []
+
+
+@pytest.mark.parametrize("kind", ["only_clean", "unsure"])
+def test_a_queued_song_whose_swap_ended_since_isnt_heard_or_swapped(make_check, store, kind):
+    # Queued to be heard before the swap ended: the queue can be hours old, or from before a restart.
+    store.save_check({"running": True, "done": 0, "total": 1, "current": None, "queue": [SICKO],
+                      "last_finished": None})
+    store.add(kind, "Travis Scott - SICKO MODE (Clean)", "why", song_id="d1", kept=["d2"], at=CHECK_NOW - DAY)
+    check = make_check(library=FakeLibrary({"Astro": [SICKO]}), ears=FakeEars({"d1": CLEAN}))
+
+    check.resume()
+
+    assert finished(check)["done"] == 1
+    assert check.fakes.ears.heard == [] and check.fakes.swapper.swaps == []
+
+
 def test_an_entry_without_copies_or_a_time_doesnt_hold_a_swap_back(make_check, store):
     # Ears' own unsure entry and a plain couldnt keep no copies, and one with copies but no time is old.
     store.set_verdict("d1", 4096, "2026-11-16T10:00:00Z", CLEAN, "Travis Scott - SICKO MODE (Clean)")

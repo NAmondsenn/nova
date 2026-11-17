@@ -334,7 +334,7 @@ class CleanCheck:
         Raises:
             requests.RequestException, NavidromeError or ValueError if Navidrome couldn't be asked.
         """
-        only_clean = self._only_clean()
+        left_be = self._only_clean() | self._rejected()
         songs, seen, offset = [], set(), 0
         while True:
             albums = library._call("getAlbumList2", type="alphabeticalByName", size=PAGE,
@@ -346,7 +346,7 @@ class CleanCheck:
                     if song.get("id") in seen:
                         continue
                     seen.add(song.get("id"))
-                    todo = self._todo(library, song, only_clean)
+                    todo = self._todo(library, song, left_be)
                     if todo:
                         kept = {key: song[key] for key in KEPT if key in song}
                         songs.append({**kept, "swap": True} if todo == "swap" else kept)
@@ -356,17 +356,25 @@ class CleanCheck:
 
     def _only_clean(self) -> Set[str]:
         """
-        The ids of the songs a swap isn't made of again: those which only came down clean (the
-        copy swapped, and the copies kept, which SoulSync may have filed elsewhere, under
-        another id), and those whose swap ended with the original put back, as the new copy
-        wasn't heard explicit - the original, and the copies set aside - for REJECTED_FOR, after
-        which a swap may bring a better copy. Without them the check would fetch the same
-        unsure copy every night.
+        The ids of the songs which only came down clean: the copy swapped, and the copies kept,
+        which SoulSync may have filed elsewhere, under another id. The check never swaps them
+        again, whatever Navidrome says of their files.
         """
         ids = set()
         for entry in self._store.listed("only_clean"):
             ids.add(entry.get("song_id"))
             ids.update(entry.get("kept") or ())
+        return ids
+
+    def _rejected(self) -> Set[str]:
+        """
+        The ids of the songs whose swap ended less than REJECTED_FOR ago with the new copy set aside
+        as not heard explicit and the original put back: the original, and every copy set aside.
+        Whatever Navidrome says of their files - it records the original afresh once it's back - the
+        check leaves them be, or it would fetch the same unsure copy every night; after REJECTED_FOR
+        a swap may bring a better one.
+        """
+        ids = set()
         # Only a rejected swap's entries keep copies, on the unsure and couldn't swap lists; one from
         # before entries had times, or without one, counts as old.
         recent = self._now() - REJECTED_FOR
@@ -378,16 +386,24 @@ class CleanCheck:
                     ids.update(entry["kept"])
         return ids
 
-    def _todo(self, library: NavidromeLibrary, song: Dict, only_clean: Set[str]) -> Optional[str]:
+    def _todo(self, library: NavidromeLibrary, song: Dict, left_be: Set[str]) -> Optional[str]:
         """
         What a song needs: "hear" if it's new or its file changed, "swap" if it was heard clean
         with this file and its swap couldn't be made, or None. One whose file Navidrome won't
         give is heard anyway, which says why it can't be judged.
 
+        Args:
+            library: Navidrome.
+            song: The song.
+            left_be: The ids of the songs which only came down clean, or whose swap was rejected
+                lately - neither heard nor swapped, whatever their files say.
+
         Raises:
             requests.ConnectionError: Navidrome couldn't be reached for the file, so the caller
                 waits and tries again rather than hearing the song as not judged.
         """
+        if song["id"] in left_be:
+            return None
         try:
             file = library.song_file(song["id"])
         except NavidromeError as e:
@@ -398,7 +414,7 @@ class CleanCheck:
         if not self._store.known(song["id"], file["size"], file["updated"]):
             return "hear"
         kind = ((self._store.verdict(song["id"]) or {}).get("verdict") or {}).get("kind")
-        if kind == "clean" and song["id"] not in only_clean:
+        if kind == "clean":
             return "swap"
         return None
 
@@ -438,6 +454,11 @@ class CleanCheck:
                 # Its swap's own outcome goes on the page's lists.
                 logger.info(f"The library check leaves {name} to the swap already under way")
                 return DONE
+            left_be = self._only_clean() | self._rejected()
+            if song["id"] in left_be:
+                # Queued before its swap ended, or its file changed when the original was put back.
+                logger.info(f"The library check leaves {name}, whose swap has ended")
+                return DONE
             needs = "hear"
             if song.get("swap"):
                 if self._closing.is_set():
@@ -445,7 +466,7 @@ class CleanCheck:
                 # The queue can be hours old, or from before a restart: a new copy may have landed
                 # in its place since, which has never been heard, or it may have come down only clean.
                 try:
-                    needs = self._todo(library, song, self._only_clean())
+                    needs = self._todo(library, song, left_be)
                 except requests.ConnectionError:
                     return UNREACHED
                 if needs is None:

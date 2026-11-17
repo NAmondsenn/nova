@@ -399,7 +399,7 @@ def _album_said(lead: str, outcomes: Counter, already_had: bool = False) -> str:
             still = "it's still the clean version" if one else "they're still the clean versions"
             said.append(f"{_of_its_tracks(count, True)} came down again"
                         + (f" but not plainly explicit, so {still}." if kind == "unsure_back"
-                           else f", but I couldn't check {it}, so {still}."))
+                           else f", but I couldn't check the new {'copy' if one else 'copies'}, so {still}."))
     return " ".join(said)
 
 

@@ -781,10 +781,10 @@ def test_an_album_says_how_many_were_swapped_and_how_many_werent(watching, clock
      "Rumours by Fleetwood Mac has been downloaded. One of its tracks came down again but not plainly explicit, so "
      "it's still the clean version."),
     ({"r1": Outcome("not_judged", "listening took too long"), "r2": Outcome("not_judged", "no lyrics")},
-     "Rumours by Fleetwood Mac has been downloaded. 2 of its tracks came down again, but I couldn't check them, so "
+     "Rumours by Fleetwood Mac has been downloaded. 2 of its tracks came down again, but I couldn't check the new copies, so "
      "they're still the clean versions."),
     ({"r1": Outcome("not_judged", "no lyrics")},
-     "Rumours by Fleetwood Mac has been downloaded. One of its tracks came down again, but I couldn't check it, so "
+     "Rumours by Fleetwood Mac has been downloaded. One of its tracks came down again, but I couldn't check the new copy, so "
      "it's still the clean version."),
 ])
 def test_an_albums_tracks_whose_new_copy_was_set_aside_are_said_to_be_still_clean(watching, clock, said, ears,

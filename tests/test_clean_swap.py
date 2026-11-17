@@ -1011,6 +1011,20 @@ def test_a_restart_between_moving_a_rejected_copy_and_saving_where_keeps_the_cop
     assert sorted(entry["kept"]) == sorted([f"id-{ENDLESS_REL}", f"id-{other}"])
 
 
+def test_a_rejected_unsure_swap_leaves_one_unsure_entry_even_if_ears_listed_the_copy_under_another_name(
+        make_swapper, music, store):
+    swapper = make_swapper(ears=FakeEars(["unsure"]))
+    other = "Gunna/The Last Wun/endless 2.mp3"
+    swapper.fakes.soulsync.lands = [(30, other, b"unsure a")]
+    # As Ears lists a copy it heard unsure, by the copy's own name and id.
+    store.add("unsure", "Gunna - endless (Deluxe)", "heard 2 of its 10 swears", song_id=f"id-{other}")
+
+    swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    [entry] = store.listed("unsure")
+    assert entry["name"] == "Gunna - endless" and entry["song_id"] == f"id-{ENDLESS_REL}"
+
+
 def _rejected_saved(store, music, second=False):
     """
     A swap stopped part way through setting aside the copies of a try heard unsure: the original

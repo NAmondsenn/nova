@@ -911,6 +911,13 @@ class Swapper:
         self._end_saved(swap)
         logger.info(f"The swap of {swap['name']} ended {kind}" + (f": {reason}" if reason else ""))
         if kind in LISTS:
+            # Ears listed a copy heard unsure under its own name and id: with the swap's entry, which
+            # has every copy's id, that would be two.
+            for copy_id in extra.get("kept") or ():
+                try:
+                    self.store.discard("unsure", copy_id)
+                except (OSError, ValueError) as e:
+                    logger.error(f"Couldn't take {swap['name']} off the unsure list: {type(e).__name__}")
             if LISTS[kind] != "couldnt" and swap.get("song_id"):
                 # A put-back which failed was listed as couldn't swap at once: it mustn't stay on two lists.
                 try:
