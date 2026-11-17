@@ -1508,6 +1508,8 @@ def test_a_rival_nobody_knows_is_said_with_the_nearest_name_where_bbc_sport_wasn
 @pytest.mark.parametrize("seasons, other, since, said", [
     (6, CRAWLEY, "2021-08", "No match between South Shields and Crawley Town is listed in the last 6 seasons, nor in BBC Sport's "
                             "results since August 2021."),
+    (2, CRAWLEY, "2021-08", "No match between South Shields and Crawley Town is listed in the last 2 seasons, nor in BBC Sport's "
+                            "results since August 2021."),
     (1, CRAWLEY, "2021-08", "No match between South Shields and Crawley Town is among ESPN's results for South Shields, nor in "
                             "BBC Sport's results since August 2021."),
     (6, CRAWLEY_BBC, "2021-08", "No match between South Shields and Crawley Town is among BBC Sport's results for South Shields "

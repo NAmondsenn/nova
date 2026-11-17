@@ -1168,6 +1168,9 @@ def test_get_football_tells_claude_to_ask_which_team_was_meant_where_nearest_nam
     assert "nearest names" in description and "ask the user whether they meant" in description
     assert "'Did you mean Chorley?'" in description
     assert "never guess another team" in description
+    # Never a guess where nothing is found either, and the question asked even where one name seems plainly meant.
+    assert "never that they haven't played, and never guess another team yourself" in description
+    assert "even where one seems plainly meant" in description and "on a yes, or the name they meant" in description
     # A yes is asked again with that name as the other team, so that the match is found; and none is not made up.
     assert "ask again with that name as against" in description
     assert "never that they haven't played" in description
