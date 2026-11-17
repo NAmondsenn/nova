@@ -107,9 +107,13 @@ class FakeSwapper:
         return Outcome("swapped")
 
 
+# The time every list entry is stamped with, so a list can be compared whole.
+AT = 1763000000
+
+
 @pytest.fixture
 def store(tmp_path):
-    return CleanStore(str(tmp_path / "clean_songs.json"))
+    return CleanStore(str(tmp_path / "clean_songs.json"), clock=lambda: AT)
 
 
 @pytest.fixture
@@ -236,7 +240,7 @@ def test_the_page_sees_the_lists_and_how_many_songs_are_held(make_check, store, 
     state = make_check().state()
 
     assert state["held"] == 1
-    assert state["swapped"] == [{"song_id": "e1", "name": "Gunna - endless", "reason": ""}]
+    assert state["swapped"] == [{"song_id": "e1", "name": "Gunna - endless", "reason": "", "at": AT}]
     assert state["only_clean"] == state["unsure"] == state["couldnt"] == []
     assert state["running"] is False and state["last_finished"] is None
 
@@ -715,6 +719,7 @@ def test_without_the_folder_or_admin_a_clean_song_is_listed_unmoved_and_nothing_
     check.start()
     state = finished(check)
 
-    assert state["couldnt"] == [{"song_id": "d1", "name": "Travis Scott - SICKO MODE (Clean)", "reason": reason}]
+    assert state["couldnt"] == [{"song_id": "d1", "name": "Travis Scott - SICKO MODE (Clean)", "reason": reason,
+                                 "at": AT}]
     assert state["swapped"] == [] and store.swaps() == []
     assert said == [] and not os.path.exists(os.path.join(music, HELD))
