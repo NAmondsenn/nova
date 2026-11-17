@@ -39,8 +39,9 @@ DECODE = ["ffmpeg", "-v", "error", "-i", "pipe:0", "-ac", "1", "-ar", str(RATE),
           "-f", "f32le", "pipe:1"]
 
 # What of Nova's environment the worker is given: enough to run Python, and none of the
-# keys and passwords Nova reads into its own (NAVIDROME_PASSWORD, say).
-WORKER_ENVIRONMENT = ("PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH")
+# keys and passwords Nova reads into its own (NAVIDROME_PASSWORD, say). MALLOC_ARENA_MAX
+# too, the brain's unit's cap on glibc's arenas, so the worker's model is held to it as well.
+WORKER_ENVIRONMENT = ("PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH", "MALLOC_ARENA_MAX")
 
 # onnxruntime looking for a GPU as the worker's model loads - pve2 has none, so it's said
 # every time: '[W:onnxruntime:Default, device_discovery.cc:285 GetGpuDevices] Failed to
@@ -83,12 +84,20 @@ def decode(audio: bytes) -> np.ndarray:
     return np.frombuffer(data[:len(data) - len(data) % 4], dtype="<f4")
 
 
-def _niced(command: List[str]) -> List[str]:
-    """A command run under "nice -n 19", the lowest priority, where there's a nice to run it."""
+def _niced(command: List[str], worker: bool = False) -> List[str]:
+    """
+    A command run under "nice -n 19", the lowest priority, where there's a nice to run it.
+
+    Args:
+        command: What to run.
+        worker: Whether it's the listening worker, which lowers its own priority without nice.
+    """
     nice = shutil.which("nice")
     if nice is None:
-        logger.warning(f"There's no nice to run {command[0]} with, "
-                       f"so it runs at the usual priority")
+        if worker:
+            logger.warning("There's no nice to start the listening worker with, so it lowers its own priority")
+        else:
+            logger.warning(f"There's no nice to run {command[0]} with, so it runs at the usual priority")
         return command
     return [nice, "-n", "19"] + command
 
@@ -101,7 +110,7 @@ def worker_command(folder: str, threads: int) -> List[str]:
         folder: Where the model is.
         threads: How many processor threads it works with.
     """
-    return _niced([sys.executable, "-m", "voice_assistant.listen_worker", folder, str(threads)])
+    return _niced([sys.executable, "-m", "voice_assistant.listen_worker", folder, str(threads)], worker=True)
 
 
 def _log_complaints(stderr):

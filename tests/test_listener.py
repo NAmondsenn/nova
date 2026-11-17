@@ -166,14 +166,17 @@ def test_a_failure_sending_the_song_fails_at_once(tmp_path, listeners, monkeypat
 def test_the_worker_gets_none_of_novas_keys(tmp_path, listeners, monkeypatch):
     monkeypatch.setenv("NAVIDROME_PASSWORD", "not for the worker")
     monkeypatch.setenv("LANG", "en_GB.UTF-8")
+    # The brain's unit caps glibc's arenas, and the worker's model wants the same cap.
+    monkeypatch.setenv("MALLOC_ARENA_MAX", "2")
     heard = fake(tmp_path, 'answer({"text": json.dumps(dict(os.environ))})')
     listeners.append(heard)
 
     given = json.loads(heard.transcribe(SECOND, timeout=10))
     assert "NAVIDROME_PASSWORD" not in given
     assert given["PATH"] == os.environ["PATH"] and given["LANG"] == "en_GB.UTF-8"
+    assert given["MALLOC_ARENA_MAX"] == "2"
     # Python may add LC_CTYPE itself, in a C locale.
-    assert set(given) <= {"PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH", "LC_CTYPE"}
+    assert set(given) <= {"PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH", "LC_CTYPE", "MALLOC_ARENA_MAX"}
 
 
 def test_a_worker_that_hangs_raises_after_the_timeout_and_is_killed(tmp_path, listeners):
@@ -371,7 +374,9 @@ def test_without_nice_the_worker_runs_anyway_with_a_warning(monkeypatch, caplog)
     with caplog.at_level(logging.WARNING):
         command = listener.worker_command("/m/nemotron", 3)
     assert command == [sys.executable, "-m", "voice_assistant.listen_worker", "/m/nemotron", "3"]
-    assert any("nice" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
+    # The worker lowers its own priority, so it doesn't run at the usual one.
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING] == [
+        "There's no nice to start the listening worker with, so it lowers its own priority"]
 
 
 def test_decode_asks_ffmpeg_for_mono_16khz_float(monkeypatch):
@@ -392,7 +397,7 @@ def test_decode_asks_ffmpeg_for_mono_16khz_float(monkeypatch):
     assert samples.dtype == np.float32 and samples.tolist() == [0.5, -0.5, 0.25]
 
 
-def test_decode_without_nice_runs_ffmpeg_anyway(monkeypatch):
+def test_decode_without_nice_runs_ffmpeg_anyway(monkeypatch, caplog):
     asked = []
 
     def run(command, **kwargs):
@@ -402,7 +407,10 @@ def test_decode_without_nice_runs_ffmpeg_anyway(monkeypatch):
     monkeypatch.setattr(listener.subprocess, "run", run)
     monkeypatch.setattr(listener.shutil, "which", lambda name: None)
 
-    assert decode(b"an mp3").tolist() == [0.5]
+    with caplog.at_level(logging.WARNING):
+        assert decode(b"an mp3").tolist() == [0.5]
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING] == [
+        "There's no nice to run ffmpeg with, so it runs at the usual priority"]
     assert asked == [["ffmpeg", "-v", "error", "-i", "pipe:0", "-ac", "1", "-ar", "16000",
                       "-f", "f32le", "pipe:1"]]
 
