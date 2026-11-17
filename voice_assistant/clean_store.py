@@ -246,8 +246,9 @@ class CleanStore:
         """
         Returns:
             What the nightly check and the weekly note have done, as last saved: night_done, the
-            day of the last night's check ("2026-11-17"), week_sent, the week of the last note
-            ("2026-W47"), and note_at, when that was (epoch seconds); empty if nothing yet.
+            day of the last night's check ("2026-11-17"), week_sent, the day the last weekly note
+            was due ("2026-11-16"), and note_at, when it was dealt with (epoch seconds); empty if
+            nothing yet.
         """
         with self._lock:
             return copy.deepcopy(self._state["schedule"])

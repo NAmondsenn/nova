@@ -9,7 +9,9 @@ say the same in London and in UTC.
 
 import json
 import logging
+import os
 import threading
+import time
 from datetime import datetime
 
 import pytest
@@ -185,7 +187,25 @@ def test_switched_off_there_is_no_nightly_check(make, store):
     schedule.look()
 
     assert check.started == 0
-    assert "night_done" not in store.schedule()
+    # The night is done all the same, so switching it on in the day doesn't start a check then.
+    assert store.schedule()["night_done"] == "2026-11-17"
+
+
+def test_switched_on_in_the_day_the_check_waits_for_the_next_night(make, store):
+    settings = {**DEFAULTS, "nightly": False}
+    schedule, clock, check, _, _ = make(at(17, 5, 0), settings=settings)
+    schedule.look()
+    clock.now = at(17, 5, 30)
+    schedule.look()
+    settings["nightly"] = True
+    for hour, minute in ((14, 0), (14, 1), (23, 59)):
+        clock.now = at(17, hour, minute)
+        schedule.look()
+    assert check.started == 0
+
+    clock.now = at(18, 5, 30)
+    schedule.look()
+    assert check.started == 1
 
 
 def test_the_nights_time_is_read_from_the_settings_at_each_look(make):
@@ -220,6 +240,8 @@ def entries(store, kind, *times):
 
 
 def test_the_note_goes_once_on_its_day_and_time_with_the_weeks_counts(make, store):
+    # Last week's went, so nothing is due until this week's time.
+    store.save_schedule({"week_sent": "2026-11-09", "note_at": at(9, 9, 30)})
     entries(store, "swapped", at(14, 12), at(15, 12), at(16, 3))
     entries(store, "only_clean", at(13, 12))
     entries(store, "unsure", at(12, 12), at(15, 1))
@@ -240,7 +262,7 @@ def test_the_note_goes_once_on_its_day_and_time_with_the_weeks_counts(make, stor
                           "message": "This week Nova swapped 3 clean songs for explicit ones; 1 only comes down "
                                      "clean, 2 are unsure, 1 couldn't be swapped. 4 files wait in .nova-held. "
                                      "See the settings page."}]
-    assert store.schedule()["week_sent"] == "2026-W47"
+    assert store.schedule()["week_sent"] == "2026-11-16"
     assert store.schedule()["note_at"] == at(16, 9, 30)
 
 
@@ -254,7 +276,7 @@ def test_the_first_note_counts_only_the_last_seven_days(make, store):
 
 
 def test_a_later_note_counts_only_what_came_after_the_last(make, store):
-    store.save_schedule({"week_sent": "2026-W46", "note_at": at(9, 9, 30)})
+    store.save_schedule({"week_sent": "2026-11-09", "note_at": at(9, 9, 30)})
     entries(store, "unsure", at(9, 9, 0), at(10, 12))
     schedule, clock, _, ntfy, _ = make(at(16, 9, 30))
     schedule.look()
@@ -273,7 +295,7 @@ def test_entries_saved_without_a_time_count_as_old(tmp_path):
     schedule.look()
 
     assert ntfy.sent == []
-    assert store.schedule()["week_sent"] == "2026-W47"
+    assert store.schedule()["week_sent"] == "2026-11-16"
 
 
 def test_a_week_with_nothing_new_sends_nothing_and_is_done(make, store, caplog):
@@ -286,7 +308,7 @@ def test_a_week_with_nothing_new_sends_nothing_and_is_done(make, store, caplog):
     schedule.look()
 
     assert ntfy.sent == []
-    assert store.schedule()["week_sent"] == "2026-W47"
+    assert store.schedule()["week_sent"] == "2026-11-16"
     assert store.schedule()["note_at"] == at(16, 9, 30)
 
 
@@ -308,7 +330,7 @@ def test_a_note_due_in_quiet_hours_waits_for_them_to_end_and_goes_once(make, sto
     schedule.look()
 
     assert len(ntfy.sent) == 1
-    assert store.schedule()["week_sent"] == "2026-W47"
+    assert store.schedule()["week_sent"] == "2026-11-16"
 
 
 def test_a_note_whose_quiet_hours_run_past_midnight_goes_the_next_morning(make, store):
@@ -325,7 +347,50 @@ def test_a_note_whose_quiet_hours_run_past_midnight_goes_the_next_morning(make, 
     schedule.look()
 
     assert len(ntfy.sent) == 1
-    assert store.schedule()["week_sent"] == "2026-W47"
+    assert store.schedule()["week_sent"] == "2026-11-16"
+
+
+def test_a_note_due_late_on_sunday_in_quiet_hours_goes_on_monday_morning_once(make, store):
+    entries(store, "swapped", at(20, 12))
+    ntfy = FakeNtfy(quiet=True)
+    settings = {**DEFAULTS, "weekly_day": "Sunday", "weekly_time": "23:00"}
+    schedule, clock, _, _, _ = make(at(22, 22, 59), settings=settings, ntfy=ntfy)
+    for day, hour, minute in ((22, 22, 59), (22, 23, 0), (22, 23, 59), (23, 0, 0), (23, 6, 59)):
+        clock.now = at(day, hour, minute)
+        schedule.look()
+    assert ntfy.sent == []
+
+    ntfy.is_quiet = False
+    for minute in (0, 1, 2):
+        clock.now = at(23, 7, minute)
+        schedule.look()
+
+    assert len(ntfy.sent) == 1
+    assert store.schedule()["week_sent"] == "2026-11-22"
+
+
+def test_a_note_due_while_nova_was_off_goes_at_the_next_look_once(make, store):
+    store.save_schedule({"week_sent": "2026-11-16", "note_at": at(16, 9, 30)})
+    entries(store, "unsure", at(20, 12))
+    schedule, clock, _, ntfy, _ = make(at(23, 12, 0))
+    schedule.look()
+    clock.now = at(23, 12, 1)
+    schedule.look()
+
+    assert [sent["message"] for sent in ntfy.sent] == ["This week 1 song is unsure. See the settings page."]
+    assert store.schedule()["week_sent"] == "2026-11-23"
+
+
+def test_started_mid_week_the_first_note_goes_once_with_the_last_seven_days(make, store):
+    entries(store, "swapped", at(11, 11, 59), at(12, 12))
+    schedule, clock, _, ntfy, _ = make(at(18, 12))
+    schedule.look()
+    clock.now = at(18, 12, 1)
+    schedule.look()
+
+    assert [sent["message"] for sent in ntfy.sent] == [
+        "This week Nova swapped 1 clean song for an explicit one. See the settings page."]
+    assert store.schedule()["week_sent"] == "2026-11-16"
 
 
 def test_a_note_not_sent_while_nova_was_off_goes_later_that_week_but_not_the_next(make, store):
@@ -344,6 +409,7 @@ def test_a_note_not_sent_while_nova_was_off_goes_later_that_week_but_not_the_nex
 
 
 def test_before_its_day_in_the_week_no_note_goes(make, store):
+    store.save_schedule({"week_sent": "2026-11-11", "note_at": at(11, 9, 30)})
     entries(store, "swapped", at(15, 12))
     schedule, clock, _, ntfy, _ = make(at(17, 12), settings={**DEFAULTS, "weekly_day": "Wednesday"})
     schedule.look()
@@ -371,6 +437,7 @@ def test_switched_off_there_is_no_weekly_note(make, store):
 
 
 def test_the_notes_day_and_time_are_read_from_the_settings_at_each_look(make, store):
+    store.save_schedule({"week_sent": "2026-11-09", "note_at": at(9, 9, 30)})
     entries(store, "swapped", at(15, 12))
     schedule, clock, _, ntfy, settings = make(at(16, 9, 0))
     schedule.look()
@@ -394,7 +461,26 @@ def test_a_note_ntfy_wont_take_is_logged_and_the_week_still_done(make, store, ca
 
     assert len(ntfy.sent) == 1
     assert "couldn't be sent" in caplog.text
-    assert store.schedule()["week_sent"] == "2026-W47"
+    assert store.schedule()["week_sent"] == "2026-11-16"
+
+
+def test_a_send_which_raises_is_logged_and_the_week_still_done(make, store, caplog):
+    entries(store, "swapped", at(15, 12))
+    ntfy = FakeNtfy()
+
+    def send(*args, **kwargs):
+        ntfy.sent.append(args)
+        raise RuntimeError("boom")
+
+    ntfy.send = send
+    schedule, clock, _, _, _ = make(at(16, 9, 30), ntfy=ntfy)
+    schedule.look()
+    clock.now = at(16, 9, 31)
+    schedule.look()
+
+    assert len(ntfy.sent) == 1
+    assert "RuntimeError" in caplog.text
+    assert store.schedule()["week_sent"] == "2026-11-16"
 
 
 @pytest.mark.parametrize("ntfy", [None, FakeNtfy(phone="")])
@@ -406,7 +492,7 @@ def test_with_nowhere_to_send_the_week_is_done_and_logged(make, store, ntfy, cap
 
     if ntfy is not None:
         assert ntfy.sent == []
-    assert store.schedule()["week_sent"] == "2026-W47"
+    assert store.schedule()["week_sent"] == "2026-11-16"
     assert "no phone topic" in caplog.text
 
 
@@ -459,7 +545,72 @@ def test_the_note_leaves_out_what_didnt_happen(counts, held, said):
     assert note(counts, held) == said
 
 
+def test_a_note_after_more_than_eight_days_says_since_the_last_note(make, store):
+    store.save_schedule({"week_sent": "2026-11-02", "note_at": at(2, 9, 30)})
+    entries(store, "swapped", at(5, 12))
+    entries(store, "unsure", at(10, 12))
+    schedule, _, _, ntfy, _ = make(at(16, 9, 30))
+    schedule.look()
+
+    assert [sent["message"] for sent in ntfy.sent] == [
+        "Since the last note, Nova swapped 1 clean song for an explicit one; 1 is unsure. See the settings page."]
+
+
+def test_a_note_eight_days_after_the_last_still_says_this_week(make, store):
+    # A note held a day by quiet hours or Nova being off is still the week's.
+    store.save_schedule({"week_sent": "2026-11-09", "note_at": at(8, 9, 30)})
+    entries(store, "unsure", at(10, 12))
+    schedule, _, _, ntfy, _ = make(at(16, 9, 30))
+    schedule.look()
+
+    assert [sent["message"] for sent in ntfy.sent] == ["This week 1 song is unsure. See the settings page."]
+
+
+# The clocks going back
+
+@pytest.fixture
+def london():
+    """The system's zone as London's, where 01:00 to 02:00 comes twice on 25 October 2026."""
+    before = os.environ.get("TZ")
+    os.environ["TZ"] = "Europe/London"
+    time.tzset()
+    yield
+    if before is None:
+        del os.environ["TZ"]
+    else:
+        os.environ["TZ"] = before
+    time.tzset()
+
+
+def test_when_the_clocks_go_back_the_night_and_the_note_are_done_once(london, store):
+    check, ntfy = FakeCheck(store), FakeNtfy()
+    entries(store, "swapped", datetime(2026, 10, 24, 12).timestamp())
+    settings = {**DEFAULTS, "nightly_time": "01:30", "weekly_day": "Sunday", "weekly_time": "01:30"}
+    start = datetime(2026, 10, 25, 0, 0).timestamp()
+    clock = Clock(start)
+    schedule = CleanSchedule(check, store, ntfy, lambda: settings, lambda: "", clock=clock)
+    # Every minute of the five hours from midnight, which the clock shows as midnight to four.
+    for minute in range(5 * 60):
+        clock.now = start + minute * 60
+        schedule.look()
+
+    assert datetime.fromtimestamp(clock.now).hour == 3
+    assert check.started == 1
+    assert len(ntfy.sent) == 1
+    assert store.schedule()["night_done"] == store.schedule()["week_sent"] == "2026-10-25"
+
+
 # The thread
+
+def test_each_look_waits_until_the_next_minute_starts(store):
+    # Sixty seconds after a look which started late would step over a minute, and a 23:59 with it.
+    clock = Clock(at(17, 23, 58) + 20.5)
+    schedule = CleanSchedule(FakeCheck(store), store, None, lambda: dict(DEFAULTS), lambda: "", clock=clock)
+
+    assert schedule._until_next_look() == pytest.approx(39.5)
+    clock.now = at(17, 23, 59)
+    assert schedule._until_next_look() == pytest.approx(60)
+
 
 def test_the_thread_looks_at_once_and_stops_promptly(store, monkeypatch):
     schedule = CleanSchedule(FakeCheck(store), store, None, lambda: dict(DEFAULTS), lambda: "")

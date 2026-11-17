@@ -7,20 +7,22 @@ aren't Nova's downloads, so only a check hears them.
 Every night at the settings page's "Nightly check at" (05:30 by default, after SoulSync's 04:00
 daily mixes and Monday's 03:00 discovery) the check is started as the page's Check library button
 starts it: one already running is left to run, and one paused is carried on. A night missed while
-Nova was off isn't made up: started after the night's time, Nova counts that night as done.
+Nova was off isn't made up: started after the night's time, Nova counts that night as done. So
+is a night whose time came with "Check new songs every night" off, so switching it on in the day
+doesn't start a check then - listening takes the brain's CPU while Nova is in use.
 
-Once a week, from the page's day and time (Monday 09:30 by default), one message goes to ntfy's
+Once a week, at the page's day and time (Monday 09:30 by default), one message goes to ntfy's
 phone topic saying how many songs went on each of the page's lists since the last note, and how
 many files wait in .nova-held - only if any went on a list. A note due in the quiet hours waits
-for them to end; one due while Nova was off goes at the next look that week.
+for them to end, and one due while Nova was off goes at its next look, whatever day that is.
 
-What's been done - the night's date, the week's number and when its note went - is kept in the
-clean songs file, so a restart neither does a night twice nor sends a week's note twice. It is
+What's been done - the night's date, the date the last note was due and when it went - is kept in
+the clean songs file, so a restart neither does a night twice nor sends a week's note twice. It is
 held here too, so a save which fails can't have every minute's look start the check or send the
 note again.
 
-A look is once a minute, on the local time as the system's zone has it: 05:30 is the user's,
-not UTC's.
+A look is at the start of each minute, on the local time as the system's zone has it: 05:30 is
+the user's, not UTC's.
 """
 
 import logging
@@ -35,7 +37,8 @@ from voice_assistant.config import WEEKDAYS
 
 logger = logging.getLogger(__name__)
 
-# Seconds between looks, so the night's check starts within a minute of its time.
+# Seconds between looks, so the night's check starts within a minute of its time. Each look is at
+# the start of a minute, so none is stepped over.
 LOOK_EVERY = 60
 
 # What a setting is read as when it's missing or isn't one - config.yaml's defaults.
@@ -45,6 +48,10 @@ WEEKLY_TIME = "09:30"
 
 # The first note counts the lists' entries of the last week.
 FIRST_NOTE_COUNTS = 7 * 24 * 3600
+# A note whose last was longer ago than this - Nova off for a while, or the note switched off -
+# counts more than a week, so it doesn't say "This week". A day's leeway, for one held by the
+# quiet hours or a restart.
+A_WEEK_OR_SO = 8 * 24 * 3600
 
 TITLE = "Clean songs"
 
@@ -63,7 +70,7 @@ def _many(number: int, one: str, more: str) -> str:
     return f"{number} {one if number == 1 else more}"
 
 
-def note(counts: Dict[str, int], held: int) -> str:
+def note(counts: Dict[str, int], held: int, opening: str = "This week") -> str:
     """
     The weekly note, leaving out each list nothing went on, and the held files if there are none.
 
@@ -71,6 +78,8 @@ def note(counts: Dict[str, int], held: int) -> str:
         counts: How many songs went on each list since the last note, by kind: swapped,
             only_clean, unsure and couldnt. At least one is above 0.
         held: How many files wait in .nova-held now.
+        opening: What the note starts with: "This week", or "Since the last note," when it
+            counts longer.
 
     Returns:
         e.g. "This week Nova swapped 3 clean songs for explicit ones; 1 only comes down clean, 2
@@ -91,7 +100,7 @@ def note(counts: Dict[str, int], held: int) -> str:
         count, (one, more) = rest[0]
         said[0] = f"{_many(count, 'song', 'songs')} {one if count == 1 else more}"
         sentence = ", ".join(said)
-    text = f"This week {sentence}."
+    text = f"{opening} {sentence}."
     if held > 0:
         text += f" {_many(held, 'file waits', 'files wait')} in .nova-held."
     return text + " See the settings page."
@@ -152,7 +161,11 @@ class CleanSchedule:
                 self.look()
             except Exception:
                 logger.exception("Looking at whether the clean songs' night or week is due failed, will try again")
-            self._stopping.wait(LOOK_EVERY)
+            self._stopping.wait(self._until_next_look())
+
+    def _until_next_look(self) -> float:
+        """Seconds to the start of the next minute, e.g. 39.5 at 23:58:20.5, or 60 on the minute."""
+        return LOOK_EVERY - self._clock() % LOOK_EVERY
 
     def look(self):
         """One look: starts the night's check if it's due, then sends the week's note if that is."""
@@ -172,15 +185,15 @@ class CleanSchedule:
                            f"so it holds until Nova restarts")
 
     def _night(self, now: datetime, settings: Dict, first: bool):
-        """Starts the library check once a night, at its time."""
-        if settings.get("nightly", True) is False:
-            return
+        """Starts the library check once a night, at its time, if it's switched on."""
         today = now.date().isoformat()
         if now.strftime("%H:%M") < _time(settings.get("nightly_time"), NIGHTLY_TIME) \
                 or self._record.get("night_done") == today:
             return
         # Kept before the check is started, so nothing can have it started twice in a night.
         self._keep(night_done=today)
+        if settings.get("nightly", True) is False:
+            return
         if first:
             logger.info("Nova started after the night's library check was due, so the next is tomorrow night's")
             return
@@ -192,31 +205,35 @@ class CleanSchedule:
         logger.info(f"The night's library check: {(result or {}).get('message')}")
 
     def _week(self, now: datetime, settings: Dict):
-        """Sends the week's note, once, from its day and time until the week ends."""
+        """Sends the note last due, once, as soon as it can go."""
         if settings.get("weekly_note", True) is False:
-            return
-        year, number, _ = now.isocalendar()
-        week = f"{year}-W{number:02d}"
-        if self._record.get("week_sent") == week:
             return
         day = settings.get("weekly_day")
         day = day.strip().casefold() if isinstance(day, str) else ""
-        due = now.date() - timedelta(days=now.weekday()) + timedelta(
-            days=WEEKDAYS.index(day if day in WEEKDAYS else WEEKLY_DAY))
-        if (now.date(), now.strftime("%H:%M")) < (due, _time(settings.get("weekly_time"), WEEKLY_TIME)):
+        at = _time(settings.get("weekly_time"), WEEKLY_TIME)
+        # The note's day at or before today, or a week before if today's time hasn't come: kept by
+        # its date, so one held by the quiet hours or Nova being off - into the next week, even - is
+        # sent once and not lost.
+        weekday = WEEKDAYS.index(day if day in WEEKDAYS else WEEKLY_DAY)
+        due = now.date() - timedelta(days=(now.weekday() - weekday) % 7)
+        if due == now.date() and now.strftime("%H:%M") < at:
+            due -= timedelta(days=7)
+        due = due.isoformat()
+        if self._record.get("week_sent") == due:
             return
-        sent_at = self._clock()
         # Read once, so a topic cleared on the settings page meanwhile is never sent to as "".
         phone = getattr(self._ntfy, "phone", "") if self._ntfy else ""
         if not phone:
             logger.info("The week's clean songs note has no phone topic to go to, so none is sent this week")
-            self._keep(week_sent=week, note_at=sent_at)
+            self._keep(week_sent=due, note_at=self._clock())
             return
         if self._ntfy.quiet():
-            if self._waiting != week:
-                self._waiting = week
+            if self._waiting != due:
+                self._waiting = due
                 logger.info("The week's clean songs note waits for the night to end")
             return
+        # Taken before the lists are read, so a song listed meanwhile is in the next note, not in both.
+        sent_at = self._clock()
         state = self._check.state()
         since = self._record.get("note_at")
         since = since if _number(since) else sent_at - FIRST_NOTE_COUNTS
@@ -228,10 +245,17 @@ class CleanSchedule:
             held = state.get("held")
             link = self._page_url()
             link = link.strip().rstrip("/") if isinstance(link, str) else ""
-            if not self._ntfy.send(phone, note(counts, held if _number(held) else 0), title=TITLE,
-                                   click=f"{link}/" if link else ""):
-                # Not tried again: a note every minute while ntfy is down would be worse than none.
-                logger.warning("The week's clean songs note couldn't be sent, so none goes this week")
+            opening = "Since the last note," if sent_at - since > A_WEEK_OR_SO else "This week"
+            # Not tried again if it fails: a note every minute while ntfy is down would be worse than none.
+            try:
+                sent = self._ntfy.send(phone, note(counts, held if _number(held) else 0, opening), title=TITLE,
+                                       click=f"{link}/" if link else "")
+            except Exception as e:
+                logger.warning(f"The week's clean songs note couldn't be sent ({type(e).__name__}), "
+                               f"so none goes this week")
+            else:
+                if not sent:
+                    logger.warning("The week's clean songs note couldn't be sent, so none goes this week")
         else:
             logger.info("Nothing went on the clean songs lists this week, so no note was sent")
-        self._keep(week_sent=week, note_at=sent_at)
+        self._keep(week_sent=due, note_at=sent_at)
