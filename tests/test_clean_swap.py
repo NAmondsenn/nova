@@ -663,6 +663,8 @@ def test_a_new_file_where_the_song_was_is_kept_beside_the_held_copy(make_swapper
     assert read(music, ENDLESS_REL) == b"something new"
     assert read(music, f"{HELD}/{ENDLESS_REL}") == b"clean endless"
     assert store.listed("couldnt")[0]["reason"] == outcome.reason
+    # Both kept is where it ends: nothing is tried again.
+    assert store.swaps() == []
 
 
 def test_without_an_admin_profile_nothing_is_moved(make_swapper, music, store):
@@ -943,6 +945,36 @@ def test_a_swap_running_now_isnt_carried_on_a_second_time(make_swapper, music, s
     assert fakes.soulsync.requested == ["deezer-1"] and len(fakes.ears.heard) == 1 and swapper.said == []
 
 
+def test_a_song_already_being_swapped_isnt_swapped_a_second_time(make_swapper, music, store):
+    # A download's swap is watching for endless; the copy SoulSync brought has landed where the
+    # old one was, with its id, and something asks to swap that id again before it's heard.
+    _stopped_while_watching(make_swapper)
+    put(music, ENDLESS_REL, b"explicit endless")
+    swapper = make_swapper()
+
+    outcome = swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    assert outcome == "couldnt" and outcome.reason == "Nova is already swapping it"
+    assert read(music, ENDLESS_REL) == b"explicit endless"
+    assert not os.path.exists(os.path.join(music, HELD, "Gunna/The Last Wun/endless (2).mp3"))
+    assert swapper.fakes.admin.forgot == [] and len(store.swaps()) == 1
+    assert store.listed("couldnt") == []
+
+
+@pytest.mark.parametrize("where", ["copy", "pending"])
+def test_a_later_tries_copy_being_swapped_isnt_swapped_a_second_time(make_swapper, music, store, where):
+    other = {"id": "id-other", "title": "endless", "artist": "Gunna", "rel": "Gunna/other.mp3"}
+    store.save_swap(_saved(song_id="id-first", copy=other if where == "copy" else _saved()["copy"],
+                           pending=[other] if where == "pending" else []))
+    put(music, "Gunna/other.mp3", b"clean try 1")
+    swapper = make_swapper()
+
+    outcome = swapper.swap({"id": "id-other", "title": "endless", "artist": "Gunna"}, ENDLESS_WANTED, None, True)
+
+    assert outcome.reason == "Nova is already swapping it"
+    assert read(music, "Gunna/other.mp3") == b"clean try 1"
+
+
 def test_a_restart_before_anything_moved_ends_the_swap_quietly(make_swapper, music, store):
     store.save_swap({"key": "made-up", "stage": "setting_aside", "name": "Gunna - endless", "named": "endless by Gunna",
                      "satellite": "kitchen", "quiet": False, "held": [],
@@ -1036,6 +1068,48 @@ def test_a_swap_carried_on_part_way_without_an_admin_profile_is_put_back(make_sw
 
     assert read(music, ENDLESS_REL) == b"clean endless" and swapper.fakes.soulsync.unwished == []
     assert store.swaps() == [] and store.listed("couldnt")[0]["reason"] == "SoulSync admin profile isn't set up"
+
+
+def test_a_put_back_that_fails_keeps_the_swap_to_try_again(make_swapper, music, store, monkeypatch):
+    real_put_back = MusicFolder.put_back
+    monkeypatch.setattr(MusicFolder, "put_back", lambda self, held: "couldn't move the song: disk trouble")
+    swapper = make_swapper()
+    swapper.fakes.soulsync.lands = [None]
+
+    outcome = swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, "kitchen", quiet=False)
+
+    assert outcome == "couldnt"
+    assert outcome.reason == ("SoulSync didn't bring another copy in time, and it couldn't be put back (couldn't "
+                              f"move the song: disk trouble), so it's still in {HELD}")
+    assert store.listed("couldnt")[0]["reason"] == outcome.reason
+    # Kept, so the copy goes back at the next try rather than staying held for good.
+    [saved] = store.swaps()
+    assert saved["stage"] == "putting_back" and saved["reason"] == "SoulSync didn't bring another copy in time"
+    assert read(music, f"{HELD}/{ENDLESS_REL}") == b"clean endless"
+
+    monkeypatch.setattr(MusicFolder, "put_back", real_put_back)
+    # Putting back needs no admin profile, and it's taken off the wishlist only the once.
+    again = make_swapper(admin=None)
+    again.resume()
+
+    assert read(music, ENDLESS_REL) == b"clean endless"
+    assert not os.path.exists(os.path.join(music, HELD, ENDLESS_REL))
+    assert store.swaps() == [] and again.fakes.soulsync.unwished == []
+    assert store.listed("couldnt")[0]["reason"] == "SoulSync didn't bring another copy in time"
+    # Said once already, as it first failed.
+    assert again.said == []
+
+
+def test_a_held_copy_that_has_gone_ends_the_swap(make_swapper, music, store, monkeypatch):
+    # Emptied by hand: trying again would never find it.
+    monkeypatch.setattr(MusicFolder, "put_back", lambda self, held: "the held copy has gone")
+    swapper = make_swapper()
+    swapper.fakes.soulsync.lands = [None]
+
+    outcome = swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    assert outcome == "couldnt" and outcome.reason.endswith(f"the copy set aside has gone from {HELD}")
+    assert store.swaps() == []
 
 
 def _saved(**changes):
