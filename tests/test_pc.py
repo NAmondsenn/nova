@@ -212,6 +212,21 @@ def test_only_hass_agents_own_entities_say_whether_the_pc_is_on(tmp_path):
     assert power.act("off") == {"success": False, "message": "Your PC's already off."}
 
 
+def test_the_hass_agent_integrations_own_device_isnt_a_second_pc(tmp_path):
+    # The HASS.Agent integration from HACS makes a device of its own for the same machine,
+    # with the same name and maker, holding only its media player - seen live on 17 Nov.
+    player = _entry("media_player.desk_pc", platform="hass_agent", device="desk_player")
+    snapshot = _snapshot(_pc(), ([player], {"desk_player": {"name": "Desk PC", **AGENT}}))
+    assert [pc.device for pc in find_pcs(_states(snapshot), snapshot, {})] == ["desk"]
+    power, home = _power(tmp_path, snapshot)
+    assert power.act("lock") == {"success": True, "message": "Locking your PC."}
+
+    # Nor does it leave the only Wake-on-LAN button needing to be chosen.
+    power, home = _power(tmp_path, snapshot, on=False)
+    assert power.act("on") == {"success": True, "message": "Turning your PC on."}
+    assert home.pressed == ["button.wake_desk_pc"]
+
+
 def test_a_press_that_never_reached_home_assistant_says_so(tmp_path):
     power, home = _power(tmp_path, _snapshot(_pc()))
     home.fails = requests.ConnectTimeout("connect timed out")
