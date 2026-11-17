@@ -717,9 +717,9 @@ class Swapper:
                 listed: Optional[str] = None) -> Optional[Outcome]:
         """
         Sets aside every copy a try brought, none of which was heard explicit - or the last
-        try's clean ones - so the original clean copy can go back: the swap is saved as rejecting first, and each copy is set aside
-        in turn by _run, which then puts the original back and ends the swap as the copies were
-        heard. Nothing is deleted.
+        try's clean ones - so the original clean copy can go back: the swap is saved as
+        rejecting first, and each copy is set aside in turn by _run, which then puts the
+        original back and ends the swap as the copies were heard. Nothing is deleted.
 
         Args:
             swap: The swap.

@@ -1596,8 +1596,8 @@ def test_a_clean_copy_found_without_an_admin_profile_is_left_in_the_library(make
     assert read(music, ENDLESS_REL) == b"clean try 1" and read(music, f"{HELD}/{ENDLESS_REL}") == b"clean endless"
     assert not os.path.exists(os.path.join(music, HELD, "Gunna/The Last Wun/endless (2).mp3"))
     assert store.swaps() == []
-    assert store.listed("couldnt")[0]["reason"] == ("SoulSync admin profile isn't set up, and a new file is where "
-                                                    f"it was, so both are kept: the new file, and the old copy in {HELD}")
+    assert store.listed("couldnt")[0]["reason"] == ("SoulSync admin profile isn't set up, and a new file is where it "
+                                                    f"was, so both are kept: the new file, and the old copy in {HELD}")
 
 
 def test_swaps_left_for_later_are_logged_once_until_that_changes(make_swapper, store, music, tmp_path, caplog):
