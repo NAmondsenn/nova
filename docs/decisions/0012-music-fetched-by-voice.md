@@ -28,6 +28,7 @@ What the user wants, in his words: "hey nova play ...., then if its not download
    - SoulSync changes often, so the builder confirms the request and response shapes against the running version, read-only, with the key, before writing the client.
 
 4. **The original, normal release - never a clean version.**
+   - How a song which has landed is judged clean or explicit changed in [0019](0019-clean-songs-by-ear.md): it is heard against its lyrics, and the label rules below now only steer what Nova picks. Those rules' clean words also count "lyrics" and "advance copy" after a clean word, as in "(Clean Lyrics)" and "(Clean Advance Copy)".
    - Nova asks for the plain title, never a live, remix, acoustic, sped-up or other version, unless the user named one ("play the live version of ...").
    - Where SoulSync's API lets the caller steer the choice (words to avoid, a candidate to pick, a preference for explicit), Nova uses it to avoid clean, edited and radio-edit versions. As built, Nova picks both itself: an album's edition from `find_album`'s candidates, and a song from the search's tracks, as below. Neither says whether it's explicit, so the check after it lands is still what stops a clean version being called downloaded.
    - Once it has landed, Nova checks what Navidrome holds. Navidrome reports each track as explicit, clean or unmarked (OpenSubsonic's `explicitStatus`, from the files' tags).

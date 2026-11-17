@@ -335,8 +335,10 @@ clean_check:
   # Where Navidrome's music is on this machine, so Nova can find a song's file. See
   # docs/decisions/0019.
   music_folder: "/mnt/music"
-  # The SoulSync profile Nova signs in as to take away a swapped song's old row. Its password
-  # goes in ~/.config/nova/.env as SOULSYNC_ADMIN_PASSWORD. See docs/decisions/0019.
+  # The SoulSync profile Nova signs in as to take away a swapped song's old row: a second
+  # profile with admin rights, made in SoulSync's own Settings. Its password goes under Keys on
+  # the settings page as SOULSYNC_ADMIN_PASSWORD (or in ~/.config/nova/.env), never here. See
+  # docs/decisions/0019.
   soulsync_admin: ""
 
 mqtt:
