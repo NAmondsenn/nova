@@ -451,6 +451,27 @@ def test_the_notes_day_and_time_are_read_from_the_settings_at_each_look(make, st
     assert len(ntfy.sent) == 1
 
 
+def test_a_song_listed_as_the_note_is_made_is_in_the_next_note_not_this_one(make, store):
+    # Listed by the library check after the note took its time, but before it read the lists.
+    store.save_schedule({"week_sent": "2026-11-09", "note_at": at(9, 9, 30)})
+    entries(store, "swapped", at(15, 12))
+
+    class ListingMeanwhile(FakeCheck):
+        def state(self):
+            if not store.listed("unsure"):
+                store.add("unsure", "Late Song", "heard 2 of its 10 swears", at=at(16, 9, 30) + 1)
+            return super().state()
+
+    schedule, clock, _, ntfy, _ = make(at(16, 9, 30), check=ListingMeanwhile(store))
+    schedule.look()
+    clock.now = at(23, 9, 30)
+    schedule.look()
+
+    assert [sent["message"] for sent in ntfy.sent] == [
+        "This week Nova swapped 1 clean song for an explicit one. See the settings page.",
+        "This week 1 song is unsure. See the settings page."]
+
+
 def test_a_note_ntfy_wont_take_is_logged_and_the_week_still_done(make, store, caplog):
     entries(store, "swapped", at(15, 12))
     ntfy = FakeNtfy(takes=False)

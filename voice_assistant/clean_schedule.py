@@ -232,14 +232,17 @@ class CleanSchedule:
                 self._waiting = due
                 logger.info("The week's clean songs note waits for the night to end")
             return
-        # Taken before the lists are read, so a song listed meanwhile is in the next note, not in both.
+        # Taken before the lists are read, and only what was listed up to it counted, so a song
+        # listed meanwhile - the night's check runs on while the note is made - is in the next
+        # note and not this one.
         sent_at = self._clock()
         state = self._check.state()
         since = self._record.get("note_at")
         since = since if _number(since) else sent_at - FIRST_NOTE_COUNTS
         # An entry with no time was listed before entries had one, so it's old news.
         counts = {kind: sum(1 for entry in state.get(kind) or []
-                            if isinstance(entry, dict) and _number(entry.get("at")) and entry["at"] > since)
+                            if isinstance(entry, dict) and _number(entry.get("at"))
+                            and since < entry["at"] <= sent_at)
                   for kind in KINDS}
         if any(counts.values()):
             held = state.get("held")
