@@ -21,16 +21,14 @@ from voice_assistant.clean_store import CleanStore
 from voice_assistant.clean_swap import Ears, Outcome
 from voice_assistant.downloads import NOT_SET_UP, POLL_EVERY, SCAN_AFTER, Downloads, Wanted, _bare_title
 from voice_assistant.navidrome import NavidromeLibrary
-from voice_assistant.soulsync import (KEY_REFUSED, MCP_OFF, NOT_ANSWERING, NOT_FOUND, AlbumRequest, Progress,
-                                      SongRequest, SoulSync, SoulSyncError)
+from voice_assistant.soulsync import (KEY_REFUSED, MCP_OFF, NOT_ANSWERING, NOT_FOUND, AlbumRequest, SongRequest,
+                                      SoulSync, SoulSyncError)
 
 GOOBA = {"id": "1", "title": "Gooba", "artist": "6ix9ine", "album": "Gooba", "explicitStatus": "explicit"}
 GOOBA_CLEAN = {"id": "2", "title": "Gooba (Clean)", "artist": "6ix9ine", "album": "Gooba", "explicitStatus": ""}
 GOOBA_WANTED = Wanted("Gooba", "6ix9ine", "track")
 RUMOURS_WANTED = Wanted("Rumours", "Fleetwood Mac", "album")
 RUMOURS_TITLES = ["Dreams", "Go Your Own Way", "The Chain"]
-
-WAITING, DONE = Progress("waiting"), Progress("done")
 
 GOOBA_REQUESTED = ("kitchen", "Gooba by 6ix9ine requested.")
 GOOBA_DOWNLOADED = ("kitchen", "Gooba by 6ix9ine has been downloaded.")
@@ -110,13 +108,9 @@ class FakeTime:
 
 
 class FakeSoulSync:
-    """
-    Stands in for SoulSync: records what it searches for and what it's asked for, and
-    answers how it's getting on from a list.
-    """
+    """Stands in for SoulSync: records what it searches for and what it's asked for."""
 
-    def __init__(self, progress=(WAITING,), album=None, fail=None, song=None, wishlist_fail=None):
-        self.progress = list(progress)
+    def __init__(self, album=None, fail=None, song=None, wishlist_fail=None):
         self.album = album or AlbumRequest(None, [], 3, 3)
         self.fail = fail
         # The song it finds - by default the one asked for, named as it was asked for.
@@ -145,16 +139,8 @@ class FakeSoulSync:
         if self.wishlist_fail:
             raise self.wishlist_fail
 
-    def song_progress(self, request):
-        assert request is self.found
-        return _answer(self.progress)
-
     def request_album(self, title, artist):
         return self._request(title, artist, self.album)
-
-    def album_progress(self, request):
-        assert request is self.album
-        return _answer(self.progress)
 
 
 class FakeLibrary:
@@ -358,8 +344,8 @@ def test_its_named_as_asked_for_and_told_apart_however_its_spelt():
 # A song
 
 def test_a_song_is_requested_then_said_downloaded_once_navidrome_has_it(watching, clock, said, ears, swapper):
-    # SoulSync: waiting, then done; Navidrome: nothing before, nothing, then Gooba - heard explicit.
-    soulsync = FakeSoulSync([WAITING, DONE])
+    # Navidrome: nothing before, nothing, then Gooba - heard explicit.
+    soulsync = FakeSoulSync()
     downloads = watching(soulsync, FakeLibrary(clock, songs=[[], [], [GOOBA]]))
 
     assert downloads._watch(GOOBA_WANTED, "kitchen") == "Gooba by 6ix9ine has been downloaded."
@@ -369,23 +355,11 @@ def test_a_song_is_requested_then_said_downloaded_once_navidrome_has_it(watching
     assert ears.heard == [("1", True)] and swapper.swaps == []
 
 
-def test_done_in_soulsync_isnt_downloaded_until_navidrome_has_it_and_it_scans_once(watching, clock, said):
-    # SoulSync done at once; Navidrome has nothing for three minutes, then Gooba.
-    library = FakeLibrary(clock, songs=[[]] * (1 + 180 // POLL_EVERY) + [[GOOBA]])
-    downloads = watching(FakeSoulSync([DONE]), library)
-
-    downloads._watch(GOOBA_WANTED, "kitchen")
-
-    assert said == [GOOBA_REQUESTED, GOOBA_DOWNLOADED]
-    assert clock.said_at[-1] == 180 + POLL_EVERY
-    assert library.scans == [SCAN_AFTER + POLL_EVERY]  # when, by the fake clock; once only
-
-
 # What landed, heard (decision 0019, section 3)
 
 def test_a_copy_named_clean_but_heard_explicit_is_downloaded(watching, clock, said, ears, swapper):
     # SoulSync's tagging calls explicit songs clean, so a name is never believed.
-    downloads = watching(FakeSoulSync([DONE]), FakeLibrary(clock, songs=[[], [GOOBA_CLEAN]]))
+    downloads = watching(FakeSoulSync(), FakeLibrary(clock, songs=[[], [GOOBA_CLEAN]]))
 
     assert downloads._watch(GOOBA_WANTED, "kitchen") == "Gooba by 6ix9ine has been downloaded."
     assert ears.heard == [("2", True)] and swapper.swaps == []
@@ -395,7 +369,7 @@ def test_a_copy_named_clean_but_heard_explicit_is_downloaded(watching, clock, sa
                                            ("too_few", GOOBA_DOWNLOADED)])
 def test_a_song_heard_neither_way_says_so_and_is_never_swapped(watching, clock, said, ears, swapper, kind, outcome):
     ears.kinds["1"] = kind
-    downloads = watching(FakeSoulSync([DONE]), FakeLibrary(clock, songs=[[], [GOOBA]]))
+    downloads = watching(FakeSoulSync(), FakeLibrary(clock, songs=[[], [GOOBA]]))
 
     assert downloads._watch(GOOBA_WANTED, "kitchen") == outcome[1]
     assert said == [GOOBA_REQUESTED, outcome] and swapper.swaps == []
@@ -419,7 +393,7 @@ def test_a_song_heard_clean_is_swapped_before_anything_is_said(watching, clock, 
                                                                outcome):
     ears.kinds["1"] = "clean"
     swapper.outcomes["1"] = swapped
-    downloads = watching(FakeSoulSync([DONE]), FakeLibrary(clock, songs=[[], [GOOBA]]))
+    downloads = watching(FakeSoulSync(), FakeLibrary(clock, songs=[[], [GOOBA]]))
 
     assert downloads._watch(GOOBA_WANTED, "kitchen") == outcome
     assert said == [GOOBA_REQUESTED, ("kitchen", outcome)]
@@ -440,7 +414,7 @@ def test_a_clean_song_is_swapped_by_the_title_asked_for_and_soulsyncs_artist(wat
 
 def test_of_two_copies_landed_the_one_heard_explicit_is_the_download(watching, clock, said, ears, swapper):
     ears.kinds["2"] = "clean"
-    downloads = watching(FakeSoulSync([DONE]), FakeLibrary(clock, songs=[[], [GOOBA_CLEAN, GOOBA]]))
+    downloads = watching(FakeSoulSync(), FakeLibrary(clock, songs=[[], [GOOBA_CLEAN, GOOBA]]))
 
     assert downloads._watch(GOOBA_WANTED, "kitchen") == "Gooba by 6ix9ine has been downloaded."
     assert ears.heard == [("2", True), ("1", True)] and swapper.swaps == []
@@ -448,7 +422,7 @@ def test_of_two_copies_landed_the_one_heard_explicit_is_the_download(watching, c
 
 def test_hearing_that_fails_unforeseen_still_says_its_downloaded_unchecked(watching, clock, said, ears, caplog):
     ears.kinds["1"] = RuntimeError("made-up bug")
-    downloads = watching(FakeSoulSync([DONE]), FakeLibrary(clock, songs=[[], [GOOBA]]))
+    downloads = watching(FakeSoulSync(), FakeLibrary(clock, songs=[[], [GOOBA]]))
 
     assert downloads._watch(GOOBA_WANTED, "kitchen") == GOOBA_UNCHECKED[1]
     assert "made-up bug" in caplog.text
@@ -457,7 +431,7 @@ def test_hearing_that_fails_unforeseen_still_says_its_downloaded_unchecked(watch
 def test_listening_that_fails_for_one_download_is_said_and_the_next_is_heard(watching, clock, said, ears):
     # Review Focus 4: the worker failing mid-song, then the next song.
     ears.kinds["1"] = "not_judged"
-    watching(FakeSoulSync([DONE]), FakeLibrary(clock, songs=[[], [GOOBA]]))._watch(GOOBA_WANTED, "kitchen")
+    watching(FakeSoulSync(), FakeLibrary(clock, songs=[[], [GOOBA]]))._watch(GOOBA_WANTED, "kitchen")
     assert said[-1] == GOOBA_UNCHECKED
 
     watching(FakeSoulSync(song=ENDLESS_FOUND), FakeLibrary(clock, songs=[[], [ENDLESS]], names=ENDLESS_NAMES))._watch(
@@ -473,13 +447,13 @@ def test_a_song_found_at_the_last_look_is_heard_too(watching, clock, said, ears,
     library = FakeLibrary(clock)
     library.songs = [[], lambda: [GOOBA] if clock.time >= 600 else []]
 
-    assert watching(FakeSoulSync([WAITING]), library)._watch(GOOBA_WANTED, "kitchen") == (
+    assert watching(FakeSoulSync(), library)._watch(GOOBA_WANTED, "kitchen") == (
         "Gooba by 6ix9ine only came down clean, so I've kept it.")
 
 
 def test_a_swap_nova_stopped_says_nothing(watching, clock, said, ears, swapper):
     ears.kinds["1"] = "clean"
-    downloads = watching(FakeSoulSync([DONE]), FakeLibrary(clock, songs=[[], [GOOBA]]))
+    downloads = watching(FakeSoulSync(), FakeLibrary(clock, songs=[[], [GOOBA]]))
 
     def stopped(song, wanted, satellite, quiet):
         downloads.stop()
@@ -495,7 +469,7 @@ def test_an_old_clean_copy_isnt_taken_for_the_download(watching, clock, said, st
     # Without a swapper, so it's requested rather than swapped.
     heard_clean(store, GOOBA_CLEAN)
     library = FakeLibrary(clock, songs=[[GOOBA_CLEAN], [GOOBA_CLEAN], [GOOBA_CLEAN, GOOBA]])
-    downloads = watching(FakeSoulSync([WAITING, DONE]), library, swapping=False)
+    downloads = watching(FakeSoulSync(), library, swapping=False)
 
     downloads._watch(GOOBA_WANTED, "kitchen")
 
@@ -505,7 +479,7 @@ def test_an_old_clean_copy_isnt_taken_for_the_download(watching, clock, said, st
 
 def test_a_song_is_given_up_on_after_ten_minutes(watching, clock, said):
     library = FakeLibrary(clock)
-    downloads = watching(FakeSoulSync([WAITING]), library)
+    downloads = watching(FakeSoulSync(), library)
 
     assert downloads._watch(GOOBA_WANTED, "kitchen") == "I couldn't download Gooba by 6ix9ine."
     assert said[-1] == ("kitchen", "I couldn't download Gooba by 6ix9ine.")
@@ -518,7 +492,7 @@ def test_a_song_soulsync_never_says_is_done_is_found_by_the_scan_before_its_time
     # Left "downloading" by SoulSync, and only in Navidrome once it has scanned.
     library = FakeLibrary(clock)
     library.songs = [[], lambda: [GOOBA] if library.scans else []]
-    downloads = watching(FakeSoulSync([WAITING]), library)
+    downloads = watching(FakeSoulSync(), library)
 
     downloads._watch(GOOBA_WANTED, "kitchen")
 
@@ -528,11 +502,11 @@ def test_a_song_soulsync_never_says_is_done_is_found_by_the_scan_before_its_time
 
 
 def test_there_is_only_ever_one_scan(watching, config, clock, said):
-    # Scanned as its ten minutes ran out, the limit is raised to an hour, and SoulSync
-    # then says it's done - with Navidrome still without it.
+    # Scanned as its ten minutes ran out, then the limit is raised to an hour - with
+    # Navidrome still without it, and not scanned again.
     clock.later.append((530, lambda: config.apply({("music", "song_download_minutes"): 60})))
     library = FakeLibrary(clock)
-    downloads = watching(FakeSoulSync([WAITING] * (600 // POLL_EVERY) + [DONE]), library)
+    downloads = watching(FakeSoulSync(), library)
 
     downloads._watch(GOOBA_WANTED, "kitchen")
 
@@ -543,7 +517,7 @@ def test_there_is_only_ever_one_scan(watching, config, clock, said):
 def test_the_time_limits_are_read_as_they_are_now(watching, config, clock, said):
     # music.song_download_minutes changed from 10 to 2 a minute in.
     clock.later.append((60, lambda: config.apply({("music", "song_download_minutes"): 2})))
-    downloads = watching(FakeSoulSync([WAITING]), FakeLibrary(clock))
+    downloads = watching(FakeSoulSync(), FakeLibrary(clock))
 
     downloads._watch(GOOBA_WANTED, "kitchen")
 
@@ -839,20 +813,6 @@ def test_an_album_with_nothing_new_by_then_is_scanned_once_before_its_time_is_up
     assert said[-1] == ("kitchen", "I couldn't download Rumours by Fleetwood Mac.")
 
 
-def test_an_album_soulsync_gives_up_on_says_how_much_came_down(watching, clock, said):
-    downloads = watching(FakeSoulSync([WAITING, Progress("failed", NOT_FOUND)]),
-                         FakeLibrary(clock, tracks=[[], [DREAMS]]))
-
-    downloads._watch(RUMOURS_WANTED, "kitchen")
-
-    assert said[-1] == ("kitchen", "Only 1 of the 3 tracks of Rumours by Fleetwood Mac came down.")
-    assert clock.said_at[-1] == 2 * POLL_EVERY
-
-    # And with none of it by then, why:
-    watching(FakeSoulSync([Progress("failed", NOT_FOUND)]), FakeLibrary(clock))._watch(RUMOURS_WANTED, "kitchen")
-    assert said[-1] == ("kitchen", "I couldn't download Rumours by Fleetwood Mac. SoulSync couldn't find it.")
-
-
 # When it goes wrong
 
 def test_a_failure_is_said_with_soulsyncs_reason(watching, clock, said):
@@ -862,14 +822,6 @@ def test_a_failure_is_said_with_soulsyncs_reason(watching, clock, said):
             == "I couldn't download Gooba by 6ix9ine. SoulSync isn't answering.")
     assert said == [("kitchen", "I couldn't download Gooba by 6ix9ine. SoulSync isn't answering.")]
 
-    # Apart, its progress "failed" - with a reason, and without one.
-    said.clear()
-    watching(FakeSoulSync([WAITING, Progress("failed", NOT_FOUND)]), FakeLibrary(clock))._watch(GOOBA_WANTED, "kitchen")
-    assert said == [GOOBA_REQUESTED, ("kitchen", "I couldn't download Gooba by 6ix9ine. SoulSync couldn't find it.")]
-
-    watching(FakeSoulSync([Progress("failed")]), FakeLibrary(clock))._watch(GOOBA_WANTED, "kitchen")
-    assert said[-1] == ("kitchen", "I couldn't download Gooba by 6ix9ine.")
-
     # And an album SoulSync can't be asked for.
     watching(FakeSoulSync(fail=SoulSyncError(MCP_OFF)), FakeLibrary(clock))._watch(RUMOURS_WANTED, "bedroom")
     assert said[-1] == ("bedroom", f"I couldn't download Rumours by Fleetwood Mac. {MCP_OFF}")
@@ -877,16 +829,14 @@ def test_a_failure_is_said_with_soulsyncs_reason(watching, clock, said):
 
 def test_a_poll_that_fails_is_logged_and_the_watch_carries_on(watching, clock, said, caplog):
     caplog.set_level(logging.INFO)
-    # song_progress raises SoulSyncError once and find_songs requests.ConnectionError once, then all is well.
-    soulsync = FakeSoulSync([SoulSyncError(NOT_ANSWERING), WAITING, DONE])
+    # find_songs raises requests.ConnectionError once, then all is well.
     error = requests.ConnectionError("http://navidrome.local:4533/rest/search3?t=made-up-token")
     library = FakeLibrary(clock, songs=[[], error, [], [GOOBA]])
 
-    downloads = watching(soulsync, library)
+    downloads = watching(FakeSoulSync(), library)
     downloads._watch(GOOBA_WANTED, "kitchen")
 
     assert said == [GOOBA_REQUESTED, GOOBA_DOWNLOADED]
-    assert "Couldn't ask SoulSync how Gooba by 6ix9ine is getting on" in caplog.text
     assert "Navidrome request failed: ConnectionError" in caplog.text
     # Only the kind of error, never the request, which holds the signed-in token.
     assert "made-up-token" not in caplog.text
@@ -894,19 +844,19 @@ def test_a_poll_that_fails_is_logged_and_the_watch_carries_on(watching, clock, s
 
 def test_a_scan_navidrome_refuses_is_tried_once_and_the_watch_carries_on(watching, clock, said):
     # Refused because Nova's user isn't an admin - which the library logs.
-    library = FakeLibrary(clock, songs=[[]] * 8 + [[GOOBA]], scans_allowed=False)
-    downloads = watching(FakeSoulSync([DONE]), library)
+    library = FakeLibrary(clock, songs=[[]] * 40 + [[GOOBA]], scans_allowed=False)
+    downloads = watching(FakeSoulSync(), library)
 
     downloads._watch(GOOBA_WANTED, "kitchen")
 
-    assert library.scans == [SCAN_AFTER + POLL_EVERY]
+    assert library.scans == [600 - SCAN_AFTER - POLL_EVERY]
     assert said == [GOOBA_REQUESTED, GOOBA_DOWNLOADED]
 
 
 def test_without_navidrome_before_the_request_anything_found_counts(watching, clock, said, caplog):
     caplog.set_level(logging.INFO)
     library = FakeLibrary(clock, songs=[requests.ConnectionError(), [GOOBA]])
-    downloads = watching(FakeSoulSync([DONE]), library)
+    downloads = watching(FakeSoulSync(), library)
 
     downloads._watch(GOOBA_WANTED, "kitchen")
 
@@ -916,7 +866,7 @@ def test_without_navidrome_before_the_request_anything_found_counts(watching, cl
 
 def test_something_unforeseen_still_ends_in_an_answer(watching, clock, said, caplog):
     caplog.set_level(logging.INFO)
-    downloads = watching(FakeSoulSync([RuntimeError("made-up bug")]), FakeLibrary(clock))
+    downloads = watching(FakeSoulSync(), FakeLibrary(clock, songs=[[], RuntimeError("made-up bug")]))
 
     assert downloads._watch(GOOBA_WANTED, "kitchen") == "I couldn't download Gooba by 6ix9ine."
     assert said == [GOOBA_REQUESTED, ("kitchen", "I couldn't download Gooba by 6ix9ine.")]
@@ -924,8 +874,9 @@ def test_something_unforeseen_still_ends_in_an_answer(watching, clock, said, cap
 
 
 def test_something_unforeseen_names_the_song_as_soulsync_found_it_once_it_has(watching, clock, said):
-    soulsync = FakeSoulSync([RuntimeError("made-up bug")], song=ENDLESS_FOUND)
-    watching(soulsync, FakeLibrary(clock, names=ENDLESS_NAMES))._watch(ENDLESS_ASKED, "kitchen")
+    soulsync = FakeSoulSync(song=ENDLESS_FOUND)
+    watching(soulsync, FakeLibrary(clock, songs=[[], RuntimeError("made-up bug")], names=ENDLESS_NAMES))._watch(
+        ENDLESS_ASKED, "kitchen")
     assert said == [("kitchen", "endless by Gunna requested."), ("kitchen", "I couldn't download endless by Gunna.")]
 
     # Before SoulSync has found anything, it's named as it was asked for.
@@ -965,7 +916,7 @@ def test_several_are_watched_at_once_and_the_same_one_once(running, clock, said)
 
 
 def test_once_its_landed_it_can_be_asked_for_again(watching, clock, said):
-    downloads = watching(FakeSoulSync([DONE]), FakeLibrary(clock, songs=[[], [GOOBA]]))
+    downloads = watching(FakeSoulSync(), FakeLibrary(clock, songs=[[], [GOOBA]]))
 
     assert downloads.start(GOOBA_WANTED, "kitchen")
     assert _all_ended()
@@ -1067,7 +1018,7 @@ def test_stopping_says_one_download_for_one_and_nothing_with_none(running, clock
 
 def test_an_outcome_reached_as_nova_stops_isnt_said(watching, clock, said):
     library = FakeLibrary(clock)
-    downloads = watching(FakeSoulSync([DONE]), library)
+    downloads = watching(FakeSoulSync(), library)
 
     def stopped_then_landed():
         downloads.stop()
@@ -1108,7 +1059,7 @@ def test_a_song_waiting_is_named_as_soulsync_found_it_once_it_has(watching, cloc
     # "endless by Gunna requested." is said for "Endless by Gunner", so "what's downloading?"
     # names it the same once SoulSync has found it - and as it was asked for before.
     seen = []
-    soulsync = FakeSoulSync([DONE], song=ENDLESS_FOUND)
+    soulsync = FakeSoulSync(song=ENDLESS_FOUND)
     downloads = watching(soulsync, FakeLibrary(clock, songs=[[], [ENDLESS]], names=ENDLESS_NAMES))
     find_song = soulsync.find_song
     soulsync.find_song = lambda title, artist: seen.append(downloads.describe_waiting()) or find_song(title, artist)
@@ -1125,7 +1076,7 @@ def test_a_song_waiting_is_named_as_soulsync_found_it_once_it_has(watching, cloc
 
 
 def test_one_which_has_landed_isnt_downloading(watching, clock):
-    downloads = watching(FakeSoulSync([DONE]), FakeLibrary(clock, songs=[[], [GOOBA]]))
+    downloads = watching(FakeSoulSync(), FakeLibrary(clock, songs=[[], [GOOBA]]))
 
     assert downloads.start(GOOBA_WANTED, "kitchen")
     assert _all_ended()
@@ -1423,7 +1374,7 @@ def test_an_album_had_explicit_beside_a_clean_edition_is_already_got(watching, s
 
 def test_a_download_is_started_and_nothing_said_until_soulsync_answers(watching, set_up, clock, said):
     # Navidrome: nothing when asked, nothing when the watch starts, then Gooba.
-    soulsync = FakeSoulSync([DONE])
+    soulsync = FakeSoulSync()
     downloads = watching(soulsync, FakeLibrary(clock, songs=[[], [], [GOOBA]]), set_up)
 
     assert downloads.download("Gooba by 6ix9ine", "track", "kitchen") == {
@@ -1456,7 +1407,7 @@ def test_a_yes_requests_without_looking_in_navidrome_again(watching, set_up, clo
     heard_clean(store, GOOBA_CLEAN)
     ears.kinds["2"] = "clean"
     library = FakeLibrary(clock, songs=[[GOOBA_CLEAN]])
-    soulsync = FakeSoulSync([DONE])
+    soulsync = FakeSoulSync()
     downloads = watching(soulsync, library, set_up)
 
     assert downloads.request("Gooba by 6ix9ine", "track", "kitchen") == {

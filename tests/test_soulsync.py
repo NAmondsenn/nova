@@ -13,8 +13,7 @@ import requests
 
 from voice_assistant import network
 from voice_assistant.soulsync import (MCP_TIMEOUT, PICTURE_MOST, REQUEST_TIMEOUT, SEARCH_TIMEOUT, AlbumRequest,
-                                      Progress, SongRequest, SoulSync, SoulSyncAdmin, SoulSyncError, pick_album,
-                                      pick_track)
+                                      SongRequest, SoulSync, SoulSyncAdmin, SoulSyncError, pick_album, pick_track)
 
 URL = "http://soulsync.local:8008"
 RECORDED_TRACK_COUNT = 11
@@ -232,14 +231,6 @@ def test_a_song_still_comes_down_when_the_wishlist_couldnt_be_started(soulsync, 
     assert "SoulSync's wishlist couldn't be started, so the song waits for its next run" in caplog.text
 
 
-def test_a_song_is_only_waited_for_as_navidrome_decides(soulsync, http):
-    song = soulsync.find_song("Gooba", "6ix9ine")
-    soulsync.request_song(song)
-    posted = len(http.posted)
-    assert soulsync.song_progress(song) == Progress("waiting")
-    assert len(http.posted) == posted
-
-
 @pytest.mark.parametrize("found", [
     _found(), _envelope({"source": "deezer"}),
     # Only a clean version, and only another artist's.
@@ -426,13 +417,6 @@ def test_an_album_partly_had_is_followed_by_the_tracks_soulsync_queued(soulsync,
 def test_an_album_title_alone_is_searched_for_as_it_is(soulsync, http):
     soulsync.request_album("Rumours", None)
     assert http.mcp_calls[0]["params"]["arguments"] == {"query": "Rumours", "limit": 25}
-
-
-def test_an_album_is_only_waited_for_as_soulsync_gives_nothing_to_follow(soulsync, http):
-    request = soulsync.request_album("Rumours", "Fleetwood Mac")
-    calls = len(http.mcp_calls)
-    assert soulsync.album_progress(request) == Progress("waiting")
-    assert len(http.mcp_calls) == calls and http.posted == []
 
 
 def test_an_album_still_comes_down_when_the_wishlist_couldnt_be_started(soulsync, http, caplog):

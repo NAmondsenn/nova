@@ -119,14 +119,6 @@ class SoulSyncError(Exception):
 
 
 @dataclass
-class Progress:
-    """How a request is getting on: "waiting", "done" or "failed", with a reason if it failed."""
-
-    state: str
-    reason: Optional[str] = None
-
-
-@dataclass
 class SongRequest:
     """
     A song SoulSync found for what was asked for.
@@ -713,16 +705,6 @@ class SoulSync:
         tracks = data.get("tracks") if isinstance(data, dict) else None
         return [track for track in tracks if isinstance(track, dict)] if isinstance(tracks, list) else []
 
-    def song_progress(self, request: SongRequest) -> Progress:
-        """
-        How a song request is getting on - always "waiting", as for an album: the
-        wishlist gives no request to follow, so the watch goes by Navidrome alone.
-
-        Args:
-            request: The SongRequest find_song gave.
-        """
-        return Progress("waiting")
-
     def request_album(self, title: str, artist: Optional[str]) -> AlbumRequest:
         """
         Asks SoulSync for an album: finds it, requests the one pick_album chooses,
@@ -758,16 +740,6 @@ class SoulSync:
             # It's on the wishlist either way, so it still comes down - only later.
             logger.warning("SoulSync's wishlist couldn't be started, so the album waits for its next run")
         return AlbumRequest(None, [], int(track_count), int(queued))
-
-    def album_progress(self, request: AlbumRequest) -> Progress:
-        """
-        How an album request is getting on - always "waiting", as SoulSync gives no
-        request to follow, so the watch goes by Navidrome alone.
-
-        Args:
-            request: The AlbumRequest request_album gave.
-        """
-        return Progress("waiting")
 
 
 class SoulSyncAdmin:

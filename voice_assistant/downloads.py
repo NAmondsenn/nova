@@ -35,7 +35,7 @@ from voice_assistant.clean_ear import Verdict
 from voice_assistant.clean_store import CleanStore
 from voice_assistant.navidrome import (BRACKETED, CLEAN_VERSIONS, DASH, NavidromeError, NavidromeLibrary,
                                        _says_version, likeness, normalise, split_by)
-from voice_assistant.soulsync import AlbumRequest, Progress, SongRequest, SoulSync, SoulSyncError
+from voice_assistant.soulsync import AlbumRequest, SongRequest, SoulSync, SoulSyncError
 
 if TYPE_CHECKING:
     # Only for the types: clean_swap imports this module.
@@ -48,11 +48,11 @@ logger = logging.getLogger(__name__)
 # are on the local network, and a couple of small requests a poll are nothing to either.
 POLL_EVERY = 15
 
-# Seconds after SoulSync says it's done before Navidrome, still without it, is asked
-# to scan its folders - once. Navidrome finds new files itself, so this is only in
-# case it hasn't. SoulSync's wishlist never says a song or album is done, so without
-# its word the scan is asked for this long and a poll before the time limit instead,
-# and the last look sees what it found.
+# Seconds before the time limit, less a poll, at which Navidrome, still without a
+# download, is asked to scan its folders - once. Navidrome finds new files itself, so
+# this is only in case it hasn't. SoulSync's wishlist never says a song or album is
+# done, so the scan is asked for this long and a poll before the time limit, and the
+# last look sees what it found.
 SCAN_AFTER = 60
 
 NOT_SET_UP = ("Downloading music isn't set up. SoulSync's address goes in Settings, under Music, "
@@ -725,8 +725,8 @@ class Downloads:
     def _watch(self, wanted: Wanted, satellite: Optional[str]) -> str:
         """
         The whole of one request: asks SoulSync for it, says it's requested, then
-        asks SoulSync and Navidrome every POLL_EVERY seconds until it has landed,
-        failed or run out of time, and says which.
+        asks Navidrome every POLL_EVERY seconds until it has landed or run out of
+        time, and says which.
 
         Args:
             wanted: What was asked for.
@@ -814,25 +814,17 @@ class Downloads:
         self._tell(satellite, f"{wanted.name} requested.")
 
         new: List[Dict] = []
-        done_at: Optional[float] = None
         scanned = False
         while not self._wait(POLL_EVERY):
             limit = self._limit(wanted)
             if self._now() - started >= limit:
                 new = self._look(library, sought, before, new)
                 return self._tell(satellite, self._last_word(wanted, sought, request, new, satellite))
-            if done_at is None:
-                progress = self._progress(soulsync, wanted, request)
-                if progress is not None and progress.state == "failed":
-                    return self._tell(satellite, self._last_word(wanted, sought, request, new, satellite,
-                                                                 progress.reason))
-                if progress is not None and progress.state == "done":
-                    done_at = self._now()
             new = self._look(library, sought, before, new)
             outcome = self._landed(wanted, sought, request, new, satellite)
             if outcome:
                 return self._tell(satellite, outcome)
-            why = None if scanned else self._scan_due(wanted, started, done_at, limit)
+            why = None if scanned else self._scan_due(wanted, started, limit)
             if why:
                 # Once only: a scan Navidrome refused - Nova's user not an admin - or
                 # one which didn't find it won't do better asked again.
@@ -850,18 +842,13 @@ class Downloads:
             if self._waiting.get(asked.key) is asked:
                 self._names[asked.key] = found.name
 
-    def _scan_due(self, wanted: Wanted, started: float, done_at: Optional[float], limit: float) -> Optional[str]:
+    def _scan_due(self, wanted: Wanted, started: float, limit: float) -> Optional[str]:
         """
         Why Navidrome is to be asked to scan now, or None if it isn't yet: SCAN_AFTER
-        seconds after SoulSync said it was done, or - with no word from SoulSync -
-        that long and a poll before the time limit.
+        seconds and a poll before the time limit, as SoulSync never says it's done.
         """
-        now = self._now()
-        if done_at is not None:
-            if now - done_at >= SCAN_AFTER:
-                return f"SoulSync is done with {wanted.name}, but Navidrome hasn't got it"
-        elif now - started >= limit - SCAN_AFTER - POLL_EVERY:
-            return f"Time is nearly up for {wanted.name}, and SoulSync hasn't said it's done"
+        if self._now() - started >= limit - SCAN_AFTER - POLL_EVERY:
+            return f"Time is nearly up for {wanted.name}, and Navidrome hasn't got it"
         return None
 
     def _tell(self, satellite: Optional[str], message: str) -> str:
@@ -917,17 +904,6 @@ class Downloads:
             return last
         return [track for track in found if track.get("id") not in before]
 
-    @staticmethod
-    def _progress(soulsync: SoulSync, wanted: Wanted, request: Union[SongRequest, AlbumRequest]) -> Optional[Progress]:
-        """How SoulSync says the request is getting on - None if it can't be asked this time."""
-        try:
-            if wanted.kind == "album":
-                return soulsync.album_progress(request)
-            return soulsync.song_progress(request)
-        except SoulSyncError:
-            logger.warning(f"Couldn't ask SoulSync how {wanted.name} is getting on this time, so the watch carries on")
-            return None
-
     def _landed(self, wanted: Wanted, sought: Wanted, request: Union[SongRequest, AlbumRequest], new: List[Dict],
                 satellite: Optional[str]) -> Optional[str]:
         """
@@ -952,10 +928,10 @@ class Downloads:
         return self._heard_album(f"{wanted.name} has been downloaded.", tracks, satellite)
 
     def _last_word(self, wanted: Wanted, sought: Wanted, request: Union[SongRequest, AlbumRequest],
-                   new: List[Dict], satellite: Optional[str], reason: Optional[str] = None) -> str:
+                   new: List[Dict], satellite: Optional[str]) -> str:
         """
-        What to say once the watch ends without seeing all of it land - failed, or
-        out of time: what did land, once heard, or that it couldn't be downloaded.
+        What to say once the watch ends without seeing all of it land, as time has run
+        out: what did land, once heard, or that it couldn't be downloaded.
 
         Args:
             wanted: What was asked for.
@@ -963,10 +939,9 @@ class Downloads:
             request: The SongRequest or AlbumRequest SoulSync gave.
             new: What's new in Navidrome, at its last look.
             satellite: The satellite that asked, or None.
-            reason: Why SoulSync said it failed, if it did and said why.
         """
         if wanted.kind != "album":
-            return (self._heard_song(wanted, sought, new, satellite) if new else "") or _couldnt(wanted, reason)
+            return (self._heard_song(wanted, sought, new, satellite) if new else "") or _couldnt(wanted, None)
         tracks = _album_tracks(request, new)
         if tracks and len(tracks) < request.queued:
             return self._heard_album(f"Only {len(tracks)} of the {request.queued} tracks of {wanted.name} came down.",
@@ -974,7 +949,7 @@ class Downloads:
         if tracks:
             # All of it, at the last look.
             return self._heard_album(f"{wanted.name} has been downloaded.", tracks, satellite)
-        return _couldnt(wanted, reason)
+        return _couldnt(wanted, None)
 
     def _heard_song(self, wanted: Wanted, sought: Wanted, copies: List[Dict], satellite: Optional[str]) -> str:
         """
