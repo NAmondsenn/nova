@@ -1,7 +1,10 @@
 """Tests for the rules which judge a song clean or explicit from how many of its lyric swears are heard (decision 0019)."""
 
+import logging
+
 import pytest
 
+from voice_assistant import clean_ear
 from voice_assistant.clean_ear import Thresholds, Verdict, count_swears, judge
 
 T = Thresholds()
@@ -69,6 +72,33 @@ def test_the_thresholds_are_the_settings_or_the_defaults():
     assert Thresholds.from_config(_Config(own)) == Thresholds(5, 0.5, 0.1)
     # A setting left out takes its default and not the others'.
     assert Thresholds.from_config(_Config({"lyric_minimum": 4})) == Thresholds(4, 0.35, 0.15)
+
+
+def test_a_threshold_left_blank_takes_its_default():
+    # "clean_share:" with nothing after it reads as None from config.yaml.
+    blank = {"lyric_minimum": None, "explicit_share": None, "clean_share": None}
+    assert Thresholds.from_config(_Config(blank)) == Thresholds()
+
+
+@pytest.mark.parametrize("shares", [(0.2, 0.3), (0.3, 0.3)])
+def test_shares_the_wrong_way_round_take_both_defaults_with_a_warning(shares, caplog, monkeypatch):
+    monkeypatch.setattr(clean_ear, "_warned_of", None)
+    explicit, clean = shares
+    with caplog.at_level(logging.WARNING):
+        thresholds = Thresholds.from_config(_Config({"lyric_minimum": 4, "explicit_share": explicit,
+                                                     "clean_share": clean}))
+
+    assert thresholds == Thresholds(4, 0.35, 0.15)
+    assert "clean_share" in caplog.text
+    # Read for every song, so said once, not each time.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        Thresholds.from_config(_Config({"explicit_share": explicit, "clean_share": clean}))
+    assert caplog.text == ""
+
+
+def test_the_module_names_its_section_of_the_decision():
+    assert "section 1 of decision 0019" in clean_ear.__doc__
 
 
 def test_the_thresholds_are_those_the_judging_uses():

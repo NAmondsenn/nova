@@ -1,7 +1,7 @@
 """
 Clean Ear Module
 The rules which judge whether a song is clean or explicit from how many of its lyric swears
-a speech model heard, from decision 1 of docs/decisions/0019.
+a speech model heard, from section 1 of decision 0019 (docs/decisions/0019-clean-songs-by-ear.md).
 
 Pure: it is given the lyrics and what was heard, reads no file, network or clock, and says
 the same in any time zone. Getting the lyrics, listening to the song and swapping a clean
@@ -12,9 +12,15 @@ and listening as nemotron.py's streaming recogniser does, so the method is not t
 changed without setting them again.
 """
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+# The shares last warned of, as the thresholds are read for every song heard.
+_warned_of = None
 
 # The words counted, in the lyrics and in what was heard alike: the fuck, shit, bitch, nigga,
 # pussy, dick, hoe and ass families. \b stops "ass" matching inside "class" or "asshole", and
@@ -67,12 +73,28 @@ class Thresholds:
             config: Nova's Config, with a clean_check section.
 
         Returns:
-            The thresholds, with the defaults for any setting the section lacks.
+            The thresholds, with the defaults for any setting the section lacks or leaves
+            blank. Shares that don't leave a gap between clean and explicit are both put back
+            to their defaults, as clean_share 0.3 with explicit_share 0.2 puts a song heard at
+            25% past both.
         """
         section = config.section("clean_check")
-        return cls(minimum=section.get("lyric_minimum", LYRIC_MINIMUM),
-                   explicit_share=section.get("explicit_share", EXPLICIT_SHARE),
-                   clean_share=section.get("clean_share", CLEAN_SHARE))
+
+        def setting(name, default):
+            value = section.get(name)
+            return default if value is None else value
+
+        explicit_share = setting("explicit_share", EXPLICIT_SHARE)
+        clean_share = setting("clean_share", CLEAN_SHARE)
+        if not clean_share < explicit_share:
+            global _warned_of
+            if _warned_of != (explicit_share, clean_share):
+                _warned_of = (explicit_share, clean_share)
+                logger.warning(f"clean_check.clean_share ({clean_share}) isn't below explicit_share "
+                               f"({explicit_share}), so both are left at {CLEAN_SHARE} and {EXPLICIT_SHARE}")
+            explicit_share, clean_share = EXPLICIT_SHARE, CLEAN_SHARE
+        return cls(minimum=setting("lyric_minimum", LYRIC_MINIMUM), explicit_share=explicit_share,
+                   clean_share=clean_share)
 
 
 def judge(lyrics: Optional[str], transcript: Optional[str], thresholds: Thresholds) -> Verdict:
