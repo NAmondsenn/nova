@@ -2991,6 +2991,37 @@ def test_the_clean_song_settings_are_under_music_and_used_straight_away(files):
     assert running.section("clean_check")["swap_tries"] == 3
 
 
+def test_the_nightly_check_and_weekly_note_are_under_music_and_used_straight_away(files):
+    page, running = _running(files)
+    shown = {setting["key"]: setting for setting in page.state()["settings"]}
+    names = ("nightly", "nightly_time", "weekly_note", "weekly_day", "weekly_time")
+    assert {name: shown[f"clean_check.{name}"]["label"] for name in names} == {
+        "nightly": "Check new songs every night", "nightly_time": "Nightly check at",
+        "weekly_note": "Send a weekly note", "weekly_day": "Weekly note on", "weekly_time": "Weekly note at"}
+    assert all(shown[f"clean_check.{name}"]["used"] == NOW for name in names)
+    assert {name: shown[f"clean_check.{name}"]["value"] for name in names} == {
+        "nightly": True, "nightly_time": "05:30", "weekly_note": True, "weekly_day": "Monday", "weekly_time": "09:30"}
+    assert shown["clean_check.nightly"]["kind"] == shown["clean_check.weekly_note"]["kind"] == "yes/no"
+    assert shown["clean_check.nightly_time"]["form"] == shown["clean_check.weekly_time"]["form"] == "time"
+    assert shown["clean_check.weekly_day"]["form"] == "day"
+    keys = [setting["key"] for setting in page.state()["settings"]]
+    assert keys.index("clean_check.soulsync_admin") < keys.index("clean_check.nightly") < keys.index(
+        "clean_check.weekly_time") < keys.index("football.kickoff_minutes")
+
+    result = page.save_settings({"clean_check.nightly": False, "clean_check.nightly_time": "04:45",
+                                 "clean_check.weekly_day": "friday", "clean_check.weekly_time": "18:00"}, LOGIN)
+
+    assert result == {"success": True, "message": "Saved. It's used straight away.", "restart_needed": False}
+    clean_check = running.section("clean_check")
+    # The day is kept as it was written.
+    assert (clean_check["nightly"], clean_check["nightly_time"], clean_check["weekly_day"],
+            clean_check["weekly_time"]) == (False, "04:45", "friday", "18:00")
+    assert page.save_settings({"clean_check.weekly_day": "Funday"}, LOGIN) == {
+        "success": False, "message": "Weekly note on should be a day of the week, from Monday to Sunday."}
+    assert not page.save_settings({"clean_check.nightly_time": "5am"}, LOGIN)["success"]
+    assert running.section("clean_check")["weekly_day"] == "friday"
+
+
 def test_soulsyncs_admin_password_is_saved_and_never_shown(files, caplog):
     caplog.set_level(logging.INFO)
     page = _page()

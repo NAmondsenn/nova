@@ -111,6 +111,12 @@ EDITABLE = [
     ("clean_check", "swap_tries", "Tries to swap a clean song", "now"),
     ("clean_check", "music_folder", "Music folder", "now"),
     ("clean_check", "soulsync_admin", "SoulSync admin profile", "now"),
+    # Read at each minute's look - see clean_schedule.py and docs/decisions/0022, section 8.
+    ("clean_check", "nightly", "Check new songs every night", "now"),
+    ("clean_check", "nightly_time", "Nightly check at", "now"),
+    ("clean_check", "weekly_note", "Send a weekly note", "now"),
+    ("clean_check", "weekly_day", "Weekly note on", "now"),
+    ("clean_check", "weekly_time", "Weekly note at", "now"),
     ("football", "kickoff_minutes", "Minutes before kick-off that Nova says a match is starting", "now"),
     ("home_assistant", "url", "Home Assistant's address", "restart"),
     ("ntfy", "url", "Your ntfy server", "restart"),
