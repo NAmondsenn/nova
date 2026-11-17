@@ -623,6 +623,17 @@ def test_a_scan_which_cant_be_asked_for_is_false_and_never_logs_the_token(make_l
     assert library.start_scan() is False and "admin" not in caplog.text
 
 
+@pytest.mark.parametrize("body", [[], ["subsonic-response"], {"subsonic-response": []},
+                                  {"subsonic-response": "ok"}])
+def test_an_answer_that_isnt_a_dictionary_is_a_valueerror(make_library, body):
+    # Callers already handle ValueError as an answer they couldn't read; AttributeError they don't.
+    library = make_library()
+    library._session.get = lambda url, params=None, timeout=None, stream=False: FakeResponse(body)
+
+    with pytest.raises(ValueError):
+        library._call("ping")
+
+
 def test_a_scan_which_wasnt_answered_with_json_is_false(make_library):
     class NotJson(FakeResponse):
         def json(self):

@@ -344,6 +344,7 @@ class NavidromeLibrary:
         Raises:
             requests.RequestException: If Navidrome couldn't be reached.
             NavidromeError: If it answered with an error.
+            ValueError: If its answer wasn't JSON, or wasn't a Subsonic response.
         """
         # On the local network, so it's still asked with only the internet down - but
         # not with no network at all, which only waited out looking its name up. See
@@ -353,7 +354,13 @@ class NavidromeLibrary:
         response = self._session.get(f"{self.url}/rest/{endpoint}", params={**self._sign_in(), **params},
                                      timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
-        body = response.json().get("subsonic-response") or {}
+        answer = response.json()
+        body = answer.get("subsonic-response") if isinstance(answer, dict) else None
+        # Any other shape, a list say, is an answer that couldn't be read, which callers handle
+        # as ValueError, as they do JSON that isn't; one without it at all is an unknown error.
+        if not isinstance(answer, dict) or not isinstance(body, (dict, type(None))):
+            raise ValueError("Navidrome's answer wasn't a Subsonic response")
+        body = body or {}
         if body.get("status") != "ok":
             error = body.get("error") or {}
             raise NavidromeError(error.get("message") or "unknown error", error.get("code"))
