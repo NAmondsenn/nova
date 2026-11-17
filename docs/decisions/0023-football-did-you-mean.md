@@ -1,6 +1,6 @@
 # 0023: Football, round seven: "did you mean"
 
-17 November 2026 · Agreed with the user in chat ("yes") · Approved, being built
+17 November 2026 · Agreed with the user in chat ("yes") · Built
 
 **Context.** Asked "When did South Shields last play Chorley?", the speech model heard "crawle", then "Corley". Home Assistant answered both truthfully (ESPN's search took "crawle" for Crawley Town, never met; "Corley" is no team), and Claude, given nothing better, guessed Carlisle United and Corby Town. Asked with "Chorley", the 15 August 2026 match is found in a second. Among the teams South Shields have played, Chorley is the closest name to both mishearings ("Corley" 0.92, "crawle" 0.62 by Python's difflib).
 

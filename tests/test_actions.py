@@ -1161,6 +1161,20 @@ def test_get_football_offers_when_two_teams_last_played():
     assert "against" not in schema["input_schema"]["required"]
 
 
+def test_get_football_tells_claude_to_ask_which_team_was_meant_where_nearest_names_are_given():
+    schema = {tool["name"]: tool for tool in ActionExecutor(football=SimpleNamespace(names=list)).tool_schemas()}["get_football"]
+    description = schema["description"]
+    # Where the answer names the nearest names among the team's opponents, a name was probably misheard: ask, never guess.
+    assert "nearest names" in description and "ask the user whether they meant" in description
+    assert "'Did you mean Chorley?'" in description
+    assert "never guess another team" in description
+    # A yes is asked again with that name as the other team, so that the match is found; and none is not made up.
+    assert "ask again with that name as against" in description
+    assert "never that they haven't played" in description
+    # Only the description says it: the parameters stand as they were.
+    assert set(schema["input_schema"]["properties"]) == {"team", "competition", "about", "date", "days", "against"}
+
+
 def test_get_football_hands_the_other_team_to_the_words_and_none_when_not_given(monkeypatch):
     from voice_assistant import actions as actions_module
 

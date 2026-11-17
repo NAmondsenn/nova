@@ -1478,6 +1478,172 @@ def test_bbc_sport_read_is_said_end_to_end_and_a_bad_month_is_cant_get(london, c
     assert [record.levelno for record in caplog.records] == [logging.WARNING]
 
 
+# Round seven (decision 2 of 0023): where no meeting is found, Home Assistant may give "nearest", the names of the team's
+# opponents which are closest to the other team as it was asked, and Nova says them so that Claude asks "Did you mean ...?".
+CRAWLEY = {"id": "2390", "name": "Crawley Town", "followed": False}
+CRAWLEY_BBC = {"id": "bbc:crawley-town", "name": "Crawley Town", "followed": False}
+NEAREST_ONE = "The nearest name among South Shields' opponents is Chorley."
+
+
+def test_corley_is_said_with_the_nearest_name_among_the_teams_opponents(london):
+    answer = _never_met_answer(unknown=["Corley"], nearest=["Chorley"])
+    home = FakeHome(answer=answer)
+    assert _said(home, team="South Shields", about="match", against="Corley") == {
+        "success": True, "message": "No match between South Shields and Corley is among BBC Sport's results for South Shields "
+                                    "since August 2021, and ESPN found nothing called Corley. " + NEAREST_ONE}
+    assert home.asked == [("match", "South Shields", "", 1, "Corley")]
+
+
+def test_a_rival_nobody_knows_is_said_with_the_nearest_name_where_bbc_sport_wasnt_read_too(london):
+    # The same ESPN line as it always was, then the nearest name.
+    for answer in (_never_met_answer(since=None, unknown=["Corley"], nearest=["Chorley"]),
+                   _never_met_answer(since=None, team={**SHIELDS_TEAM, "full_name": "South Shields FC"}, unknown=["Corley"],
+                                     nearest=["Chorley"])):
+        said = _said(FakeHome(answer=answer), team="South Shields", about="match", against="Corley")["message"]
+        opponents = "South Shields FC's" if "full_name" in answer["team"] else "South Shields'"
+        assert said == ("ESPN, where Home Assistant's football comes from, found nothing called Corley. "
+                        f"The nearest name among {opponents} opponents is Chorley.")
+
+
+@pytest.mark.parametrize("seasons, other, since, said", [
+    (6, CRAWLEY, "2021-08", "No match between South Shields and Crawley Town is listed in the last 6 seasons, nor in BBC Sport's "
+                            "results since August 2021."),
+    (1, CRAWLEY, "2021-08", "No match between South Shields and Crawley Town is among ESPN's results for South Shields, nor in "
+                            "BBC Sport's results since August 2021."),
+    (6, CRAWLEY_BBC, "2021-08", "No match between South Shields and Crawley Town is among BBC Sport's results for South Shields "
+                                "since August 2021."),
+    (6, CRAWLEY, None, "No match between South Shields and Crawley Town is listed in the last 6 seasons."),
+    (1, CRAWLEY, None, "No match between South Shields and Crawley Town is among ESPN's results for South Shields."),
+])
+def test_crawle_found_as_crawley_town_and_not_met_is_said_with_the_nearest_name_after_the_not_found_line(
+        london, seasons, other, since, said):
+    answer = _since_answer(seasons, other, since, nearest=["Chorley"])
+    assert said_match_report(answer, _after_the_match(), against="crawle") == f"{said} {NEAREST_ONE}"
+    # As Claude is given it, with the other team as it was asked for sent on.
+    home = FakeHome(answer=answer)
+    assert _said(home, team="South Shields", about="match", against="crawle") == {"success": True, "message": f"{said} {NEAREST_ONE}"}
+    assert home.asked == [("match", "South Shields", "", 1, "crawle")]
+
+
+@pytest.mark.parametrize("nearest, said", [
+    (["Chorley"], "The nearest name among South Shields' opponents is Chorley."),
+    (["Chorley", "Crawley Town"], "The nearest names among South Shields' opponents are Chorley and Crawley Town."),
+    (["Chorley", "Crawley Town", "Corby Town"], "The nearest names among South Shields' opponents are Chorley, Crawley Town and Corby Town."),
+])
+def test_one_nearest_name_is_said_in_the_singular_and_two_or_three_as_a_list(london, nearest, said):
+    found = said_match_report(_since_answer(6, CRAWLEY, nearest=nearest), _after_the_match(), against="crawle")
+    assert found == ("No match between South Shields and Crawley Town is listed in the last 6 seasons, nor in BBC Sport's "
+                     f"results since August 2021. {said}")
+    unknown = _said(FakeHome(answer=_never_met_answer(unknown=["Corley"], nearest=nearest)), team="South Shields", about="match",
+                    against="Corley")["message"]
+    assert unknown == ("No match between South Shields and Corley is among BBC Sport's results for South Shields since August "
+                       f"2021, and ESPN found nothing called Corley. {said}")
+
+
+def test_the_nearest_sentence_names_the_team_as_its_own_lines_do_and_takes_the_possessive_of_it(london):
+    liverpool = {"id": "364", "name": "Liverpool", "full_name": "Liverpool FC", "followed": True}
+    said = said_match_report(_match_answer(team=liverpool, seasons=6, against=NEWCASTLE, nearest=["Newport County"]),
+                             _after_the_match(), against="Newcastle")
+    assert said == ("No match between Liverpool FC and Newcastle United is listed in the last 6 seasons. "
+                    "The nearest name among Liverpool FC's opponents is Newport County.")
+    said = said_match_report(_liverpool_answer(seasons=6, against=NEWCASTLE, nearest=["Newport County"]), _after_the_match(),
+                             against="Newcastle")
+    assert said.endswith("The nearest name among Liverpool's opponents is Newport County.")
+
+
+def test_no_nearest_leaves_the_not_found_lines_as_they_were(london):
+    for seasons, other, since in ((6, SPENNYMOOR_ESPN, "2021-08"), (1, SPENNYMOOR_ESPN, "2021-08"), (6, SPENNYMOOR_BBC, "2021-08"),
+                                  (6, SPENNYMOOR_ESPN, None)):
+        plain = said_match_report(_since_answer(seasons, other, since), _after_the_match(), against="Spennymoor")
+        assert "nearest" not in plain
+        # A "nearest" left out and one given as none are the same.
+        assert said_match_report(_since_answer(seasons, other, since, nearest=None), _after_the_match(), against="Spennymoor") == plain
+    never = _never_met_answer(unknown=["Nowhere Rovers"])
+    said = _said(FakeHome(answer=never), team="South Shields", about="match", against="Nowhere Rovers")["message"]
+    assert said == _said(FakeHome(answer={**never, "nearest": None}), team="South Shields", about="match",
+                         against="Nowhere Rovers")["message"]
+    assert "nearest" not in said
+
+
+def test_the_nearest_names_are_never_said_beside_a_match_found(london):
+    AT = _after_the_match()
+    found = _found_match(**OXFORD_SOUTH_SHIELDS)
+    asked = _since_answer(6, match=found, notes=[PENALTY_CONCEDED], nearest=["Chorley", "Crawley Town"])
+    said = said_match_report(asked, AT, against="Oxford City")
+    assert said == said_match_report({key: value for key, value in asked.items() if key not in ("seasons", "against", "bbc_since",
+                                                                                                "nearest")}, AT)
+    assert "nearest" not in said and "Chorley" not in said
+    assert "nearest" not in _said(FakeHome(answer=asked), team="South Shields", about="match", against="Oxford City")["message"]
+    # Nor with a team's own match, which asked for no other team, nor a day, which wins over the other team.
+    own = _match_answer(team=SHIELDS_TEAM, nearest=["Chorley"])
+    assert said_match_report(own, AT) == "No match is listed for South Shields."
+    assert said_match_report(own, AT, on_a_day=True) == "No match is listed for South Shields on that day."
+    assert said_match_report({**own, "match": found, "bbc_since": "2021-08"}, AT).startswith("Oxford City 1, South Shields 3")
+    assert "Chorley" not in _said(FakeHome(answer=own), team="South Shields", about="match")["message"]
+
+
+def test_the_nearest_names_are_never_said_beside_the_same_team(london):
+    same = {"id": "18312", "name": "South Shields", "full_name": "South Shields FC", "followed": False}
+    said = said_match_report(_since_answer(6, same, nearest=["Chorley"]), _after_the_match(), against="South Shields FC")
+    assert said == "South Shields and South Shields FC are the same team."
+
+
+@pytest.mark.parametrize("answer", [
+    # No team to name the opponents of: the line as it always was, and no nearest.
+    {"unknown": ["Corley"], "stale": False, "bbc_since": "2021-08", "nearest": ["Chorley"]},
+    {"unknown": ["Corley"], "stale": False, "nearest": ["Chorley"]},
+    # A name unknown which isn't the other team asked for.
+    {"team": SHIELDS_TEAM, "unknown": ["Somewhere Town"], "stale": False, "bbc_since": "2021-08", "nearest": ["Chorley"]},
+    {"team": SHIELDS_TEAM, "unknown": ["Somewhere Town"], "stale": False, "nearest": ["Chorley"]},
+], ids=["no team, BBC read", "no team", "another name, BBC read", "another name"])
+def test_the_nearest_names_are_said_only_where_the_other_team_asked_for_was_found_nothing_called(london, answer):
+    said = _said(FakeHome(answer=answer), team="South Shields", about="match", against="Corley")["message"]
+    assert said == f"ESPN, where Home Assistant's football comes from, found nothing called {answer['unknown'][0]}."
+    # Without another team asked for, "unknown" is the team's own name, which "nearest" says nothing of.
+    said = _said(FakeHome(answer={**answer, "unknown": ["Corley"]}), team="Corley", about="match")["message"]
+    assert said == "ESPN, where Home Assistant's football comes from, found nothing called Corley."
+
+
+@pytest.mark.parametrize("nearest", [
+    "Chorley", {"Chorley": 1}, [], ["Chorley", "Crawley Town", "Corby Town", "Carlisle United"], [4], [None], [""], ["  "],
+    ["Chorley", ""], [["Chorley"]], [{"name": "Chorley"}], True, 0, "",
+], ids=repr)
+def test_a_nearest_of_the_wrong_shape_is_refused_as_any_wrong_shape_is(london, caplog, nearest):
+    asked_against = [_since_answer(6, CRAWLEY, nearest=nearest), _since_answer(1, CRAWLEY_BBC, nearest=nearest),
+                     _since_answer(6, CRAWLEY, None, nearest=nearest), _never_met_answer(unknown=["Corley"], nearest=nearest),
+                     _never_met_answer(since=None, unknown=["Corley"], nearest=nearest),
+                     # Refused where nothing of it would be said, too: a match found, or an unrelated name unknown.
+                     _since_answer(6, match=_found_match(**OXFORD_SOUTH_SHIELDS), nearest=nearest),
+                     _never_met_answer(unknown=["Somewhere Town"], nearest=nearest),
+                     {"unknown": ["Corley"], "stale": False, "nearest": nearest}]
+    # And where no other team was asked for, or a day was.
+    own = _match_answer(team=SHIELDS_TEAM, nearest=nearest)
+    for answer, asked in [(answer, {"against": "Corley"}) for answer in asked_against] + [(own, {}), (own, {"date": "2026-11-15"})]:
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="voice_assistant.football_words"):
+            assert _said(FakeHome(answer=answer), team="South Shields", about="match", **asked) == NOT_GOT
+        assert [record.levelno for record in caplog.records] == [logging.WARNING]
+        assert "nearest" in caplog.records[0].getMessage()
+    for answer in asked_against[:3] + asked_against[5:6]:
+        with pytest.raises((TypeError, ValueError), match="nearest"):
+            said_match_report(answer, _after_the_match(), against="crawle")
+    with pytest.raises((TypeError, ValueError), match="nearest"):
+        said_match_report(own, _after_the_match(), on_a_day=True)
+
+
+def test_nothing_of_the_nearest_names_is_said_with_digits_joined_by_a_dash(london):
+    for nearest in (["Chorley"], ["Chorley", "Crawley Town", "Corby Town"], ["Sunderland 1-2"], ["FC 08\u201309", "Chorley"]):
+        said = [said_match_report(_since_answer(seasons, other, since, nearest=nearest), _after_the_match(), against="Spennymoor")
+                for seasons, other, since in ((6, SPENNYMOOR_ESPN, "2021-08"), (1, SPENNYMOOR_ESPN, "2021-08"),
+                                              (6, SPENNYMOOR_BBC, "2021-08"), (6, SPENNYMOOR_ESPN, None))]
+        said.append(_said(FakeHome(answer=_never_met_answer(unknown=["Corley"], nearest=nearest)), team="South Shields",
+                          about="match", against="Corley")["message"])
+        assert not [words for words in said if re.search(r"\d\s*[-\u2010-\u2015\u2212]\s*\d", words)]
+    # The name is still said, with a space where the dash was.
+    assert said_match_report(_since_answer(6, nearest=["Sunderland 1-2"]), _after_the_match(), against="Spennymoor").endswith(
+        "is Sunderland 1 2.")
+
+
 # Liverpool as ESPN names it: the same team, found again under the other name.
 LIVERPOOL_FC = {"id": "364", "name": "Liverpool", "full_name": "Liverpool FC", "followed": False}
 

@@ -6,8 +6,10 @@ and decisions 1 to 4 of docs/decisions/0016 (what happened in a match: its goals
 about a team's match or a competition's day, and never a score said with a dash), and decisions 1 and 7 of
 docs/decisions/0018 (when two teams last played, and how far back it was looked for when they hadn't), and
 decisions 2 to 4 of docs/decisions/0019 (odds said only where Home Assistant looked for them, a national side's
-not-found line, and a team asked against itself), and decisions 2 and 6 of docs/decisions/0021 (what happened in last
-night's match with no team named, and BBC Sport named in the not-found line where its results were read).
+not-found line, and a team asked against itself), decisions 2 and 6 of docs/decisions/0021 (what happened in last
+night's match with no team named, and BBC Sport named in the not-found line where its results were read), and decision
+2 of docs/decisions/0023 (the nearest names among a team's opponents, said after a not-found line so that Claude asks
+"Did you mean ...?" rather than guess another team).
 
 Nova gives Claude plain text built from what Home Assistant returned, not Home Assistant's
 JSON: the full names, the kick-off as a local day and time, the ground, the odds and who
@@ -61,6 +63,9 @@ _BBC_MONTH = re.compile(r"([0-9]{4})-([0-9]{2})")
 
 # The most seasons a match between two teams is looked for through, as the Contract has it: this season and five before.
 _MOST_SEASONS = 6
+
+# The most names Home Assistant gives as the nearest to the other team asked for, as the Contract has it.
+_MOST_NEAREST = 3
 
 # How each phase of a match which has started is said. "off" (postponed, abandoned, cancelled)
 # is said another way, and a phase which isn't here is one Home Assistant's side has added since:
@@ -953,6 +958,55 @@ def _bbc_read_since(answer: Dict) -> Optional[str]:
     return f"{month.strftime('%B')} {month.year}"
 
 
+def _nearest_names(answer: Dict) -> List[str]:
+    """
+    Reads the nearest names Home Assistant gave for a match asked with the other team where no meeting was found:
+    the team's opponents in the matches it looked through, whose names are closest to the other team as asked.
+
+    Args:
+        answer: The answer to a match, which may carry "nearest" - a list of one to three names, closest first - and
+            has none otherwise. It is read for every answer to a match, so that one of the wrong shape is refused
+            whether or not it would be said.
+
+    Returns:
+        The names, closest first, with a space where two digits were joined by a dash (the speech would read that out as
+        "dash"); or an empty list where the answer has none.
+
+    Raises:
+        TypeError: If it isn't a list, or a name in it isn't text.
+        ValueError: If it is empty or has more than three names, or a name in it is empty.
+    """
+    nearest = _field(answer, "nearest", list, None)
+    if nearest is None:
+        return []
+    if not all(isinstance(name, str) for name in nearest):
+        raise TypeError(f"nearest should be a list of names, not {nearest!r}")
+    if not 1 <= len(nearest) <= _MOST_NEAREST or not all(name.strip() for name in nearest):
+        raise ValueError(f"nearest should be from one to {_MOST_NEAREST} names, none of them empty, not {nearest!r}")
+    return [_DIGIT_DASH.sub(" ", name) for name in nearest]
+
+
+def _with_nearest(line: str, name: str, nearest: Sequence[str]) -> str:
+    """
+    Puts the nearest names after a not-found line, for Claude to ask whether one of them was meant.
+
+    Args:
+        line: What is said where no meeting was found.
+        name: The team, as its own lines say it.
+        nearest: The nearest names among the team's opponents, from _nearest_names; none for no sentence.
+
+    Returns:
+        The line, then "The nearest name among South Shields' opponents is Chorley." or, for two or three names, "The
+        nearest names among South Shields' opponents are Chorley and Crawley Town."; the line as it was where there
+        are none.
+    """
+    if not nearest:
+        return line
+    if len(nearest) == 1:
+        return f"{line} The nearest name among {_possessive(name)} opponents is {nearest[0]}."
+    return f"{line} The nearest names among {_possessive(name)} opponents are {_and_list(nearest)}."
+
+
 def _other_team_found(answer: Dict) -> Tuple[str, Optional[str]]:
     """
     Reads the other team Home Assistant found for a match asked against it, which is not always the one
@@ -1035,8 +1089,12 @@ def said_match_report(answer: Dict, now: datetime, on_a_day: bool = False, again
         August 2021." (for a side whose one list has no seasons in it, "is among ESPN's results for South Shields, nor in
         BBC Sport's results since August 2021."), and for a side only BBC Sport knows, whose id begins "bbc:", "... is
         among BBC Sport's results for South Shields since August 2021." Nothing of it is said of a match found or of a
-        day. (A side only BBC Sport could know which Home Assistant never met is not in this answer at all: it is "unknown",
-        and _said_answer says it.) Where the two teams' ids are one, the team was asked against itself under another
+        day. Where Home Assistant gave the nearest names among the team's opponents ("nearest", one to three) for the
+        other team as it was asked, they are said after that line: "The nearest name among South Shields' opponents is
+        Chorley.", or "The nearest names among South Shields' opponents are A, B and C." - for Claude to ask whether one
+        was meant; and never with a match found, a day, or the same team. (A side only BBC Sport could know which Home
+        Assistant never met is not in this answer at all: it is "unknown", and _said_answer says it.) Where the two
+        teams' ids are one, the team was asked against itself under another
         name: only that they are the same team ("Liverpool and Liverpool FC are the same team."), with nothing of a
         match, as a team has none against itself.
 
@@ -1045,7 +1103,7 @@ def said_match_report(answer: Dict, now: datetime, on_a_day: bool = False, again
             its seasons or the other team.
         TypeError: If a value isn't of the type it should be, or either team's id isn't text.
         ValueError: If the match, an event or a note is of the wrong shape, its seasons aren't from 1 to 6, its
-            bbc_since isn't a year and month, or the other team has no name.
+            bbc_since isn't a year and month, its nearest isn't one to three names, or the other team has no name.
     """
     _dict(answer, "an answer")
     team = _field(answer, "team", dict)
@@ -1055,6 +1113,7 @@ def said_match_report(answer: Dict, now: datetime, on_a_day: bool = False, again
     seasons = _seasons_looked_through(answer) if against else None
     # Read for any answer which has it, so that one of the wrong shape is refused whether or not it is said.
     since = _bbc_read_since(answer)
+    nearest = _nearest_names(answer)
     other, other_id = _other_team_found(answer) if against else (None, None)
     own_id = _field(team, "id", str, None) if against else None
     found = _field(answer, "match", dict, None)
@@ -1067,12 +1126,13 @@ def said_match_report(answer: Dict, now: datetime, on_a_day: bool = False, again
         if seasons is not None:
             if since and (other_id or "").startswith("bbc:"):
                 # Only BBC Sport knows the side, so ESPN's seasons were never where it could be.
-                return f"No match between {name} and {other} is among BBC Sport's results for {name} since {since}."
+                return _with_nearest(f"No match between {name} and {other} is among BBC Sport's results for {name} since {since}.",
+                                     name, nearest)
             # A national side's one list has no seasons in it, so what was looked through is ESPN's results for it.
             looked = f"among ESPN's results for {name}" if seasons == 1 else f"listed in the last {seasons} seasons"
             if since:
                 looked += f", nor in BBC Sport's results since {since}"
-            return f"No match between {name} and {other} is {looked}."
+            return _with_nearest(f"No match between {name} and {other} is {looked}.", name, nearest)
         return f"No match is listed for {name}{' on that day' if on_a_day else ''}."
     # A match which hasn't started has nothing to note, as it has nothing which happened in it.
     unlisted = [_NO_SCORERS] if _scorers_unlisted(match) else []
@@ -1178,28 +1238,37 @@ def _said_answer(what: str, answer: Dict, now: datetime, on_a_day: bool = False,
         results named: "No match between South Shields and Nowhere Rovers is among BBC Sport's results for South
         Shields since August 2021, and ESPN found nothing called Nowhere Rovers." - the team as its own lines say it,
         and the other team as it was asked for, which is how Home Assistant lists it as unknown. Home Assistant gives
-        no seasons for such a side, as only BBC Sport could know it.
+        no seasons for such a side, as only BBC Sport could know it. Where it also gives the nearest names among the
+        team's opponents ("nearest"), those are said after that line, or after ESPN's own (with no bbc_since), for a
+        match asked against the other team named as unknown, and where the team is in the answer: "... and ESPN found
+        nothing called Corley. The nearest name among South Shields' opponents is Chorley." Any answer to a match is
+        refused where its nearest isn't one to three names, whether or not they are said.
 
     Raises:
         KeyError: If a key is missing from the answer, a match or a table row - or, for a match asked
             against another team, its seasons or the other team found.
         TypeError: If a value isn't of the type it should be.
         ValueError: If a match or a day is of the wrong shape, seasons aren't from 1 to 6, the other
-            team found has no name, or a match's bbc_since isn't a year and month.
+            team found has no name, or a match's bbc_since isn't a year and month or its nearest isn't one to three names.
     """
-    # Read for any answer to a match, so that one of the wrong shape is refused whether or not anything was found.
+    # Both read for any answer to a match, so that one of the wrong shape is refused whether or not anything was found.
     since = _bbc_read_since(answer) if what == "match" else None
+    nearest = _nearest_names(answer) if what == "match" else []
     unknown = answer.get("unknown")
     if unknown:
         if not isinstance(unknown, list) or not all(isinstance(name, str) and name for name in unknown):
             raise TypeError(f"unknown should be a list of names, not {unknown!r}")
-        team = _field(answer, "team", dict, None) if what == "match" and against and since else None
+        said = f"ESPN, where Home Assistant's football comes from, found nothing called {_and_list(unknown)}."
+        # The team is only needed to say BBC Sport's results for it, or its opponents' nearest names.
+        team = _field(answer, "team", dict, None) if what == "match" and against and (since or nearest) else None
         if team is not None and any(_name_key(name) == _name_key(against) for name in unknown):
-            # ESPN doesn't know the other team, but BBC Sport's results for the team were read, which may have it.
             name = _field(team, "full_name", str, None) or _field(team, "name", str)
-            return (f"No match between {name} and {against} is among BBC Sport's results for {name} since {since}, "
-                    f"and ESPN found nothing called {_and_list(unknown)}.")
-        return f"ESPN, where Home Assistant's football comes from, found nothing called {_and_list(unknown)}."
+            if since:
+                # ESPN doesn't know the other team, but BBC Sport's results for the team were read, which may have it.
+                said = (f"No match between {name} and {against} is among BBC Sport's results for {name} since {since}, "
+                        f"and ESPN found nothing called {_and_list(unknown)}.")
+            return _with_nearest(said, name, nearest)
+        return said
     if what == "table":
         return said_table(answer)
     if what == "match":

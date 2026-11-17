@@ -105,6 +105,7 @@ With clean songs set up as well (the README's "Clean songs, found by ear": the m
 28a. "Hey Nova, who won the Euros?" - the last European Championship (ESPN's "EURO"), found and said from what Home Assistant has: its final and who won it, never "ESPN found nothing called Euros".
 28b. "Hey Nova, who's left in the EFL Cup?" - the Carabao Cup, which Claude names as it is properly called and Home Assistant also knows as the EFL Cup: the teams still in it, as for any cup.
 29a. "Hey Nova, what happened in the match?" the morning after a followed team's evening match, or just after midnight: that match, with its goals and cards, as if its team had been named - not "Name a team for its match." From just past fifteen hours after its kick-off (10:46 after one at 19:45) it is "Name a team for its match." again, and a match in play is asked about first.
+30a. "Hey Nova, when did South Shields last play Corley?": Nova asks whether you meant Chorley ("Did you mean Chorley?"), and "yes" gives the August match. It does not guess another team, and where Home Assistant gives no nearest name it says how far back it looked, as before.
 
 ## The manual scripts
 
