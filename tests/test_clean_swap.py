@@ -721,6 +721,33 @@ def test_an_original_gone_from_the_holding_folder_has_the_last_copy_set_aside_pu
     assert read(music, other) == b"clean try 3" and not os.path.exists(os.path.join(music, HELD, other))
     assert read(music, SECOND_HELD) == b"clean try 1" and read(music, THIRD_HELD) == b"clean try 2"
     assert store.swaps() == []
+    assert f"id-{other}" in store.listed("couldnt")[0]["kept"]
+
+
+@pytest.mark.parametrize("ending", ["not in time", "not found"])
+def test_a_later_copy_put_back_for_a_gone_original_is_kept_for_the_library_check(make_swapper, music, store,
+                                                                                ending):
+    # The original is emptied from .nova-held by hand once the first try's copy is set aside; the second
+    # try then ends without a copy, so the first try's goes back. Its id is kept, so the check leaves it
+    # for 30 days rather than swapping it again the next night.
+    swapper = make_swapper(ears=FakeEars(["clean"]))
+    fakes = swapper.fakes
+    fakes.soulsync.lands = [(30, ENDLESS_REL, b"clean try 1"), None]
+
+    def forgot():
+        if len(fakes.admin.forgot) == 2:
+            os.remove(os.path.join(music, HELD, ENDLESS_REL))
+            if ending == "not found":
+                fakes.soulsync.find_fails = SoulSyncError(NOT_FOUND)
+
+    fakes.admin.on_forget = forgot
+
+    outcome = swapper.swap(_endless(fakes.library), ENDLESS_WANTED, None, quiet=True)
+
+    assert outcome == "couldnt" and outcome.reason.endswith("so the copy set aside last was put back")
+    assert read(music, ENDLESS_REL) == b"clean try 1"
+    [entry] = store.listed("couldnt")
+    assert entry["kept"] == [f"id-{ENDLESS_REL}"] and "original_back" not in entry
 
 
 def test_a_restart_after_the_original_went_back_ends_as_put_back_and_keeps_the_later_copy_held(

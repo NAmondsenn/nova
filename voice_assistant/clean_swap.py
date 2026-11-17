@@ -590,7 +590,9 @@ class Swapper:
                     if swap["held"]:
                         return self._put_back(swap, parts, e.reason)
                     return self._end(swap, "couldnt", e.reason)
-                swap["held"].append(asdict(held))
+                # With the copy's id, so one put back in place of an original gone from .nova-held is
+                # known to the library check.
+                swap["held"].append({**asdict(held), "id": swap["copy"].get("id")})
                 if not rejected:
                     self._next(swap, DROPPING)
                 elif swap.get("pending"):
@@ -884,7 +886,13 @@ class Swapper:
                              kept=rejected.get("ids") or [])
         # The copies a rejected swap meant to set aside are listed, so the library check leaves them be.
         extra = {"kept": rejected.get("ids") or []} if rejected else {}
-        if put == PUT_BACK and original:
+        if put == PUT_BACK and not original:
+            # The copy put back in the original's place, and the others held, are listed, so the library
+            # check leaves them for 30 days rather than swapping again the next night. Held records saved
+            # before they had ids have the copy last set aside's.
+            later = [saved.get("id") for saved in swap["held"][1:]] + [(swap.get("copy") or {}).get("id")]
+            extra["kept"] = list(dict.fromkeys(extra.get("kept", []) + [copy_id for copy_id in later if copy_id]))
+        elif put == PUT_BACK and original:
             # Marked, so the library check leaves the song for a while rather than fetching again the
             # next night what most likely won't come then either.
             extra["original_back"] = True
