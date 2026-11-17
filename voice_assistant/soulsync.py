@@ -737,11 +737,13 @@ class SoulSync:
         queued = track_count if requested.get("queued") is None else requested["queued"]
         logger.info(f"SoulSync is getting {album.get('title')} by {', '.join(map(str, album.get('artists') or []))} "
                     f"({album['album_id']}): {queued} of {track_count} tracks queued")
-        try:
-            self._mcp("process_wishlist", {})
-        except SoulSyncError:
-            # It's on the wishlist either way, so it still comes down - only later.
-            logger.warning("SoulSync's wishlist couldn't be started, so the album waits for its next run")
+        # With none queued there's nothing new for it to start: every track is had or already on its way.
+        if int(queued) > 0:
+            try:
+                self._mcp("process_wishlist", {})
+            except SoulSyncError:
+                # It's on the wishlist either way, so it still comes down - only later.
+                logger.warning("SoulSync's wishlist couldn't be started, so the album waits for its next run")
         return AlbumRequest(None, [], int(track_count), int(queued))
 
 

@@ -425,6 +425,23 @@ def test_an_album_partly_had_is_followed_by_the_tracks_soulsync_queued(soulsync,
     assert soulsync.request_album("Rumours", "Fleetwood Mac").queued == RECORDED_TRACK_COUNT
 
 
+def test_the_wishlist_isnt_started_when_nothing_was_queued(soulsync, http):
+    # Every track already had or on its way: nothing for process_wishlist to start.
+    http.tools["request_album"] = _tool_result({"album": "Rumours", "tracks": RECORDED_TRACK_COUNT, "queued": 0})
+    assert soulsync.request_album("Rumours", "Fleetwood Mac").queued == 0
+    assert [call["params"]["name"] for call in http.mcp_calls] == ["find_album", "request_album"]
+
+    # Some queued, or an answer which doesn't say, still starts it.
+    http.mcp_calls.clear()
+    http.tools["request_album"] = _tool_result({"album": "Rumours", "tracks": RECORDED_TRACK_COUNT, "queued": 9})
+    soulsync.request_album("Rumours", "Fleetwood Mac")
+    assert [call["params"]["name"] for call in http.mcp_calls][-1] == "process_wishlist"
+    http.mcp_calls.clear()
+    http.tools["request_album"] = _tool_result({"album": "Rumours", "tracks": RECORDED_TRACK_COUNT})
+    soulsync.request_album("Rumours", "Fleetwood Mac")
+    assert [call["params"]["name"] for call in http.mcp_calls][-1] == "process_wishlist"
+
+
 def test_an_album_title_alone_is_searched_for_as_it_is(soulsync, http):
     soulsync.request_album("Rumours", None)
     assert http.mcp_calls[0]["params"]["arguments"] == {"query": "Rumours", "limit": 25}
