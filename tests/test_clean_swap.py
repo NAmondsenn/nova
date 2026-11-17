@@ -589,6 +589,8 @@ def test_every_try_coming_down_clean_keeps_the_last_and_holds_the_rest(make_swap
     assert read(music, f"{HELD}/Gunna/The Last Wun/endless (3).mp3") == b"clean try 2"
     assert read(music, ENDLESS_REL) == b"clean try 3"
     assert [entry["name"] for entry in store.listed("only_clean")] == ["Gunna - endless"]
+    # The copy kept is listed by its id, for the library check.
+    assert store.listed("only_clean")[0]["kept"] == [f"id-{ENDLESS_REL}"]
     assert store.swaps() == [] and store.listed("swapped") == []
 
 

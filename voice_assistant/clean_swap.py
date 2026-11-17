@@ -625,8 +625,11 @@ class Swapper:
             return self._end(swap, "not_judged", verdict.reason,
                              listed=f"couldn't check the copy SoulSync brought: {verdict.reason}")
         if swap["tries"] > self._tries():
-            # The last copy stays in the library; the earlier ones stay held.
-            return self._end(swap, "only_clean", f"{swap['tries']} copies came down clean")
+            # The last copies stay in the library; the earlier ones stay held. Their ids are
+            # listed, so the library check knows them as only clean, not as clean songs it
+            # couldn't swap - SoulSync may file them somewhere else, under another id.
+            return self._end(swap, "only_clean", f"{swap['tries']} copies came down clean",
+                             kept=[other.get("id") for other in new])
         # Clean is only ever the verdict when every copy heard was clean: each goes, the one
         # given first.
         copies = [copy] + [other for other in new if other.get("id") != copy.get("id")]
@@ -767,7 +770,7 @@ class Swapper:
         except OSError as e:
             logger.error(f"Couldn't forget the finished swap of {swap.get('name')}: {type(e).__name__}")
 
-    def _end(self, swap: Dict, kind: str, reason: str, listed: Optional[str] = None) -> Outcome:
+    def _end(self, swap: Dict, kind: str, reason: str, listed: Optional[str] = None, **extra) -> Outcome:
         """
         Ends a swap: forgets its progress and puts it on the page's list for how it ended.
 
@@ -776,17 +779,18 @@ class Swapper:
             kind: How it ended.
             reason: Why, as the outcome gives it.
             listed: The reason as the page's list gives it, if not the same.
+            **extra: Anything else the list keeps, e.g. the kept copies' ids.
         """
         self._end_saved(swap)
         logger.info(f"The swap of {swap['name']} ended {kind}" + (f": {reason}" if reason else ""))
         if kind in LISTS:
-            self._list(swap["name"], swap.get("song_id"), LISTS[kind], listed or reason)
+            self._list(swap["name"], swap.get("song_id"), LISTS[kind], listed or reason, **extra)
         return Outcome(kind, reason)
 
-    def _list(self, name: str, song_id: Optional[str], kind: str, reason: str) -> Outcome:
+    def _list(self, name: str, song_id: Optional[str], kind: str, reason: str, **extra) -> Outcome:
         """Puts a song on one of the page's lists; a list that can't be saved is logged."""
         try:
-            self.store.add(kind, name, reason, song_id=song_id)
+            self.store.add(kind, name, reason, song_id=song_id, **extra)
         except (OSError, TypeError, ValueError) as e:
             logger.error(f"Couldn't list {name} as {kind}: {type(e).__name__}")
         return Outcome(kind, reason)
