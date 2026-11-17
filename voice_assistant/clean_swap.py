@@ -634,6 +634,15 @@ class Swapper:
                 if new is None:
                     break
                 if not new:
+                    if swap["tries"] > 1:
+                        # Every try which landed came down clean, and the last didn't land: the song
+                        # only comes down clean (seen live on 17 Nov), so the check leaves it for good.
+                        # Kept with the swap, so an original which can't go back yet ends so too.
+                        landed = swap["tries"] - 1
+                        swap["rejected"] = {"kind": "only_clean", "listed": None, "ids": [],
+                                            "reason": f"{landed} {'copy' if landed == 1 else 'copies'} came "
+                                                      f"down clean, and {NOT_IN_TIME}"}
+                        return self._put_back(swap, parts, None, unwish=True)
                     return self._put_back(swap, parts, NOT_IN_TIME, unwish=True)
                 ended = self._judge(swap, library, new, parts)
                 if ended:

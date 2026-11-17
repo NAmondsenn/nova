@@ -792,6 +792,25 @@ def test_a_fetch_that_never_lands_is_taken_off_the_wishlist_and_the_song_put_bac
     assert store.swaps() == []
 
 
+def test_a_later_try_which_doesnt_land_after_clean_ones_ends_only_clean(make_swapper, music, store):
+    # Seen live on 17 Nov: tries 1 and 2 came down clean and try 3 didn't land in time. Every copy
+    # which landed was clean, so the song only comes down clean, and the check leaves it for good.
+    swapper = make_swapper(ears=FakeEars(["clean"]))
+    fakes = swapper.fakes
+    fakes.soulsync.lands = [(30, ENDLESS_REL, b"clean try 1"), (30, ENDLESS_REL, b"clean try 2"), None]
+
+    outcome = swapper.swap(_endless(fakes.library), ENDLESS_WANTED, "kitchen", quiet=False)
+
+    assert outcome == "only_clean"
+    assert outcome.reason == "2 copies came down clean, and SoulSync didn't bring another copy in time"
+    assert fakes.soulsync.unwished == ["deezer-3"]
+    assert read(music, ENDLESS_REL) == b"clean endless"
+    assert read(music, SECOND_HELD) == b"clean try 1" and read(music, THIRD_HELD) == b"clean try 2"
+    [entry] = store.listed("only_clean")
+    assert entry["song_id"] == f"id-{ENDLESS_REL}" and entry["reason"] == outcome.reason
+    assert store.listed("couldnt") == [] and store.swaps() == []
+
+
 def test_a_new_file_where_the_song_was_is_kept_beside_the_held_copy(make_swapper, music, store):
     # Something filed where it was, which Navidrome hasn't picked up by the time limit.
     swapper = make_swapper()
