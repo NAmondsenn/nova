@@ -360,10 +360,17 @@ class CleanCheck:
         What a song needs: "hear" if it's new or its file changed, "swap" if it was heard clean
         with this file and its swap couldn't be made, or None. One whose file Navidrome won't
         give is heard anyway, which says why it can't be judged.
+
+        Raises:
+            requests.ConnectionError: Navidrome couldn't be reached for the file, so the caller
+                waits and tries again rather than hearing the song as not judged.
         """
         try:
             file = library.song_file(song["id"])
-        except NavidromeError:
+        except NavidromeError as e:
+            # The library's own words, e.g. "Couldn't ask Navidrome for the song's file: ConnectTimeout".
+            if OUT_OF_REACH.match(str(e)):
+                raise requests.ConnectionError() from None
             return "hear"
         if not self._store.known(song["id"], file["size"], file["updated"]):
             return "hear"
@@ -414,7 +421,10 @@ class CleanCheck:
                     return AGAIN
                 # The queue can be hours old, or from before a restart: a new copy may have landed
                 # in its place since, which has never been heard, or it may have come down only clean.
-                needs = self._todo(library, song, self._only_clean())
+                try:
+                    needs = self._todo(library, song, self._only_clean())
+                except requests.ConnectionError:
+                    return UNREACHED
                 if needs is None:
                     logger.info(f"The library check leaves {name}, which needs nothing now")
                     return DONE

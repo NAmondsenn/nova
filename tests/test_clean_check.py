@@ -21,7 +21,7 @@ from voice_assistant.clean_store import CleanStore
 from voice_assistant.clean_swap import NO_ADMIN, Ears, Outcome, Swapper
 from voice_assistant.downloads import Wanted
 from voice_assistant.music_folder import HELD, MusicFolder
-from voice_assistant.navidrome import NavidromeError
+from voice_assistant.navidrome import NavidromeError, NavidromeLibrary
 
 FILE = {"size": 4096, "updated": "2026-11-16T10:00:00Z"}
 
@@ -499,6 +499,58 @@ def test_a_library_out_of_reach_is_listed_again_each_minute_then_carried_on_next
     again = make_check(library=library)
     again.resume()
     assert finished(again)["done"] == 1 and again.fakes.ears.heard == ["e1"]
+
+
+class FileOutOfReach(FakeLibrary):
+    """Navidrome which can list its albums but, for a while, not give a song's file: as it starts after pve2 does."""
+
+    def __init__(self, albums, failures):
+        super().__init__(albums)
+        self.file_failures = failures
+
+    def song_file(self, song_id):
+        if self.file_failures:
+            self.file_failures -= 1
+            raise NavidromeLibrary._cant_ask("the song's file", requests.ConnectionError("http://secret?t=token"))
+        return super().song_file(song_id)
+
+
+def test_a_songs_file_out_of_reach_while_listing_lists_again(make_check, store):
+    # Taken for a song to hear, it would be heard as not judged; the listing waits instead.
+    store.set_verdict("e1", 4096, "2026-11-16T10:00:00Z", EXPLICIT, "Gunna - endless")
+    library = FileOutOfReach({"One": [ENDLESS]}, failures=1)
+    check = make_check(library=library)
+
+    check.start()
+    state = finished(check)
+
+    assert library.pages == [0, 0] and check.fakes.waits == [60]
+    assert state["total"] == 0 and check.fakes.ears.heard == []
+
+
+def test_a_queued_swaps_file_out_of_reach_is_tried_again(make_check, store):
+    store.set_verdict("d1", 4096, "2026-11-16T10:00:00Z", CLEAN, "Travis Scott - SICKO MODE (Clean)")
+    store.save_check({"running": True, "done": 0, "total": 1, "current": None, "queue": [{**SICKO, "swap": True}],
+                      "last_finished": None})
+    check = make_check(library=FileOutOfReach({"Astro": [SICKO]}, failures=1))
+
+    check.resume()
+
+    assert finished(check)["done"] == 1 and check.fakes.waits == [60]
+    assert [swap[0] for swap in check.fakes.swapper.swaps] == ["d1"]
+
+
+@pytest.mark.parametrize("what", ["the song's file", "the lyrics", "the song's audio"])
+@pytest.mark.parametrize("error", ["ConnectionError", "ReadTimeout", "HTTPError 502"])
+def test_navidrome_out_of_reach_is_known_by_the_librarys_own_words(what, error):
+    if error == "HTTPError 502":
+        response = requests.Response()
+        response.status_code = 502
+        failure = requests.HTTPError(response=response)
+    else:
+        failure = getattr(requests, error)("http://secret?t=token")
+
+    assert clean_check.OUT_OF_REACH.match(str(NavidromeLibrary._cant_ask(what, failure)))
 
 
 def test_a_library_which_answers_with_an_error_isnt_listed_again_till_next_time(make_check, store):
