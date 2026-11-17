@@ -272,6 +272,9 @@ class CleanCheck:
                 break
             if ended == UNREACHED:
                 if failures >= RETRIES:
+                    # Stop pressed during the last try ends the check, as it would at any other song.
+                    if self._ending():
+                        break
                     self._pause(PAUSED)
                     return
                 failures += 1
@@ -305,6 +308,9 @@ class CleanCheck:
                     continue
                 why = str(e) if isinstance(e, NavidromeError) else type(e).__name__
                 logger.warning(f"Couldn't list the songs in Navidrome: {why}")
+                if self._ending():
+                    self._ended()
+                    return None
                 self._pause(PAUSED if out_of_reach(e) else
                             f"Navidrome couldn't list the songs ({why}), so the check stopped here and "
                             f"carries on next time.")

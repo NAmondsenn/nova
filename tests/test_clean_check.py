@@ -644,6 +644,37 @@ def test_a_stop_while_waiting_for_navidrome_ends_the_check(make_check, store):
     assert state["paused"] is False and store.check()["queue"] is None
 
 
+def test_a_stop_during_the_last_try_for_a_song_ends_the_check_rather_than_pausing_it(make_check, store):
+    ears = FakeEars({"a1": UNREACHABLE})
+    check = make_check(ears=ears)
+    ears.on_hear = lambda song: check.stop() if len(ears.heard) == 11 else None
+
+    check.start()
+    state = finished(check)
+
+    assert ears.heard == ["a1"] * 11
+    assert state["paused"] is False and state["error"] is None and store.check()["queue"] is None
+
+
+def test_a_stop_during_the_last_try_at_listing_ends_the_check_rather_than_pausing_it(make_check, store):
+    library = FakeLibrary({"One": [ENDLESS]}, fails=requests.ConnectionError("made-up refusal"))
+    real_call = library._call
+
+    def call(endpoint, **params):
+        if len(library.pages) == 10:
+            check.stop()
+        return real_call(endpoint, **params)
+
+    library._call = call
+    check = make_check(library=library)
+
+    check.start()
+    state = finished(check)
+
+    assert len(library.pages) == 11
+    assert state["paused"] is False and state["error"] is None and store.check()["queue"] is None
+
+
 def test_a_surprise_part_way_ends_the_check_with_a_sentence(make_check):
     check = make_check()
 
