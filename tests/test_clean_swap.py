@@ -1025,6 +1025,26 @@ def test_a_rejected_unsure_swap_leaves_one_unsure_entry_even_if_ears_listed_the_
     assert entry["name"] == "Gunna - endless" and entry["song_id"] == f"id-{ENDLESS_REL}"
 
 
+@pytest.mark.parametrize("kinds, lands, ended", [
+    (["explicit"], [(30, ENDLESS_REL, b"explicit endless")], "swapped"),
+    (["explicit"], [None], "couldnt"),
+    (["clean"], [(30, ENDLESS_REL, f"clean try {number}".encode()) for number in (1, 2, 3)], "only_clean"),
+])
+def test_a_swap_tried_again_after_a_rejected_one_takes_the_song_off_the_unsure_list(
+        make_swapper, music, store, kinds, lands, ended):
+    # Over 30 days after a swap whose new copy was heard unsure, the library check tries again; however
+    # this one ends, the song mustn't still be on Unsure as well.
+    store.add("unsure", "Gunna - endless (old name)", "heard 2 of its 10 swears", song_id=f"id-{ENDLESS_REL}",
+              kept=[f"id-{ENDLESS_REL}"])
+    swapper = make_swapper(ears=FakeEars(kinds))
+    swapper.fakes.soulsync.lands = list(lands)
+
+    assert swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True) == ended
+
+    assert store.listed("unsure") == []
+    assert [entry["name"] for entry in store.listed(ended)] == ["Gunna - endless"]
+
+
 def _rejected_saved(store, music, second=False):
     """
     A swap stopped part way through setting aside the copies of a try heard unsure: the original

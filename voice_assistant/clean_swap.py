@@ -924,6 +924,13 @@ class Swapper:
                     self.store.discard("couldnt", swap["song_id"])
                 except (OSError, ValueError) as e:
                     logger.error(f"Couldn't take {swap['name']} off the couldn't swap list: {type(e).__name__}")
+            if LISTS[kind] != "unsure" and swap.get("song_id"):
+                # A swap rejected as unsure over 30 days ago left the original on Unsure; tried again and
+                # "swapped" or "couldn't swap", it mustn't stay on two lists.
+                try:
+                    self.store.discard("unsure", swap["song_id"])
+                except (OSError, ValueError) as e:
+                    logger.error(f"Couldn't take {swap['name']} off the unsure list: {type(e).__name__}")
             self._list(swap["name"], swap.get("song_id"), LISTS[kind], listed or reason, **extra)
         return Outcome(kind, reason)
 
