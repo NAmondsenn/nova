@@ -1008,10 +1008,10 @@ def test_a_rejected_new_copy_is_saved_before_it_moves_and_so_is_the_original_goi
                     ("put back", "putting_back", ENDLESS_REL, True)]
 
 
-def test_a_rejected_new_copy_which_cant_be_saved_is_left_in_the_library(make_swapper, music, store, monkeypatch):
+def _rejected_not_saved(make_swapper, store, monkeypatch, rel):
+    """A swap whose new copy, filed at rel, is heard unsure and then can't be saved as being set aside."""
     swapper = make_swapper(ears=FakeEars(["unsure"]))
-    fakes = swapper.fakes
-    fakes.soulsync.lands = [(30, ENDLESS_REL, b"new endless")]
+    swapper.fakes.soulsync.lands = [(30, rel, b"new endless")]
     real = store.save_swap
 
     def save_swap(swap):
@@ -1020,12 +1020,31 @@ def test_a_rejected_new_copy_which_cant_be_saved_is_left_in_the_library(make_swa
         real(swap)
 
     monkeypatch.setattr(store, "save_swap", save_swap)
+    return swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True)
 
-    outcome = swapper.swap(_endless(fakes.library), ENDLESS_WANTED, None, quiet=True)
 
-    # Nothing of the new copy moved, so the song is there, as it is when a clean copy can't be saved.
-    assert outcome == "couldnt" and outcome.reason == clean_swap.NOT_SAVED
+def test_a_rejected_new_copy_which_cant_be_saved_where_the_original_was_keeps_both(make_swapper, music, store,
+                                                                                  monkeypatch):
+    outcome = _rejected_not_saved(make_swapper, store, monkeypatch, ENDLESS_REL)
+
+    # Nothing of the new copy moved, and it's where the original was, so both are kept.
+    assert outcome == "couldnt" and outcome.reason.startswith(clean_swap.NOT_SAVED + ", and a new file is where")
     assert read(music, ENDLESS_REL) == b"new endless" and read(music, f"{HELD}/{ENDLESS_REL}") == b"clean endless"
+    assert store.swaps() == []
+
+
+def test_a_rejected_new_copy_which_cant_be_saved_elsewhere_has_the_original_put_back(make_swapper, music, store,
+                                                                                    monkeypatch):
+    other = "Gunna/The Last Wun/endless 2.mp3"
+
+    outcome = _rejected_not_saved(make_swapper, store, monkeypatch, other)
+
+    # Nothing new moves, and the original goes back where it was: never left held for want of a save.
+    assert outcome == "couldnt" and outcome.reason == clean_swap.NOT_SAVED
+    assert read(music, ENDLESS_REL) == b"clean endless" and read(music, other) == b"new endless"
+    assert not os.path.exists(os.path.join(music, HELD, ENDLESS_REL))
+    [entry] = store.listed("couldnt")
+    assert entry["kept"] == [f"id-{other}"] and store.swaps() == []
 
 
 def test_an_original_which_cant_be_put_back_keeps_the_swap_and_is_put_back_at_the_next_try(

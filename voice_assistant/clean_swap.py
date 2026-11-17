@@ -755,7 +755,9 @@ class Swapper:
             return self._put_back(swap, parts, f"couldn't find the {what} SoulSync brought: {e}")
         swap.update(stage=SETTING_ASIDE, copy=files[0], pending=files[1:])
         if not self._save(swap):
-            return self._end(swap, "couldnt", NOT_SAVED)
+            # Nothing new moves without where it goes being saved; the copies stay in the library,
+            # and the original goes back where its path is free.
+            return self._put_back(swap, parts, NOT_SAVED)
         return None
 
     def _tries(self) -> int:
