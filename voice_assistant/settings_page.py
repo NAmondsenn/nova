@@ -106,6 +106,11 @@ EDITABLE = [
     ("music", "song_download_minutes", "Minutes to wait for a song to download", "now"),
     ("music", "album_download_minutes", "Minutes to wait for an album to download", "now"),
     ("soulsync", "url", "SoulSync's address", "now"),
+    # Read at each song, so straight away - see docs/decisions/0019. The thresholds were set
+    # from a test on real songs, so they stay in config.yaml.
+    ("clean_check", "swap_tries", "Tries to swap a clean song", "now"),
+    ("clean_check", "music_folder", "Music folder", "now"),
+    ("clean_check", "soulsync_admin", "SoulSync admin profile", "now"),
     ("football", "kickoff_minutes", "Minutes before kick-off that Nova says a match is starting", "now"),
     ("home_assistant", "url", "Home Assistant's address", "restart"),
     ("ntfy", "url", "Your ntfy server", "restart"),
@@ -150,8 +155,9 @@ LATER = "Used once Nova restarts"
 # The keys, and what each is for. Claude's can be under an older name too.
 KEYS = [("ANTHROPIC_API_KEY", "Claude"), ("HA_TOKEN", "Home Assistant (an administrator's token)"),
         ("MQTT_PASSWORD", "Home Assistant's MQTT"), ("NAVIDROME_PASSWORD", "Navidrome"),
-        ("SOULSYNC_API_KEY", "SoulSync"), ("NTFY_TOKEN", "ntfy"),
-        ("SPOTIFY_CLIENT_ID", "Spotify client ID"), ("SPOTIFY_CLIENT_SECRET", "Spotify client secret"),
+        ("SOULSYNC_API_KEY", "SoulSync"), ("SOULSYNC_ADMIN_PASSWORD", "SoulSync admin"),
+        ("NTFY_TOKEN", "ntfy"), ("SPOTIFY_CLIENT_ID", "Spotify client ID"),
+        ("SPOTIFY_CLIENT_SECRET", "Spotify client secret"),
         ("GOOGLE_CLIENT_ID", "Google client ID"), ("GOOGLE_CLIENT_SECRET", "Google client secret")]
 OLDER_NAMES = {"ANTHROPIC_API_KEY": ["Claude_API_Key"]}
 
@@ -852,6 +858,14 @@ class SettingsPage:
         teams = [{"id": team.id, "name": team.name, "stale": team.stale, "switches": choices.switches(team.id)}
                  for team in reading.teams]
         return {"available": True, "teams": teams, "unknown": list(reading.unknown), "trimmed": reading.trimmed}
+
+    def clean_state(self) -> Dict:
+        """
+        The Clean songs block, under Music: how the library check is going, or when it last
+        finished, the songs it found and how many wait in the holding folder - see
+        CleanCheck.state and docs/decisions/0019.
+        """
+        return self.brain.clean_check.state()
 
     def calendars_state(self) -> Dict:
         """
@@ -1771,6 +1785,35 @@ class SettingsPage:
             return {"success": False, "message": "Nova isn't connected to Home Assistant."}
         return None
 
+    def start_clean_check(self, who: str) -> Dict:
+        """
+        The Clean songs block's Check library: every song in Navidrome heard in the
+        background, the clean ones swapped - or a paused check carried on. See
+        CleanCheck.start.
+
+        Args:
+            who: The login pressing it, for the log.
+
+        Returns:
+            {"success": ..., "message": ...}, what the check says of it.
+        """
+        logger.info(f"Settings page: {who} asked to check the library for clean songs")
+        return self.brain.clean_check.start()
+
+    def stop_clean_check(self, who: str) -> Dict:
+        """
+        The Clean songs block's Stop: the check ends after the song it's on, or a paused
+        one is dropped. See CleanCheck.stop.
+
+        Args:
+            who: The login pressing it, for the log.
+
+        Returns:
+            {"success": ..., "message": ...}, what the check says of it.
+        """
+        logger.info(f"Settings page: {who} asked to stop the library check")
+        return self.brain.clean_check.stop()
+
     def run(self, entity_id: str, who: str, satellite: Optional[str] = None, confirmed: bool = False) -> Dict:
         """
         Runs a script or sets a scene - see HomeAssistant.run, whose guard still decides.
@@ -2266,6 +2309,8 @@ ACTIONS: Dict[str, Callable[[SettingsPage, Dict, str], Dict]] = {
     "/api/football": lambda page, body, who: page.set_football(body["id"], body["kind"], body["on"], who),
     "/api/football/follow": lambda page, body, who: page.follow_football(body["name"], who),
     "/api/football/unfollow": lambda page, body, who: page.unfollow_football(body["name"], who),
+    "/api/clean/check": lambda page, body, who: page.start_clean_check(who),
+    "/api/clean/stop": lambda page, body, who: page.stop_clean_check(who),
     "/api/run": lambda page, body, who: page.run(
         body["id"], who, body.get("satellite"), body.get("confirmed", False)),
     "/api/routines": lambda page, body, who: page.save_routine(body["routine"], who),
@@ -2369,6 +2414,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(page.batteries_state())
         elif path == "/api/football":
             self._send_json(page.football_state())
+        elif path == "/api/clean":
+            self._send_json(page.clean_state())
         elif path == "/api/calendars":
             self._send_json(page.calendars_state())
         elif path == "/api/home-choices":

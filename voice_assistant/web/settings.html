@@ -164,6 +164,20 @@
             </div>
           </form>
         </div>
+        <!-- Clean songs, found by ear (docs/decisions/0019): the library check, how far it's got
+             or when it last finished, the songs held aside, then each list with a song in it.
+             Hidden until Nova has said how the check is. -->
+        <h3 class="subheading" id="clean-title" hidden>Clean songs</h3>
+        <div class="panel clean" id="clean" hidden>
+          <div class="entry">
+            <p class="about" id="clean-progress"></p>
+            <button type="button" class="button quiet" id="clean-start">Check library</button>
+            <button type="button" class="button quiet" id="clean-stop" hidden>Stop</button>
+          </div>
+          <p class="how" id="clean-error" hidden></p>
+          <p class="how" id="clean-held" hidden></p>
+        </div>
+        <div id="clean-lists"></div>
       </section>
 
       <section aria-labelledby="devices-title">

@@ -2023,6 +2023,8 @@ def test_every_setting_on_the_page_has_a_group_of_its_own(files):
               for name, line in re.findall(r'^\s*\["([^"]+)", (\[.*\])\],$', groups, re.M)}
     assert "usage." in starts["Claude"]
     assert starts["Football"] == ["football."]
+    # The clean songs' settings go with the music they're about.
+    assert "clean_check." in starts["Music"]
     for section, name, *_ in page_module.EDITABLE:
         key = f"{section}.{name}"
         assert any(key.startswith(start) for prefixes in starts.values() for start in prefixes), key
@@ -2906,6 +2908,94 @@ def test_a_football_change_needs_the_pages_own_header(files, tmp_path):
         assert football.followed == ["Arsenal"] and football.unfollowed == ["Everton"]
     finally:
         page.stop()
+
+
+# Clean songs
+
+class FakeCleanCheck:
+    """Stands in for the library check - see clean_check.py - part way through, as it says so."""
+
+    STATE = {"running": True, "phase": "checking", "done": 111, "total": 398, "current": "Gunna - endless",
+             "last_finished": 1763290000.0, "paused": False, "error": None, "held": 2,
+             "swapped": [{"name": "Travis Scott - SICKO MODE", "reason": "", "song_id": "d1"}],
+             "only_clean": [], "unsure": [{"name": "Artist - Known", "reason": "heard 4 of 10 swears"}],
+             "couldnt": []}
+
+    def __init__(self):
+        self.started = self.stopped = 0
+
+    def state(self):
+        return dict(self.STATE)
+
+    def start(self):
+        self.started += 1
+        return {"success": True, "message": "Checking the library."}
+
+    def stop(self):
+        self.stopped += 1
+        return {"success": True, "message": "The library check will stop after this song."}
+
+
+def test_the_clean_song_settings_are_under_music_and_used_straight_away(files):
+    page, running = _running(files)
+    shown = {setting["key"]: setting for setting in page.state()["settings"]}
+    labels = {name: shown[f"clean_check.{name}"]["label"] for name in ("swap_tries", "music_folder", "soulsync_admin")}
+    assert labels == {"swap_tries": "Tries to swap a clean song", "music_folder": "Music folder",
+                      "soulsync_admin": "SoulSync admin profile"}
+    assert all(shown[f"clean_check.{name}"]["used"] == NOW for name in labels)
+    tries = shown["clean_check.swap_tries"]
+    assert (tries["value"], tries["min"], tries["max"], tries["whole"]) == (2, 0, 5, True)
+    assert shown["clean_check.music_folder"]["value"] == "/mnt/music"
+    # The thresholds were set from a test on real songs, so they stay in config.yaml.
+    assert not {"clean_check.lyric_minimum", "clean_check.explicit_share", "clean_check.clean_share"} & set(shown)
+
+    result = page.save_settings({"clean_check.swap_tries": "3", "clean_check.music_folder": "/srv/music",
+                                 "clean_check.soulsync_admin": "nova"}, LOGIN)
+
+    assert result == {"success": True, "message": "Saved. It's used straight away.", "restart_needed": False}
+    assert running.section("clean_check")["swap_tries"] == 3
+    assert running.section("clean_check")["music_folder"] == "/srv/music"
+    assert running.section("clean_check")["soulsync_admin"] == "nova"
+    for tries in ("6", "-1", "1.5"):
+        assert not page.save_settings({"clean_check.swap_tries": tries}, LOGIN)["success"]
+    assert running.section("clean_check")["swap_tries"] == 3
+
+
+def test_soulsyncs_admin_password_is_saved_and_never_shown(files, caplog):
+    caplog.set_level(logging.INFO)
+    page = _page()
+    assert {key["name"]: key["label"] for key in page.state()["keys"]}["SOULSYNC_ADMIN_PASSWORD"] == "SoulSync admin"
+
+    assert page.set_key("SOULSYNC_ADMIN_PASSWORD", "made-up-admin-password", LOGIN)["success"]
+
+    assert 'SOULSYNC_ADMIN_PASSWORD="made-up-admin-password"' in (files / ".env").read_text()
+    state = page.state()
+    assert {key["name"]: key["set"] for key in state["keys"]}["SOULSYNC_ADMIN_PASSWORD"]
+    assert "made-up-admin-password" not in json.dumps(state) and "made-up-admin-password" not in caplog.text
+
+
+def test_the_page_shows_the_library_check_and_starts_and_stops_it(files, caplog):
+    caplog.set_level(logging.INFO)
+    check = FakeCleanCheck()
+    page = _page(clean_check=check)
+    assert page.clean_state() == FakeCleanCheck.STATE
+    page.start()
+    try:
+        assert json.loads(_ask(page, "/api/clean")[2]) == FakeCleanCheck.STATE
+        # Changes only from the page itself, as every other.
+        assert _ask(page, "/api/clean/check", {})[0] == 403
+        assert _ask(page, "/api/clean/stop", {})[0] == 403
+        assert (check.started, check.stopped) == (0, 0)
+
+        assert json.loads(_ask(page, "/api/clean/check", {}, X_Nova="page")[2]) == {
+            "success": True, "message": "Checking the library."}
+        assert json.loads(_ask(page, "/api/clean/stop", {}, X_Nova="page")[2]) == {
+            "success": True, "message": "The library check will stop after this song."}
+        assert (check.started, check.stopped) == (1, 1)
+    finally:
+        page.stop()
+    assert f"Settings page: {LOGIN} asked to check the library for clean songs" in caplog.text
+    assert f"Settings page: {LOGIN} asked to stop the library check" in caplog.text
 
 
 # The lists, sending, the weather and the PCs

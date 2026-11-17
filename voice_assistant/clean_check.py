@@ -143,12 +143,19 @@ class CleanCheck:
     def stop(self) -> Dict:
         """
         Ends the check once the song it's on is done - the page's Stop. It isn't carried on at
-        the next start.
+        the next start. A check paused as Navidrome couldn't be reached is dropped, with its
+        saved queue, so the next Start checks the whole library afresh.
 
         Returns:
             {"success", "message"}.
         """
         with self._lock:
+            if self._thread is None and self._progress.get("paused"):
+                self._progress = {**self._progress, "running": False, "paused": False, "current": None,
+                                  "queue": None, "error": None}
+                self._save()
+                logger.info("The paused library check was dropped")
+                return {"success": True, "message": "The paused check is dropped."}
             if self._thread is None:
                 return {"success": False, "message": "The library check isn't running."}
             self._stop_asked.set()

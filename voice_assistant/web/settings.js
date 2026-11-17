@@ -47,6 +47,18 @@ const FOOTBALL_SWITCHES = [
   ["full_time", "Full time"],
 ];
 
+// How the library check for clean songs is going. A song takes about half a minute to
+// hear, with no GPU, so every ten seconds shows each one it's on. See docs/decisions/0019.
+const CLEAN_EVERY = 10000;
+
+// The library check's lists, as the brain names them and as the page heads them.
+const CLEAN_LISTS = [
+  ["swapped", "Clean and swapped"],
+  ["only_clean", "Only comes down clean"],
+  ["unsure", "Unsure"],
+  ["couldnt", "Couldn't swap"],
+];
+
 // The calendars' sign-in changes only when it's done here or removed in Google, and
 // Nova reads Google's list of them every five minutes at most, so once a minute too.
 const CALENDARS_EVERY = 60000;
@@ -128,7 +140,7 @@ const VOLUMES = {
 // The settings, grouped by what they're for. One that's under none of these goes
 // under Other, so a new setting turns up on the page without it changing.
 const GROUPS = [
-  ["Music", ["music.", "navidrome.", "soulsync.", "spotify."]],
+  ["Music", ["music.", "navidrome.", "soulsync.", "spotify.", "clean_check."]],
   ["Wrapped", ["wrapped."]],
   ["Football", ["football."]],
   ["Voice", ["voice."]],
@@ -193,6 +205,8 @@ let batteries = null;
 
 // What /api/football last said.
 let football = null;
+// What /api/clean last said.
+let cleanSongs = null;
 
 // What /api/calendars said last.
 let calendars = null;
@@ -529,6 +543,7 @@ async function live() {
     loadHome();
     loadBatteries();
     loadFootball();
+    loadClean();
     loadCalendars();
     loadHomeChoices();
   }
@@ -1861,6 +1876,83 @@ function batteryRow(device) {
   return row;
 }
 
+// Clean songs
+
+async function loadClean() {
+  try {
+    const response = answered(await fetchWithin("/api/clean"));
+    if (!response.ok) return;
+    cleanSongs = await response.json();
+  } catch (error) {
+    return;
+  }
+  showClean(cleanSongs);
+}
+
+// Check library and Stop. Stop drops a paused check, which can't be had back, so that's
+// asked first.
+function setUpClean() {
+  document.getElementById("clean-start").addEventListener("click", () => change("/api/clean/check", {}, loadClean));
+  document.getElementById("clean-stop").addEventListener("click", () => {
+    if (cleanSongs && cleanSongs.paused && !cleanSongs.running
+        && !confirm("Drop the paused check? The next one starts again from the beginning.")) return undefined;
+    return change("/api/clean/stop", {}, loadClean);
+  });
+}
+
+function showClean(state) {
+  document.getElementById("clean-title").hidden = false;
+  document.getElementById("clean").hidden = false;
+  document.getElementById("clean-progress").textContent = cleanProgress(state);
+  // A paused check is carried on from where it stopped, rather than started again.
+  const start = document.getElementById("clean-start");
+  start.textContent = state.paused ? "Carry on" : "Check library";
+  start.disabled = state.running;
+  document.getElementById("clean-stop").hidden = !(state.running || state.paused);
+  // Why a check ended early, as a paused one already says why in its progress.
+  const error = document.getElementById("clean-error");
+  error.hidden = !state.error || state.running || state.paused;
+  error.textContent = error.hidden ? "" : state.error;
+  const held = document.getElementById("clean-held");
+  held.hidden = !state.held;
+  held.textContent = state.held ? `Holding folder: ${counted(state.held, "file", "files")} waiting for you to empty` : "";
+  drawIfChanged("clean", CLEAN_LISTS.map(([kind]) => state[kind]), () => {
+    const shown = [];
+    for (const [kind, heading] of CLEAN_LISTS) {
+      if (!state[kind].length) continue;
+      const list = element("ul", undefined, "list batteries");
+      list.append(...state[kind].map(cleanRow));
+      shown.push(element("h3", heading, "subheading"), list);
+    }
+    document.getElementById("clean-lists").replaceChildren(...shown);
+  });
+}
+
+// "Checking 112 of 398: Gunna - endless" - the song being heard is the one after those
+// done - or "Last check: today at 03:10".
+function cleanProgress(state) {
+  if (state.running && state.phase === "listing") return "Listing the library";
+  if (state.running) {
+    const at = `Checking ${Math.min(state.done + 1, state.total)} of ${state.total}`;
+    return state.current ? `${at}: ${state.current}` : at;
+  }
+  if (state.paused) return state.error ? `Paused: ${state.error}` : "Paused";
+  if (!state.last_finished) return "Last check: never";
+  const finished = new Date(state.last_finished * 1000);
+  const day = dayOf(finished);
+  return `Last check: ${day === "Today" || day === "Yesterday" ? day.toLowerCase() : day} at ${clockTime(finished)}`;
+}
+
+// A song on one of the lists, by name, with why it's there if the list says.
+function cleanRow(song) {
+  const row = element("li");
+  const what = element("span", undefined, "what");
+  what.append(element("span", song.name, "name"));
+  if (song.reason) what.append(element("span", song.reason, "sub"));
+  row.append(what);
+  return row;
+}
+
 // Football
 
 async function loadFootball() {
@@ -2698,6 +2790,7 @@ function followSaveBar() {
 document.addEventListener("DOMContentLoaded", () => {
   drawSky();
   followSaveBar();
+  setUpClean();
   let resized = null;
   window.addEventListener("resize", () => {
     clearTimeout(resized);
@@ -2926,6 +3019,7 @@ document.addEventListener("DOMContentLoaded", () => {
   every(HOME_EVERY, loadHome);
   every(BATTERIES_EVERY, loadBatteries);
   every(FOOTBALL_EVERY, loadFootball);
+  every(CLEAN_EVERY, loadClean);
   every(CALENDARS_EVERY, loadCalendars);
   every(HOME_CHOICES_EVERY, loadHomeChoices);
   document.getElementById("also-send-box").addEventListener("change", (event) =>

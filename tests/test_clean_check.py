@@ -529,6 +529,26 @@ def test_start_carries_a_paused_check_on_from_its_queue(make_check, store):
     assert state["done"] == 5 and state["total"] == 5
 
 
+def test_stop_drops_a_paused_check_so_the_next_starts_afresh(make_check, store):
+    # The page's way to give up on a check paused for Navidrome, rather than carry it on.
+    store.save_check({"running": False, "paused": True, "done": 3, "total": 5, "current": None,
+                      "queue": [SICKO, ENDLESS], "last_finished": 1763000000.0, "error": PAUSED})
+    check = make_check()
+
+    assert check.stop() == {"success": True, "message": "The paused check is dropped."}
+
+    state = check.state()
+    assert state["paused"] is False and state["error"] is None and state["last_finished"] == 1763000000.0
+    assert store.check()["paused"] is False and store.check()["queue"] is None
+    # Nothing is left for Nova's next start to carry on, and Start checks the whole library.
+    check.resume()
+    assert check._thread is None
+    assert check.stop() == {"success": False, "message": "The library check isn't running."}
+    check.start()
+    finished(check)
+    assert check.fakes.ears.heard == ["a1", "b1", "c1", "d1", "e1"]
+
+
 def test_a_stop_while_waiting_for_navidrome_ends_the_check(make_check, store):
     check = make_check(ears=FakeEars({"a1": UNREACHABLE}))
 
