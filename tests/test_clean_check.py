@@ -396,6 +396,50 @@ def test_a_queued_song_whose_swap_ended_since_isnt_heard_or_swapped(make_check, 
     assert check.fakes.ears.heard == [] and check.fakes.swapper.swaps == []
 
 
+@pytest.mark.parametrize("files", [{}, {"d1": MOVED}])
+@pytest.mark.parametrize("song_id, kept", [("d1", None), ("x1", ["d1"])])
+def test_a_song_put_back_as_its_swap_couldnt_be_made_isnt_swapped_for_seven_days(make_check, store, files, song_id,
+                                                                                  kept):
+    # SoulSync didn't bring another copy in time, and the original was put back: swapping it again the
+    # next night would most likely end the same way. Its id, or a copy's, is known, whatever the file says.
+    store.set_verdict("d1", 4096, "2026-11-16T10:00:00Z", CLEAN, "Travis Scott - SICKO MODE (Clean)")
+    store.add("couldnt", "Travis Scott - SICKO MODE (Clean)", "SoulSync didn't bring another copy in time",
+              song_id=song_id, original_back=True, at=CHECK_NOW - 6 * DAY, **({"kept": kept} if kept else {}))
+    check = make_check(library=FakeLibrary({"Astro": [SICKO]}, files=files), ears=FakeEars({"d1": CLEAN}))
+
+    check.start()
+
+    assert finished(check)["total"] == 0
+    assert check.fakes.ears.heard == [] and check.fakes.swapper.swaps == []
+
+
+def test_a_song_put_back_as_its_swap_couldnt_be_made_is_swapped_again_after_seven_days(make_check, store):
+    store.set_verdict("d1", 4096, "2026-11-16T10:00:00Z", CLEAN, "Travis Scott - SICKO MODE (Clean)")
+    store.add("couldnt", "Travis Scott - SICKO MODE (Clean)", "SoulSync didn't bring another copy in time",
+              song_id="d1", original_back=True, at=CHECK_NOW - 8 * DAY)
+    check = make_check(library=FakeLibrary({"Astro": [SICKO]}))
+
+    check.start()
+    finished(check)
+
+    assert check.fakes.swapper.swaps == [("d1", Wanted("SICKO MODE", "Travis Scott", "track"), None, True)]
+
+
+def test_a_queued_song_put_back_since_isnt_swapped(make_check, store):
+    # Queued to swap before an earlier swap of it, carried on after a restart, ended with it put back.
+    store.set_verdict("d1", 4096, "2026-11-16T10:00:00Z", CLEAN, "Travis Scott - SICKO MODE (Clean)")
+    store.save_check({"running": True, "done": 0, "total": 1, "current": None, "queue": [{**SICKO, "swap": True}],
+                      "last_finished": None})
+    store.add("couldnt", "Travis Scott - SICKO MODE (Clean)", "SoulSync didn't bring another copy in time",
+              song_id="d1", original_back=True, at=CHECK_NOW - DAY)
+    check = make_check(library=FakeLibrary({"Astro": [SICKO]}))
+
+    check.resume()
+
+    assert finished(check)["done"] == 1
+    assert check.fakes.ears.heard == [] and check.fakes.swapper.swaps == []
+
+
 def test_an_entry_without_copies_or_a_time_doesnt_hold_a_swap_back(make_check, store):
     # Ears' own unsure entry and a plain couldnt keep no copies, and one with copies but no time is old.
     store.set_verdict("d1", 4096, "2026-11-16T10:00:00Z", CLEAN, "Travis Scott - SICKO MODE (Clean)")

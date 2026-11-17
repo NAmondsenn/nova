@@ -883,7 +883,12 @@ class Swapper:
             return self._end(swap, rejected["kind"], rejected["reason"], listed=rejected.get("listed"),
                              kept=rejected.get("ids") or [])
         # The copies a rejected swap meant to set aside are listed, so the library check leaves them be.
-        return self._end(swap, "couldnt", said, **({"kept": rejected.get("ids") or []} if rejected else {}))
+        extra = {"kept": rejected.get("ids") or []} if rejected else {}
+        if put == PUT_BACK and original:
+            # Marked, so the library check leaves the song for a while rather than fetching again the
+            # next night what most likely won't come then either.
+            extra["original_back"] = True
+        return self._end(swap, "couldnt", said, **extra)
 
     @staticmethod
     def _put_original(folder: MusicFolder, held: List[Dict]) -> Tuple[Optional[str], bool]:

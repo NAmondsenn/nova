@@ -787,8 +787,10 @@ def test_a_fetch_that_never_lands_is_taken_off_the_wishlist_and_the_song_put_bac
     assert read(music, "Gunna/The Last Wun/endless.lrc") == b"[00:01] lyrics"
     assert not os.path.exists(os.path.join(music, HELD, ENDLESS_REL))
     assert fakes.library.scans[-1] >= T0 + 600
+    # Marked as put back, so the library check leaves it for seven days.
     assert store.listed("couldnt") == [{"name": "Gunna - endless", "song_id": f"id-{ENDLESS_REL}",
-                                        "reason": "SoulSync didn't bring another copy in time", "at": AT}]
+                                        "reason": "SoulSync didn't bring another copy in time", "at": AT,
+                                        "original_back": True}]
     assert store.swaps() == []
 
 
@@ -827,6 +829,7 @@ def test_a_new_file_where_the_song_was_is_kept_beside_the_held_copy(make_swapper
     assert read(music, ENDLESS_REL) == b"something new"
     assert read(music, f"{HELD}/{ENDLESS_REL}") == b"clean endless"
     assert store.listed("couldnt")[0]["reason"] == outcome.reason
+    assert "original_back" not in store.listed("couldnt")[0]
     # Both kept is where it ends: nothing is tried again.
     assert store.swaps() == []
 

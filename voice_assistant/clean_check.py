@@ -6,7 +6,8 @@ one at a time, in the background, and each one heard clean swapped quietly for a
 Only songs which are new, or whose file has changed since they were last judged, are heard. A
 song whose lyrics have too few swears is passed over without being listened to - Ears reads the
 lyrics first. A song heard clean before whose swap couldn't be made is swapped again without
-being heard; one which only came down clean is left. A download's hearing goes ahead: the check
+being heard - after 7 days, if its original was put back, or 30 if the new copy wasn't heard
+explicit; one which only came down clean is left. A download's hearing goes ahead: the check
 waits while one is being heard.
 
 The check says nothing aloud and sends nothing to the phone; how it went is on the settings
@@ -37,6 +38,10 @@ PAGE = 500
 # How long a song whose swap ended with the original put back, as the new copy wasn't heard
 # explicit, is left alone before a swap is tried once more: 30 days, in seconds.
 REJECTED_FOR = 30 * 24 * 3600
+
+# How long a song whose swap couldn't be made, and whose original was put back - SoulSync didn't
+# bring another copy in time, say - is left alone before a swap is tried once more: 7 days.
+PUT_BACK_FOR = 7 * 24 * 3600
 
 # Seconds between looks at whether a download is still being heard, while the check waits.
 BUSY_POLL = 5
@@ -334,7 +339,7 @@ class CleanCheck:
         Raises:
             requests.RequestException, NavidromeError or ValueError if Navidrome couldn't be asked.
         """
-        left_be = self._only_clean() | self._rejected()
+        left_be = self._left_be()
         songs, seen, offset = [], set(), 0
         while True:
             albums = library._call("getAlbumList2", type="alphabeticalByName", size=PAGE,
@@ -353,6 +358,10 @@ class CleanCheck:
             if len(albums) < PAGE:
                 return songs
             offset += PAGE
+
+    def _left_be(self) -> Set[str]:
+        """The ids of the songs the check neither hears nor swaps, whatever their files say - see the three below."""
+        return self._only_clean() | self._rejected() | self._put_back_lately()
 
     def _only_clean(self) -> Set[str]:
         """
@@ -375,8 +384,9 @@ class CleanCheck:
         a swap may bring a better one.
         """
         ids = set()
-        # Only a rejected swap's entries keep copies, on the unsure and couldn't swap lists; one from
-        # before entries had times, or without one, counts as old.
+        # Only a rejected swap's entries keep copies, on the unsure and couldn't swap lists - one which
+        # set aside the last try's clean copies, too, if it ended couldn't swap - and one from before
+        # entries had times, or without one, counts as old.
         recent = self._now() - REJECTED_FOR
         for kind in ("unsure", "couldnt"):
             for entry in self._store.listed(kind):
@@ -384,6 +394,23 @@ class CleanCheck:
                 if entry.get("kept") and isinstance(at, (int, float)) and at > recent:
                     ids.add(entry.get("song_id"))
                     ids.update(entry["kept"])
+        return ids
+
+    def _put_back_lately(self) -> Set[str]:
+        """
+        The ids of the songs whose swap ended "couldn't swap" with the original put back less than
+        PUT_BACK_FOR ago: the original, and any copies kept. Whatever Navidrome says of their files
+        - it records the original afresh once it's back - the check leaves them be, or it would
+        fetch again the next night what most likely won't come then either. An entry without a
+        time counts as old.
+        """
+        ids = set()
+        recent = self._now() - PUT_BACK_FOR
+        for entry in self._store.listed("couldnt"):
+            at = entry.get("at")
+            if entry.get("original_back") and isinstance(at, (int, float)) and at > recent:
+                ids.add(entry.get("song_id"))
+                ids.update(entry.get("kept") or ())
         return ids
 
     def _todo(self, library: NavidromeLibrary, song: Dict, left_be: Set[str]) -> Optional[str]:
@@ -396,7 +423,7 @@ class CleanCheck:
             library: Navidrome.
             song: The song.
             left_be: The ids of the songs which only came down clean, or whose swap was rejected
-                lately - neither heard nor swapped, whatever their files say.
+                or put back lately - neither heard nor swapped, whatever their files say.
 
         Raises:
             requests.ConnectionError: Navidrome couldn't be reached for the file, so the caller
@@ -454,7 +481,7 @@ class CleanCheck:
                 # Its swap's own outcome goes on the page's lists.
                 logger.info(f"The library check leaves {name} to the swap already under way")
                 return DONE
-            left_be = self._only_clean() | self._rejected()
+            left_be = self._left_be()
             if song["id"] in left_be:
                 # Queued before its swap ended, or its file changed when the original was put back.
                 logger.info(f"The library check leaves {name}, whose swap has ended")
