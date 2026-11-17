@@ -405,7 +405,7 @@ class Brain:
         # listening worker and one Navidrome library to hear through, which the downloads and
         # the library check share: the worker takes a song at a time, and Navidrome limits
         # sign-ins.
-        self.clean_store = CleanStore(os.path.join(paths.DATA_DIR, "clean_songs.json"))
+        self.clean_store = CleanStore(paths.CLEAN_SONGS_FILE)
         self.listener = Listener(os.path.join(paths.PROJECT_DIRECTORY, config.section("backend").get("model") or ""))
         heard_through = listening_library(config)
 

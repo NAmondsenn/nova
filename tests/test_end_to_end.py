@@ -310,6 +310,7 @@ def world(tmp_path, monkeypatch, make_config):
     """
     monkeypatch.setattr(paths, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(paths, "LOGS_DIR", str(tmp_path))
+    monkeypatch.setattr(paths, "CLEAN_SONGS_FILE", str(tmp_path / "clean_songs.json"))
     monkeypatch.setattr(clock_module, "TIMERS_FILE", str(tmp_path / "timers.json"))
     monkeypatch.setattr(clock_module, "ALARMS_FILE", str(tmp_path / "alarms.json"))
     monkeypatch.setattr(memory_module, "MEMORY_FILE", str(tmp_path / "memory.json"))

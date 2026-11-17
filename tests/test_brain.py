@@ -219,6 +219,7 @@ def make_brain(tmp_path, monkeypatch, make_config, passwords):
     """
     monkeypatch.setattr(paths, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(paths, "LOGS_DIR", str(tmp_path))
+    monkeypatch.setattr(paths, "CLEAN_SONGS_FILE", str(tmp_path / "clean_songs.json"))
     monkeypatch.setattr(clock_module, "TIMERS_FILE", str(tmp_path / "timers.json"))
     monkeypatch.setattr(clock_module, "ALARMS_FILE", str(tmp_path / "alarms.json"))
     monkeypatch.setattr(memory_module, "MEMORY_FILE", str(tmp_path / "memory.json"))
@@ -2874,6 +2875,11 @@ def test_the_downloads_hear_and_swap_through_one_store_worker_and_library(brain,
     assert brain.clean_store.path == str(tmp_path / "clean_songs.json")
     assert brain.ears._library is brain.swapper._library
     assert brain.swapper._say == brain._say_download
+
+
+def test_the_clean_songs_file_is_the_one_paths_names(make_brain, tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "CLEAN_SONGS_FILE", str(tmp_path / "elsewhere" / "clean_songs.json"))
+    assert make_brain().clean_store.path == str(tmp_path / "elsewhere" / "clean_songs.json")
 
 
 def test_the_library_check_hears_and_swaps_through_the_same_ones(brain):
