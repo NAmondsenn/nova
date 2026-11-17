@@ -243,6 +243,11 @@ class MusicFolder:
         held_base = os.path.join(self.root, HELD)
         held_real = os.path.join(self._root_real(), HELD)
         audio, audio_held = _clean(held.original), _clean(held.held)
+        # A Held is read back from a file, so one naming ".ndignore", or a song held under another
+        # extension than it had, is never trusted: set_aside only holds audio, by its own name.
+        extension = os.path.splitext(audio)[1]
+        if extension.lower() not in AUDIO or os.path.splitext(audio_held)[1] != extension:
+            raise MusicFolderError("that record isn't of a song's audio file")
         pairs = [(audio, audio_held)]
         for original, held_rel in held.sidecars:
             original, held_rel = _clean(original), _clean(held_rel)

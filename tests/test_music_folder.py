@@ -555,6 +555,23 @@ class TestPutBackSidecars:
         assert result not in ("put back", "a new copy is there")
         assert listing(waiting) == before
 
+    @pytest.mark.parametrize("original, held_rel", [
+        ("x.mp3", ".ndignore"),
+        ("x.mp3", "a.lrc"),
+        ("a.lrc", "a.lrc"),
+        ("x.flac", "a.mp3"),
+        ("x", "a.mp3"),
+    ])
+    def test_the_song_must_be_audio_with_the_same_extension_both_ends(self, waiting, original, held_rel):
+        # Read back from a file, a Held naming .ndignore would let Navidrome into the holding folder.
+        (waiting / HELD / ".ndignore").write_bytes(b"")
+        before = listing(waiting)
+
+        result = MusicFolder(str(waiting)).put_back(Held(original, held_rel, []))
+
+        assert result not in ("put back", "a new copy is there", "the held copy has gone")
+        assert listing(waiting) == before
+
     def test_a_numbered_held_name_still_matches_its_own_stem(self, waiting):
         make(waiting, HELD + "/a (2).mp3", b"two")
         make(waiting, HELD + "/a (2).lrc", b"two lrc")
