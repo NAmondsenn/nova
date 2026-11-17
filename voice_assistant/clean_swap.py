@@ -896,7 +896,9 @@ class Swapper:
         Puts back the original, the first copy set aside. If it has gone from .nova-held - emptied
         by hand - the latest copy set aside which is still there goes back instead, so the library
         is never left without the song: setting aside the last try's copy, to put the original
-        back, would otherwise leave none.
+        back, would otherwise leave none. Something already at the original's path means it went
+        back before a restart, or the store couldn't forget the swap: it counts as put back, and
+        nothing more moves.
 
         Returns:
             What put_back said - None with nothing set aside - and whether it was of the original.
@@ -906,6 +908,8 @@ class Swapper:
         put = folder.put_back(_held(held[0]))
         if put != HELD_GONE:
             return put, True
+        if os.path.lexists(os.path.join(folder.root, held[0]["original"])):
+            return PUT_BACK, True
         for later in reversed(held[1:]):
             other = folder.put_back(_held(later))
             if other != HELD_GONE:

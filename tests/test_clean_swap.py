@@ -723,6 +723,39 @@ def test_an_original_gone_from_the_holding_folder_has_the_last_copy_set_aside_pu
     assert store.swaps() == []
 
 
+def test_a_restart_after_the_original_went_back_ends_as_put_back_and_keeps_the_later_copy_held(
+        make_swapper, music, store, monkeypatch):
+    # The original went back, but the swap couldn't be forgotten (the store, or Nova, stopped first): at
+    # the next start the original isn't in .nova-held any more, as it's back in its place. The latest
+    # copy set aside must stay held, not be put in the library beside it.
+    other = "Gunna/The Last Wun/endless 2.mp3"
+    swapper = make_swapper(ears=FakeEars(["clean"]))
+    swapper.fakes.soulsync.lands = [(30, ENDLESS_REL, b"clean try 1"), (30, ENDLESS_REL, b"clean try 2"),
+                                    (30, other, b"clean try 3")]
+    real = store.end_swap
+    ends = []
+
+    def end_swap(key):
+        ends.append(key)
+        if len(ends) == 1:
+            raise OSError("disk full")
+        real(key)
+
+    monkeypatch.setattr(store, "end_swap", end_swap)
+    assert swapper.swap(_endless(swapper.fakes.library), ENDLESS_WANTED, None, quiet=True) == "only_clean"
+    [saved] = store.swaps()
+    assert saved["stage"] == "putting_back" and read(music, ENDLESS_REL) == b"clean endless"
+
+    again = make_swapper(admin=None)
+    again.resume()
+
+    assert read(music, ENDLESS_REL) == b"clean endless"
+    assert read(music, f"{HELD}/{other}") == b"clean try 3" and not os.path.exists(os.path.join(music, other))
+    assert store.swaps() == []
+    assert [entry["name"] for entry in store.listed("only_clean")] == ["Gunna - endless"]
+    assert store.listed("couldnt") == []
+
+
 def test_a_later_clean_copy_which_cant_be_set_aside_has_the_original_put_back_beside_it(make_swapper, music, store,
                                                                                        monkeypatch):
     other = "Gunna/The Last Wun/endless 2.mp3"
