@@ -327,6 +327,17 @@ def test_a_credit_is_never_read_as_a_version():
             assert pick_track([_track(name, "6ix9ine")], "Gooba", artist) is None
 
 
+def test_a_dashed_part_is_read_without_its_own_brackets():
+    # "Extended Mix (feat. X)" ends in its credit, which would hide the mix it is.
+    extended = _track("Song - Extended Mix (feat. X)", "Made Up")
+    assert pick_track([extended], "Song", "Made Up") is None
+    assert pick_track([extended], "Song Extended Mix", "Made Up") is extended
+    # The credit is still a part of its own, and a version in brackets still a version.
+    assert pick_track([_track("Song - Live (feat. X)", "Made Up")], "Song", "Made Up") is None
+    plain = _track("Song - feat. X (Original Mix)", "Made Up")
+    assert pick_track([plain], "Song", "Made Up") is plain
+
+
 def test_an_original_mix_is_the_song_itself():
     # On an electronic release, the original mix is the original.
     original = _track("Strobe (Original Mix)", "deadmau5")
