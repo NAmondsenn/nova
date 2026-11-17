@@ -451,6 +451,53 @@ def test_the_notes_day_and_time_are_read_from_the_settings_at_each_look(make, st
     assert len(ntfy.sent) == 1
 
 
+def test_moving_the_notes_day_after_it_went_sends_no_extra_note(make, store):
+    # Monday's note went; on Tuesday the day is set to Wednesday, whose last was the 11th - before it.
+    store.save_schedule({"week_sent": "2026-11-16", "note_at": at(16, 9, 30)})
+    entries(store, "unsure", at(16, 12))
+    schedule, clock, _, ntfy, settings = make(at(17, 12, 0))
+    settings["weekly_day"] = "Wednesday"
+    schedule.look()
+    clock.now = at(18, 9, 29)
+    schedule.look()
+    assert ntfy.sent == []
+
+    clock.now = at(18, 9, 30)
+    schedule.look()
+    assert [sent["message"] for sent in ntfy.sent] == ["This week 1 song is unsure. See the settings page."]
+    assert store.schedule()["week_sent"] == "2026-11-18"
+
+
+def test_moving_the_notes_time_later_after_it_went_sends_no_second_that_day(make, store):
+    store.save_schedule({"week_sent": "2026-11-09", "note_at": at(9, 9, 30)})
+    entries(store, "swapped", at(15, 12))
+    schedule, clock, _, ntfy, settings = make(at(16, 9, 30))
+    schedule.look()
+    assert len(ntfy.sent) == 1
+
+    entries(store, "unsure", at(16, 9, 45))
+    settings["weekly_time"] = "11:00"
+    for hour, minute in ((10, 0), (11, 0), (23, 59)):
+        clock.now = at(16, hour, minute)
+        schedule.look()
+    assert len(ntfy.sent) == 1
+
+    clock.now = at(23, 11, 0)
+    schedule.look()
+    assert [sent["message"] for sent in ntfy.sent][1] == "This week 1 song is unsure. See the settings page."
+
+
+def test_a_last_note_whose_date_isnt_one_is_read_as_none_sent(make, store):
+    # Hand-edited: "soon" would be after every date, and no note would ever go again.
+    store.save_schedule({"week_sent": "soon", "note_at": at(9, 9, 30)})
+    entries(store, "swapped", at(15, 12))
+    schedule, _, _, ntfy, _ = make(at(16, 9, 30))
+    schedule.look()
+
+    assert len(ntfy.sent) == 1
+    assert store.schedule()["week_sent"] == "2026-11-16"
+
+
 def test_a_song_listed_as_the_note_is_made_is_in_the_next_note_not_this_one(make, store):
     # Listed by the library check after the note took its time, but before it read the lists.
     store.save_schedule({"week_sent": "2026-11-09", "note_at": at(9, 9, 30)})
@@ -605,6 +652,8 @@ def london():
 
 def test_when_the_clocks_go_back_the_night_and_the_note_are_done_once(london, store):
     check, ntfy = FakeCheck(store), FakeNtfy()
+    # Last week's note went, so the look at midnight, before this week's time, sends none.
+    store.save_schedule({"week_sent": "2026-10-18", "note_at": datetime(2026, 10, 18, 1, 30).timestamp()})
     entries(store, "swapped", datetime(2026, 10, 24, 12).timestamp())
     settings = {**DEFAULTS, "nightly_time": "01:30", "weekly_day": "Sunday", "weekly_time": "01:30"}
     start = datetime(2026, 10, 25, 0, 0).timestamp()
@@ -619,6 +668,8 @@ def test_when_the_clocks_go_back_the_night_and_the_note_are_done_once(london, st
     assert check.started == 1
     assert len(ntfy.sent) == 1
     assert store.schedule()["night_done"] == store.schedule()["week_sent"] == "2026-10-25"
+    # Sent at the first 01:30, and nothing done at the second.
+    assert store.schedule()["note_at"] == datetime(2026, 10, 25, 1, 30, fold=0).timestamp()
 
 
 # The thread

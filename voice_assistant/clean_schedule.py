@@ -14,7 +14,10 @@ doesn't start a check then - listening takes the brain's CPU while Nova is in us
 Once a week, at the page's day and time (Monday 09:30 by default), one message goes to ntfy's
 phone topic saying how many songs went on each of the page's lists since the last note, and how
 many files wait in .nova-held - only if any went on a list. A note due in the quiet hours waits
-for them to end, and one due while Nova was off goes at its next look, whatever day that is.
+for them to end, and one due while Nova was off goes at its next look, whatever day that is. Its
+day or time moved after a note went sends no second for the same week: the next goes at the new
+day and time. The first note, with none before it, goes at the first look and counts the last 7
+days.
 
 What's been done - the night's date, the date the last note was due and when it went - is kept in
 the clean songs file, so a restart neither does a night twice nor sends a week's note twice. It is
@@ -219,7 +222,11 @@ class CleanSchedule:
         if due == now.date() and now.strftime("%H:%M") < at:
             due -= timedelta(days=7)
         due = due.isoformat()
-        if self._record.get("week_sent") == due:
+        # At or after the day due, not only on it: a note went on Monday, and moving the day to
+        # Wednesday on Tuesday - whose last was the 11th - or the time to 11:00 at 10:00 sends no
+        # second. ISO dates sort as strings; one which isn't a date counts as no note sent.
+        sent = self._record.get("week_sent")
+        if isinstance(sent, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", sent) and sent >= due:
             return
         # Read once, so a topic cleared on the settings page meanwhile is never sent to as "".
         phone = getattr(self._ntfy, "phone", "") if self._ntfy else ""
