@@ -198,13 +198,19 @@ Without the address or the key, "download X" says "Downloading music isn't set u
 To set it up:
 
 1. Give the brain's container the music folder, and only that folder: in the container's config on the Proxmox host, `mp1: /mnt/library/media/music,mp=/mnt/music` (read-write), then restart the container.
-2. Put where it is as Nova sees it under Music on the settings page, "Music folder" (`clean_check.music_folder`, default `/mnt/music`). With no folder, or one Nova can't write to, songs are still judged, and clean ones are listed rather than swapped.
-3. In SoulSync's own Settings, make a second profile with admin rights for Nova - SoulSync's API key can't remove a song, only a signed-in admin profile can. Put its name under Music, "SoulSync admin profile" (`clean_check.soulsync_admin`), and its password under Keys, "SoulSync admin", or on the brain in `~/.config/nova/.env` yourself. It's used once Nova restarts, and never shown back:
+2. Install the brain's service again, as root on the brain, with `bash setup.sh --brain` (or `bash update.sh`), then `systemctl restart nova-backend`. Its sandbox lets it write only to its own folders and `/mnt/music`, and a service installed before this release has no `/mnt/music` in it. For a music folder anywhere else, add it with `systemctl edit nova-backend`, which keeps it through later installs:
+
+   ```
+   [Service]
+   ReadWritePaths=-/your/music/folder
+   ```
+3. Put where it is as Nova sees it under Music on the settings page, "Music folder" (`clean_check.music_folder`, default `/mnt/music`). With no folder, or one Nova can't write to, songs are still judged, and clean ones are listed rather than swapped.
+4. In SoulSync's own Settings, make a second profile with admin rights for Nova - SoulSync's API key can't remove a song, only a signed-in admin profile can. Put its name under Music, "SoulSync admin profile" (`clean_check.soulsync_admin`), and its password under Keys, "SoulSync admin", or on the brain in `~/.config/nova/.env` yourself. It's used once Nova restarts, and never shown back:
 
    ```
    SOULSYNC_ADMIN_PASSWORD=the-password
    ```
-4. Without these, songs are still heard and listed, but none is swapped.
+5. Without these, songs are still heard and listed, but none is swapped.
 
 **Spotify.** Spotify Premium is needed. Its client ID and secret (`SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET`, from Spotify's developer dashboard) go under Keys on the settings page, or in the brain's `~/.config/nova/.env` yourself, and your Spotify app has to list the brain's `SPOTIFY_REDIRECT_URI` as a redirect URI - setup.sh sets it to `http://127.0.0.1:8888/callback`. Once Nova has restarted with them, sign in on the settings page, under Music. Spotify's page opens in a new tab, and once you've agreed it sends you to an address that doesn't load: paste that address back on the settings page. Every satellite's Spotify uses the sign-in from its next command, with no restart. Without the page, sign in on the brain instead, as its user - it prints a link to open in a browser:
 

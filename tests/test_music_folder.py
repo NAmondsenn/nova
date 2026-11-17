@@ -459,6 +459,31 @@ class TestPutBack:
         assert list((tmp_path / "away").iterdir()) == []
         assert (root / HELD / "dir/a.mp3").exists()
 
+    def test_a_folder_made_again_takes_its_parents_mode_not_the_umasks(self, root, song):
+        # The brain's unit has UMask=0077, which would leave "Gunna" unreadable to Navidrome and SoulSync.
+        folder = MusicFolder(str(root))
+        held = folder.set_aside(song)
+        for path in (root / "Gunna/Album/cover.jpg", root / "Gunna/Album", root / "Gunna"):
+            path.unlink() if path.is_file() else path.rmdir()
+        root.chmod(0o755)
+        old_umask = os.umask(0o077)
+        try:
+            assert folder.put_back(held) == "put back"
+        finally:
+            os.umask(old_umask)
+
+        assert (root / "Gunna").stat().st_mode & 0o777 == 0o755
+        assert (root / "Gunna/Album").stat().st_mode & 0o777 == 0o755
+
+    def test_folders_in_the_holding_folder_keep_the_umasks_mode(self, root, song):
+        old_umask = os.umask(0o077)
+        try:
+            MusicFolder(str(root)).set_aside(song)
+        finally:
+            os.umask(old_umask)
+
+        assert (root / HELD / "Gunna").stat().st_mode & 0o777 == 0o700
+
     def test_a_failing_second_link_puts_the_first_one_back_in_the_holding_folder(self, root, song, monkeypatch):
         folder = MusicFolder(str(root))
         held = folder.set_aside(song)

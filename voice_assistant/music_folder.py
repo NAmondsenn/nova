@@ -214,7 +214,7 @@ class MusicFolder:
             if any(os.path.lexists(os.path.join(held_base, to)) for _from, to in moves):
                 continue
             for _from, to in moves:
-                self._make_folders(held_base, os.path.dirname(to), None)
+                self._make_folders(held_base, os.path.dirname(to), None, False)
             try:
                 self._move([(os.path.join(self.root, a), os.path.join(held_base, b)) for a, b in moves], True)
             except _Taken:
@@ -271,7 +271,7 @@ class MusicFolder:
         if any(os.path.lexists(to) for _from, to in moves):
             return NEW_COPY
         for _from, to in moves:
-            self._make_folders(self.root, os.path.dirname(self._label(to)), held_real)
+            self._make_folders(self.root, os.path.dirname(self._label(to)), held_real, True)
         try:
             self._move(moves, False)
         except _Taken:
@@ -334,7 +334,7 @@ class MusicFolder:
             raise MusicFolderError(f"couldn't make {HELD} in the music folder: {error}") from error
         return held
 
-    def _make_folders(self, base: str, folder: str, avoid: Optional[str]) -> None:
+    def _make_folders(self, base: str, folder: str, avoid: Optional[str], parents_mode: bool) -> None:
         """Makes the folders a file needs under base, one level at a time.
 
         Args:
@@ -342,6 +342,8 @@ class MusicFolder:
             folder: Relative to base, e.g. "Gunna/Album"; "" or "." for base itself.
             avoid: A resolved folder the result must not lie in (the holding folder, when
                 putting back), or None.
+            parents_mode: Whether a folder made takes its parent's mode, for folders in the
+                music folder itself that Navidrome and SoulSync must read.
 
         Raises:
             MusicFolderError: A level can't be made, or a symlink would lead outside base
@@ -354,6 +356,10 @@ class MusicFolder:
             try:
                 if not os.path.lexists(current):
                     os.mkdir(current)
+                    # The brain's unit has UMask=0077, so "Gunna" would otherwise be 0700 and
+                    # unreadable to Navidrome and SoulSync, which run as other users.
+                    if parents_mode:
+                        os.chmod(current, stat.S_IMODE(os.stat(os.path.dirname(current)).st_mode))
             except OSError as error:
                 raise MusicFolderError(f"couldn't make the folder {part}: {error}") from error
             real = os.path.realpath(current)
