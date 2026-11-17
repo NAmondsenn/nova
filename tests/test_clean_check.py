@@ -258,6 +258,34 @@ def test_a_song_heard_clean_but_not_swapped_is_swapped_by_the_next_check_without
     assert check.fakes.swapper.swaps == [("d1", Wanted("SICKO MODE", "Travis Scott", "track"), None, True)]
 
 
+def test_a_queued_swap_whose_file_has_changed_since_is_heard_rather_than_swapped(make_check, store):
+    # Queued to swap, then a new copy landed in its place before the check reached it: the
+    # copy there now has never been heard, so it's heard, never set aside unheard.
+    store.set_verdict("d1", 4096, "2026-11-16T10:00:00Z", CLEAN, "Travis Scott - SICKO MODE (Clean)")
+    store.save_check({"running": True, "done": 0, "total": 1, "current": None, "queue": [{**SICKO, "swap": True}],
+                      "last_finished": None})
+    library = FakeLibrary({"Astro": [SICKO]}, files={"d1": {"size": 9999, "updated": "2026-11-17T09:00:00Z"}})
+    check = make_check(library=library)
+
+    check.resume()
+
+    assert finished(check)["done"] == 1
+    assert check.fakes.ears.heard == ["d1"] and check.fakes.swapper.swaps == []
+
+
+def test_a_queued_swap_which_since_came_down_only_clean_is_left(make_check, store):
+    store.set_verdict("d1", 4096, "2026-11-16T10:00:00Z", CLEAN, "Travis Scott - SICKO MODE (Clean)")
+    store.save_check({"running": True, "done": 0, "total": 1, "current": None, "queue": [{**SICKO, "swap": True}],
+                      "last_finished": None})
+    store.add("only_clean", "Travis Scott - SICKO MODE (Clean)", "3 copies came down clean", song_id="d1")
+    check = make_check(library=FakeLibrary({"Astro": [SICKO]}))
+
+    check.resume()
+
+    assert finished(check)["done"] == 1
+    assert check.fakes.ears.heard == [] and check.fakes.swapper.swaps == []
+
+
 def test_a_copy_kept_as_only_clean_isnt_swapped_again(make_check, store):
     # SoulSync filed the last copy elsewhere, so it has an id of its own.
     store.set_verdict("d2", 4096, "2026-11-16T10:00:00Z", CLEAN, "Travis Scott - SICKO MODE (Clean)")

@@ -267,7 +267,7 @@ class CleanCheck:
             song = self._progress["queue"][0]
             with self._lock:
                 self._progress["current"] = song_name(song)
-            ended = self._one(song)
+            ended = self._one(library, song)
             if ended == AGAIN:
                 break
             if ended == UNREACHED:
@@ -390,9 +390,13 @@ class CleanCheck:
                 return False
         return not self._ending()
 
-    def _one(self, song: Dict) -> str:
+    def _one(self, library: NavidromeLibrary, song: Dict) -> str:
         """
         Hears one song - unless it was heard clean before - and swaps it quietly if it's clean.
+
+        Args:
+            library: Navidrome, to look again at a song queued to swap.
+            song: The song, as the queue keeps it.
 
         Returns:
             DONE; AGAIN if Nova is stopping and it's to be heard again at the next start; or
@@ -404,8 +408,18 @@ class CleanCheck:
                 # Its swap's own outcome goes on the page's lists.
                 logger.info(f"The library check leaves {name} to the swap already under way")
                 return DONE
-            if not song.get("swap"):
-                verdict = self._ears.hear(song)
+            needs = "hear"
+            if song.get("swap"):
+                if self._closing.is_set():
+                    return AGAIN
+                # The queue can be hours old, or from before a restart: a new copy may have landed
+                # in its place since, which has never been heard, or it may have come down only clean.
+                needs = self._todo(library, song, self._only_clean())
+                if needs is None:
+                    logger.info(f"The library check leaves {name}, which needs nothing now")
+                    return DONE
+            if needs == "hear":
+                verdict = self._ears.hear({key: value for key, value in song.items() if key != "swap"})
                 if self._closing.is_set() and verdict.kind in ("not_judged", "clean"):
                     # Cut short as the worker closed - or heard clean, but with no time to swap it.
                     return AGAIN
@@ -413,8 +427,6 @@ class CleanCheck:
                     return UNREACHED
                 if verdict.kind != "clean":
                     return DONE
-            elif self._closing.is_set():
-                return AGAIN
             # Asked for by its title without the clean note, as SoulSync names the explicit copy.
             wanted = Wanted(_without_clean_note(song.get("title") or ""), song.get("artist") or None, "track")
             outcome = self._swapper.swap({key: value for key, value in song.items() if key != "swap"},
