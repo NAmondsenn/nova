@@ -221,6 +221,26 @@ def test_the_nights_time_is_read_from_the_settings_at_each_look(make):
     assert check.started == 1
 
 
+@pytest.mark.parametrize("changed_at, starts", [((14, 0), False), ((13, 59), True)])
+def test_moving_the_nights_time_to_one_gone_by_starts_no_check_in_the_day(make, store, changed_at, starts):
+    # At 23:00 tonight, then set to 13:00 at 14:00: the night is over an hour past, so it's done, not
+    # started in the day. Set to 13:00 at 13:59, it's a look in its first hour, which starts it.
+    schedule, clock, check, _, settings = make(at(17, 12, 0), settings={**DEFAULTS, "nightly_time": "23:00"})
+    schedule.look()
+    settings["nightly_time"] = "13:00"
+    for hour, minute in (changed_at, (14, 30), (23, 0)):
+        clock.now = at(17, hour, minute)
+        schedule.look()
+
+    assert check.started == (1 if starts else 0)
+    assert store.schedule()["night_done"] == "2026-11-17"
+    clock.now = at(18, 12, 59)
+    schedule.look()
+    clock.now = at(18, 13, 0)
+    schedule.look()
+    assert check.started == (2 if starts else 1)
+
+
 def test_a_time_which_isnt_one_is_read_as_the_default(make):
     schedule, clock, check, _, settings = make(at(17, 5, 0), settings={**DEFAULTS, "nightly_time": "5.30"})
     schedule.look()

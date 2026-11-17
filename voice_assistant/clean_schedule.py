@@ -9,7 +9,9 @@ daily mixes and Monday's 03:00 discovery) the check is started as the page's Che
 starts it: one already running is left to run, and one paused is carried on. A night missed while
 Nova was off isn't made up: started after the night's time, Nova counts that night as done. So
 is a night whose time came with "Check new songs every night" off, so switching it on in the day
-doesn't start a check then - listening takes the brain's CPU while Nova is in use.
+doesn't start a check then - listening takes the brain's CPU while Nova is in use - and one more
+than an hour past its time, as when "Nightly check at" is moved from 23:00 to 13:00 at 14:00.
+Moved to 13:00 at 13:20, the check starts then, as any look in the night's first hour does.
 
 Once a week, at the page's day and time (Monday 09:30 by default), one message goes to ntfy's
 phone topic saying how many songs went on each of the page's lists since the last note, and how
@@ -33,6 +35,7 @@ import re
 import threading
 import time
 from datetime import datetime, timedelta
+from datetime import time as day_time
 from typing import Callable, Dict, Optional
 
 from voice_assistant.clean_store import KINDS, CleanStore
@@ -43,6 +46,11 @@ logger = logging.getLogger(__name__)
 # Seconds between looks, so the night's check starts within a minute of its time. Each look is at
 # the start of a minute, so none is stepped over.
 LOOK_EVERY = 60
+
+# How long after the night's time a look may still start its check: the first hour, for a look
+# which came late, the brain busy at the minute itself. Later, the night is done unstarted - its
+# time was moved to one gone by, 23:00 set to 13:00 at 14:00 - so no check starts in the day.
+STARTS_WITHIN = 3600
 
 # What a setting is read as when it's missing or isn't one - config.yaml's defaults.
 NIGHTLY_TIME = "05:30"
@@ -190,8 +198,8 @@ class CleanSchedule:
     def _night(self, now: datetime, settings: Dict, first: bool):
         """Starts the library check once a night, at its time, if it's switched on."""
         today = now.date().isoformat()
-        if now.strftime("%H:%M") < _time(settings.get("nightly_time"), NIGHTLY_TIME) \
-                or self._record.get("night_done") == today:
+        nightly_time = _time(settings.get("nightly_time"), NIGHTLY_TIME)
+        if now.strftime("%H:%M") < nightly_time or self._record.get("night_done") == today:
             return
         # Kept before the check is started, so nothing can have it started twice in a night.
         self._keep(night_done=today)
@@ -199,6 +207,12 @@ class CleanSchedule:
             return
         if first:
             logger.info("Nova started after the night's library check was due, so the next is tomorrow night's")
+            return
+        # By the clock's seconds, not its hours and minutes, so an hour the clocks skip or repeat counts as it passed.
+        due = datetime.combine(now.date(), day_time(*map(int, nightly_time.split(":")))).timestamp()
+        if now.timestamp() - due >= STARTS_WITHIN:
+            logger.info(f"The night's library check, at {nightly_time}, is over an hour gone, "
+                        f"so the next is tomorrow night's")
             return
         try:
             result = self._check.start()

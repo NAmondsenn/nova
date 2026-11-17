@@ -342,8 +342,8 @@ clean_check:
   soulsync_admin: ""
   # Nova checks the library itself once a night at nightly_time, hearing only the songs which are
   # new or whose file changed, so a night's check is short; one missed while Nova was off waits
-  # for the next night, as does one switched on after its time. 05:30 is after SoulSync's 04:00
-  # daily mixes and Monday's 03:00 discovery.
+  # for the next night, as does one switched on after its time, or moved to a time over an hour
+  # gone. 05:30 is after SoulSync's 04:00 daily mixes and Monday's 03:00 discovery.
   # See docs/decisions/0022, section 8.
   nightly: true
   nightly_time: "05:30"
