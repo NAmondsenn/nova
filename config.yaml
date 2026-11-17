@@ -340,6 +340,18 @@ clean_check:
   # the settings page as SOULSYNC_ADMIN_PASSWORD (or in ~/.config/nova/.env), never here. See
   # docs/decisions/0022.
   soulsync_admin: ""
+  # Nova checks the library itself once a night at nightly_time, hearing only the songs which are
+  # new or whose file changed, so a night's check is short; one missed while Nova was off waits
+  # for the next night. 05:30 is after SoulSync's 04:00 daily mixes and Monday's 03:00 discovery.
+  # See docs/decisions/0022, section 8.
+  nightly: true
+  nightly_time: "05:30"
+  # Once a week, on weekly_day at weekly_time, a short note to the phone topic of what happened to
+  # clean songs since the last one - only when something did. One due in the night's quiet hours
+  # waits for them to end. weekly_day is a day of the week, in any capitals.
+  weekly_note: true
+  weekly_day: "Monday"
+  weekly_time: "09:30"
 
 new_music:
   # New music for you, which SoulSync finds and downloads. All three are on the settings page.
