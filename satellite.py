@@ -62,6 +62,10 @@ MOST_SECONDS = 30
 FALLBACK_CHECK = 1.0
 PROGRESS_EVERY = 1.0
 
+# How often a push-to-talk satellite looks for a follow-up the brain has asked for, or a
+# stop, while it waits for a press, in seconds.
+PRESS_POLL = 0.05
+
 # How far past an unmute a clip has to start, in seconds. Sound heard while muted can
 # still be on its way to the microphone's buffer when the unmute is noted: up to about
 # 0.25 s between ALSA, the stream's blocks, the resampler and the echo canceller, since
@@ -201,11 +205,18 @@ class Satellite:
         self.echo = make_echo_canceller(config, self.sample_rate)
         self.speaker = Speaker(sample_rate=self.sample_rate, echo_reference=self.echo.played if self.echo else None)
         self.microphone = Microphone(sample_rate=self.sample_rate, echo=self.echo)
-        self.wake = WakeWordDetector(config=config, microphone=self.microphone, playing=self._making_sound)
-        # Only made when switched on, as it keeps the user's voice - see wake_clips.py.
-        clips_config = config.section("wake_clips")
-        self.clips = (WakeClips(self.microphone, self._muted_since, most=clips_config.get("most", 400))
-                      if clips_config.get("keep") else None)
+        # A push-to-talk satellite, such as the PC, starts a recording from a key press
+        # and so has no wake word to load - nor any clips of it. Its mute is then kept in
+        # the state copy alone.
+        self.push_to_talk = config.section("satellite").get("trigger", "wake_word") == "push_to_talk"
+        self.wake: Optional[WakeWordDetector] = None
+        self.clips: Optional[WakeClips] = None
+        if not self.push_to_talk:
+            self.wake = WakeWordDetector(config=config, microphone=self.microphone, playing=self._making_sound)
+            # Only made when switched on, as it keeps the user's voice - see wake_clips.py.
+            clips_config = config.section("wake_clips")
+            self.clips = (WakeClips(self.microphone, self._muted_since, most=clips_config.get("most", 400))
+                          if clips_config.get("keep") else None)
         # Just past the microphone position of the last unmute, so a clip can tell it
         # doesn't reach back into what was said while muted. The audio flows on through
         # a mute. See IN_FLIGHT_SECONDS.
@@ -224,7 +235,8 @@ class Satellite:
         # The brain owns the mute, but a satellite which was muted when the brain went
         # down stays muted until it's back to say otherwise. The same goes for how sure
         # the voice check must be.
-        self.wake.set_muted(self.state.muted)
+        if self.wake is not None:
+            self.wake.set_muted(self.state.muted)
         self._check_voice_at(self.state.voice_check)
 
         # Made in run(), once it's known whether the last run stopped properly.
@@ -298,7 +310,7 @@ class Satellite:
             self.ringer.resume(time.time())
             self.link = SatelliteLink(self.address, self.name, self.hostname, self.password, self.sample_rate,
                                       self._note_start(), self._on_message, self._on_connected,
-                                      speaker=self.spotify_speaker)
+                                      speaker=self.spotify_speaker, push_to_talk=self.push_to_talk)
             self.link.start()
             threading.Thread(target=self._ring_when_due, daemon=True, name="fallback").start()
             logger.info(f"Satellite '{self.name}' ready, for its brain at {self.address}")
@@ -338,9 +350,9 @@ class Satellite:
 
     def _listen_forever(self):
         """
-        Listens for the wake word, and sends each follow-up the brain asks to hear. The
-        one loop owns the microphone, so while a recording is being sent, the wake word
-        can't start another.
+        Listens for the wake word - or, push-to-talk, waits for a press - and sends each
+        follow-up the brain asks to hear. The one loop owns the microphone, so while a
+        recording is being sent, the wake word can't start another.
         """
         while True:
             try:
@@ -348,7 +360,10 @@ class Satellite:
                 # going wrong never returns - which is when the brain's Restart, from
                 # Home Assistant, is needed most.
                 self._exit_if_asked()
-                heard = self.wake.listen_once(until=self._interrupted)
+                if self.wake is None:
+                    heard = self._wait_for_presses()
+                else:
+                    heard = self.wake.listen_once(until=self._interrupted)
                 self._exit_if_asked()
                 if heard is not None:
                     self._keep_clip(heard)
@@ -361,6 +376,19 @@ class Satellite:
                 logger.error(f"Error: {e}", exc_info=True)
                 time.sleep(1)
 
+    def _wait_for_presses(self) -> Optional[float]:
+        """
+        What a push-to-talk satellite does in the wake word's place: waits until the
+        brain asks to hear a follow-up, or the satellite is to stop. It starts no
+        recording itself yet.
+
+        Returns:
+            None, as the wake word does when it's interrupted.
+        """
+        while not self._interrupted():
+            time.sleep(PRESS_POLL)
+        return None
+
     def _keep_clip(self, score: float):
         """
         Hands the wake over to be kept, if that's switched on. A problem with a clip
@@ -369,7 +397,7 @@ class Satellite:
         Args:
             score: How sure the wake word detector was.
         """
-        if self.clips is None:
+        if self.clips is None or self.wake is None:
             return
         try:
             heard_at = self.wake.heard_at
@@ -408,7 +436,8 @@ class Satellite:
         Returns:
             True if a clip from there would take in some of a mute, or might.
         """
-        return self.wake.muted or position < self._unmuted_at
+        muted = self.wake.muted if self.wake is not None else self.state.muted
+        return muted or position < self._unmuted_at
 
     def _woken(self):
         """
@@ -669,6 +698,10 @@ class Satellite:
             self._refused_longest = ascii(longest)
             logger.warning(f"The brain's longest_request makes no sense, so a recording still lasts up to "
                            f"{self.longest_request:g} seconds: {ascii(longest)[:80]}")
+        # A push-to-talk satellite has no wake word to tune, to check a voice for or to
+        # note an unmute for: only the mute, which the state copy has just taken.
+        if self.wake is None:
+            return
         confidence = message.get("wake_confidence")
         # Held to the same care, as the Pi has nobody at the keyboard to notice. Only 0.05
         # to 0.99 is taken: near 0 the wake word fires on any noise, and at 1 it all but
@@ -696,7 +729,7 @@ class Satellite:
             sureness: From 0, for no check, to 0.99, as the state copy keeps it - having
                 left out anything else. None, before the brain has ever said, changes nothing.
         """
-        if sureness is None or sureness == self.wake.voice_check_threshold:
+        if self.wake is None or sureness is None or sureness == self.wake.voice_check_threshold:
             return
         # A plain assignment, as with the sensitivity.
         self.wake.voice_check_threshold = sureness

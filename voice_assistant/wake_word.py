@@ -11,7 +11,12 @@ import os
 import re
 import logging
 from typing import Callable, Optional
-from openwakeword.model import Model
+try:
+    from openwakeword.model import Model
+except ImportError:
+    # A push-to-talk satellite, such as the PC, doesn't install openWakeWord. Nothing
+    # then makes a detector - see WakeWordDetector.
+    Model = None
 from voice_assistant import paths, storage, voice_check
 from voice_assistant.microphone import RATE, Microphone
 from voice_assistant.wake_phrase import DEFAULT_WAKE_WORD
@@ -67,7 +72,12 @@ class WakeWordDetector:
                 alarm, a reply, music - when the voice check would stop a wake. Over
                 one, the wake word alone counts. Called on the listening thread, so it
                 must answer at once. Left out, nothing is.
+
+        Raises:
+            RuntimeError: openWakeWord isn't installed.
         """
+        if Model is None:
+            raise RuntimeError("openwakeword isn't installed")
         # Pulls sensitivity from config.yaml's "thresholds" section, the wake word
         # phrase from "assistant", and the mic sample rate from "audio".
         thresholds_config = config.section("thresholds") if config else {}

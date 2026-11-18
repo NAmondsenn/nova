@@ -33,6 +33,8 @@ home_assistant:
   url: ""
 batteries:
   other_marks: [15, 5]
+satellite:
+  trigger: wake_word
 """
 
 
@@ -283,6 +285,7 @@ IN_AND_OUT = {
     ("conversation", "history_max_age"): ([0, 3600, 300], [-1, 3601, 1.5]),
     ("mqtt", "host"): (["192.168.1.20", "ha.local", ""], ["http://ha.local", "ha local"]),
     ("mqtt", "port"): ([1, 1883, 65535], [0, 65536, 1883.5]),
+    ("satellite", "press_port"): ([1024, 10401, 65535], [1023, 65536, 10401.5, True, "10401"]),
     ("voice", "speed"): ([0.75, 1.5, 1], [0.74, 1.51]),
     ("settings_page", "proxy_port"): ([0, 8766, 65535], [-1, 65536, 8766.5, True]),
     ("soulsync", "url"): (["http://soulsync.local:8008", ""], ["soulsync.local", "ftp://soulsync.local"]),
@@ -329,6 +332,14 @@ def test_each_limit_is_the_tables():
     assert limit_problem("ntfy", "phone", "a/b") == "should be an ntfy topic: letters, digits, hyphens and underscores"
     assert limit_problem("mqtt", "host", "http://x") == "should be a host name or address, without http://"
     assert limit_problem("music", "player", "anything") is None
+
+
+def test_satellite_trigger_is_one_of_two(config_with):
+    for trigger in ("wake_word", "push_to_talk"):
+        assert config_with(f"satellite:\n  trigger: {trigger}\n").section("satellite")["trigger"] == trigger
+    with pytest.raises(ConfigError) as caught:
+        config_with("satellite:\n  trigger: button\n")
+    assert "'satellite.trigger' should be one of wake_word, push_to_talk, not 'button'" in str(caught.value)
 
 
 def test_the_download_settings_have_their_limits():

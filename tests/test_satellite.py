@@ -1717,3 +1717,52 @@ def test_a_restart_from_the_brain_is_heard_while_listening_keeps_failing(brain, 
 
     assert wait_for(lambda: made.exited)
     assert made.exited == [1]
+
+
+def test_push_to_talk_makes_no_wake_word_or_clips(brain, make, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise AssertionError("Made for a push-to-talk satellite")
+
+    monkeypatch.setattr(satellite, "WakeWordDetector", refuse)
+    monkeypatch.setattr(satellite, "WakeClips", refuse)
+    made = make(satellite={"trigger": "push_to_talk"}, wake_clips={"keep": True})
+    assert made.push_to_talk is True
+    assert made.wake is None and made.clips is None
+    assert wait_for(lambda: brain.hellos)
+    assert brain.hellos[0]["push_to_talk"] is True
+
+
+def test_push_to_talk_takes_state_without_a_wake_word(brain, make):
+    made = make(satellite={"trigger": "push_to_talk"})
+    assert made.wake is None
+    assert wait_for(lambda: connected(made))
+    brain.say("state", volumes={"general": 0.5}, muted=True, wake_confidence=0.75, voice_check=0.6)
+    assert wait_for(lambda: made.state.muted is True)
+    assert made.state.volume("general") == 0.5
+    # Unmuted again, which a satellite with a wake word notes the position of.
+    brain.say("state", volumes={"general": 0.25}, muted=False, wake_confidence=0.75, voice_check=0.6)
+    assert wait_for(lambda: made.state.volume("general") == 0.25)
+    assert made.state.muted is False
+
+
+def test_a_push_to_talk_satellite_sends_the_follow_up_the_brain_asks_for(brain, make):
+    made = make(satellite={"trigger": "push_to_talk"})
+    assert made.wake is None
+    assert wait_for(lambda: connected(made))
+    brain.say("listen", recording="listen-1")
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    brain.say("stop_listening", recording="listen-1")
+
+
+def test_a_push_to_talk_satellite_stops_when_asked(brain, make):
+    made = make(satellite={"trigger": "push_to_talk"})
+    assert made.wake is None
+    assert wait_for(lambda: connected(made))
+    made.stop()
+    assert wait_for(lambda: made.exited)
+
+
+def test_wake_word_satellite_hello_is_unchanged(brain, make):
+    make()
+    assert wait_for(lambda: brain.hellos)
+    assert brain.hellos[0]["push_to_talk"] is False

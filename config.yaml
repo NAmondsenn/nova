@@ -98,6 +98,14 @@ backend:
   # Empty switches it off, and Nova hears such words again by itself, more slowly.
   fallback_model: "models/sherpa-onnx-nemo-parakeet_tdt_transducer_110m-en-36000-int8"
 
+satellite:
+  # What starts a recording on a satellite: "wake_word", the wake word, as on the Pi, or
+  # "push_to_talk", a key pressed, as on the PC - which loads no wake word at all.
+  trigger: "wake_word"
+  # Push-to-talk only: the port on this machine, which answers only to itself, where
+  # the key press is sent.
+  press_port: 10401
+
 ntfy:
   # Your own ntfy server, e.g. "https://ntfy.example.com" - for alerts said out loud
   # as they arrive, and things sent to your phone. See voice_assistant/ntfy.py. Its
