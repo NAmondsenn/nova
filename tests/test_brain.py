@@ -474,6 +474,21 @@ def test_the_brain_lists_the_satellites_of_a_room_own_first(brain, connect):
     assert brain.room_sessions("bedroom") == [own]
 
 
+@pytest.mark.parametrize("problem", [OSError("disk gone"), ValueError("half written")])
+def test_a_satellite_whose_room_cant_be_read_is_a_room_of_its_own(brain, passwords, monkeypatch, caplog, problem):
+    # The passwords' file unreadable mid-wake mustn't cost the wake, or leave the session busy.
+    brain.rooms.set_area("bedroom", "Study")
+    brain.rooms.set_area("kitchen", "Study")
+
+    def unreadable(missing_ok=True):
+        raise problem
+
+    monkeypatch.setattr(passwords, "names", unreadable)
+    with caplog.at_level(logging.WARNING, logger="voice_assistant.brain"):
+        assert brain.room_of("kitchen") == ["kitchen"]
+    assert any("kitchen" in record.message and str(problem) in record.message for record in caplog.records)
+
+
 def test_a_second_connection_replaces_the_first(brain, connect, caplog):
     serving(brain)
     first = connect(brain)

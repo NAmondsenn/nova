@@ -820,6 +820,25 @@ def test_a_wake_holds_the_music_on_the_whole_room(make_session, brain):
     assert held == [("hold", "pc"), ("hold", "pi"), ("release", "pc"), ("release", "pi")]
 
 
+def test_a_room_which_cant_be_looked_up_still_has_the_wake_answered_and_let_go(make_session, brain):
+    # Held and let go alone, rather than the session being left busy for good.
+    pi = make_session()
+    held = []
+    _noting_holds(held, ("pi", pi))
+
+    def unreadable(name):
+        raise OSError("disk gone")
+
+    brain.room_sessions = unreadable
+    pi.conversation = ScriptedConversation()
+    answered = []
+    pi._handle_interaction = lambda feed, timeline, pre_roll=None, pressed=False: answered.append(feed)
+    pi._converse({"talked_over": False, "feed": AudioFeed()})
+    assert len(answered) == 1
+    assert held == [("hold", "pi"), ("release", "pi")]
+    assert pi._idle.is_set() and pi.activity == "idle"
+
+
 def test_a_satellite_alone_holds_only_its_own(make_session, brain):
     pi, kitchen = make_session(), make_session()
     held = []

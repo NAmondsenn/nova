@@ -557,6 +557,10 @@ class Session:
         Args:
             wake: The wake word, as the satellite's wakes have it.
         """
+        # Every satellite's music in the room is held, as the room acts as one - and the
+        # same ones are let go of after, however the room changes meanwhile. Looked up
+        # before the assistant is marked busy, so a failure here can't leave it so.
+        self._room_held = self._room_now()
         # Marks the assistant as busy, so a timer going off waits its turn rather than interrupting.
         self._idle.clear()
         self.activity = "listening"
@@ -564,11 +568,7 @@ class Session:
         # The pause goes through Spotify's servers, so it runs alongside the
         # recording rather than holding it up - see MusicHold. Held across every
         # request, so it doesn't come back for a moment when a reply is talked over.
-        # Every satellite's in the room is held, as the room acts as one - and the same
-        # ones are let go of after, however the room changes meanwhile. Holds are
-        # counted, so one here and the satellite's own from its own wake both stand.
-        self._room_held = [self] + [session for session in self.brain.room_sessions(self.satellite.name)
-                                    if session is not self]
+        # Holds are counted, so one here and the satellite's own from its own wake both stand.
         for session in self._room_held:
             session.music.hold()
         try:
@@ -594,6 +594,19 @@ class Session:
             room, self._room_held = self._room_held, [self]
             for session in room:
                 session.music.release()
+
+    def _room_now(self) -> List["Session"]:
+        """
+        Returns:
+            The connected sessions of this satellite's room, this one first - or just
+            this one if they can't be looked up, so what it's doing goes ahead alone.
+        """
+        try:
+            return [self] + [session for session in self.brain.room_sessions(self.satellite.name)
+                             if session is not self]
+        except Exception as e:
+            logger.error(f"Couldn't look up the room, so acting alone: {e}")
+            return [self]
 
     def _room_players(self) -> List:
         """

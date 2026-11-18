@@ -765,9 +765,15 @@ class Brain:
 
         Returns:
             Every satellite which may connect that's in the same room as it, itself
-            first - connected or not - or just itself if its room isn't known.
+            first - connected or not - or just itself if its room isn't known, or the
+            satellites can't be read just now: a wake, a timer and a "stop" all ask, and
+            none of them should fail for it.
         """
-        return self.rooms.room_of(name, self.satellites())
+        try:
+            return self.rooms.room_of(name, self.satellites())
+        except (OSError, ValueError) as e:
+            logger.warning(f"Couldn't read the satellites for the {name} satellite's room, so it's on its own: {e}")
+            return [name]
 
     def ring_on(self, name: str) -> str:
         """
