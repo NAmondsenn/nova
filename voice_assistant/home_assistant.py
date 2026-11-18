@@ -166,8 +166,9 @@ JOURNEY_PLACE_LENGTH = 80
 JOURNEY_ENTRY_SECONDS = 300
 # What a journey's end may be: a zone or a person, by entity id...
 JOURNEY_ENTITY = re.compile(r"(zone|person)\.[a-z0-9_]+")
-# ...and what any other entity id looks like, which is never one to ask Google about.
-ANY_ENTITY = re.compile(r"[a-z_]+\.[a-z0-9_]+")
+# ...and what any other entity id looks like once lower-cased, as Home Assistant looks one up
+# whatever its case - which is never one to ask Google about.
+ANY_ENTITY = re.compile(r"[a-z0-9_]+\.[a-z0-9_]+")
 # A time on a clear road, as Google words it: "20 mins", "1 hour 5 mins", "2 hours".
 CLEAR_ROAD = re.compile(r"(?:(\d+) hours?)?(?: ?(\d+) mins?)?")
 
@@ -198,8 +199,10 @@ def _journey_end(place) -> bool:
     if JOURNEY_ENTITY.fullmatch(place):
         return True
     # A place said: only what journey_place leaves as it was, and never another entity's id,
-    # which would send a light's or a lock's name to Google as if it were a place.
-    return bool(place) and place == journey_place(place) and not ANY_ENTITY.fullmatch(place)
+    # which would send a light's or a lock's name to Google as if it were a place. Home Assistant
+    # finds an entity by its lower-cased id too, and lower-cases some letters to ASCII ones (the
+    # Kelvin sign to "k"), so it's the lower-cased form which is checked.
+    return bool(place) and place == journey_place(place) and not ANY_ENTITY.fullmatch(place.lower())
 
 
 def _clear_seconds(words) -> Optional[int]:

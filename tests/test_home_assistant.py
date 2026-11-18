@@ -1398,6 +1398,10 @@ def test_entries_which_cant_be_read_are_a_failure_not_no_journeys(make_home, ent
 
 @pytest.mark.parametrize("data", [
     {**GOOD_JOURNEY, "entity_id": "zone.work"}, {**GOOD_JOURNEY, "destination": "light.lamp"},
+    {**GOOD_JOURNEY, "destination": "Light.Lamp"}, {**GOOD_JOURNEY, "destination": "LIGHT.LAMP"},
+    {**GOOD_JOURNEY, "destination": "light.Kitchen"}, {**GOOD_JOURNEY, "origin": "Sensor.Phone_Battery"},
+    # The Kelvin sign is a letter which lower-cases to "k", as Home Assistant's own lookup does.
+    {**GOOD_JOURNEY, "destination": "light.\u212aitchen"},
     {**GOOD_JOURNEY, "origin": "person.nathaniel; rm"}, {**GOOD_JOURNEY, "destination": "x" * 81},
     {**GOOD_JOURNEY, "destination": ""}, {**GOOD_JOURNEY, "destination": " Work"}, {**GOOD_JOURNEY, "mode": "flying"},
     {**GOOD_JOURNEY, "mode": "transit"}, {**GOOD_JOURNEY, "departure_time": "now"},
