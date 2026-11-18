@@ -8,7 +8,8 @@ Where the project stands, using the finding IDs from the audit of 19 October 202
 2. **The minor findings parked by each plan's reviews** - done: fixed in one round (about 120 commits, 14 tasks).
 3. **Music fetched by voice** - a song or album that isn't in Navidrome fetched through SoulSync by "download X", or by a yes to the offer after "play X", and said to be downloaded once Navidrome has it - not played. Designed ([decisions/0012](decisions/0012-music-fetched-by-voice.md)) and built, waiting for the hand checks in the [release checklist](release-checklist.md). Clean songs found by ear and swapped ([decisions/0022](decisions/0022-clean-songs-by-ear.md)) is built too, and waits for its set-up (the music folder shared with the brain, the SoulSync admin profile) and its hand checks, 13g to 13l.
 4. **Football** - questions about any team or competition answered from Home Assistant, and the followed teams' matches announced: about to start, a goal, half time, the second half and full time, with the teams followed by voice or on the settings page. Designed ([decisions/0014](decisions/0014-football.md)) and built, waiting for the hand checks in the [release checklist](release-checklist.md). Round two ([decisions/0015](decisions/0015-football-round-two.md)) adds South Shields' league matches from BBC Sport, line-ups by voice and a fortnight on the card; built, and waiting for its hand checks too.
-5. **Phase 6** - push-to-talk clients for Windows and macOS.
+5. **Journeys** - "what time do I leave for work?" and "how long's the drive to X?" answered from Home Assistant's Google Maps Travel Time and the calendar, a reminder offered and moved if the traffic changes. Designed and built ([decisions/0025](decisions/0025-leaving-time.md)); waits for its set-up in Home Assistant (a Google key, the integration, the zones) and its hand checks.
+6. **Phase 6** - push-to-talk clients for Windows and macOS.
 
 ## Branches
 
