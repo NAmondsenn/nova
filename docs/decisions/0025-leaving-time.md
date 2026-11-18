@@ -40,7 +40,9 @@ What a look on 17 November showed, all read-only:
     - A leave-by time for public transport (above).
     - Watching a reminder set from a satellite that travels with him, or one for a walk or a cycle (above). The first is looked at again when such a satellite exists.
     - The event's own location as the destination: the zone of the activity's name is used.
-    - A forecast for a day beyond tomorrow uses that time of day's next occurrence.
+    - A forecast for another day: Home Assistant's action takes only a time of day, which it reads as that time's next occurrence, so a forecast for tomorrow's journey can be today's traffic at that hour. It is said with "about", and the watch looks at the real traffic before the reminder. Left as it is on the user's word (18 November 2026).
+    - A day a week or more off is said as its weekday alone ("on Friday"). Left as it is on the user's word too.
+    - Before a satellite is first marked as travelling with him: a reminder set from one still tells Claude its time ("I'll remind you at 5:15 PM.", and the clock's list), from which the journey from where he is could be worked out, and a private answer which was a refusal is told to Claude as an answer. Both are to be closed with the first such satellite.
     - Bus numbers, departure times, directions, alternative routes and more than one stop; a reminder for every shift without being asked; sensors or cards for journeys in Home Assistant.
 
 **Goals.**
