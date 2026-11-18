@@ -1,0 +1,33 @@
+# 0025: Ask Nova by typing, in Home Assistant
+
+18 November 2026 · Agreed with the user in chat, as part of the Nova view (docs/superpowers/specs/2026-11-18-nova-view-design.md) · Built
+
+Another branch holds 0024; if it is merged first under the same number, this one is renumbered at merge.
+
+**Context.** The Nova view in Home Assistant is a controller page for Nova: its status, mute, volumes, timers, music and Speak. The user wants to be able to ask Nova something there too, by typing, for when talking isn't wanted or the microphone is muted. [0005](0005-nova-in-home-assistant.md) says nothing anyone says to Nova, and none of its answers, goes to Home Assistant; a typed request has to go there by its nature, so how far that changes 0005 had to be settled.
+
+**Decision.**
+
+1. **Typed requests come from Home Assistant, through the satellite's own device.** The Pi's device has an Ask Nova text box (`text.nova_ask`). What's typed there is sent to Nova on the box's command topic, `{base}/ask/set`, and is answered on the satellite whose device it is. The box's state topic, `{base}/ask`, only ever carries the fixed placeholder `-` (retained), and the box's discovery has a `value_template` of `{{ '' }}`, so Home Assistant's state for the box is always empty and what was typed is never sent back. The placeholder is not `""` because an empty retained message deletes the broker's copy: Home Assistant would only ever get it while subscribed, and after a restart the box would show "unknown".
+2. **Replies are spoken only.** The reply is said out loud on the satellite, as a reply to speech is, and is never published, shown or sent to Home Assistant. 0005 is kept: the only words that go to Home Assistant are the ones the user types into it, which Home Assistant already has, and nothing Nova says goes there. Showing replies on the page would be a deliberate change to 0005, and a new decision.
+3. **The same path as speech.** What's typed joins the turn where speech-to-text's words would, so the local commands, Assist, Claude and every guard see it exactly as heard text. Nothing typed goes round them.
+4. **Logging follows the transcripts setting.** What's typed is logged only as heard text is, marked as a transcript, so `logging.log_transcripts` decides whether it's kept; no other log line carries it.
+5. **One turn at a time.** A typed request is a turn of its own, which waits behind any turn in progress and anything being announced (Speak, an alert, a routine, a timer's or an alarm's round), and never stops or talks over a reply or an announcement. A wake word waiting is always answered first. A timer or an alarm left ringing between its rounds is silenced while a typed request is answered, as for a wake word, so a typed "stop" stops it.
+6. **Questions back.** When Nova asks a question back - "Which room?", "Shut down the PC?" - the first thing typed from the moment it knows it's asking is the answer, within the same conversation, so a typed "yes" confirms. In reply to speech, Nova listens for the answer as ever, and a typed answer arriving while it listens ends that listen and is used instead of what the microphone caught. In reply to something typed, the microphone stays shut and the turn ends as any turn does, so nothing is held back, but the question stays open for 60 seconds (`TYPED_ANSWER_WAIT`): what's typed in that time is answered as its answer, in the conversation which asked it. A timer, an alarm, an alert or Speak said in between doesn't change that, as none of them goes through the conversation and the question still stands. A wake word, a hold on a clock display, a routine (which starts a conversation of its own), or anything typed after the 60 seconds, starts afresh and the question is dropped, without a word.
+7. **Mute.** Typing uses no microphone, so a typed request is answered while the microphone is muted, and its reply spoken. If that reply asks a question, only a typed answer is taken. Mute keeps meaning Nova doesn't listen for its wake word; a typed request never opens the microphone.
+8. **Who can use it.** Any Home Assistant user, with no per-user hiding and no broker change. Only the user has a login to Home Assistant or to Nova, and Home Assistant is reachable only at home or over Tailscale. If anyone else is ever given a login to either, this is revisited.
+
+**How it's put together.** These are Claude's calls, and the builder can change them if something better turns up:
+
+- **A queue of its own.** Typed requests wait in the session's own queue, not with the satellite's wake words: a reply checks those for a wake word said over it, and would take a typed request for one and stop.
+- **At most 255 characters.** As many as Home Assistant's text box takes (`ASK_MOST`), so only something else publishing to the topic is ever cut short. A blank one is dropped.
+- **Never failing on Home Assistant's thread.** The device hands what's typed to the session on its thread for Home Assistant's commands, which logs a failure with its message. Taking it can't fail with anything typed in that message, and returns at once, so a Stop pressed meanwhile isn't kept waiting.
+- **What it shows.** A typed turn starts as "thinking", with no listening sound, and is idle once it has asked its question, as between any two turns. What goes off by itself is never held back by a question waiting for a typed answer: an earlier build waited inside the turn, which could have kept a timer or an alarm waiting for up to that minute.
+- **Answering an open question.** The answer is a turn of its own which carries on the conversation rather than starting another, so what a yes to "Shut down the PC?" would do still holds. What was ringing is as the question's turn found it, which only matters to a "stop" said over something ringing.
+- **What rings.** As with the wake word, anything ringing is silenced while a typed request is answered, and a typed "stop" stops it.
+
+**Not part of this.** Replies shown in Home Assistant. Typed requests from anywhere but the satellite's own device in Home Assistant. A per-user allow list.
+
+**Must never happen.** What's typed, or any reply, published anywhere but the command topic it arrived on. A typed request stopping or talking over a reply. The microphone opened for a typed request or for its question back. What's typed in a log line that the transcripts setting doesn't control.
+
+**Done when.** Typing in Ask Nova gets a spoken answer on the Pi, muted or not; a question back takes a typed answer; a typed answer ends a spoken follow-up; nothing typed or answered is published; and tests cover each.
