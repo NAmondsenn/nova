@@ -63,7 +63,8 @@
          section is open, in the body's data-open. -->
     <div class="shell">
       <nav id="list" aria-label="Nova's sections">
-        <div id="attention"></div>
+        <!-- What needs attention, a row each, drawn by settings.js: empty, and so hidden, when nothing does. -->
+        <div id="attention" class="list"></div>
         <input type="search" id="find" placeholder="Search Nova's page" aria-label="Search Nova's page"
                autocomplete="off" autocapitalize="none" spellcheck="false">
         <div id="rows"></div>
@@ -172,6 +173,8 @@
 
         <section id="section-journeys" data-section="journeys" aria-labelledby="journeys-title">
           <h2 class="heading" id="journeys-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-car"></use></svg>Journeys</h2>
+          <!-- How many journeys Nova has asked Google for this month, from /api/state: hidden without it. -->
+          <p class="panel note" id="journeys-used" hidden></p>
           <div class="settings-of" data-settings="journeys" hidden></div>
         </section>
 

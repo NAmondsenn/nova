@@ -336,6 +336,20 @@ body:not([data-open]) .board > #section-status { display: block; }
 
 #attention:empty { display: none; }
 
+/* What needs attention: a block of glass of its own, rows as the list's with a ring of ember to
+   say these aren't just the sections. */
+#attention {
+  margin-bottom: 20px;
+  overflow: hidden;
+  border-color: rgba(255, 144, 119, 0.35);
+}
+
+/* An attention row's dot is where a section's icon would be, centred in the same width. */
+.row.attention .dot {
+  grid-area: icon;
+  margin: 0 5px;
+}
+
 .row-group { margin: 0 0 24px; }
 
 .row-group .subheading { margin: 0 0 10px 4px; }
@@ -386,6 +400,9 @@ body:not([data-open]) .board > #section-status { display: block; }
 
 .row .line:empty { display: none; }
 
+/* A line which says something is wrong - a battery under its mark, Google to sign in to. */
+.row .line.warn { color: var(--ember); }
+
 .row .chevron {
   grid-area: chevron;
   color: var(--dusk);
@@ -398,6 +415,39 @@ body:not([data-open]) .board > #section-status { display: block; }
 .row-group .list { overflow: hidden; }
 
 .row:focus-visible { outline-offset: -2px; }
+
+/* A setting or control a search found in a section: a smaller row under the section's own,
+   its words lined up under the section's name. */
+.row.hit {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "name";
+  min-height: 44px;
+  padding: 8px 14px 8px 48px;
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--dusk);
+  font-size: 14px;
+}
+
+/* What a search sent you to, marked for a moment: the highlight fades over the time it is kept,
+   or, with motion off, stays until it goes. Inset, so no panel's edge cuts it off. */
+.found {
+  border-radius: var(--field-round);
+  background: rgba(243, 214, 160, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(243, 214, 160, 0.5);
+  animation: found 2s ease-out forwards;
+}
+
+@keyframes found {
+  from {
+    background: rgba(243, 214, 160, 0.28);
+    box-shadow: inset 0 0 0 1px rgba(243, 214, 160, 0.8);
+  }
+
+  to {
+    background: rgba(243, 214, 160, 0);
+    box-shadow: inset 0 0 0 1px rgba(243, 214, 160, 0);
+  }
+}
 
 /* A section's heading takes the focus as it opens, so reading starts there; it isn't a
    control, and a ring round it across the page would say it was. */
@@ -2013,6 +2063,7 @@ p.login { color: var(--moon); }
   .star span::before,
   .star span::after,
   .toast,
+  .found,
   input[type="checkbox"],
   input[type="checkbox"]::before {
     animation: none !important;
