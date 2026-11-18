@@ -93,6 +93,7 @@ class FakeCalendar:
     def activity_words(self):
         words = {name.lower(): name.lower() for name in self.names}
         words.update({"shift": "work", "shifts": "work"} if "Work" in self.names else {})
+        words.update({"lectures": "uni", "classes": "uni"} if "Uni" in self.names else {})
         return words
 
     def events(self, first, days, calendar_ids=None):
@@ -269,6 +270,63 @@ def test_other_words_which_arent_a_zone_still_go_to_google_as_said(store):
     assert home.asked[-1][1] == "mystery cottage"
 
 
+@pytest.mark.parametrize("said", ["my shift", "shift", "the shift", "My  Shift"])
+def test_the_calendars_word_for_an_activity_finds_the_zone_named_as_it(store, said):
+    home = FakeHome()
+    answer = ask(make(store, home, FakeCalendar()), said)
+    assert answer == {"success": True, "message": "The drive to Work is 24 minutes, 6.4 miles."}
+    assert home.asked == [("zone.home", "zone.work", "driving", None)]
+
+
+def test_a_word_for_an_activity_takes_the_arrival_time_from_its_calendar(store):
+    home = FakeHome({"seconds": 1440, "clear_seconds": None, "metres": 10300})
+    calendar = work_at(at(2026, 11, 18, 9))
+    for said in ("my shift", "shift"):
+        home.asked.clear()
+        answer = ask(make(store, home, calendar), said, leave=True)
+        assert answer["message"] == "Work starts at 9:00 AM. The drive is 24 minutes, " \
+            "so leave by 8:26 AM. Want a reminder?"
+        assert answer["ask_first"].params["destination"] == "zone.work"
+        assert answer["ask_first"].params["place"] == "Work"
+        assert home.asked == [("zone.home", "zone.work", "driving", None)]
+    assert calendar.read[-1] == (EIGHT.date(), 2, ["work-id"])
+
+
+def test_lectures_find_the_uni_zone_the_same_way(store):
+    home = FakeHome()
+    answer = ask(make(store, home, FakeCalendar(activities=("Uni",))), "my lectures")
+    assert answer == {"success": True, "message": "The drive to Uni is 24 minutes, 6.4 miles."}
+    assert home.asked == [("zone.home", "zone.uni", "driving", None)]
+
+
+def test_a_word_for_an_activity_with_no_zone_named_as_it_is_as_before(store):
+    home = FakeHome(zones=[zone for zone in ZONES if zone["id"] != "zone.work"])
+    answer = ask(make(store, home, FakeCalendar()), "my shift")
+    assert answer == {"success": False, "message": "I don't know where my shift is. "
+                                                    "Add it as a zone in Home Assistant."}
+    assert home.asked == []
+    answer = ask(make(store, home, FakeCalendar()), "shift")
+    assert answer == {"success": True, "message": "The drive to shift is 24 minutes, 6.4 miles."}
+    assert home.asked == [("zone.home", "shift", "driving", None)]
+
+
+@pytest.mark.parametrize("failure", [None, SignInNeeded("no"), requests.ConnectionError("down"), KeyError("x")])
+def test_with_no_calendar_or_an_unreadable_one_a_word_for_an_activity_is_as_before(store, failure):
+    for calendar in ([None] if failure is None else [FakeCalendar(failure=failure)]):
+        home = FakeHome()
+        assert ask(make(store, home, calendar), "my shift") == \
+            {"success": False, "message": "I don't know where my shift is. Add it as a zone in Home Assistant."}
+        assert ask(make(store, home, calendar), "shift")["message"].startswith("The drive to shift is")
+        assert home.asked == [("zone.home", "shift", "driving", None)]
+
+
+def test_a_zones_own_name_wins_over_the_calendars_word(store):
+    home = FakeHome(zones=ZONES + [{"id": "zone.shift", "name": "Shift"}])
+    answer = ask(make(store, home, FakeCalendar()), "my shift")
+    assert answer == {"success": True, "message": "The drive to Shift is 24 minutes, 6.4 miles."}
+    assert home.asked == [("zone.home", "zone.shift", "driving", None)]
+
+
 def test_home_is_the_home_zone(store):
     home = FakeHome()
     assert ask(make(store, home), "home")["message"].startswith("The drive to Home is 24 minutes")
@@ -363,7 +421,7 @@ def test_the_reminder_offered_carries_everything_the_yes_needs(store):
 def test_an_activity_is_found_by_a_word_for_it(store):
     calendar = work_at(at(2026, 11, 18, 9))
     home = FakeHome({"seconds": 1440, "clear_seconds": None, "metres": 10300})
-    # "shift" is Work, and isn't a zone, so it goes to Google as said and the activity is found by its word.
+    # "shift" is Work's word, and no zone is named so: it is the Work zone, and the activity is found by its word.
     answer = ask(make(store, home, calendar), "shift", leave=True)
     assert answer["message"].startswith("Work starts at 9:00 AM. The drive is 24 minutes")
 

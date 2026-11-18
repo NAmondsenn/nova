@@ -11,6 +11,9 @@ an activity's next event starts when its calendar says. Nova asks Google through
 Assistant and never directly, and counts each ask by calendar month so that a month's free
 requests are never passed.
 
+A place is found among Home Assistant's zones by the zone's name, or by the calendar's word for the activity
+the zone is named as ("shift" for a Work zone).
+
 Nova never reads, keeps or logs a position. A place is a zone's entity id and name, or the
 words the user said, and the user's own place is their person's entity id, which Home
 Assistant turns into a position itself. A journey's answer holds a time and a distance, so
@@ -311,6 +314,9 @@ class Journeys:
         """
         Finds the place said, among Home Assistant's zones by name.
 
+        A zone is found by its name, else by the calendar's word for the activity it is named as ("shift" is
+        Work), else words which begin "my " are refused, and any others go to Google as said.
+
         Returns:
             What to ask Google for - a zone's id, else the words cleaned of what mustn't go to it -
             what to say back, and the name to find the place's activity by.
@@ -324,6 +330,11 @@ class Journeys:
             for zone in zones:
                 if _zone_key(zone["name"]) == tidy:
                     return zone["id"], zone["name"], zone["name"]
+            # No zone is named so: the calendar's word for an activity ("shift") is the zone named as that
+            # activity ("Work"). A zone's own name was tried first, so it always wins over a word.
+            zone = self._zone_for_activity_word(words, zones)
+            if zone is not None:
+                return zone["id"], zone["name"], zone["name"]
         if _as_said(words).startswith("my "):
             # "My gran's" is a place of the user's own, which only a zone can be: sent to Google as words, a
             # misheard one - "my grans" - would be a confident drive to the wrong place, said back as the same.
@@ -332,6 +343,35 @@ class Journeys:
         if not sent:
             raise _Refused(WHERE_TO)
         return sent, sent, sent
+
+    def _zone_for_activity_word(self, words: str, zones: list) -> Optional[Dict]:
+        """
+        The zone named as the activity which the words are the calendar's word for.
+
+        Args:
+            words: The place as said, e.g. "my shift".
+            zones: Home Assistant's zones, each with an "id" and a "name".
+
+        Returns:
+            The zone, or None if Nova has no calendar, it can't be read (that is no match, and is
+            said, if it matters, when the arrival time is looked for), the words are no activity's
+            word, or no zone is named as the activity.
+        """
+        if self.calendar is None:
+            return None
+        try:
+            # Google's list is read, if it's old, before it's looked in, as _next_start does.
+            self.calendar.calendars()
+            activity = self.calendar.activity_words().get(_tidy(words))
+        except READ_FAILURES as e:
+            logger.warning(f"Couldn't read the calendar's words for a place: {type(e).__name__}")
+            return None
+        if not activity:
+            return None
+        for zone in zones:
+            if _zone_key(zone["name"]) == _zone_key(activity):
+                return zone
+        return None
 
     def _origin(self, satellite: Optional[str]) -> str:
         """Where the journey starts: home, or the user - their person's id - for a satellite which travels."""
