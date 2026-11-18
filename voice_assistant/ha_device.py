@@ -24,6 +24,7 @@ import queue
 import re
 import socket
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Dict, List, Optional, Tuple
@@ -55,6 +56,16 @@ VOLUMES = (("general", "volume", "Volume", "mdi:volume-high"),
 # How often what Nova's doing is looked at, in seconds. Only what's changed is sent.
 PUBLISH_EVERY = 1
 
+# How often what Nova's playing is looked at, in seconds, on a thread of its own - never
+# the state thread's, which must stay quick - and how often the playlists on offer are
+# read again. The cover is fetched only when the song's cover changes.
+MUSIC_EVERY = 5
+PLAYLISTS_EVERY = 600
+
+# What the cover's content type is until a picture says otherwise - what the covers are,
+# as in music_device.DEFAULT_TYPE.
+DEFAULT_COVER_TYPE = "image/jpeg"
+
 # Everything's sent until the broker says it has it, rather than once and hoped for -
 # a Stop pressed in Home Assistant mustn't go missing.
 QOS = 1
@@ -73,6 +84,11 @@ class DeviceControls:
     on a thread of their own. A slow one holds up only the commands behind it, never
     the connection - but it does hold them up, so a speak which waited until the words
     had been said would keep a Stop pressed meanwhile waiting too.
+
+    The music ones - now_playing, cover and playlists - are never called by the state
+    thread, since the player may take its time: they're read on a thread of their own,
+    every MUSIC_EVERY seconds, and the playlists every PLAYLISTS_EVERY. Each is None
+    for a Nova with no player, and the music is then left out of Home Assistant.
     """
     # What Nova's doing: one of STATUSES.
     status: Callable[[], str]
@@ -90,6 +106,19 @@ class DeviceControls:
     restart: Callable[[], None]
     # Says a message out loud, once any conversation has finished.
     speak: Callable[[str], None]
+    # The music, which is only shown when now_playing is set: what the player's playing
+    # now, as its now_playing() has it - track, artist, album, playing, position, duration
+    # and cover - or None when nothing is.
+    now_playing: Optional[Callable[[], Optional[Dict]]] = None
+    # The picture for the cover id now_playing gave, with its content type - or None.
+    cover: Optional[Callable[[], Optional[Tuple[bytes, str]]]] = None
+    # The names of the playlists which can be played - a network call, so it's only made
+    # on the music thread, never as the device is announced.
+    playlists: Optional[Callable[[], List[str]]] = None
+    # "play_pause", "next" or "previous", for the player.
+    playback: Optional[Callable[[str], None]] = None
+    # Plays the playlist of that name.
+    play_playlist: Optional[Callable[[str], None]] = None
 
 
 def _slug(text: str) -> str:
@@ -161,6 +190,11 @@ class NovaDevice:
         self._backend = f"{base}/backend"
         self._muted = f"{base}/muted"
         self._stop, self._restart, self._speak = f"{base}/stop", f"{base}/restart", f"{base}/speak"
+        self._playing = f"{base}/playing"
+        self._playing_attributes = f"{base}/playing/attributes"
+        self._playing_cover = f"{base}/playing/cover"
+        self._playback = {action: f"{base}/playing/{action}" for action in ("play_pause", "next", "previous")}
+        self._playlist_set = f"{base}/playlist/set"
         self._discovery_topic = f"{DISCOVERY_PREFIX}/device/{self.node_id}/config"
 
         self._client = None
@@ -176,6 +210,20 @@ class NovaDevice:
         # logged once rather than at every try.
         self._complained = False
         self._state_failing = False
+        # The music is read on its own thread, one read at a time. The playlists are those
+        # it last read, which is all the announcement ever uses - announcing runs on
+        # paho's thread, and reading them is a network call.
+        self._music_lock = threading.Lock()
+        self._playlists: List[str] = []
+        # The cover is fetched once for each cover id, and kept until the id changes. Its
+        # content type is the latest picture's, and the announcement says what it was
+        # announced with, so a change is noticed.
+        self._cover_id = None
+        self._cover = b""
+        self._cover_type = DEFAULT_COVER_TYPE
+        self._announced_cover_type = DEFAULT_COVER_TYPE
+        self._music_failing = False
+        self._playlists_failing = False
 
     @classmethod
     def from_config(cls, config, password: Optional[str], controls: DeviceControls,
@@ -237,6 +285,8 @@ class NovaDevice:
                       "command_topic": f"{self._muted}/set", "payload_on": ON, "payload_off": OFF,
                       "icon": "mdi:microphone-off"},
         })
+        if self._has_music():
+            controls.update(self._music_discovery())
         for control, settings in controls.items():
             settings["unique_id"] = f"{self.node_id}_{control}"
             settings["qos"] = QOS
@@ -244,6 +294,42 @@ class NovaDevice:
                 "o": {"name": "Nova"},
                 "availability_topic": self._availability,
                 "cmps": controls}
+
+    def _has_music(self) -> bool:
+        """Whether Nova has a player to show - a device with no controls, like the brain's, has none."""
+        return self.controls is not None and self.controls.now_playing is not None
+
+    def _music_discovery(self) -> Dict[str, Dict]:
+        """
+        The music's controls: what's playing, its cover, the three buttons and, if any
+        playlists were read, the playlist to play. Each has its entity id set here, from the
+        device's name, since the Nova view is built on them - and none is "nova_music_...",
+        which is the Music device's.
+        """
+        slug = _slug(self.name)
+        controls = {
+            "playing": {"p": "sensor", "name": "Playing", "state_topic": self._playing,
+                        "json_attributes_topic": self._playing_attributes, "device_class": "enum",
+                        "options": ["playing", "paused", "idle"], "icon": "mdi:music",
+                        "default_entity_id": f"sensor.{slug}_playing"},
+            "cover": {"p": "image", "name": "Cover", "image_topic": self._playing_cover,
+                      "content_type": self._cover_type, "default_entity_id": f"image.{slug}_playing_cover"},
+            "play_pause": {"p": "button", "name": "Play or pause", "command_topic": self._playback["play_pause"],
+                           "icon": "mdi:play-pause", "default_entity_id": f"button.{slug}_play_pause"},
+            "next_track": {"p": "button", "name": "Next track", "command_topic": self._playback["next"],
+                           "icon": "mdi:skip-next", "default_entity_id": f"button.{slug}_next_track"},
+            "previous_track": {"p": "button", "name": "Previous track",
+                               "command_topic": self._playback["previous"], "icon": "mdi:skip-previous",
+                               "default_entity_id": f"button.{slug}_previous_track"},
+        }
+        if self._playlists:
+            # Optimistic, with no state topic: which playlist was last chosen says nothing
+            # of what's playing, so it's a way to pick one and no more.
+            controls["playlist"] = {"p": "select", "name": "Playlist", "command_topic": self._playlist_set,
+                                    "options": list(self._playlists), "optimistic": True,
+                                    "icon": "mdi:playlist-music", "default_entity_id": f"select.{slug}_playlist"}
+        self._announced_cover_type = self._cover_type
+        return controls
 
     # Connecting
 
@@ -289,6 +375,8 @@ class NovaDevice:
         self._thread = threading.Thread(target=self._keep_publishing, name="ha-device", daemon=True)
         self._thread.start()
         threading.Thread(target=self._carry_out, name="ha-device-commands", daemon=True).start()
+        if self._has_music():
+            threading.Thread(target=self._keep_music, name="ha-device-music", daemon=True).start()
 
     def stop(self):
         """Says Nova's offline, and disconnects."""
@@ -359,9 +447,12 @@ class NovaDevice:
         commands for each control, and its saying it's back after a restart. A device
         with no commands of its own, like the brain's usage one, replaces this.
         """
-        return ([(f"{self._volume[category]}/set", QOS) for category, _, _, _ in VOLUMES] +
-                [(f"{self._muted}/set", QOS), (self._stop, QOS), (self._restart, QOS),
-                 (self._speak, QOS), (HA_STATUS, QOS)])
+        topics = ([(f"{self._volume[category]}/set", QOS) for category, _, _, _ in VOLUMES] +
+                  [(f"{self._muted}/set", QOS), (self._stop, QOS), (self._restart, QOS),
+                   (self._speak, QOS), (HA_STATUS, QOS)])
+        if self._has_music():
+            topics += [(topic, QOS) for topic in (*self._playback.values(), self._playlist_set)]
+        return topics
 
     def _announce(self):
         """Tells Home Assistant about Nova's device and its controls."""
@@ -422,6 +513,95 @@ class NovaDevice:
         while not self._stopping.wait(PUBLISH_EVERY):
             self.publish_state()
 
+    # What Nova's playing, to Home Assistant
+
+    def refresh_playlists(self):
+        """
+        Reads the playlists on offer again, and announces the device again if they've
+        changed - the music thread's job, at its start and every PLAYLISTS_EVERY seconds,
+        since reading them is a network call. Home Assistant is only ever announced the
+        list this last read.
+        """
+        if not self._has_music() or self.controls.playlists is None:
+            return
+        with self._music_lock:
+            try:
+                playlists = [str(name) for name in self.controls.playlists()]
+            except Exception as e:
+                if not self._playlists_failing:
+                    logger.error(f"Couldn't read the playlists for Home Assistant: {e}")
+                self._playlists_failing = True
+                return
+            self._playlists_failing = False
+            changed, self._playlists = playlists != self._playlists, playlists
+        if changed and self._connected:
+            self._announce()
+
+    def _send(self, topic: str, payload):
+        """Sends one topic, kept by the broker, unless it's what was last sent."""
+        client = self._client
+        if client is None:
+            return
+        with self._lock:
+            if self._published.get(topic) != payload:
+                client.publish(topic, payload, qos=QOS, retain=True)
+                self._published[topic] = payload
+
+    def publish_music(self):
+        """
+        Sends Home Assistant what Nova's playing, whatever's changed: whether it's playing,
+        paused or nothing, the track, artist, album and length, and its cover - fetched
+        once for each cover id rather than every time. The position isn't sent, since it
+        would change every time. Never called by the state thread.
+        """
+        if not self._has_music() or self._client is None or not self._connected:
+            return
+        with self._music_lock:
+            try:
+                playing = self.controls.now_playing()
+                if playing:
+                    state = "playing" if playing.get("playing") else "paused"
+                    attributes = {"track": playing.get("track"), "artist": playing.get("artist"),
+                                  "album": playing.get("album"), "duration": playing.get("duration")}
+                    self._read_cover(playing.get("cover"))
+                else:
+                    state, attributes = "idle", {}
+                    self._read_cover(None)
+            except Exception as e:
+                if not self._music_failing:
+                    logger.error(f"Couldn't tell Home Assistant what Nova's playing: {e}")
+                self._music_failing = True
+                return
+            self._music_failing = False
+            self._send(self._playing, state)
+            self._send(self._playing_attributes, json.dumps(attributes))
+            # Nothing is sent as an empty payload, so Home Assistant shows no picture
+            # rather than the last song's.
+            self._send(self._playing_cover, self._cover)
+        # The type is only known from the picture, which comes after the announcement.
+        if self._connected and self._cover_type != self._announced_cover_type:
+            self._announce()
+
+    def _read_cover(self, cover_id):
+        """Fetches the cover unless its id is the one already held, and keeps it with its type."""
+        if cover_id == self._cover_id:
+            return
+        picture = self.controls.cover() if cover_id and self.controls.cover is not None else None
+        self._cover_id = cover_id
+        self._cover = picture[0] if picture else b""
+        if picture:
+            self._cover_type = picture[1] or DEFAULT_COVER_TYPE
+
+    def _keep_music(self):
+        """Keeps what Nova's playing and the playlists up to date, on a thread of their own, until stopped."""
+        self.refresh_playlists()
+        playlists_due = time.monotonic() + PLAYLISTS_EVERY
+        while not self._stopping.wait(MUSIC_EVERY):
+            if time.monotonic() >= playlists_due:
+                self.refresh_playlists()
+                playlists_due = time.monotonic() + PLAYLISTS_EVERY
+            self.publish_music()
+
     # Home Assistant's commands, to Nova
 
     def _on_message(self, client, userdata, message):
@@ -464,6 +644,18 @@ class NovaDevice:
             if payload in (ON, OFF):
                 logger.info(f"Microphone {'muted' if payload == ON else 'unmuted'} from Home Assistant")
                 self._queue("Microphone muted", self._set_muted, payload == ON)
+        elif self._has_music() and topic in self._playback.values():
+            # A button's payload is only Home Assistant's "PRESS", so it isn't looked at.
+            action = next(action for action, where in self._playback.items() if where == topic)
+            if self.controls.playback is not None:
+                logger.info(f"Music '{action}', from Home Assistant")
+                self._queue("Music", self.controls.playback, action)
+        elif self._has_music() and topic == self._playlist_set:
+            # Only a playlist which was offered: the select sends whatever it's given, and
+            # anything on the broker could make that up.
+            if payload in self._playlists and self.controls.play_playlist is not None:
+                logger.info("Playing a playlist, from Home Assistant")
+                self._queue("Playlist", self.controls.play_playlist, payload)
         else:
             for category, _, name, _ in VOLUMES:
                 if topic == f"{self._volume[category]}/set":

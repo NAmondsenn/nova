@@ -429,3 +429,243 @@ def test_nothing_said_is_published(started, nova):
         f"{BASE}/backend", f"{BASE}/muted"}
     for said in ("tablets", "Washing"):
         assert not any(said in topic or said in payload for topic, payload, _, _ in client.published)
+
+
+# Nova's music
+
+SONG = {"track": "Fashion Killa", "artist": "A$AP Rocky", "album": "Long.Live.A$AP", "playing": True,
+        "position": 12.0, "duration": 237, "cover": "al-1"}
+
+
+class FakePlayer:
+    """Stands in for the session's music player, keeping what it was asked and what it was read for."""
+
+    def __init__(self):
+        self.song = dict(SONG)
+        self.names = ["Chill", "Gym"]
+        self.picture = (b"jpeg-bytes", "image/jpeg")
+        self.reads = []
+        self.calls = []
+
+    def controls(self, nova):
+        controls = nova.controls()
+        controls.now_playing = self._now_playing
+        controls.cover = self._cover
+        controls.playlists = self._playlists
+        controls.playback = lambda action: self.calls.append(("playback", action))
+        controls.play_playlist = lambda name: self.calls.append(("play_playlist", name))
+        return controls
+
+    def _playlists(self):
+        self.reads.append("playlists")
+        return list(self.names)
+
+    def _now_playing(self):
+        self.reads.append("now_playing")
+        return self.song
+
+    def _cover(self):
+        self.reads.append("cover")
+        return self.picture
+
+
+@pytest.fixture
+def player():
+    return FakePlayer()
+
+
+@pytest.fixture
+def with_player(nova, player):
+    """A NovaDevice for nova with a player, started, with the client it made - not yet connected."""
+    made = []
+
+    def factory(client_id):
+        made.append(FakeClient(client_id))
+        return made[-1]
+
+    device = NovaDevice("broker.local", 1883, "nova", "secret", player.controls(nova), node_id="nova_test",
+                        client_factory=factory)
+    device.start()
+    # The music thread reads the playlists as it starts, so that's waited for - and any read
+    # still going on is waited out - rather than the tests racing it.
+    assert _eventually(lambda: "playlists" in player.reads)
+    device.refresh_playlists()
+    yield device, made[0]
+    device.stop()
+
+
+def _components(device):
+    return device.discovery()["cmps"]
+
+
+MUSIC_CONTROLS = {"playing": "sensor.nova_playing", "cover": "image.nova_playing_cover",
+                  "play_pause": "button.nova_play_pause", "next_track": "button.nova_next_track",
+                  "previous_track": "button.nova_previous_track", "playlist": "select.nova_playlist"}
+
+
+def test_music_is_announced_only_with_a_player(started, with_player):
+    plain, _ = started
+    assert not set(MUSIC_CONTROLS) & set(_components(plain))
+
+    device, _ = with_player
+    controls = _components(device)
+    assert {control: controls[control]["default_entity_id"] for control in MUSIC_CONTROLS} == MUSIC_CONTROLS
+    assert controls["cover"]["image_topic"] == f"{BASE}/playing/cover"
+    assert controls["cover"]["content_type"] == "image/jpeg"
+    assert controls["playing"]["state_topic"] == f"{BASE}/playing"
+    assert controls["playing"]["json_attributes_topic"] == f"{BASE}/playing/attributes"
+    assert controls["next_track"]["command_topic"] == f"{BASE}/playing/next"
+    assert controls["playlist"]["command_topic"] == f"{BASE}/playlist/set"
+    assert len({control["unique_id"] for control in controls.values()}) == len(controls)
+
+
+def test_no_playlist_select_without_playlists(with_player, player):
+    device, _ = with_player
+    # Announcing never reads them: only what the music thread last read is used, so a
+    # changed list isn't in it until it's read again.
+    assert _components(device)["playlist"]["options"] == ["Chill", "Gym"]
+    player.names = []
+    device.refresh_playlists()
+    assert "playlist" not in _components(device)
+    player.names = ["Chill", "Gym"]
+    device.refresh_playlists()
+    assert _components(device)["playlist"]["options"] == ["Chill", "Gym"]
+
+
+def test_announcing_never_reads_the_playlists(nova):
+    called = []
+    controls = nova.controls()
+    controls.now_playing = lambda: None
+    controls.playlists = lambda: called.append("playlists") or ["Chill"]
+    device = NovaDevice("broker.local", 1883, "nova", "secret", controls, node_id="nova_test",
+                        client_factory=FakeClient)
+    device.discovery()
+    assert called == []
+
+
+def test_a_changed_list_of_playlists_is_announced_again(with_player, player):
+    device, client = with_player
+    client.connects()
+    device.refresh_playlists()
+    assert len(client.sent(DISCOVERY)) == 1
+    player.names = ["Chill"]
+    device.refresh_playlists()
+    assert len(client.sent(DISCOVERY)) == 2
+    assert json.loads(client.sent(DISCOVERY)[-1][1])["cmps"]["playlist"]["options"] == ["Chill"]
+
+
+def test_what_is_playing_is_sent_on_change_only(with_player):
+    device, client = with_player
+    client.connects()
+    device.publish_music()
+    device.publish_music()
+    assert client.sent(f"{BASE}/playing") == [(f"{BASE}/playing", "playing", 1, True)]
+    [(_, attributes, _, retained)] = client.sent(f"{BASE}/playing/attributes")
+    assert retained and json.loads(attributes) == {
+        "track": "Fashion Killa", "artist": "A$AP Rocky", "album": "Long.Live.A$AP", "duration": 237}
+
+    device.controls.now_playing = lambda: {**SONG, "playing": False, "position": 99.0}
+    device.publish_music()
+    assert [payload for _, payload, _, _ in client.sent(f"{BASE}/playing")] == ["playing", "paused"]
+    assert len(client.sent(f"{BASE}/playing/attributes")) == 1
+
+
+def test_nothing_playing_is_idle(with_player):
+    device, client = with_player
+    device.controls.now_playing = lambda: None
+    client.connects()
+    device.publish_music()
+    assert client.latest()[f"{BASE}/playing"] == "idle"
+    assert json.loads(client.latest()[f"{BASE}/playing/attributes"]) == {}
+    assert client.latest()[f"{BASE}/playing/cover"] == b""
+
+
+def test_the_cover_is_fetched_once_per_song(with_player, player):
+    device, client = with_player
+    client.connects()
+    for _ in range(3):
+        device.publish_music()
+    assert player.reads.count("cover") == 1
+    assert client.sent(f"{BASE}/playing/cover") == [(f"{BASE}/playing/cover", b"jpeg-bytes", 1, True)]
+
+    player.song = {**SONG, "cover": "al-2"}
+    player.picture = (b"png-bytes", "image/png")
+    announced = len(client.sent(DISCOVERY))
+    device.publish_music()
+    device.publish_music()
+    assert player.reads.count("cover") == 2
+    assert client.latest()[f"{BASE}/playing/cover"] == b"png-bytes"
+    # A new content type is announced with it.
+    assert len(client.sent(DISCOVERY)) == announced + 1
+    assert json.loads(client.sent(DISCOVERY)[-1][1])["cmps"]["cover"]["content_type"] == "image/png"
+
+    # A song with no picture leaves none shown.
+    player.song = {**SONG, "cover": None}
+    device.publish_music()
+    assert client.latest()[f"{BASE}/playing/cover"] == b""
+    assert player.reads.count("cover") == 2
+
+
+def test_the_state_thread_never_reads_the_music(nova):
+    def broken():
+        raise AssertionError("the state thread read the music")
+
+    controls = nova.controls()
+    controls.now_playing, controls.cover, controls.playlists = broken, broken, broken
+    made = []
+    device = NovaDevice("broker.local", 1883, "nova", "secret", controls, node_id="nova_test",
+                        client_factory=lambda client_id: made.append(FakeClient(client_id)) or made[-1])
+    device.start()
+    try:
+        made[0].connects()
+        device.publish_state()
+        assert made[0].sent(f"{BASE}/status")
+        assert not made[0].sent(f"{BASE}/playing")
+    finally:
+        device.stop()
+
+
+def test_a_failing_player_is_logged_once(with_player, player, caplog):
+    device, client = with_player
+    client.connects()
+
+    def broken():
+        raise RuntimeError("Spotify's gone")
+
+    device.controls.now_playing = broken
+    with caplog.at_level(logging.ERROR, logger=ha_device.__name__):
+        device.publish_music()
+        device.publish_music()
+    assert len(_complaints(caplog)) == 1
+
+
+def test_music_buttons_reach_the_player(with_player, player):
+    device, client = with_player
+    client.connects()
+    assert {f"{BASE}/playing/play_pause", f"{BASE}/playing/next", f"{BASE}/playing/previous",
+            f"{BASE}/playlist/set"} <= {topic for topic, _ in client.subscribed}
+    client.delivers(f"{BASE}/playing/play_pause", "PRESS")
+    client.delivers(f"{BASE}/playing/next", "PRESS")
+    client.delivers(f"{BASE}/playing/previous", "PRESS")
+    assert _eventually(lambda: len(player.calls) == 3)
+    assert player.calls == [("playback", "play_pause"), ("playback", "next"), ("playback", "previous")]
+
+
+def test_only_an_offered_playlist_is_played(with_player, player, nova):
+    device, client = with_player
+    client.connects()
+    device.refresh_playlists()
+    client.delivers(f"{BASE}/playlist/set", "Gone")
+    client.delivers(f"{BASE}/playlist/set", "Gym")
+    # A Stop queued after is carried out after them, so both have been looked at by then.
+    client.delivers(f"{BASE}/stop", "PRESS")
+    assert _eventually(lambda: ("stop",) in nova.calls)
+    assert player.calls == [("play_playlist", "Gym")]
+
+
+def test_music_commands_kept_by_the_broker_are_ignored(with_player, player):
+    device, client = with_player
+    client.connects()
+    client.delivers(f"{BASE}/playing/next", "PRESS", retain=True)
+    time.sleep(0.1)
+    assert player.calls == []
