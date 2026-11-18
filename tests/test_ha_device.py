@@ -519,17 +519,25 @@ def test_music_is_announced_only_with_a_player(started, with_player):
     assert len({control["unique_id"] for control in controls.values()}) == len(controls)
 
 
-def test_no_playlist_select_without_playlists(with_player, player):
-    device, _ = with_player
-    # Announcing never reads them: only what the music thread last read is used, so a
-    # changed list isn't in it until it's read again.
-    assert _components(device)["playlist"]["options"] == ["Chill", "Gym"]
+def test_no_playlist_select_without_playlists(nova, player):
     player.names = []
+    device = NovaDevice("broker.local", 1883, "nova", "secret", player.controls(nova), node_id="nova_test",
+                        client_factory=FakeClient)
     device.refresh_playlists()
     assert "playlist" not in _components(device)
     player.names = ["Chill", "Gym"]
     device.refresh_playlists()
     assert _components(device)["playlist"]["options"] == ["Chill", "Gym"]
+
+
+def test_announcing_uses_the_playlists_last_read(with_player, player):
+    device, _ = with_player
+    # Announcing never reads them: only what the music thread last read is used, so a
+    # changed list isn't in it until it's read again.
+    player.names = ["Gym"]
+    assert _components(device)["playlist"]["options"] == ["Chill", "Gym"]
+    device.refresh_playlists()
+    assert _components(device)["playlist"]["options"] == ["Gym"]
 
 
 def test_announcing_never_reads_the_playlists(nova):
@@ -669,3 +677,55 @@ def test_music_commands_kept_by_the_broker_are_ignored(with_player, player):
     client.delivers(f"{BASE}/playing/next", "PRESS", retain=True)
     time.sleep(0.1)
     assert player.calls == []
+
+
+def test_playlists_read_after_the_announcement_are_announced_again(nova, player, monkeypatch):
+    # The broker answers before the music thread's first read: the announcement has no
+    # playlists, and the read finishes before the device counts as connected, so nothing
+    # announces it then. The music loop does, on its next round.
+    monkeypatch.setattr(ha_device, "MUSIC_EVERY", 0.02)
+    made = []
+    controls = player.controls(nova)
+    release = threading.Event()
+    read = controls.playlists
+    controls.playlists = lambda: release.wait(2) and read()
+    device = NovaDevice("broker.local", 1883, "nova", "secret", controls, node_id="nova_test",
+                        client_factory=lambda client_id: made.append(FakeClient(client_id)) or made[-1])
+    device.start()
+    try:
+        client = made[0]
+        device._announce()
+        assert "playlist" not in json.loads(client.sent(DISCOVERY)[-1][1])["cmps"]
+        release.set()
+        assert _eventually(lambda: device._playlists == ["Chill", "Gym"])
+        assert len(client.sent(DISCOVERY)) == 1
+        device._connected = True
+        assert _eventually(lambda: len(client.sent(DISCOVERY)) == 2)
+        assert json.loads(client.sent(DISCOVERY)[-1][1])["cmps"]["playlist"]["options"] == ["Chill", "Gym"]
+        time.sleep(0.1)
+        assert len(client.sent(DISCOVERY)) == 2
+    finally:
+        device.stop()
+
+
+def test_a_cover_which_could_not_be_had_is_asked_for_again(with_player, player):
+    device, client = with_player
+    client.connects()
+    player.picture = None
+    device.publish_music()
+    assert client.latest()[f"{BASE}/playing/cover"] == b""
+    player.picture = (b"jpeg-bytes", "image/jpeg")
+    device.publish_music()
+    device.publish_music()
+    assert player.reads.count("cover") == 2
+    assert client.latest()[f"{BASE}/playing/cover"] == b"jpeg-bytes"
+
+
+def test_playlists_which_could_not_be_read_keep_the_old_ones(with_player, player):
+    device, client = with_player
+    player.names = []
+    device.refresh_playlists()
+    assert _components(device)["playlist"]["options"] == ["Chill", "Gym"]
+    player.names = ["Gym"]
+    device.refresh_playlists()
+    assert _components(device)["playlist"]["options"] == ["Gym"]

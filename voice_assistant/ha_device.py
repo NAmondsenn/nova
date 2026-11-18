@@ -27,7 +27,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from voice_assistant.logging_setup import TRANSCRIPT
 
@@ -205,7 +205,7 @@ class NovaDevice:
         self._commands = queue.Queue()
         # What each state topic was last sent, so only what's changed is sent again.
         self._lock = threading.Lock()
-        self._published: Dict[str, str] = {}
+        self._published: Dict[str, Union[str, bytes]] = {}
         # Whether a problem has been logged since things last worked, so an outage is
         # logged once rather than at every try.
         self._complained = False
@@ -218,10 +218,13 @@ class NovaDevice:
         # The cover is fetched once for each cover id, and kept until the id changes. Its
         # content type is the latest picture's, and the announcement says what it was
         # announced with, so a change is noticed.
-        self._cover_id = None
+        self._cover_id: Optional[str] = None
         self._cover = b""
         self._cover_type = DEFAULT_COVER_TYPE
         self._announced_cover_type = DEFAULT_COVER_TYPE
+        # The playlists the announcement had, which may be the list before the music thread
+        # first read them if the broker answered first - so it's announced again once read.
+        self._announced_playlists: List[str] = []
         self._music_failing = False
         self._playlists_failing = False
 
@@ -307,13 +310,16 @@ class NovaDevice:
         which is the Music device's.
         """
         slug = _slug(self.name)
+        # Each read once, so what's announced is what's recorded as announced even if the
+        # music thread changes them meanwhile.
+        cover_type, playlists = self._cover_type, list(self._playlists)
         controls = {
             "playing": {"p": "sensor", "name": "Playing", "state_topic": self._playing,
                         "json_attributes_topic": self._playing_attributes, "device_class": "enum",
                         "options": ["playing", "paused", "idle"], "icon": "mdi:music",
                         "default_entity_id": f"sensor.{slug}_playing"},
             "cover": {"p": "image", "name": "Cover", "image_topic": self._playing_cover,
-                      "content_type": self._cover_type, "default_entity_id": f"image.{slug}_playing_cover"},
+                      "content_type": cover_type, "default_entity_id": f"image.{slug}_playing_cover"},
             "play_pause": {"p": "button", "name": "Play or pause", "command_topic": self._playback["play_pause"],
                            "icon": "mdi:play-pause", "default_entity_id": f"button.{slug}_play_pause"},
             "next_track": {"p": "button", "name": "Next track", "command_topic": self._playback["next"],
@@ -322,13 +328,14 @@ class NovaDevice:
                                "command_topic": self._playback["previous"], "icon": "mdi:skip-previous",
                                "default_entity_id": f"button.{slug}_previous_track"},
         }
-        if self._playlists:
+        if playlists:
             # Optimistic, with no state topic: which playlist was last chosen says nothing
             # of what's playing, so it's a way to pick one and no more.
             controls["playlist"] = {"p": "select", "name": "Playlist", "command_topic": self._playlist_set,
-                                    "options": list(self._playlists), "optimistic": True,
+                                    "options": playlists, "optimistic": True,
                                     "icon": "mdi:playlist-music", "default_entity_id": f"select.{slug}_playlist"}
-        self._announced_cover_type = self._cover_type
+        self._announced_cover_type = cover_type
+        self._announced_playlists = playlists
         return controls
 
     # Connecting
@@ -533,8 +540,16 @@ class NovaDevice:
                 self._playlists_failing = True
                 return
             self._playlists_failing = False
-            changed, self._playlists = playlists != self._playlists, playlists
-        if changed and self._connected:
+            # An empty list after a full one is what the player gives when it couldn't be
+            # asked, so the old one is kept until a read which has some.
+            if playlists or not self._playlists:
+                self._playlists = playlists
+        self._announce_if_stale()
+
+    def _announce_if_stale(self):
+        """Announces the device again if the playlists or the cover's type aren't what it was last announced with."""
+        if self._connected and (self._playlists != self._announced_playlists
+                                or self._cover_type != self._announced_cover_type):
             self._announce()
 
     def _send(self, topic: str, payload):
@@ -579,16 +594,17 @@ class NovaDevice:
             # rather than the last song's.
             self._send(self._playing_cover, self._cover)
         # The type is only known from the picture, which comes after the announcement.
-        if self._connected and self._cover_type != self._announced_cover_type:
-            self._announce()
+        self._announce_if_stale()
 
     def _read_cover(self, cover_id):
         """Fetches the cover unless its id is the one already held, and keeps it with its type."""
         if cover_id == self._cover_id:
             return
         picture = self.controls.cover() if cover_id and self.controls.cover is not None else None
-        self._cover_id = cover_id
         self._cover = picture[0] if picture else b""
+        # A picture which couldn't be had - the player gives none when it couldn't be asked - isn't
+        # taken as done, so the next round asks again rather than the song going without one.
+        self._cover_id = cover_id if picture or not cover_id else None
         if picture:
             self._cover_type = picture[1] or DEFAULT_COVER_TYPE
 
@@ -601,6 +617,9 @@ class NovaDevice:
                 self.refresh_playlists()
                 playlists_due = time.monotonic() + PLAYLISTS_EVERY
             self.publish_music()
+            # Also when publishing failed or there was nothing to send: the playlists may
+            # have been read after the announcement went out with the old ones.
+            self._announce_if_stale()
 
     # Home Assistant's commands, to Nova
 
