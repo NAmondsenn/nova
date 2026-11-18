@@ -1210,7 +1210,12 @@ class Session:
             return True
 
     def _device_controls(self) -> DeviceControls:
-        """What Home Assistant sees and does of the satellite - see ha_device.py."""
+        """
+        What Home Assistant sees and does of the satellite - see ha_device.py. The music
+        is only there with a player: without one, Home Assistant is given no player to
+        show, and none of its controls.
+        """
+        player = self.music_player
         return DeviceControls(
             status=lambda: self.activity,
             volumes=lambda: volume_levels(self.volume, self.music_player),
@@ -1223,7 +1228,53 @@ class Session:
             set_muted=self.set_muted,
             stop=self.stop_what_rings_and_speaks,
             restart=self.satellite.restart,
-            speak=self._speak_from_home_assistant)
+            speak=self._speak_from_home_assistant,
+            # Read by the device on a thread of its own, never the one that publishes the
+            # state every second, as the player may be asking Navidrome or Spotify.
+            now_playing=(lambda: self.music_player.now_playing()) if player else None,
+            cover=(lambda: self.music_player.cover()) if player else None,
+            playlists=(lambda: self.music_player.playlists()) if player else None,
+            playback=self._playback_from_home_assistant if player else None,
+            play_playlist=self._playlist_from_home_assistant if player else None)
+
+    def _playback_from_home_assistant(self, action):
+        """
+        Plays, pauses, skips or goes back for Home Assistant's buttons, through the
+        actions, as asking out loud does - so that a pause from Home Assistant isn't
+        undone once Nova finishes talking, as with the settings page's play(). What's
+        playing isn't logged, as what's said isn't unless the user wants it.
+
+        Args:
+            action: "play_pause" - which pauses what's playing, and plays, as "play some
+                music" does, when it's paused or nothing is - "next" or "previous".
+        """
+        if action == "play_pause":
+            logger.info("Play/pause from Home Assistant")
+            playing = self.music_player.now_playing()
+            if playing and playing.get("playing"):
+                self.actions.control_playback("pause")
+            else:
+                # Without the offer to download anything: Home Assistant can't hear a yes.
+                self.actions.play_without_offer(None)
+        elif action == "next":
+            logger.info("Next from Home Assistant")
+            self.actions.control_playback("skip")
+        elif action == "previous":
+            logger.info("Previous from Home Assistant")
+            self.actions.control_playback("previous")
+        else:
+            logger.warning(f"Home Assistant asked the music to do something unknown: {action!r}")
+
+    def _playlist_from_home_assistant(self, name):
+        """
+        Plays one of the user's playlists for Home Assistant's playlist choice, through
+        the actions, as saying its name does. Which playlist isn't logged.
+
+        Args:
+            name: The playlist's name, as the player listed it.
+        """
+        logger.info("Playlist from Home Assistant")
+        self.actions.play_playlist(name)
 
     def stop_what_rings_and_speaks(self):
         """

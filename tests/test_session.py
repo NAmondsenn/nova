@@ -1337,6 +1337,120 @@ def test_home_assistants_stop_is_the_same_code(make_session):
     assert session._device_controls().stop == session.stop_what_rings_and_speaks
 
 
+class StubPlayer:
+    """Stands in for a music player: says what it is playing, and has the one cover and the playlists given."""
+
+    def __init__(self, playing=None):
+        self.playing = playing
+        self.closed = False
+
+    def now_playing(self):
+        return self.playing
+
+    def cover(self):
+        return b"jpeg", "image/jpeg"
+
+    def playlists(self):
+        return ["Gym", "Evening"]
+
+    def close(self):
+        self.closed = True
+
+
+class RecordingActions:
+    """Stands in for the session's actions, keeping what Home Assistant had them do."""
+
+    def __init__(self):
+        self.calls = []
+
+    def control_playback(self, action=None):
+        self.calls.append(("control_playback", action))
+        return {"success": True, "message": "Okay."}
+
+    def play_without_offer(self, query=None, search_type=None):
+        self.calls.append(("play_without_offer", query))
+        return {"success": True, "message": "Playing."}
+
+    def play_playlist(self, name=""):
+        self.calls.append(("play_playlist", name))
+        return {"success": True, "message": "Playing."}
+
+
+@pytest.fixture
+def with_music(brain, monkeypatch, make_session):
+    """Makes a session with a stub player saying what it is playing, and actions that keep what they were asked."""
+    def make(playing=None):
+        player = StubPlayer(playing)
+        monkeypatch.setattr(session_module, "make_player", lambda config, speaker, volume, spotify_speaker=None: player)
+        session = make_session()
+        session.actions = RecordingActions()
+        return session, player
+
+    return make
+
+
+def test_without_a_player_the_device_has_no_music(make_session):
+    controls = make_session()._device_controls()
+    assert controls.now_playing is None and controls.cover is None and controls.playlists is None
+    assert controls.playback is None and controls.play_playlist is None
+
+
+def test_with_a_player_the_device_reads_the_music_from_it(with_music):
+    session, player = with_music({"playing": True, "title": "Song", "artist": "Band"})
+    controls = session._device_controls()
+    assert controls.now_playing() == {"playing": True, "title": "Song", "artist": "Band"}
+    assert controls.cover() == (b"jpeg", "image/jpeg")
+    assert controls.playlists() == ["Gym", "Evening"]
+
+
+def test_play_pause_pauses_what_plays_and_plays_what_does_not(with_music):
+    session, player = with_music({"playing": True})
+    controls = session._device_controls()
+    controls.playback("play_pause")
+    assert session.actions.calls == [("control_playback", "pause")]
+
+    # Paused, or nothing playing at all, it plays - as "play some music" does.
+    for playing in ({"playing": False}, None):
+        player.playing = playing
+        session.actions.calls.clear()
+        controls.playback("play_pause")
+        assert session.actions.calls == [("play_without_offer", None)]
+
+
+def test_next_and_previous_go_through_the_spoken_actions(with_music):
+    session, _ = with_music({"playing": True})
+    controls = session._device_controls()
+    controls.playback("next")
+    controls.playback("previous")
+    assert session.actions.calls == [("control_playback", "skip"), ("control_playback", "previous")]
+
+
+def test_something_else_from_home_assistant_does_nothing(with_music):
+    session, _ = with_music({"playing": True})
+    session._device_controls().playback("rewind")
+    assert session.actions.calls == []
+
+
+def test_a_playlist_from_home_assistant_plays_through_the_actions(with_music):
+    session, _ = with_music()
+    session._device_controls().play_playlist("Gym")
+    assert session.actions.calls == [("play_playlist", "Gym")]
+
+
+def test_what_home_assistant_does_to_the_music_is_logged_without_what_plays(with_music, caplog):
+    session, _ = with_music({"playing": True, "title": "Secret Song"})
+    controls = session._device_controls()
+    with caplog.at_level(logging.INFO):
+        controls.playback("play_pause")
+        controls.playback("next")
+        controls.playback("previous")
+        controls.play_playlist("Private Gym")
+    logged = " ".join(record.getMessage() for record in caplog.records)
+    assert "Play/pause from Home Assistant" in logged
+    assert "Next from Home Assistant" in logged and "Previous from Home Assistant" in logged
+    assert "Secret Song" not in logged and "Private Gym" not in logged
+
+
 def test_stop_never_deletes_a_repeating_alarm(brain, make_session):
     # A daily alarm stopped as it rings has only this morning's silenced - it rings
     # again the next day, as saying "stop" leaves it.
