@@ -87,12 +87,16 @@
   // How long a problem is still news for, in seconds.
   const RECENT = 3600;
 
+  // A number which can be shown: not missing, not text, not NaN.
+  const isNumber = (value) => typeof value === "number" && Number.isFinite(value);
+
   // The newest problem (not a warning) in the last hour, or null. Looked for by its time,
-  // not its place in the list, so the order the page keeps them in doesn't matter.
+  // not its place in the list, so the order the page keeps them in doesn't matter. One with
+  // no time to say is passed over, rather than shown as "NaN:NaN".
   const recentProblem = (view, now) => {
     let newest = null;
     for (const problem of view.problems || []) {
-      if (problem.level !== "problem" || now - problem.at > RECENT) continue;
+      if (problem.level !== "problem" || !isNumber(problem.at) || now - problem.at > RECENT) continue;
       if (!newest || problem.at > newest.at) newest = problem;
     }
     return newest;
@@ -104,14 +108,18 @@
     status: (view, now) => {
       if (!view.loaded) return { text: "" };
       const bad = (view.tiles || []).find((tile) => !tile.good);
-      if (bad) return { text: bad.words };
+      // A tile which has gone wrong with nothing to say is named, so the line is never blank.
+      if (bad) return { text: bad.words || (bad.name ? `${bad.name} isn't right` : "") };
+      // Not knowing the tiles or the problems isn't the same as nothing being wrong.
+      if (view.tiles == null || view.problems == null) return { text: "" };
       const problem = recentProblem(view, now);
       return { text: problem ? `A problem at ${clockAt(problem.at)}` : "All well" };
     },
     music: (view) => {
       const music = view.music;
       if (!music) return { text: "" };
-      if (!music.playing || !music.title) return { text: "Nothing playing" };
+      if (!music.playing) return { text: "Nothing playing" };
+      if (!music.title) return { text: music.artist || "Playing" };
       return { text: music.artist ? `${music.title}, ${music.artist}` : music.title };
     },
     clock: (view) => {
@@ -130,8 +138,8 @@
       return { text: lights.on ? `${count(lights.on, "light", "lights")} on` : "All off" };
     },
     batteries: (view) => {
-      const batteries = view.batteries;
-      if (!batteries) return { text: "" };
+      if (!view.batteries) return { text: "" };
+      const batteries = view.batteries.filter((battery) => isNumber(battery.percent));
       if (!batteries.length) return { text: "None to show" };
       const lowest = batteries.reduce((least, battery) => (battery.percent < least.percent ? battery : least));
       return { text: `${lowest.name} at ${lowest.percent}%`, warn: Boolean(lowest.low) };
@@ -144,7 +152,7 @@
     journeys: (view) => {
       const journeys = view.journeys;
       if (!journeys) return { text: "" };
-      return { text: `${journeys.requests} of ${withCommas(journeys.cap)} asks used this month` };
+      return { text: `${withCommas(journeys.requests)} of ${withCommas(journeys.cap)} asks used this month` };
     },
     football: (view) => {
       const football = view.football;
@@ -208,7 +216,7 @@
     const away = (view.satellites || []).find((satellite) => satellite.isDefault && !satellite.connected);
     if (away) found.push({ section: "satellites", text: `The ${away.name} satellite isn't connected` });
     for (const battery of view.batteries || []) {
-      if (battery.low) found.push({ section: "batteries", text: `${battery.name} is at ${battery.percent}%` });
+      if (battery.low && isNumber(battery.percent)) found.push({ section: "batteries", text: `${battery.name} is at ${battery.percent}%` });
     }
     if (view.google === "out") found.push({ section: "calendars", text: "Sign in to Google" });
     if (view.spotify === "out") found.push({ section: "music", text: "Sign in to Spotify" });

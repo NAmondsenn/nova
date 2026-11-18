@@ -6,6 +6,10 @@
 // in another context aren't equal to this one's, and only small strings and numbers are
 // compared, never whole objects.
 
+// Set before anything makes a Date: a zone half an hour off UTC, so a line which said the
+// time in UTC, or without its minutes right, would show.
+process.env.TZ = "Asia/Kolkata";
+
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -19,15 +23,8 @@ const List = context.NovaList;
 
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-// A moment well away from any change of clock, in epoch seconds.
+// A moment well away from any change of clock, in epoch seconds: 19:38 in Kolkata, 14:08 in UTC.
 const NOW = 1795010880;
-
-// The time as the page says it: local, HH:MM in 24 hours. Worked out here the same way
-// as in the script, so the tests hold in any time zone.
-const clockAt = (seconds) => {
-  const date = new Date(seconds * 1000);
-  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-};
 
 // A view where everything is well, with whatever a test changes laid over it.
 const view = (changes = {}) => ({
@@ -122,9 +119,9 @@ test("the status line is the first tile which isn't good", () => {
 
 test("the status line names the newest problem of the last hour, in local time", () => {
   const problems = [{ at: NOW - 60, level: "warning" }, { at: NOW - 600, level: "problem" }, { at: NOW - 900, level: "problem" }];
-  assert.equal(said("status", { problems }), `A problem at ${clockAt(NOW - 600)}`);
-  assert.match(said("status", { problems }), /^A problem at \d\d:\d\d$/);
-  assert.equal(said("status", { problems: [{ at: NOW - 3600, level: "problem" }] }), `A problem at ${clockAt(NOW - 3600)}`);
+  assert.equal(said("status", { problems }), `A problem at 19:28`);
+  assert.equal(said("status", { problems }), "A problem at 19:28");
+  assert.equal(said("status", { problems: [{ at: NOW - 3600, level: "problem" }] }), `A problem at 18:38`);
 });
 
 test("the status line is All well with no problem in the hour, or only warnings", () => {
@@ -138,6 +135,38 @@ test("a tile which isn't good comes before a problem", () => {
   assert.equal(said("status", { tiles, problems: [{ at: NOW - 10, level: "problem" }] }), "Claude can't be reached");
 });
 
+test("the status line isn't All well when its tiles or problems couldn't be read", () => {
+  assert.equal(said("status", { tiles: null }), "");
+  assert.equal(said("status", { problems: null }), "");
+  // Nothing wrong in the tiles which were read still shows before the rest is known.
+  const tiles = [{ name: "Claude", good: false, words: "Claude can't be reached" }];
+  assert.equal(said("status", { tiles, problems: null }), "Claude can't be reached");
+  // Tiles read as none, with problems read as none, is well.
+  assert.equal(said("status", { tiles: [] }), "All well");
+});
+
+test("a tile which isn't good but has no words is named", () => {
+  assert.equal(said("status", { tiles: [{ name: "Claude", good: false }] }), "Claude isn't right");
+  assert.equal(said("status", { tiles: [{ name: "Claude", good: false, words: "" }] }), "Claude isn't right");
+  assert.equal(said("status", { tiles: [{ good: false }] }), "");
+  const lines = List.lines(view({ tiles: [{ good: false }] }), NOW);
+  assert.equal(typeof lines.status.text, "string");
+});
+
+test("the newest problem is the one named, wherever it is in the list", () => {
+  const problems = [{ at: NOW - 900, level: "problem" }, { at: NOW - 300, level: "problem" }, { at: NOW - 600, level: "problem" }];
+  assert.equal(said("status", { problems }), "A problem at 19:33");
+  assert.deepEqual(attention({ problems }), ["status: A problem at 19:33"]);
+});
+
+test("a problem with no usable time is passed over", () => {
+  const odd = [{ level: "problem" }, { at: "soon", level: "problem" }, { at: NaN, level: "problem" }, { at: null, level: "problem" }];
+  assert.equal(said("status", { problems: odd }), "All well");
+  assert.deepEqual(attention({ problems: odd }), []);
+  assert.equal(said("status", { problems: [...odd, { at: NOW - 600, level: "problem" }] }), "A problem at 19:28");
+  assert.deepEqual(attention({ problems: [...odd, { at: NOW - 600, level: "problem" }] }), ["status: A problem at 19:28"]);
+});
+
 test("the status line is empty until the state is loaded", () => {
   assert.equal(said("status", { loaded: false }), "");
 });
@@ -147,7 +176,15 @@ test("the music line is the song and artist while playing", () => {
   assert.equal(said("music", { music: { title: "Song", artist: "", playing: true } }), "Song");
   assert.equal(said("music", { music: { title: "Song", artist: null, playing: true } }), "Song");
   assert.equal(said("music", { music: { title: "Song", artist: "Artist", playing: false } }), "Nothing playing");
+  assert.equal(said("music", { music: { title: "", artist: "Artist", playing: false } }), "Nothing playing");
   assert.equal(said("music", { music: null }), "");
+});
+
+test("the music line doesn't claim nothing is playing when something is, with no title", () => {
+  assert.equal(said("music", { music: { title: "", artist: "Artist", playing: true } }), "Artist");
+  assert.equal(said("music", { music: { title: null, artist: "Artist", playing: true } }), "Artist");
+  assert.equal(said("music", { music: { title: "", artist: "", playing: true } }), "Playing");
+  assert.equal(said("music", { music: { playing: true } }), "Playing");
 });
 
 test("the clock line counts what is set, with its singular and plural", () => {
@@ -176,6 +213,15 @@ test("the batteries line is the lowest, a warning when it is low", () => {
   assert.equal(said("batteries", { batteries: null }), "");
 });
 
+test("a battery with no usable percent is passed over", () => {
+  const odd = [{ name: "Phone", low: true }, { name: "Watch", percent: "full", low: true }, { name: "Pen", percent: null, low: true }];
+  assert.equal(said("batteries", { batteries: odd }), "None to show");
+  assert.deepEqual(attention({ batteries: odd }), []);
+  const mixed = [...odd, { name: "Tablet", percent: 14, low: true }];
+  assert.deepEqual(line("batteries", { batteries: mixed }), { text: "Tablet at 14%", warn: true });
+  assert.deepEqual(attention({ batteries: mixed }), ["batteries: Tablet is at 14%"]);
+});
+
 test("the displays line counts those connected", () => {
   assert.equal(said("displays"), "1 connected");
   assert.equal(said("displays", { displays: { connected: 0, total: 2 } }), "0 connected");
@@ -186,7 +232,7 @@ test("the displays line counts those connected", () => {
 test("the journeys line puts commas in the cap whatever the machine's locale", () => {
   assert.equal(said("journeys"), "21 of 3,000 asks used this month");
   assert.equal(said("journeys", { journeys: { requests: 0, cap: 999 } }), "0 of 999 asks used this month");
-  assert.equal(said("journeys", { journeys: { requests: 1234, cap: 1000000 } }), "1234 of 1,000,000 asks used this month");
+  assert.equal(said("journeys", { journeys: { requests: 1234, cap: 1000000 } }), "1,234 of 1,000,000 asks used this month");
   assert.equal(said("journeys", { journeys: null }), "");
 });
 
@@ -293,7 +339,7 @@ test("a Google or Spotify which needs signing in to is Calendars' or Music's", (
 
 test("a problem in the last hour is Status's, and only a problem", () => {
   const recent = [{ at: NOW - 120, level: "warning" }, { at: NOW - 300, level: "problem" }];
-  assert.deepEqual(attention({ problems: recent }), [`status: A problem at ${clockAt(NOW - 300)}`]);
+  assert.deepEqual(attention({ problems: recent }), [`status: A problem at 19:33`]);
   assert.deepEqual(attention({ problems: [{ at: NOW - 7200, level: "problem" }] }), []);
   assert.deepEqual(attention({ problems: [{ at: NOW - 60, level: "warning" }] }), []);
 });
@@ -315,7 +361,7 @@ test("what needs attention comes in the contract's order", () => {
     "batteries: Tablet is at 14%",
     "calendars: Sign in to Google",
     "music: Sign in to Spotify",
-    `status: A problem at ${clockAt(NOW - 300)}`,
+    `status: A problem at 19:33`,
   ]);
 });
 
