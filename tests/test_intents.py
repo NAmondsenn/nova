@@ -754,3 +754,58 @@ def test_the_pc_is_worked_without_claude(text, action):
 def test_what_the_pc_rules_mustnt_catch_is_left_alone(text, tools):
     actions = _actions(text)
     assert (None if actions is None else [action.tool for action in actions]) == tools
+
+
+def _journey(place, mode, leave):
+    return [Action("journey", {"place": place, "mode": mode, "leave": leave})]
+
+
+@pytest.mark.parametrize("text, place", [
+    ("What time do I leave for work?", "work"),
+    ("What time should I leave to get to work?", "work"),
+    ("When do I need to leave for uni?", "uni"),
+    ("When should I set off for work?", "work"),
+    ("What time do I have to leave to get to my gran's?", "my gran's"),
+    ("Please, what time do I leave for work", "work"),
+])
+def test_when_to_leave_is_heard_without_claude(text, place):
+    # The place is as said, "my" and "the" kept: the journeys module finds the zone itself.
+    assert _actions(text) == _journey(place, "driving", True)
+    # Without the calendar or Home Assistant too: Claude can't be asked for these.
+    assert _actions(text, home=None, activities=None) == _journey(place, "driving", True)
+
+
+@pytest.mark.parametrize("text, place, mode", [
+    ("How long is the drive to work?", "work", "driving"),
+    ("How long to drive to the Metrocentre?", "the metrocentre", "driving"),
+    ("How long is the walk to uni?", "uni", "walking"),
+    ("How long to walk to uni?", "uni", "walking"),
+    ("How long does it take to walk to uni?", "uni", "walking"),
+    ("How long to cycle to work?", "work", "cycling"),
+    ("How long is the cycle to work?", "work", "cycling"),
+    ("How long to get to work by bus?", "work", "transit"),
+    ("How long to work on public transport?", "work", "transit"),
+    ("How long to get to work?", "work", "driving"),
+    ("How long does it take to get to my gran's?", "my gran's", "driving"),
+    ("Please, how long does it take to drive to work", "work", "driving"),
+])
+def test_how_long_a_journey_takes_is_heard_without_claude(text, place, mode):
+    assert _actions(text) == _journey(place, mode, False)
+    assert _actions(text, home=None, activities=None) == _journey(place, mode, False)
+
+
+@pytest.mark.parametrize("text", [
+    # The calendar's, for an activity.
+    "What time do I have work tomorrow?", "When do I finish uni today?",
+    # The timers', the alarm's and the clock's - the existing answer wins.
+    "How long is left on my timer?", "How long until my alarm?", "What time is it?",
+    # No place, or no journey: Claude's.
+    "When should I leave?", "How long to boil an egg?",
+    # A time said is left to Claude.
+    "What time do I leave to be at work for 9?", "When do I need to leave to get to work for 9?",
+])
+def test_what_the_journey_rules_mustnt_catch_is_left_alone(text):
+    # Whatever these gave before the journey rules - the calendar's answer or Claude - they
+    # still give, and none is a journey.
+    actions = _actions(text)
+    assert actions is None or all(action.tool != "journey" for action in actions)
