@@ -12,7 +12,7 @@ import logging
 import threading
 import time
 from datetime import datetime
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Sequence, Union
 
 from voice_assistant.clock_words import _time_of_day_candidates, format_duration, spoken_clock_time
 from voice_assistant.logging_setup import TRANSCRIPT
@@ -24,6 +24,25 @@ logger = logging.getLogger("voice_assistant.clock")
 ALARM_START_LEVEL = 0.3
 # What an alarm rings with, here and on a satellite ringing from its copy (see copy_for).
 ALARM_SOUND = "alarm_sound.wav"
+
+# Where something rings, as the Clock is asked about it: None for anywhere, a
+# satellite's name, or the names of every satellite in a room.
+Where = Union[None, str, List[str]]
+
+
+def heard_in(room: Sequence[Optional[str]]) -> Where:
+    """
+    What to ask the Clock about for what can be heard in a room - see Brain.room_of.
+
+    Args:
+        room: Every satellite in the room, the one spoken to first - or just it, or
+            just None for none in particular.
+
+    Returns:
+        Its one satellite by name, so one in a room of its own asks just as it did
+        before there were rooms - or all of them.
+    """
+    return list(room) if len(room) > 1 else room[0]
 
 
 class Ringing:
@@ -365,13 +384,14 @@ class Ringing:
         # Only the recent ones are worth keeping, so this can't grow forever.
         self._unacknowledged = (self._unacknowledged + items)[-10:]
 
-    def is_ringing(self, satellite: Optional[str] = None, unowned: bool = False) -> bool:
+    def is_ringing(self, satellite: Where = None, unowned: bool = False) -> bool:
         """
         Whether a timer or reminder is going off and waiting to be acknowledged.
 
         Args:
             satellite: Only what rings on this satellite - what can be heard where the
-                user is talking - or None for anywhere.
+                user is talking - or on any of a list of them, the user's room, or
+                None for anywhere.
             unowned: Whether what rings on no satellite counts as ringing on this one,
                 for the default, where it is heard.
         """
@@ -379,14 +399,24 @@ class Ringing:
             return any(self._rings_on(entry, satellite, unowned) for entry in self._ringing)
 
     @staticmethod
-    def _rings_on(entry: Dict, satellite: Optional[str], unowned: bool = False) -> bool:
+    def _rings_on(entry: Dict, satellite: Where, unowned: bool = False) -> bool:
         """
-        Whether a ringing entry rings on a satellite - any, for None. One set before
-        there were satellites rings on none, so isn't on any by name, but is heard on the
-        default - see Brain.session_for - so counts as on it with unowned.
+        Whether a ringing entry rings on a satellite, or on any of a list of them - any,
+        for None. One set before there were satellites rings on none, so isn't on any by
+        name, but is heard on the default - see Brain.session_for - so counts as on it
+        with unowned.
         """
         rings_on = entry["timer"]["satellite"]
-        return satellite is None or rings_on == satellite or (unowned and rings_on is None)
+        return Ringing._heard_on(rings_on, satellite) or (unowned and rings_on is None)
+
+    @staticmethod
+    def _heard_on(rings_on: Optional[str], satellite: Where) -> bool:
+        """Whether what rings on rings_on is heard on satellite - a name, a list of them, or None for anywhere."""
+        if satellite is None:
+            return True
+        if isinstance(satellite, list):
+            return rings_on in satellite
+        return rings_on == satellite
 
     @staticmethod
     def _is_insistent(entry: Dict) -> bool:
@@ -396,15 +426,15 @@ class Ringing:
         """
         return entry["kind"] == "alarm" or not entry["timer"]["label"]
 
-    def ringing_state(self, satellite: Optional[str] = None) -> Dict:
+    def ringing_state(self, satellite: Where = None) -> Dict:
         """
         What's going off right now, split by how it should be treated when the user
         starts talking. Meant to be read at the moment the wake word fires, since
         what matters is what the user could actually hear when they spoke.
 
         Args:
-            satellite: Only what rings on the satellite the user is talking to - all
-                they could hear - or None for anywhere.
+            satellite: Only what rings on the satellite the user is talking to, or on
+                any in their room - all they could hear - or None for anywhere.
 
         Returns:
             Dict with:
@@ -463,7 +493,7 @@ class Ringing:
             logger.info(f"Silenced {len(silenced)} timer(s)/alarm(s) - the user was talking")
         return bool(silenced)
 
-    def dismiss(self, satellite: Optional[str] = None, unowned: bool = False) -> Dict:
+    def dismiss(self, satellite: Where = None, unowned: bool = False) -> Dict:
         """
         Acknowledges anything currently going off, stopping it repeating.
 
@@ -473,9 +503,9 @@ class Ringing:
         by just dismissing it.
 
         Args:
-            satellite: Only what rings on the satellite the user is talking to - a
-                "stop" in the kitchen mustn't silence the bedroom's alarm, which
-                can't be heard there - or None for anywhere.
+            satellite: Only what rings on the satellite the user is talking to, or on
+                any in their room - a "stop" in the kitchen mustn't silence the
+                bedroom's alarm, which can't be heard there - or None for anywhere.
             unowned: Whether what rings on no satellite is dismissed too, for the
                 default, where it is heard - see is_ringing.
 
@@ -486,7 +516,7 @@ class Ringing:
             ringing = [entry for entry in self._ringing if self._rings_on(entry, satellite, unowned)]
             self._ringing = [entry for entry in self._ringing if not self._rings_on(entry, satellite, unowned)]
             # Dismissing also clears what was missed, since the user has now heard it.
-            heard = [timer for timer in self._unacknowledged if satellite is None or timer["satellite"] == satellite]
+            heard = [timer for timer in self._unacknowledged if self._heard_on(timer["satellite"], satellite)]
             missed = len(heard)
             self._unacknowledged = [timer for timer in self._unacknowledged
                                     if not any(timer is other for other in heard)]

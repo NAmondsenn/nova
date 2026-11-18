@@ -289,6 +289,24 @@ def test_whats_ringing_is_heard_and_dismissed_only_where_it_rings(make_clock):
     assert not clock.is_ringing()
 
 
+def test_dismissing_a_room_stops_ringing_on_any_of_it(make_clock):
+    # A timer set at the PC rings on the Pi, in the same room, so "stop" said at the
+    # PC has to reach it.
+    clock = make_clock()
+    clock.set_timer(60, satellite="bedroom")
+    clock.set_timer(120, satellite="kitchen")
+    clock._tick(time.time() + 121)
+    assert not clock.is_ringing(satellite=["pc"])
+    assert clock.is_ringing(satellite=["pc", "bedroom"])
+    assert [entry["timer"]["satellite"] for entry in
+            clock.ringing_state(["pc", "bedroom"])["insistent_entries"]] == ["bedroom"]
+
+    assert clock.dismiss(satellite=["pc", "bedroom"])["success"]
+    assert not clock.is_ringing("bedroom")
+    # Another room's is left ringing.
+    assert clock.is_ringing("kitchen")
+
+
 def test_what_rings_on_no_satellite_can_be_counted_as_the_defaults(make_clock):
     # It is heard on the default, but isn't "on" any satellite by name.
     clock = make_clock()

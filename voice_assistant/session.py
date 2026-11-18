@@ -26,6 +26,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from voice_assistant import paths, storage
 from voice_assistant.actions import ActionExecutor
+from voice_assistant.clock_ringing import heard_in
 from voice_assistant.conversation import NOT_CAUGHT, Conversation
 from voice_assistant.ha_device import DeviceControls, NovaDevice
 from voice_assistant.home_assistant import HomeAssistant
@@ -156,6 +157,9 @@ class Session:
         # recording - see listen_now. Forgotten once let go, or once its conversation is over.
         self._held: Optional[AudioFeed] = None
         self._held_lock = threading.Lock()
+        # The sessions of the user's room, this one first, whose music a conversation
+        # here holds - just this one outside a conversation. See _converse.
+        self._room_held: List["Session"] = [self]
         # The last volume beep the settings page played, stopped as the next starts,
         # so dragging a slider doesn't pile them up - see boop.
         self._last_boop = None
@@ -230,7 +234,8 @@ class Session:
                                       downloads=brain.downloads, football=brain.football,
                                       listening=brain.listening, wrapped=brain.wrapped_store, config=config,
                                       new_music=brain.new_music_playlist,
-                                      ring_on=brain.ring_on, room_of=brain.room_of)
+                                      ring_on=brain.ring_on, room_of=brain.room_of,
+                                      room_players=self._room_players)
 
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.
@@ -260,7 +265,8 @@ class Session:
                                          chime_enabled=lambda: self.chime_enabled,
                                          max_follow_ups=self.thresholds.get("max_follow_ups", 3),
                                          routines=brain.routines, satellite=satellite.name,
-                                         playing=self.playing_here, progress=self._moved)
+                                         playing=self.playing_here, progress=self._moved,
+                                         room=lambda: brain.room_of(satellite.name))
 
     @property
     def thresholds(self) -> Dict:
@@ -558,7 +564,13 @@ class Session:
         # The pause goes through Spotify's servers, so it runs alongside the
         # recording rather than holding it up - see MusicHold. Held across every
         # request, so it doesn't come back for a moment when a reply is talked over.
-        self.music.hold()
+        # Every satellite's in the room is held, as the room acts as one - and the same
+        # ones are let go of after, however the room changes meanwhile. Holds are
+        # counted, so one here and the satellite's own from its own wake both stand.
+        self._room_held = [self] + [session for session in self.brain.room_sessions(self.satellite.name)
+                                    if session is not self]
+        for session in self._room_held:
+            session.music.hold()
         try:
             # Not talked over, even if the satellite says it was - over a chime, say. Only
             # a wake word said over a reply is that - see _say.
@@ -579,7 +591,22 @@ class Session:
                     self._held = None
             self.activity = "idle"
             self._idle.set()
-            self.music.release()
+            room, self._room_held = self._room_held, [self]
+            for session in room:
+                session.music.release()
+
+    def _room_players(self) -> List:
+        """
+        The music players of the user's room - see ActionExecutor - once the pause of
+        each of the others has landed, as Conversation._run waits for this one's.
+
+        Returns:
+            Those of the sessions whose music this conversation holds, this one's first.
+        """
+        room = list(self._room_held)
+        for session in room[1:]:
+            session.music.wait()
+        return [session.music_player for session in room]
 
     def _answer(self, wake: Dict, talked_over: bool = False) -> Optional[Dict]:
         """
@@ -602,8 +629,8 @@ class Session:
         # What was audibly going off at the moment the wake word fired,
         # read before the interaction quietens anything, since what
         # matters is what the user could hear when they started talking -
-        # which is only ever what rings on this satellite.
-        ringing = self.brain.clock.ringing_state(satellite=self.satellite.name)
+        # which is only ever what rings on this satellite, or in its room.
+        ringing = self.brain.clock.ringing_state(satellite=heard_in(self.brain.room_of(self.satellite.name)))
 
         # Anything going off stops the moment the wake word is heard, rather than
         # playing on over the user - and into the microphone - until its sound

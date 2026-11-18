@@ -29,20 +29,29 @@ class FakeClock:
     looks_like_dismissal = staticmethod(Clock.looks_like_dismissal)
     answer_to_offer = staticmethod(Clock.answer_to_offer)
 
-    def __init__(self, ringing=False, timers=()):
+    def __init__(self, ringing=False, timers=(), on=None):
         self.ringing = ringing
         self.timers = list(timers)
         self.dismissed = 0
         self.silenced = []
+        # The satellite it rings on - or None, for wherever it's asked about.
+        self.on = on
+
+    def _heard(self, satellite):
+        """Whether what rings is heard on satellite - a name, a room of them, or None for anywhere."""
+        if self.on is None or satellite is None:
+            return True
+        return self.on in satellite if isinstance(satellite, list) else self.on == satellite
 
     def is_ringing(self, satellite=None):
         self.asked_about = satellite
-        return self.ringing
+        return self.ringing and self._heard(satellite)
 
     def dismiss(self, satellite=None):
         self.dismissed += 1
         self.dismissed_on = satellite
-        self.ringing = False
+        if self._heard(satellite):
+            self.ringing = False
         return {"success": True, "message": "Okay, stopped."}
 
     def silence_insistent(self, entries):
@@ -433,6 +442,15 @@ def test_only_whats_ringing_where_the_user_is_talking_is_stopped():
     clock = FakeClock(ringing=True)
     _conversation(clock=clock, satellite="kitchen").handle("Stop.")
     assert clock.asked_about == "kitchen" and clock.dismissed_on == "kitchen"
+
+
+def test_stop_at_the_pc_stops_the_pi_ringing():
+    # A timer set at the PC rings on the Pi in the same room, and "stop" said at the
+    # PC has to reach it.
+    clock = FakeClock(ringing=True, on="bedroom")
+    _conversation(clock=clock, satellite="pc", room=lambda: ["pc", "bedroom"]).handle("Stop.")
+    assert clock.dismissed == 1 and clock.ringing is False
+    assert clock.dismissed_on == ["pc", "bedroom"]
 
 
 def test_without_the_chime_a_dismissal_is_shown_not_said():

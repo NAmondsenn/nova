@@ -256,7 +256,7 @@ def brain(tmp_path, monkeypatch, make_config):
     # Home Assistant says otherwise.
     return SimpleNamespace(config=config, clock=Clock(config=config, start=False), memory=None,
                            rooms=SatelliteRooms(str(tmp_path / "satellite_rooms.json")),
-                           ring_on=lambda name: name, room_of=lambda name: [name],
+                           ring_on=lambda name: name, room_of=lambda name: [name], room_sessions=lambda name: [],
                            routines=Routines(path=str(tmp_path / "routines.json")), ntfy=None, weather=None,
                            batteries=None, lists=None, pc=None, registry=None, calendar=None, media=None,
                            downloads=None, football=None, listening=None, wrapped_store=None, usage=None, new_music_playlist=None,
@@ -793,6 +793,42 @@ def test_talking_over_a_reply_starts_the_next_request_with_the_music_still_held(
     # The music stays paused between the two, rather than coming back for a moment.
     assert held == ["hold", "release"]
     assert session._idle.is_set() and session.activity == "idle"
+
+
+def _noting_holds(held, *named):
+    """Gives each (name, session) music which notes, in held, each hold and release of it."""
+    for name, session in named:
+        session.music = SimpleNamespace(hold=lambda name=name: held.append(("hold", name)),
+                                        release=lambda name=name: held.append(("release", name)))
+
+
+def test_a_wake_holds_the_music_on_the_whole_room(make_session, brain):
+    # Spoken to at the PC, the Pi beside it is quiet too while he's heard.
+    pc, pi = make_session(), make_session()
+    held = []
+    _noting_holds(held, ("pc", pc), ("pi", pi))
+    brain.room_sessions = lambda name: [pc, pi]
+    pc.conversation = ScriptedConversation()
+
+    def answer(feed, timeline, pre_roll=None, pressed=False):
+        # The room changing part way through doesn't change what's let go of.
+        brain.room_sessions = lambda name: [pc]
+        return None
+
+    pc._handle_interaction = answer
+    pc._converse({"talked_over": False, "feed": AudioFeed()})
+    assert held == [("hold", "pc"), ("hold", "pi"), ("release", "pc"), ("release", "pi")]
+
+
+def test_a_satellite_alone_holds_only_its_own(make_session, brain):
+    pi, kitchen = make_session(), make_session()
+    held = []
+    _noting_holds(held, ("pi", pi), ("kitchen", kitchen))
+    brain.room_sessions = lambda name: [pi]
+    pi.conversation = ScriptedConversation()
+    pi._handle_interaction = lambda feed, timeline, pre_roll=None, pressed=False: None
+    pi._converse({"talked_over": False, "feed": AudioFeed()})
+    assert held == [("hold", "pi"), ("release", "pi")]
 
 
 def test_closing_lets_go_of_the_device_the_music_and_the_satellites_sounds_once_in_order(make_session):

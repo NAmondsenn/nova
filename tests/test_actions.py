@@ -46,6 +46,23 @@ class FakeSpotify:
         return {"success": True, "message": f"Volume {self.level} percent."}
 
 
+class FakePlayer(FakeSpotify):
+    """A satellite's music player in the room, which may have music paused on it."""
+
+    def __init__(self, playing=False, paused=False, level=50):
+        super().__init__(playing, level)
+        self.paused = paused
+
+    def now_playing(self):
+        if not (self.playing or self.paused):
+            return None
+        return {"track": "Gooba", "playing": self.playing}
+
+    def play(self, query=None, search_type=None):
+        self.calls.append("play")
+        return {"success": True, "message": "Resumed playback", "silent": True}
+
+
 @pytest.fixture
 def make_executor(tmp_path, monkeypatch):
     monkeypatch.setattr(volume_module, "VOLUMES_FILE", str(tmp_path / "volumes.json"))
@@ -128,6 +145,52 @@ def test_an_explicit_pause_keeps_the_music_paused_afterwards(make_executor):
     spotify = FakeSpotify(playing=True)
     result = make_executor(spotify).execute(Action("control_playback", {"action": "pause"}))
     assert result.confirm == "chime" and spotify.resume_cancelled
+
+
+# The room acts as one
+
+def test_pause_at_the_pc_pauses_the_pis_music(make_executor):
+    pc, pi = FakePlayer(), FakePlayer(playing=True)
+    result = make_executor(pc, room_players=lambda: [pc, pi]).execute(Action("control_playback", {"action": "pause"}))
+    assert result.confirm == "chime"
+    assert pi.calls == ["pause"] and pi.resume_cancelled
+    assert pc.calls == [] and not pc.resume_cancelled
+
+    # With nothing playing in the room, its own is paused, as before rooms.
+    pc, pi = FakePlayer(), FakePlayer()
+    make_executor(pc, room_players=lambda: [pc, pi]).execute(Action("control_playback", {"action": "pause"}))
+    assert pc.calls == ["pause"] and pi.calls == []
+
+
+def test_turn_it_up_turns_up_both_when_both_play(make_executor):
+    pc, pi = FakePlayer(playing=True, level=50), FakePlayer(playing=True, level=30)
+    result = make_executor(pc, room_players=lambda: [pc, pi]).execute(Action("set_volume", {"direction": "up"}))
+    assert result.ok and (pc.level, pi.level) == (60, 40)
+
+    # Only what's playing is turned up, even when the music is named.
+    pc, pi = FakePlayer(level=50), FakePlayer(playing=True, level=30)
+    executor = make_executor(pc, room_players=lambda: [pc, pi])
+    executor.execute(Action("set_volume", {"category": "music", "direction": "down"}))
+    assert (pc.level, pi.level) == (50, 20)
+    # Music playing anywhere in the room is what "turn it down" means.
+    executor.execute(Action("set_volume", {"direction": "down"}))
+    assert (pc.level, pi.level) == (50, 10) and executor.volume.percent("general") == 70
+
+
+def test_resume_prefers_its_own_paused_music(make_executor):
+    pc, pi = FakePlayer(paused=True), FakePlayer(paused=True)
+    make_executor(pc, room_players=lambda: [pc, pi]).execute(Action("play_music", {}))
+    assert pc.calls == ["play"] and pi.calls == []
+
+    # Else the room's, if its own has nothing paused.
+    pc, pi = FakePlayer(), FakePlayer(paused=True)
+    make_executor(pc, room_players=lambda: [pc, pi]).execute(Action("play_music", {}))
+    assert pc.calls == [] and pi.calls == ["play"]
+
+    # Else its own, as before rooms.
+    pc, pi = FakePlayer(), FakePlayer(playing=True)
+    make_executor(pc, room_players=lambda: [pc, pi]).execute(Action("play_music", {}))
+    assert pc.calls == ["play"] and pi.calls == []
 
 
 @pytest.mark.parametrize("params, repeat", [
@@ -241,6 +304,11 @@ def test_only_what_rings_on_the_satellite_asked_is_dismissed():
     clock = FakeClock()
     ActionExecutor(clock=clock, satellite="kitchen").execute(Action("dismiss_timer", {}))
     assert clock.dismissed == "kitchen"
+
+    # Its room, though, is all heard - a timer set at the PC rings on the Pi beside it.
+    ActionExecutor(clock=clock, satellite="pc",
+                   room_of=lambda name: [name, "bedroom"]).execute(Action("dismiss_timer", {}))
+    assert clock.dismissed == ["pc", "bedroom"]
 
 
 # Confirming what was done

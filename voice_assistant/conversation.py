@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from voice_assistant.actions import Action, ActionExecutor, ActionResult, confirm
+from voice_assistant.clock_ringing import Where, heard_in
 from voice_assistant.devices import told_claude
 from voice_assistant.logging_setup import TRANSCRIPT
 from voice_assistant.timeline import Timeline
@@ -76,7 +77,8 @@ class Conversation:
 
     def __init__(self, clock, intents, llm, actions, music, chime_enabled: Union[bool, Callable[[], bool]] = True,
                  max_follow_ups: int = 3, routines=None, satellite: Optional[str] = None,
-                 playing: Optional[Callable[[], List[str]]] = None, progress: Optional[Callable[[], None]] = None):
+                 playing: Optional[Callable[[], List[str]]] = None, progress: Optional[Callable[[], None]] = None,
+                 room: Optional[Callable[[], List[str]]] = None):
         """
         Args:
             clock: The Clock, for what's ringing and for dismissing it.
@@ -92,14 +94,18 @@ class Conversation:
                 and listen for the answer without the wake word, so it can't hold
                 the microphone indefinitely.
             routines: The user's Routines, or None, for the words which start one.
-            satellite: The satellite the user is talking to, whose ringing alone they
-                can hear, and so stop - or None for anything ringing anywhere.
+            satellite: The satellite the user is talking to, whose ringing - and its
+                room's - alone they can hear, and so stop - or None for anything
+                ringing anywhere.
             playing: Gives the names of what's playing in the user's room - see
                 Session.playing_here - or None for nothing ever playing.
             progress: Called with nothing as a turn gets on - once for each of Claude's
                 replies, and each step of a routine - so a routine of several slow steps
                 isn't taken for one which is stuck (see Session.moved_at). Never while
                 waiting on anything, so one which is stuck still stops calling it.
+            room: Gives every satellite in the user's room, theirs first - see
+                Brain.room_of - or None for a room of its own. What rings on any of
+                them is heard, and stopped, from here.
         """
         self.clock = clock
         self.intents = intents
@@ -112,7 +118,12 @@ class Conversation:
         self.satellite = satellite
         self.playing = playing
         self.progress = progress or (lambda: None)
+        self.room = room
         self.start()
+
+    def _heard_here(self) -> Where:
+        """What rings where the user can hear it, to ask the clock about: their satellite's room."""
+        return heard_in(self.room() if self.room is not None else [self.satellite])
 
     @property
     def chime_enabled(self) -> bool:
@@ -198,7 +209,7 @@ class Conversation:
                 logger.info("Reminder left running at the user's request")
                 return Reply(say="Okay, I'll leave it.")
             if answer:
-                self.clock.dismiss(satellite=self.satellite)
+                self.clock.dismiss(satellite=self._heard_here())
                 logger.info("Reminder dismissed after being offered")
                 return self._chime("Okay.")
             # Anything else is a fresh request, so it falls through and is handled
@@ -207,8 +218,9 @@ class Conversation:
         # Anything short said while a timer is going off means "make it stop", so it's
         # handled here rather than going to the model, making it quicker and easier
         # to silence.
-        if self.clock.is_ringing(satellite=self.satellite) and self.clock.looks_like_dismissal(text):
-            result = self.clock.dismiss(satellite=self.satellite)
+        here = self._heard_here()
+        if self.clock.is_ringing(satellite=here) and self.clock.looks_like_dismissal(text):
+            result = self.clock.dismiss(satellite=here)
             timeline.note(outcome="dismissed_locally")
             logger.info("Dismissed by voice without asking the model")
             return self._chime(result["message"])
@@ -307,7 +319,7 @@ class Conversation:
         # Nor in a routine, whose next step would be taken for the answer.
         reminder = self.ringing.get("reminder")
         if (reminder and not in_routine and not self.ringing.get("reminder_sounding") and not self.reminder_offered
-                and self.clock.is_ringing(satellite=self.satellite) and not response_text.rstrip().endswith("?")):
+                and self.clock.is_ringing(satellite=self._heard_here()) and not response_text.rstrip().endswith("?")):
             self.reminder_offered = True
             self.reminder_answer_pending = True
             response_text = f"{response_text} Also, your {reminder} reminder is still going. Shall I turn it off?".strip()
