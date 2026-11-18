@@ -683,7 +683,8 @@ class Session:
             pressed: True when the recording began on a press of a key, which the
                 satellite has already answered with a sound of its own - so the brain
                 plays neither the listening sound nor the falling one for a recording with
-                no speech in it.
+                no speech in it. One the satellite ended on a press plays no falling one
+                either - see AudioFeed.pressed.
 
         Returns:
             The wake word heard over the reply, which the next request starts from - see
@@ -740,6 +741,9 @@ class Session:
         finally:
             # The user has stopped, or isn't going to start - so the satellite stops sending.
             self.satellite.stop_listening(feed)
+        # An answer the user ended with a press, having said nothing, is their changing
+        # their mind, as one begun on a press is.
+        pressed = pressed or feed.pressed
 
         if not self.satellite.connected:
             # Gone part way through, so there's nobody to answer - and half a request

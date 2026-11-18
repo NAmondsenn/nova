@@ -498,7 +498,7 @@ class RemoteSatellite:
             "ping": lambda message, payload: self.send("pong"),
             "wake": self._woken,
             "audio": self._audio,
-            "audio_end": lambda message, payload: self._end_feed(),
+            "audio_end": lambda message, payload: self._end_feed(pressed=message.get("reason") == "pressed"),
             "played": lambda message, payload: self.speaker._played(message["id"], message.get("position")),
             "progress": lambda message, payload: self.speaker._progress(message["id"], message["position"]),
             "away": self._away,
@@ -763,12 +763,17 @@ class RemoteSatellite:
             old.end()
         return feed
 
-    def _end_feed(self):
-        """Ends the feed of the recording being sent, if there is one."""
+    def _end_feed(self, pressed: bool = False):
+        """
+        Ends the feed of the recording being sent, if there is one.
+
+        Args:
+            pressed: True when the satellite ended it on a press of its key.
+        """
         with self._feed_lock:
             feed, self._feed, self._feed_recording = self._feed, None, None
         if feed is not None:
-            feed.end()
+            feed.end(pressed=pressed)
 
     def _lost(self):
         """Ends everything waiting on the satellite, now it has gone. Safe to call more than once."""

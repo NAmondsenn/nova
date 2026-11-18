@@ -2306,6 +2306,20 @@ def test_a_pressed_wake_with_nothing_said_says_nothing(brain, connect, make_sess
     assert brain.stt.made[0].cancelled
 
 
+def test_an_answer_ended_on_a_press_with_nothing_said_says_nothing(brain, connect, make_session):
+    # The user changing their mind, as with a press which began a recording.
+    satellite, pi = connect()
+    session = make_session(satellite)
+    feed = satellite.listen()
+    feed.feed(np.zeros(RATE // 2, np.int16))
+    pi.say("audio_end", reason="pressed")
+    assert wait_for(lambda: feed.ended)
+
+    assert session._handle_interaction(feed, follow_up=True, timeline=FakeTimeline()) is None
+    assert [message["name"] for message in pi.messages("play_sound")] == ["listening.wav"]
+    assert brain.tts.said == []
+
+
 def test_a_pressed_wake_is_handed_to_the_interaction(make_session, monkeypatch):
     session = make_session()
     seen = []

@@ -235,6 +235,21 @@ def test_a_wake_brings_a_feed_of_the_recording(pair):
     assert ends_at_once(wake["feed"])
 
 
+def test_a_recording_the_satellite_ended_on_a_press_says_so(pair):
+    satellite, fake, serving = pair
+    feed = satellite.listen()
+    fake.say("audio_end", reason="pressed")
+    assert wait_for(lambda: feed.ended) and feed.pressed
+
+    # Not at its limit, nor when the brain stops it.
+    feed = satellite.listen()
+    fake.say("audio_end", reason="limit")
+    assert wait_for(lambda: feed.ended) and not feed.pressed
+    feed = satellite.listen()
+    satellite.stop_listening(feed)
+    assert feed.ended and not feed.pressed
+
+
 def test_a_wake_says_how_much_of_its_recording_is_from_before_it(pair):
     # In samples - or nothing, from a satellite which doesn't say, when the session
     # goes by its own setting.
