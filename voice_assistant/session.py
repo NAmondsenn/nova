@@ -640,6 +640,32 @@ class Session:
         with self._typed_lock:
             self._typed_question = None
 
+    def _typed_turn(self) -> Optional[Dict]:
+        """
+        The next thing typed, to be answered now - unless something is being announced:
+        Speak, an alert, a routine, or a round of a timer or an alarm. Answering would
+        silence it part way, which it would take as heard - and a battery warning, sent
+        again until it's said, would be lost. So it waits for the announcement to finish,
+        as a typed request waits for a conversation. A timer or an alarm left ringing
+        lets go between its rounds, so a typed "stop" still gets its turn.
+
+        Taken with the announcements' lock held, and the session marked busy before it's
+        let go, so an announcement starting just then waits for this turn rather than
+        being silenced by it.
+
+        Returns:
+            As _next_typed - or None while something is announced, or nothing is typed.
+        """
+        if not self._announcing.acquire(blocking=False):
+            return None
+        try:
+            wake = self._next_typed()
+            if wake is not None:
+                self._idle.clear()
+            return wake
+        finally:
+            self._announcing.release()
+
     def _next_typed(self) -> Optional[Dict]:
         """
         The next thing typed, as run answers it, and whether it answers the typed
@@ -697,7 +723,7 @@ class Session:
                     # Something typed in Home Assistant is answered only once no wake word
                     # is waiting: one said is always answered first, as the satellite is
                     # already sending what the user says after it.
-                    wake = self._next_typed()
+                    wake = self._typed_turn()
                     if wake is None:
                         continue
                 try:
@@ -804,8 +830,9 @@ class Session:
         # What was audibly going off at the moment the wake word fired,
         # read before the interaction quietens anything, since what
         # matters is what the user could hear when they started talking -
-        # which is only ever what rings on this satellite.
-        ringing = self.brain.clock.ringing_state(satellite=self.satellite.name)
+        # which is only ever what rings on this satellite. Not for the answer to a
+        # typed question, which carries on its conversation - see below.
+        ringing = None if follow_up else self.brain.clock.ringing_state(satellite=self.satellite.name)
 
         # Anything going off stops the moment the wake word is heard, rather than
         # playing on over the user - and into the microphone - until its sound
@@ -920,7 +947,8 @@ class Session:
 
         if not self.satellite.connected:
             # Gone part way through, so there's nobody to answer - and half a request
-            # isn't acted on.
+            # isn't acted on. An answer typed into this listen goes too, as the session
+            # is closing.
             listening.cancel()
             timeline.note(outcome="satellite_gone")
             return None

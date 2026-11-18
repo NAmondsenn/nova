@@ -1394,8 +1394,9 @@ def test_no_typed_answer_ends_the_turn_quietly(brain, connect, make_session, mon
     thread = running(session)
 
     session.ask("Turn the lights on.")
+    # Left open, then given up on once its time is up.
+    assert wait_for(lambda: session._typed_question is not None)
     assert wait_for(lambda: pi.messages("allow") and session._idle.is_set())
-    # Given up on once its time is up.
     assert wait_for(lambda: session._typed_question is None)
     assert session.conversation.heard == [("Turn the lights on.", False)]
     # Nothing more is said, nor any sound played, and nothing listened for.
@@ -1487,6 +1488,86 @@ def test_a_routine_clears_a_typed_question(brain, make_session):
 
     session.run_routine({"name": "Good morning", "steps": ["what's the weather"]})
     assert session._typed_question is None
+
+
+def test_an_answer_typed_before_its_question_is_talked_over_is_answered_after(brain, connect, make_session):
+    # Kept as a fresh request rather than lost, once the wake word said over the question is answered.
+    satellite, pi = connect()
+    session = make_session(satellite)
+    session.conversation = ScriptedConversation(Reply(say="I've found three lights. Which room?", listen_again=True),
+                                                Reply(say="Okay."), Reply(say="Sorry?"))
+    brain.stt.texts = ["Stop."]
+    pi.held = {1}
+    thread = running(session)
+
+    session.ask("Turn the lights on.")
+    assert wait_for(lambda: pi.messages("play_stream"))
+    session.ask("The kitchen.")
+    assert wait_for(lambda: session._typed_answer == "The kitchen.")
+    pi.wake(said(), talked_over=True)
+    assert wait_for(lambda: len(session.conversation.heard) == 3 and session._idle.is_set())
+
+    assert session.conversation.heard == [("Turn the lights on.", False), ("Stop.", False), ("The kitchen.", False)]
+    assert session.conversation.started == [False, True, False]
+    pi.go()
+    thread.join(5)
+
+
+def test_something_typed_before_a_typed_question_isnt_its_answer(brain, connect, make_session):
+    # Typed while the first request was still being worked out, before Nova knew it would ask.
+    satellite, pi = connect()
+    session = make_session(satellite)
+    working, let_go = threading.Event(), threading.Event()
+
+    class Slow(ScriptedConversation):
+        def handle(self, text, follow_up=False, timeline=None):
+            if not self.heard:
+                working.set()
+                let_go.wait(5)
+            return super().handle(text, follow_up=follow_up, timeline=timeline)
+
+    session.conversation = Slow(Reply(say="Which room?", listen_again=True), Reply(say="Okay."))
+    thread = running(session)
+
+    session.ask("Turn the lights on.")
+    assert working.wait(5)
+    session.ask("What time is it?")
+    let_go.set()
+    assert wait_for(lambda: len(session.conversation.heard) == 2 and session._idle.is_set())
+
+    # A fresh request, which drops the question.
+    assert session.conversation.heard == [("Turn the lights on.", False), ("What time is it?", False)]
+    assert session.conversation.started == [False, False]
+    assert session._typed_question is None
+    pi.go()
+    thread.join(5)
+
+
+def test_a_typed_request_waits_for_an_announcement_being_said(brain, connect, make_session):
+    # Answered over it, it silenced a Speak, an alert or a routine part way - which then
+    # counted as said, so a battery warning, sent again until it is, was lost.
+    satellite, pi = connect()
+    session = make_session(satellite)
+    session.conversation = ScriptedConversation(Reply(say="It's ten o'clock."))
+    pi.held = {1}
+    thread = running(session)
+    said_out_loud = []
+    announcing = threading.Thread(target=lambda: said_out_loud.append(session.announce("The washing's done.")),
+                                  daemon=True)
+    announcing.start()
+    assert wait_for(lambda: pi.messages("play_stream"))
+
+    session.ask("What time is it?")
+    time.sleep(3 * session_module.WAKE_CHECK)
+    assert pi.messages("silence") == [] and session.conversation.heard == []
+
+    pi.say("played", id=pi.messages("play_stream")[0]["id"])
+    announcing.join(3)
+    assert said_out_loud == [True]
+    assert wait_for(lambda: session.conversation.heard == [("What time is it?", False)] and session._idle.is_set())
+    assert brain.tts.said == ["The washing's done.", "It's ten o'clock."]
+    pi.go()
+    thread.join(5)
 
 
 def test_the_device_is_given_ask(make_session):
