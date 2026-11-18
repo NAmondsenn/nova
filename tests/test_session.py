@@ -1760,6 +1760,26 @@ def test_speak_is_said_in_turn_even_when_muted(make_session):
     assert said_out_loud == ["The washing's done"]
 
 
+def test_say_on_nova_is_said_in_turn_without_a_sound(make_session):
+    # Typed on the Nova view to be said out loud, so no chime first: the person typing
+    # knows it's coming. Speak, which automations use, keeps its sound.
+    let_go, said_out_loud = threading.Event(), []
+
+    def announce(message, sound="announcement_sound.wav"):
+        let_go.wait(2)
+        said_out_loud.append((message, sound))
+
+    session = make_session()
+    session.set_muted(True)
+    session.announce = announce
+    session._device_controls().say("Dinner's ready")
+    assert said_out_loud == []
+
+    let_go.set()
+    assert wait_for(lambda: said_out_loud, seconds=2)
+    assert said_out_loud == [("Dinner's ready", None)]
+
+
 def test_stop_silences_what_rings_and_what_nova_is_saying(brain, make_session):
     session = make_session()
     happened, ringing = [], [True]

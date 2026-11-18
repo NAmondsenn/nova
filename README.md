@@ -367,6 +367,8 @@ The microphone switch works from Home Assistant or the settings page, and stays 
 
 Ask Nova is a box to type a request in, answered out loud on that satellite as if you'd said it, muted or not, once any conversation going on has finished; the reply is never sent back to Home Assistant, and what you type is logged only as what you say is. If Nova asks something back, type the answer within a minute - or, after a spoken request, type it while Nova listens. See [docs/decisions/0027](docs/decisions/0027-ask-nova-by-typing.md).
 
+Say on Nova is a second box beside it: whatever is typed is said out loud on that satellite, word for word, with no sound first, once any conversation going on has finished. Speak, for automations, keeps its sound.
+
 ### ntfy, for alerts and your phone
 
 1. On your ntfy server, make Nova a user with only the access it needs, and a token for it - here with a `homelab` topic for alerts, and `clipboard` and `reminders` for your phone:

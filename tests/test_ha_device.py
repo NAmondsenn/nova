@@ -884,3 +884,75 @@ def test_a_kept_or_empty_ask_is_ignored(asking, asked, nova):
     client.delivers(f"{BASE}/stop", "PRESS")
     assert _eventually(lambda: ("stop",) in nova.calls)
     assert asked == []
+
+
+
+@pytest.fixture
+def said():
+    """What was typed into Say on Nova, in the order it came."""
+    return []
+
+
+@pytest.fixture
+def saying(nova, said):
+    """A started NovaDevice which can be given words to say, with the client it made - no music."""
+    made = []
+
+    def factory(client_id):
+        made.append(FakeClient(client_id))
+        return made[-1]
+
+    controls = dataclasses.replace(nova.controls(), say=said.append)
+    device = NovaDevice("broker.local", 1883, "nova", "secret", controls, node_id="nova_test",
+                        client_factory=factory)
+    device.start()
+    try:
+        yield device, made[0]
+    finally:
+        device.stop()
+
+
+def test_say_is_announced_only_when_nova_can_be_given_words(started, saying):
+    plain, _ = started
+    assert "say" not in _components(plain)
+    assert f"{BASE}/say/set" not in {topic for topic, _ in plain._subscriptions()}
+
+    device, _ = saying
+    say = _components(device)["say"]
+    assert say["p"] == "text"
+    assert say["name"] == "Say on Nova"
+    assert say["command_topic"] == f"{BASE}/say/set"
+    assert say["state_topic"] == f"{BASE}/say"
+    assert say["value_template"] == "{{ '' }}"
+    assert say["max"] == 255
+    assert say["icon"] == "mdi:bullhorn-outline"
+    assert say["default_entity_id"] == "text.nova_say"
+    controls = _components(device)
+    assert len({control["unique_id"] for control in controls.values()}) == len(controls)
+
+
+def test_words_to_say_reach_nova_and_are_never_sent_back(saying, said, caplog):
+    device, client = saying
+    caplog.set_level(logging.INFO)
+    client.connects()
+    assert (f"{BASE}/say/set", 1) in client.subscribed
+    client.delivers(f"{BASE}/say/set", TYPED)
+    assert _eventually(lambda: said == [TYPED])
+
+    device.publish_state()
+    assert client.sent(f"{BASE}/say") == [(f"{BASE}/say", "-", 1, True)]
+    assert not any("Fashion Killa" in topic or "Fashion Killa" in str(payload)
+                   for topic, payload, _, _ in client.published)
+    heard = [record for record in caplog.records if "Fashion Killa" in record.getMessage()]
+    assert heard
+    assert all(getattr(record, "transcript", False) is TRANSCRIPT["transcript"] for record in heard)
+
+
+def test_kept_or_empty_words_to_say_are_ignored(saying, said, nova):
+    device, client = saying
+    client.connects()
+    client.delivers(f"{BASE}/say/set", "hello", retain=True)
+    client.delivers(f"{BASE}/say/set", "   ")
+    client.delivers(f"{BASE}/stop", "PRESS")
+    assert _eventually(lambda: ("stop",) in nova.calls)
+    assert said == []

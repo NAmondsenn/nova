@@ -1618,6 +1618,7 @@ class Session:
             stop=self.stop_what_rings_and_speaks,
             restart=self.satellite.restart,
             speak=self._speak_from_home_assistant,
+            say=self._say_from_home_assistant,
             # Read by the device on a thread of its own, never the one that publishes the
             # state every second, as the player may be asking Navidrome or Spotify.
             now_playing=(lambda: self.music_player.now_playing()) if player else None,
@@ -1690,6 +1691,18 @@ class Session:
             message: What to say.
         """
         threading.Thread(target=self.announce, args=(message,), daemon=True, name="ha-speak").start()
+
+    def _say_from_home_assistant(self, message):
+        """
+        Says what was typed into the Nova view's Say on Nova box, as Speak does but with
+        no sound first: the person typing it knows it's coming, and a chime before every
+        line typed just sounds like a notification. Automations keep Speak and its sound.
+
+        Args:
+            message: What to say.
+        """
+        threading.Thread(target=self.announce, args=(message,), kwargs={"sound": None},
+                         daemon=True, name="ha-say").start()
 
     def _room(self) -> Optional[Tuple[Optional[str], Optional[str]]]:
         """
