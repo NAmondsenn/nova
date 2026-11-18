@@ -1878,7 +1878,11 @@ class HomeAssistant:
                 or (domain == "shell_command" and not set(data) <= {"what", "name", "date", "days", "against"})
                 # Only a journey, asked of zones, people and places - never a field either could take for more.
                 or (domain == "google_travel_time" and not self._journey_asked_properly(service, data))):
-            logger.warning(f"Refused to call {domain}.{service} with {data}")
+            if domain == "google_travel_time":
+                # Its fields hold a place as the user said it, which no log line may: only which were given.
+                logger.warning(f"Refused to call {domain}.{service} with the fields {sorted(map(str, data))}")
+            else:
+                logger.warning(f"Refused to call {domain}.{service} with {data}")
             raise NotAllowed(f"{domain}.{service}")
         response = self._request("POST", f"/api/services/{domain}/{service}" + ("?return_response" if returns else ""),
                                  timeout=timeout, json=data)

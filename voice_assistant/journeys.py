@@ -122,12 +122,23 @@ def _month() -> str:
 
 
 def _tidy(words: str) -> str:
-    """Words as a place is matched: as a request is tidied, with a leading "my " or "the " dropped."""
-    said = _as_said(words)
+    """
+    Words as a place or an activity is matched: as a request is tidied, with a leading "my " or
+    "the " dropped, and a curly apostrophe - which a phone's keyboard puts in a zone's name - made straight.
+    """
+    said = _as_said(words.replace("\u2019", "'").replace("\u2018", "'"))
     for lead in ("my ", "the "):
         if said.startswith(lead):
             return said[len(lead):]
     return said
+
+
+def _zone_key(words: str) -> str:
+    """
+    A place's words as they're compared with a zone's name, with no apostrophes at all: speech to text drops
+    them, so "my grans" is "Gran's". Only for comparing - the place said back is the zone's own name.
+    """
+    return _tidy(words).replace("'", "")
 
 
 def _minutes(seconds: int) -> int:
@@ -293,15 +304,19 @@ class Journeys:
             What to ask Google for - a zone's id, else the words cleaned of what mustn't go to it -
             what to say back, and the name to find the place's activity by.
         """
-        tidy = _tidy(words)
+        tidy = _zone_key(words)
         if tidy:
             try:
                 zones = self.home.zones()
             except (requests.RequestException, ValueError) as e:
                 raise self._failure(e) from e
             for zone in zones:
-                if _tidy(zone["name"]) == tidy:
+                if _zone_key(zone["name"]) == tidy:
                     return zone["id"], zone["name"], zone["name"]
+        if _as_said(words).startswith("my "):
+            # "My gran's" is a place of the user's own, which only a zone can be: sent to Google as words, a
+            # misheard one - "my grans" - would be a confident drive to the wrong place, said back as the same.
+            raise _Refused(f"I don't know where {' '.join(words.split())} is. Add it as a zone in Home Assistant.")
         sent = journey_place(words)
         if not sent:
             raise _Refused(WHERE_TO)

@@ -1419,6 +1419,27 @@ def test_a_journey_is_only_ever_asked_of_what_it_may_be(make_home, data):
     assert home._session.requests == []
 
 
+def test_a_refused_journey_logs_which_fields_were_given_and_never_the_places(make_home, caplog):
+    home = make_home({TRAVEL: _travel([ROUTE])})
+    data = {**GOOD_JOURNEY, "origin": "Secret Origin Road", "destination": "light.Secret_Place"}
+    with caplog.at_level("INFO", logger="voice_assistant.home_assistant"):
+        with pytest.raises(NotAllowed):
+            home._call_service("google_travel_time", "get_travel_times", data, returns=True)
+    assert "Secret" not in caplog.text
+    assert [record.getMessage() for record in caplog.records] == [
+        f"Refused to call google_travel_time.get_travel_times with the fields {sorted(data)}"]
+
+
+def test_a_refused_call_of_another_domain_is_logged_as_it_always_was(make_home, caplog):
+    home = make_home({})
+    data = {"entity_id": "lock.front_door"}
+    with caplog.at_level("INFO", logger="voice_assistant.home_assistant"):
+        with pytest.raises(NotAllowed):
+            home._call_service("lock", "unlock", data)
+    assert [record.getMessage() for record in caplog.records] == [
+        "Refused to call lock.unlock with {'entity_id': 'lock.front_door'}"]
+
+
 def test_the_transit_action_takes_no_mode_or_time(make_home):
     home = make_home({TRANSIT: _travel([ROUTE])})
     for extra in ({"mode": "driving"}, {"departure_time": "08:05:00"}):

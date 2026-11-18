@@ -226,11 +226,43 @@ def test_a_zone_is_found_by_its_name_said_any_way_and_said_back_as_its_own(store
     assert home.asked == [("zone.home", "zone.grans", "driving", None)]
 
 
-def test_only_a_leading_my_or_the_is_dropped_so_another_name_goes_to_google_as_said(store):
+@pytest.mark.parametrize("said", ["my grans", "grans", "my gran\u2019s", "My Gran\u2018s"])
+def test_a_zone_is_found_whatever_the_apostrophe_did(store, said):
+    # Speech to text drops it, and a phone's keyboard curls it.
     home = FakeHome()
-    answer = ask(make(store, home), "my grans")
-    assert answer["message"].startswith("The drive to my grans is 24 minutes")
-    assert home.asked == [("zone.home", "my grans", "driving", None)]
+    answer = ask(make(store, home), said)
+    assert answer["message"].startswith("The drive to Gran's is 24 minutes")
+    assert home.asked == [("zone.home", "zone.grans", "driving", None)]
+
+
+def test_a_zone_named_with_a_curly_apostrophe_is_found_and_said_back_as_named(store):
+    home = FakeHome(zones=[{"id": "zone.grans", "name": "Gran\u2019s"}])
+    for said in ("my gran's", "my grans"):
+        home.asked.clear()
+        answer = ask(make(store, home), said)
+        assert answer["message"].startswith("The drive to Gran\u2019s is 24 minutes")
+        assert home.asked == [("zone.home", "zone.grans", "driving", None)]
+
+
+def test_my_place_which_is_no_zone_is_never_sent_to_google(store):
+    home = FakeHome(zones=[zone for zone in ZONES if zone["id"] != "zone.grans"])
+    for said in ("my gran's", "My  Mum's", "my mums house"):
+        answer = ask(make(store, home), said)
+        assert answer == {"success": False, "message": f"I don't know where {' '.join(said.split())} is. "
+                                                       "Add it as a zone in Home Assistant."}
+    assert home.asked == [] and store.get("requests") == 0
+    # Nor when the time to leave is asked.
+    assert not ask(make(store, home), "my gran's", leave=True, arrive_at="09:00")["success"]
+    assert home.asked == []
+
+
+def test_other_words_which_arent_a_zone_still_go_to_google_as_said(store):
+    home = FakeHome()
+    answer = ask(make(store, home), "the Metrocentre")
+    assert answer["message"].startswith("The drive to the Metrocentre is 24 minutes")
+    assert home.asked == [("zone.home", "the Metrocentre", "driving", None)]
+    ask(make(store, home), "mystery cottage")
+    assert home.asked[-1][1] == "mystery cottage"
 
 
 def test_home_is_the_home_zone(store):
