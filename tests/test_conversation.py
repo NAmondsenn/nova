@@ -249,6 +249,19 @@ def test_where_a_device_is_never_reaches_claude_even_when_claude_asked():
     assert "Example Road" not in str((llm.recorded, llm.tool_answers, llm.remembered))
 
 
+def test_a_journey_from_where_the_user_is_never_reaches_claude_but_its_question_does():
+    # How far the user is from a place says where they are. Claude is told it was said, and the question
+    # asked, so it can carry the answer to "When do you need to be there?".
+    said = "The drive to Work is 24 minutes, 6.4 miles. When do you need to be there?"
+    llm = FakeLLM(_answer("Okay.", Action("journey", {"place": "work"}, from_model=True)))
+    actions = FakeActions({"journey": ActionResult(True, said, private=True)})
+    reply = _conversation(llm=llm, actions=actions).handle("how long to get to work from here")
+    assert reply.say == said
+    told = "I said how long the journey takes from where you are. When do you need to be there?"
+    assert llm.recorded == [("how long to get to work from here", told)]
+    assert llm.tool_answers == [[told]]
+
+
 def test_where_my_phone_is_still_found_locally_when_nova_was_listening_for_an_answer():
     # After "Anything else?", "where's my phone?" can't be its answer, so it's still Nova's own -
     # and Claude, which isn't asked, never hears where.
@@ -875,7 +888,7 @@ class FakeJourneys:
     def __init__(self):
         self.reminded = []
 
-    def ask(self, place, mode="driving", leave=False, arrive_at=None, satellite=None, now=None):
+    def ask(self, place, mode="driving", leave=False, arrive_at=None, satellite=None, now=None, day=None):
         return {"success": True, "message": "The drive to Work is 24 minutes, so leave by 8:15 AM. Want a reminder?",
                 "ask_first": Action("set_leave_reminder", dict(self.PARAMS))}
 

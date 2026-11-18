@@ -12,12 +12,16 @@ Assistant and never directly, and counts each ask by calendar month so that a mo
 requests are never passed.
 
 A place is found among Home Assistant's zones by the zone's name, or by the calendar's word for the activity
-the zone is named as ("shift" for a Work zone).
+the zone is named as ("shift" for a Work zone). A place which only a zone could be - "my gran's", or a word for
+one of the calendar's activities - and which no zone is, is refused rather than sent to Google, and so is an
+entity's id said as a place: a zone is only ever found by its name.
 
 Nova never reads, keeps or logs a position. A place is a zone's entity id and name, or the
 words the user said, and the user's own place is their person's entity id, which Home
 Assistant turns into a position itself. A journey's answer holds a time and a distance, so
-nothing here can leak one. The place isn't put in a log line either: only the kind of error.
+nothing here can leak one - though one from the user's own place says how far they are from
+somewhere, so it is private, kept from Claude as where their phone is. The place isn't put in a
+log line either: only the kind of error.
 
 Its answers are {"success", "message"} dicts like pc.py's, with an "ask_first" Action for
 "Want a reminder?", which only a yes said next runs. Public transport gets a journey time and
@@ -35,7 +39,7 @@ import math
 import re
 import threading
 import time as clock_time
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import requests
@@ -46,7 +50,7 @@ from voice_assistant.choices import ChoiceStore
 from voice_assistant.clock_words import format_duration, spoken_clock_time
 from voice_assistant.config import CHOICES, limit_problem
 from voice_assistant.google_calendar import READ_FAILURES, _as_said
-from voice_assistant.home_assistant import HomeAssistant, NoJourneys, NotAllowed, journey_place
+from voice_assistant.home_assistant import ANY_ENTITY, HomeAssistant, NoJourneys, NotAllowed, journey_place
 
 # Logger setup
 logger = logging.getLogger(__name__)
@@ -80,6 +84,9 @@ PASS_EVERY = 60
 MOVE_AT_LEAST = 60
 
 WHERE_TO = "Where to?"
+NOT_CAUGHT_WHERE = "I didn't catch where to."
+ALREADY_THERE = "You're already there."
+NO_DAY = "I didn't catch which day."
 NEEDS_GOOGLE_MAPS = "Journeys need Google Maps Travel Time set up in Home Assistant."
 OVER_CAP = "I've asked Google for all the journeys I'm allowed this month."
 NO_JOURNEY_TIME = "I couldn't get a journey time."
@@ -89,6 +96,9 @@ NO_TIME = "I didn't catch what time you need to be there."
 TIME_GONE = "That time's already gone."
 NO_TRANSIT_TIME = " I can't say which one to catch, so I can't give a time to leave."
 WHEN_THERE = " When do you need to be there?"
+OFFER = " Want a reminder?"
+# What Claude's history has in place of a journey worked out from where the user is - see told_claude.
+FROM_WHERE_YOU_ARE = "I said how long the journey takes from where you are."
 
 
 class OverCap(Exception):
@@ -155,18 +165,65 @@ def _zone_key(words: str) -> str:
     return _tidy(words).replace("'", "")
 
 
+def _unknown(words: str) -> str:
+    """What's said of a place which only a zone could be, and which no zone is - the words as they were said."""
+    return f"I don't know where {' '.join(words.split())} is. Add it as a zone in Home Assistant."
+
+
 def _minutes(seconds: int) -> int:
     """A journey's seconds as minutes, rounded up, and never less than one."""
     return max(1, -(-int(seconds) // 60))
 
 
+def told_claude(said: str) -> str:
+    """
+    What Claude's history has in place of a journey worked out from where the user is, as
+    devices.told_claude is for where a device is: that it was said, and the question it ended
+    with, if it did, so that Claude can carry the answer to "When do you need to be there?".
+
+    Args:
+        said: The answer, as it was said.
+
+    Returns:
+        e.g. "I said how long the journey takes from where you are. When do you need to be there?"
+    """
+    asked = next((question for question in (WHEN_THERE, OFFER) if said.endswith(question.strip())), "")
+    return FROM_WHERE_YOU_ARE + asked
+
+
+def _day_said(day: date, now: datetime) -> str:
+    """A day as it's said after an event or a time: "today", "tomorrow" or "on Friday"."""
+    days = (day - now.date()).days
+    if days <= 0:
+        return "today"
+    return "tomorrow" if days == 1 else f"on {WEEKDAYS[day.weekday()]}"
+
+
 def _when(when: datetime, now: datetime) -> str:
     """A time as it's said, with its day if it isn't today."""
     said = spoken_clock_time(when.hour, when.minute)
-    days = (when.date() - now.date()).days
-    if days <= 0:
-        return said
-    return f"{said} tomorrow" if days == 1 else f"{said} on {WEEKDAYS[when.weekday()]}"
+    return said if when.date() <= now.date() else f"{said} {_day_said(when.date(), now)}"
+
+
+def _day(said: str, now: datetime) -> Optional[date]:
+    """
+    The day asked about, from what the tool was given.
+
+    Args:
+        said: "YYYY-MM-DD".
+        now: The time now, local.
+
+    Returns:
+        The date, or None if it isn't one, or it's before today.
+    """
+    said = said.strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", said):
+        return None
+    try:
+        day = datetime.strptime(said, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    return day if day >= now.date() else None
 
 
 def _arrival(said: str, now: datetime) -> Optional[datetime]:
@@ -268,7 +325,7 @@ class Journeys:
         return self.home.journey(origin, destination, HOME_MODES.get(mode, mode), departure)
 
     def ask(self, place: str, mode: str = "driving", leave: bool = False, arrive_at: Optional[str] = None,
-            satellite: Optional[str] = None, now: Optional[datetime] = None) -> Dict:
+            satellite: Optional[str] = None, now: Optional[datetime] = None, day: Optional[str] = None) -> Dict:
         """
         How long a journey takes, or when to leave for it.
 
@@ -280,24 +337,38 @@ class Journeys:
                 place's activity on the calendar.
             satellite: The satellite it was asked on, which says where from.
             now: The time now, local - only given by the tests.
+            day: The day asked about, "YYYY-MM-DD", or None for the next day from now. Only used to
+                find the place's activity on the calendar: with leave, and without arrive_at, which
+                already says its day.
 
         Returns:
             Dict with 'success' and the 'message' to say - never a time to leave unless it was
             worked out - and 'ask_first', the Action which sets the reminder, if one is offered.
+            'private' is True on any answer once it is worked out from where the user is.
         """
         now = (now or datetime.now()).astimezone()
+        origin = None
         try:
             if mode not in HOME_MODES:
                 raise _Refused("I can only work out journeys by car, on foot, by bike or by public transport.")
             destination, place_said, name = self._place(place or "")
             origin = self._origin(satellite)
-            if not leave or mode == "transit":
+            if destination == origin:
+                # "How long to get home?" from home: there's nothing to ask Google.
+                answer = {"success": True, "message": ALREADY_THERE}
+            elif not leave or mode == "transit":
                 found = self._google(origin, destination, mode, place_said)
                 words = self._time_words(found, mode, place_said)
-                return {"success": True, "message": words + (NO_TRANSIT_TIME if leave else "")}
-            return self._leave(origin, destination, place_said, name, mode, arrive_at, satellite, now)
+                answer = {"success": True, "message": words + (NO_TRANSIT_TIME if leave else "")}
+            else:
+                answer = self._leave(origin, destination, place_said, name, mode, arrive_at, day, satellite, now)
         except _Refused as refused:
-            return refused.answer
+            answer = refused.answer
+        if origin is not None and origin.startswith("person."):
+            # How far the user is from a place says where they are, which Claude's history - sent to Anthropic
+            # with every later request - is never told: the answer is the user's alone, as where their phone is.
+            answer = {**answer, "private": True}
+        return answer
 
     def _failure(self, error: Exception) -> _Refused:
         """The answer for a journey Home Assistant couldn't give, with the error's kind logged once - never the place."""
@@ -314,13 +385,18 @@ class Journeys:
         """
         Finds the place said, among Home Assistant's zones by name.
 
-        A zone is found by its name, else by the calendar's word for the activity it is named as ("shift" is
-        Work), else words which begin "my " are refused, and any others go to Google as said.
+        An entity's id is refused before anything is looked up. Then a zone is found by its name, else by the
+        calendar's word for the activity it is named as ("shift" is Work). Else words for one of the calendar's
+        activities, and words which begin "my ", are refused, and any others go to Google as said.
 
         Returns:
             What to ask Google for - a zone's id, else the words cleaned of what mustn't go to it -
             what to say back, and the name to find the place's activity by.
         """
+        if ANY_ENTITY.fullmatch(words.strip().lower()):
+            # "person.kit" or "zone.work" from Claude: a zone is only ever found by its name, and a person - whose
+            # id Home Assistant would turn into where their phone is - is never where to.
+            raise _Refused(NOT_CAUGHT_WHERE)
         tidy = _zone_key(words)
         if tidy:
             try:
@@ -332,46 +408,44 @@ class Journeys:
                     return zone["id"], zone["name"], zone["name"]
             # No zone is named so: the calendar's word for an activity ("shift") is the zone named as that
             # activity ("Work"). A zone's own name was tried first, so it always wins over a word.
-            zone = self._zone_for_activity_word(words, zones)
-            if zone is not None:
-                return zone["id"], zone["name"], zone["name"]
+            activity = self._activity_for_word(words)
+            if activity is not None:
+                for zone in zones:
+                    if _zone_key(zone["name"]) == _zone_key(activity):
+                        return zone["id"], zone["name"], zone["name"]
+                # The activity's calendar would still give its start, and sent to Google as words, "work" would be
+                # a confident time to leave for wherever Google guessed, which never names the place.
+                raise _Refused(_unknown(words))
         if _as_said(words).startswith("my "):
             # "My gran's" is a place of the user's own, which only a zone can be: sent to Google as words, a
             # misheard one - "my grans" - would be a confident drive to the wrong place, said back as the same.
-            raise _Refused(f"I don't know where {' '.join(words.split())} is. Add it as a zone in Home Assistant.")
+            raise _Refused(_unknown(words))
         sent = journey_place(words)
         if not sent:
             raise _Refused(WHERE_TO)
         return sent, sent, sent
 
-    def _zone_for_activity_word(self, words: str, zones: list) -> Optional[Dict]:
+    def _activity_for_word(self, words: str) -> Optional[str]:
         """
-        The zone named as the activity which the words are the calendar's word for.
+        The activity which the words are the calendar's word for.
 
         Args:
             words: The place as said, e.g. "my shift".
-            zones: Home Assistant's zones, each with an "id" and a "name".
 
         Returns:
-            The zone, or None if Nova has no calendar, it can't be read (that is no match, and is
-            said, if it matters, when the arrival time is looked for), the words are no activity's
-            word, or no zone is named as the activity.
+            The activity, e.g. "work", or None if Nova has no calendar, it can't be read (that is no
+            activity, and is said, if it matters, when the arrival time is looked for), or the words
+            are no activity's word.
         """
         if self.calendar is None:
             return None
         try:
             # Google's list is read, if it's old, before it's looked in, as _next_start does.
             self.calendar.calendars()
-            activity = self.calendar.activity_words().get(_tidy(words))
+            return self.calendar.activity_words().get(_tidy(words)) or None
         except READ_FAILURES as e:
             logger.warning(f"Couldn't read the calendar's words for a place: {type(e).__name__}")
             return None
-        if not activity:
-            return None
-        for zone in zones:
-            if _zone_key(zone["name"]) == _zone_key(activity):
-                return zone
-        return None
 
     def _origin(self, satellite: Optional[str]) -> str:
         """Where the journey starts: home, or the user - their person's id - for a satellite which travels."""
@@ -422,18 +496,21 @@ class Journeys:
         minutes = int(over / 60 + 0.5)
         return f" Traffic's heavy: that's {minutes} minute{'' if minutes == 1 else 's'} more than on a clear road."
 
-    def _next_start(self, activity: str, now: datetime) -> Optional[Tuple[str, str, Optional[datetime]]]:
+    def _next_start(self, activity: str, now: datetime,
+                    day: Optional[date] = None) -> Optional[Tuple[str, str, Optional[datetime]]]:
         """
         When the place's activity next starts, from its calendar.
 
         Args:
             activity: The name the place is known by, as said.
             now: The time now, local.
+            day: The day asked about, or None for the next day from now.
 
         Returns:
             None if Nova has no calendar or it has no such activity. Else the activity's word,
             its calendar's name, and the start of its next timed event which begins after now and
-            within a day - or None if there is none. An event in progress, or all day, isn't it.
+            within a day - or, with a day, the first on that day which begins after now, however
+            far off - or None if there is none. An event in progress, or all day, isn't it.
 
         Raises:
             READ_FAILURES: If the calendar can't be read.
@@ -448,14 +525,17 @@ class Journeys:
         if word not in activities:
             return None
         calendar = activities[word]
-        events = self.calendar.events(now.date(), 2, calendar_ids=[calendar["id"]])
+        first, days = (now.date(), 2) if day is None else (day, 1)
+        events = self.calendar.events(first, days, calendar_ids=[calendar["id"]])
         starts = [event["start"].astimezone() for event in events
-                  if not event["all_day"] and isinstance(event["start"], datetime)
-                  and now < event["start"] <= now + LOOK_AHEAD]
+                  if not event["all_day"] and isinstance(event["start"], datetime) and now < event["start"]
+                  # A day's read has an event which began the day before and runs into it: that isn't the day's.
+                  and (event["start"] <= now + LOOK_AHEAD if day is None
+                       else event["start"].astimezone().date() == day)]
         return word, calendar.get("name") or word.capitalize(), min(starts) if starts else None
 
     def _leave(self, origin: str, destination: str, place: str, name: str, mode: str, arrive_at: Optional[str],
-               satellite: Optional[str], now: datetime) -> Dict:
+               day: Optional[str], satellite: Optional[str], now: datetime) -> Dict:
         """When to leave: the arrival time less the journey and the buffer, and the offer of a reminder."""
         before, after, activity, arrival = "", "", None, None
         if arrive_at:
@@ -465,8 +545,13 @@ class Journeys:
             if arrival <= now:
                 raise _Refused(TIME_GONE)
         else:
+            on = None
+            if day is not None:
+                on = _day(day, now)
+                if on is None:
+                    raise _Refused(NO_DAY)
             try:
-                found = self._next_start(name, now)
+                found = self._next_start(name, now, on)
             except READ_FAILURES as e:
                 logger.warning(f"Couldn't read the calendar for a journey: {type(e).__name__}")
                 before = NO_CALENDAR + " "
@@ -474,14 +559,16 @@ class Journeys:
                 if found is None:
                     after = WHEN_THERE
                 elif found[2] is None:
-                    before = f"You've no {found[0]} in the next day. "
+                    before = f"You've no {found[0]} {'in the next day' if on is None else _day_said(on, now)}. "
                 else:
                     activity, arrival = found[1], found[2]
         found = self._google(origin, destination, mode, place)
         if arrival is None:
             return {"success": True, "message": before + self._time_words(found, mode, place) + after}
         minutes, buffer = _minutes(found["seconds"]), timedelta(minutes=self._setting("buffer_minutes"))
-        leave_by = (arrival - timedelta(minutes=minutes) - buffer).replace(second=0, microsecond=0)
+        # Made local again after the sum, which keeps the arrival's offset: across a clock change that is an hour out
+        # of what the clock will show, so the time said, and asked of Google, would be one which doesn't come.
+        leave_by = (arrival - timedelta(minutes=minutes) - buffer).astimezone().replace(second=0, microsecond=0)
         about = ""
         if mode == "driving" and leave_by - now >= timedelta(minutes=self._setting("watch_minutes")):
             # Too far off for the traffic now to say much: how it's expected to be at the time of leaving.
@@ -489,7 +576,7 @@ class Journeys:
             if forecast is not None:
                 found, about = forecast, "about "
                 minutes = _minutes(found["seconds"])
-                leave_by = (arrival - timedelta(minutes=minutes) - buffer).replace(second=0, microsecond=0)
+                leave_by = (arrival - timedelta(minutes=minutes) - buffer).astimezone().replace(second=0, microsecond=0)
         duration = about + format_duration(minutes * 60)
         sentence = f"{activity} starts at {_when(arrival, now)}. The {NOUNS[mode]} is {duration}, " if activity \
             else f"The {NOUNS[mode]} to {place} is {duration}, "
@@ -506,7 +593,7 @@ class Journeys:
             params = {"place": place, "destination": destination, "origin": origin, "mode": mode,
                       "arrive": arrival.timestamp(), "leave_by": leave_by.timestamp(),
                       "watch": mode == "driving" and origin == "zone.home"}
-            answer["message"] += " Want a reminder?"
+            answer["message"] += OFFER
             answer["ask_first"] = Action("set_leave_reminder", params)
         return answer
 
@@ -542,8 +629,10 @@ class Journeys:
         if not reply.get("success"):
             return reply
         if watch:
+            # The journey was looked at for the ask a moment ago, so that is its last look: one set inside the watch
+            # window isn't looked at again within the minute.
             watched = {"destination": destination, "origin": origin, "place": place, "arrive": arrive,
-                       "leave_by": leave_by, "satellite": satellite, "seen_home": False}
+                       "leave_by": leave_by, "satellite": satellite, "seen_home": False, "looked": now.timestamp()}
             self.store.keep(lambda state: state["watches"].update({str(reply["id"]): watched}),
                             "journey being watched")
         ringing = datetime.fromtimestamp(now.timestamp() + seconds).astimezone()
@@ -554,8 +643,8 @@ class JourneyWatcher:
     """
     Watches the reminders to leave which Journeys.remind keeps: while one waits, looks at the traffic from
     time to time, moves it when the time to leave has changed enough to matter, and says so. It also drops
-    one once Home Assistant says the user has left - they've gone, so the reminder is of no use - and forgets
-    one which has rung or been cancelled.
+    one once Home Assistant says the user has left - at home inside the watch window, then away: they've gone,
+    so the reminder is of no use - and forgets one which has rung or been cancelled.
 
     Each look is of one watch, and one watch which fails never stops the others, nor the thread.
     """
@@ -625,13 +714,15 @@ class JourneyWatcher:
 
     def _watch(self, clock, key: str, watch: Dict, now: float, at_home: list) -> None:
         """
-        One look at one watched reminder, in this order: forget it if it's gone; see where the user is; go no further
-        if it isn't yet time to look; look at the traffic and, if the time to leave has changed, move the reminder.
+        One look at one watched reminder, in this order: forget it if it's gone; leave it alone if its time has come;
+        go no further before the watch window; see where the user is; go no further if it was looked at within
+        check_every_minutes; look at the traffic and, if the time to leave has changed, move the reminder.
 
         Args:
             clock: The Clock which holds the reminder.
             key: The reminder's id, as a string, which the watch is kept by.
-            watch: The watch, as Journeys.remind keeps it, with "looked", the time of the last look, once there is one.
+            watch: The watch, as Journeys.remind keeps it, with "looked", the time of the last look - the time it was
+                set, until the first.
             now: The time now, in epoch seconds.
             at_home: This pass's note of whether the user is home, for _at_home.
         """
@@ -648,6 +739,10 @@ class JourneyWatcher:
             # to ring, and the next look forgets it.
             return
         timer_id = int(key)
+        if watch["leave_by"] - now >= self._setting("watch_minutes") * 60:
+            # Before the window, where the user is says nothing of this journey: out at eleven for a time to leave
+            # at five, they will be back. So it isn't asked, nor kept, nor acted on.
+            return
 
         home = self._at_home(at_home)
         if home:
@@ -655,13 +750,12 @@ class JourneyWatcher:
                 self._update(key, seen_home=True)
                 watch["seen_home"] = True
         elif home is False and watch.get("seen_home"):
+            # At home in the window and now away: they have left for it.
             clock.drop_timer(timer_id)
             self._forget(key)
             logger.info("Dropped the reminder to leave, as Home Assistant says the user has left")
             return
 
-        if watch["leave_by"] - now >= self._setting("watch_minutes") * 60:
-            return
         if now - watch.get("looked", 0) < self._setting("check_every_minutes") * 60:
             return
         # Saved first, so a restart doesn't ask again at once, and a look which fails is tried again as often as

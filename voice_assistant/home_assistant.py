@@ -48,10 +48,10 @@ sensor, asks one shell command a question and writes one text box - see FOOTBALL
 football_ask and FOOTBALL_BOX, the only three names it knows of.
 
 Journeys are Home Assistant's too, from its Google Maps Travel Time: Nova asks how long it
-takes to get from one zone or person to another - never where anyone is, as it holds no
-position, only the zones' ids and names - see zones and journey. Both of its actions are asked
-through _call_service, which only lets them be given zones, people and places cut down by
-journey_place, never anything else.
+takes to get from a zone or the user's person to a zone or a place - never where anyone is, as
+it holds no position, only the zones' ids and names - see zones and journey. Both of its
+actions are asked through _call_service, which only lets them be given zones, places cut down
+by journey_place and, as the origin alone, a person - never anything else.
 
 The weather is Home Assistant's own, Met's for its home location - see weather.py. The
 calendar isn't Home Assistant's: Nova reads it from Google itself - see google_calendar.py.
@@ -113,9 +113,10 @@ DEFAULT_AGENT = "conversation.home_assistant"
 # The one text box Nova writes is football's list of teams, FOOTBALL_BOX, and no other. The
 # one shell command is football_ask, given nothing but its own few fields and no target.
 # Google Maps Travel Time's two actions only ever ask how long a journey takes: given its
-# config entry's id, an origin and a destination - each a zone or a person, or a place cut down
-# by journey_place - and, for the one by road, foot or bicycle, a mode and a time of day. No
-# target, and never another of its services, which could change its entry.
+# config entry's id, an origin and a destination - each a zone or a place cut down by
+# journey_place, and the origin a person too - and, for the one by road, foot or bicycle, a
+# mode and a time of day. No target, and never another of its services, which could change
+# its entry.
 SERVICES = {"light": ("turn_on", "turn_off"), "script": ("turn_on",), "scene": ("turn_on",),
             "weather": ("get_forecasts",), "todo": ("add_item", "update_item", "get_items"),
             "notify": re.compile(r"mobile_app_[a-z0-9_]+"), "button": ("press",),
@@ -164,8 +165,11 @@ JOURNEY_TIMEOUT = 10
 JOURNEY_PLACE_LENGTH = 80
 # How long the Travel Time config entry's id is kept before Home Assistant is asked again.
 JOURNEY_ENTRY_SECONDS = 300
-# What a journey's end may be: a zone or a person, by entity id...
+# Where a journey may start: a zone or a person, by entity id - a person only ever as the user, from a
+# satellite which travels with them - and where one may end: a zone alone, as a person's id would ask
+# Google for the way to where their phone is...
 JOURNEY_ENTITY = re.compile(r"(zone|person)\.[a-z0-9_]+")
+JOURNEY_DESTINATION = re.compile(r"zone\.[a-z0-9_]+")
 # ...and what any other entity id looks like once lower-cased, as Home Assistant looks one up
 # whatever its case - which is never one to ask Google about.
 ANY_ENTITY = re.compile(r"[a-z0-9_]+\.[a-z0-9_]+")
@@ -192,11 +196,17 @@ def journey_place(words: str) -> str:
     return " ".join(kept.split())[:JOURNEY_PLACE_LENGTH].rstrip()
 
 
-def _journey_end(place) -> bool:
-    """Whether a journey's origin or destination is one _call_service may send on."""
+def _journey_end(place, origin: bool) -> bool:
+    """
+    Whether a journey's origin, or its destination, is one _call_service may send on.
+
+    Args:
+        place: What was given.
+        origin: True for the origin, which may be a person; False for the destination, which may not.
+    """
     if not isinstance(place, str):
         return False
-    if JOURNEY_ENTITY.fullmatch(place):
+    if (JOURNEY_ENTITY if origin else JOURNEY_DESTINATION).fullmatch(place):
         return True
     # A place said: only what journey_place leaves as it was, and never another entity's id,
     # which would send a light's or a lock's name to Google as if it were a place. Home Assistant
@@ -811,7 +821,7 @@ class HomeAssistant:
         Args:
             origin: Where from: a zone's or a person's entity id, e.g. "zone.home" - or a
                 place as it was said, if it's only what journey_place leaves of it.
-            destination: Where to, as origin is.
+            destination: Where to, as origin is but never a person.
             mode: One of JOURNEY_MODES.
             departure: A time of day, "HH:MM", to leave at - or None for now. Only goes
                 with "driving", as the others have no use for it: it's left out for them.
@@ -1846,9 +1856,10 @@ class HomeAssistant:
                 input_text, anything but FOOTBALL_BOX alone - or, for shell_command, any
                 field but football_ask's own: what, name, date, days and against - or, for
                 google_travel_time, anything but a loaded entry's id with an origin and a
-                destination, each a zone or a person or a place which journey_place leaves
-                as it is (and not another entity), and, for get_travel_times alone, a mode
-                of driving, walking or bicycling and a departure_time of a time of day.
+                destination, each a zone or a place which journey_place leaves as it is (and
+                not another entity) - or, for the origin alone, a person - and, for
+                get_travel_times alone, a mode of driving, walking or bicycling and a
+                departure_time of a time of day.
             requests.RequestException: If Home Assistant couldn't be asked.
         """
         entities = data.get("entity_id")
@@ -1902,7 +1913,7 @@ class HomeAssistant:
         entry, departure = data.get("config_entry_id"), data.get("departure_time", "00:00:00")
         return (set(data) <= keys and {"config_entry_id", "origin", "destination"} <= set(data)
                 and isinstance(entry, str) and bool(re.fullmatch(r"[0-9A-Za-z_-]{1,64}", entry))
-                and _journey_end(data["origin"]) and _journey_end(data["destination"])
+                and _journey_end(data["origin"], origin=True) and _journey_end(data["destination"], origin=False)
                 and data.get("mode", "driving") in JOURNEY_MODES[:3]
                 and isinstance(departure, str) and bool(re.fullmatch(r"[0-2][0-9]:[0-5][0-9]:00", departure)))
 

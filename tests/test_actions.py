@@ -1986,8 +1986,8 @@ class FakeJourneys:
     def __init__(self):
         self.asked, self.reminded = [], []
 
-    def ask(self, place, mode="driving", leave=False, arrive_at=None, satellite=None, now=None):
-        self.asked.append((place, mode, leave, arrive_at, satellite))
+    def ask(self, place, mode="driving", leave=False, arrive_at=None, satellite=None, now=None, day=None):
+        self.asked.append((place, mode, leave, arrive_at, satellite, day))
         return {"success": True, "message": "The drive to Work is 24 minutes. Want a reminder?",
                 "ask_first": Action("set_leave_reminder", {"place": place})}
 
@@ -2001,11 +2001,16 @@ def test_the_journey_tool_asks_for_the_satellite_it_was_said_on():
     executor = ActionExecutor(journeys=journeys, satellite="kitchen")
     result = executor.execute(Action("journey", {"place": "work", "leave": True, "arrive_at": "09:00"},
                                      from_model=True))
-    assert journeys.asked == [("work", "driving", True, "09:00", "kitchen")]
+    assert journeys.asked == [("work", "driving", True, "09:00", "kitchen", None)]
     assert result.ok and result.say.endswith("Want a reminder?")
     # Left out, a journey is a drive and only how long it takes.
     executor.execute(Action("journey", {"place": "the station", "mode": "walking"}, from_model=True))
-    assert journeys.asked[1] == ("the station", "walking", False, None, "kitchen")
+    assert journeys.asked[1] == ("the station", "walking", False, None, "kitchen", None)
+    # "What time do I leave for work tomorrow?" - the day, as Claude works it out from today's date.
+    executor.execute(Action("journey", {"place": "work", "leave": True, "day": "2026-11-19"}, from_model=True))
+    assert journeys.asked[2] == ("work", "driving", True, None, "kitchen", "2026-11-19")
+    executor.execute(Action("journey", {"place": "work", "leave": True, "day": ""}, from_model=True))
+    assert journeys.asked[3][5] is None
 
 
 def test_the_journey_tool_is_described_for_claude():
@@ -2013,7 +2018,9 @@ def test_the_journey_tool_is_described_for_claude():
     assert schema["input_schema"]["required"] == ["place"]
     properties = schema["input_schema"]["properties"]
     assert properties["mode"]["enum"] == ["driving", "walking", "cycling", "transit"]
-    assert set(properties) == {"place", "mode", "leave", "arrive_at"}
+    assert set(properties) == {"place", "mode", "leave", "arrive_at", "day"}
+    assert properties["day"]["description"] == ("The day asked about, as YYYY-MM-DD, worked out from today's date - "
+                                                "only when the user names a day, e.g. tomorrow. Leave it out otherwise.")
     for words in ("how long's the drive to work?", "what time do I leave for uni?", "never a guess at an address",
                   "just reply 'Okay.'", "When do you need to be there?"):
         assert words in schema["description"]

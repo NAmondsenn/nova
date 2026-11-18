@@ -1730,10 +1730,12 @@ class ActionExecutor:
         leave={"type": "boolean", "description": "True when they ask when to leave or set off."},
         arrive_at={"type": "string", "description": "The time they need to be there, only when they said one: "
                    "local 24-hour 'HH:MM', or 'YYYY-MM-DD HH:MM' for another day."},
+        day={"type": "string", "description": "The day asked about, as YYYY-MM-DD, worked out from today's date - "
+             "only when the user names a day, e.g. tomorrow. Leave it out otherwise."},
     )
-    def journey(self, place=None, mode=None, leave=None, arrive_at=None):
+    def journey(self, place=None, mode=None, leave=None, arrive_at=None, day=None):
         return self.journeys.ask(place or "", mode or "driving", bool(leave), arrive_at or None,
-                                 satellite=self.satellite)
+                                 satellite=self.satellite, day=day or None)
 
     # Only ever run by the conversation, on the user's yes to journey's "Want a reminder?" - so Claude,
     # which isn't offered it, can't set one without a yes.

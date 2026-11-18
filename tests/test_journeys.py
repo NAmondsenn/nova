@@ -9,7 +9,7 @@ import json
 import logging
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 import requests
@@ -299,15 +299,41 @@ def test_lectures_find_the_uni_zone_the_same_way(store):
     assert home.asked == [("zone.home", "zone.uni", "driving", None)]
 
 
-def test_a_word_for_an_activity_with_no_zone_named_as_it_is_as_before(store):
+def test_a_word_for_an_activity_with_no_zone_named_as_it_is_refused_and_never_sent_to_google(store):
+    # Sent to Google as words, "work" would be a confident time to leave for wherever Google guessed, said as
+    # "Work starts at 9:00 AM..." without ever naming the place.
     home = FakeHome(zones=[zone for zone in ZONES if zone["id"] != "zone.work"])
-    answer = ask(make(store, home, FakeCalendar()), "my shift")
-    assert answer == {"success": False, "message": "I don't know where my shift is. "
-                                                    "Add it as a zone in Home Assistant."}
+    for said in ("my shift", "shift", "work", "  My   Work "):
+        answer = ask(make(store, home, FakeCalendar()), said)
+        assert answer == {"success": False, "message": f"I don't know where {' '.join(said.split())} is. "
+                                                       "Add it as a zone in Home Assistant."}
+    assert home.asked == [] and store.get("requests") == 0
+
+
+def test_with_no_zone_for_an_activity_the_time_to_leave_for_it_asks_google_nothing(store):
+    home = FakeHome(zones=[zone for zone in ZONES if zone["id"] != "zone.work"])
+    calendar = work_at(at(2026, 11, 18, 9))
+    for said in ("work", "shift"):
+        answer = ask(make(store, home, calendar), said, leave=True)
+        assert answer == {"success": False, "message": f"I don't know where {said} is. "
+                                                       "Add it as a zone in Home Assistant."}
+        assert "ask_first" not in answer
+    assert home.asked == [] and store.get("requests") == 0
+
+
+def test_a_word_for_an_activity_named_unlike_any_zone_is_refused(store):
+    class Timetable(FakeCalendar):
+        def activity_words(self):
+            # As the calendar hears "Uni timetable": by its name, its first word, and the first word's own words.
+            return {"uni timetable": "uni timetable", "uni": "uni timetable", "lectures": "uni timetable"}
+
+    home = FakeHome()
+    calendar = Timetable([event(at(2026, 11, 18, 9))], activities=("Uni timetable",))
+    answer = ask(make(store, home, calendar), "lectures", leave=True)
+    assert answer == {"success": False, "message": "I don't know where lectures is. Add it as a zone in Home Assistant."}
     assert home.asked == []
-    answer = ask(make(store, home, FakeCalendar()), "shift")
-    assert answer == {"success": True, "message": "The drive to shift is 24 minutes, 6.4 miles."}
-    assert home.asked == [("zone.home", "shift", "driving", None)]
+    # The zone's own name still finds it.
+    assert ask(make(store, home, calendar), "uni")["message"] == "The drive to Uni is 24 minutes, 6.4 miles."
 
 
 @pytest.mark.parametrize("failure", [None, SignInNeeded("no"), requests.ConnectionError("down"), KeyError("x")])
@@ -329,8 +355,32 @@ def test_a_zones_own_name_wins_over_the_calendars_word(store):
 
 def test_home_is_the_home_zone(store):
     home = FakeHome()
-    assert ask(make(store, home), "home")["message"].startswith("The drive to Home is 24 minutes")
-    assert home.asked[0][1] == "zone.home"
+    journey = make(store, home)
+    journey.set_travels("macbook", True)
+    assert ask(journey, "home", satellite="macbook")["message"].startswith("The drive to Home is 24 minutes")
+    assert home.asked[0][:2] == ("person.sam", "zone.home")
+
+
+def test_a_journey_to_where_it_starts_is_already_there_and_asks_nothing(store):
+    # "How long to get home?" from a satellite at home.
+    home = FakeHome()
+    calendar = work_at(at(2026, 11, 18, 9))
+    for kwargs in ({}, {"leave": True}, {"leave": True, "arrive_at": "09:00"}, {"mode": "walking"},
+                   {"mode": "transit", "leave": True}):
+        assert ask(make(store, home, calendar), "home", **kwargs) == {"success": True, "message": "You're already there."}
+    assert home.asked == [] and store.get("requests") == 0
+
+
+@pytest.mark.parametrize("said", ["person.sam", "zone.work", "Zone.Work", "  light.lamp ", "PERSON.SAM"])
+def test_an_entity_id_said_as_a_place_is_never_looked_up_or_sent(store, said):
+    # A zone is only ever found by its name, and a person is only ever where the user is, never where to.
+    home = FakeHome()
+    answer = ask(make(store, home, FakeCalendar()), said, leave=True)
+    assert answer == {"success": False, "message": "I didn't catch where to."}
+    assert home.asked == [] and store.get("requests") == 0
+    # Refused before Home Assistant's zones are read: it is the words, not a failure to read them.
+    unread = FakeHome(zones=requests.ConnectionError("not to be read"))
+    assert ask(make(store, unread), said) == {"success": False, "message": "I didn't catch where to."}
 
 
 def test_words_which_arent_a_zone_go_to_google_as_said_and_are_said_back(store):
@@ -375,6 +425,23 @@ def test_a_travelling_satellite_whose_person_cant_be_read_gets_no_journey(store,
     answer = ask(journey, "work", satellite="macbook")
     assert answer == {"success": False, "message": "I can't tell where you are right now."}
     assert home.asked == []
+
+
+def test_an_answer_from_where_the_user_is_is_private_and_one_from_home_isnt(store):
+    # A journey from the user's phone says how far they are from a place: kept from Claude, as where their phone is.
+    home = FakeHome({"seconds": 1440, "clear_seconds": None, "metres": 10300})
+    journey = make(store, home, work_at(at(2026, 11, 18, 9)))
+    journey.set_travels("macbook", True)
+    for kwargs in ({}, {"leave": True}, {"leave": True, "arrive_at": "09:00"}, {"leave": True, "day": "2026-11-18"},
+                   {"mode": "transit", "leave": True}, {"leave": True, "day": "soon"}):
+        assert ask(journey, "work", satellite="macbook", **kwargs)["private"] is True
+        assert "private" not in ask(journey, "work", satellite="kitchen", **kwargs)
+    # Its failures too, once it is worked out from where they are.
+    home.answer = None
+    assert ask(journey, "the Metrocentre", satellite="macbook") == {
+        "success": False, "message": "I couldn't find a way to the Metrocentre.", "private": True}
+    assert ask(journey, "the Metrocentre", satellite="kitchen") == {
+        "success": False, "message": "I couldn't find a way to the Metrocentre."}
 
 
 def test_which_satellites_travel_is_kept_across_a_restart(store, tmp_path):
@@ -539,6 +606,94 @@ def test_an_arrival_time_already_gone_gives_no_time_to_leave(store):
     answer = ask(make(store, home), "gran's", now=at(2026, 11, 18, 19), leave=True, arrive_at="2026-11-18 18:00")
     assert answer == {"success": False, "message": "That time's already gone."}
     assert home.asked == []
+
+
+@pytest.mark.parametrize("arrive", [
+    # 01:30 GMT, which is 02:30 BST, on the night the clocks go forward at one, and 01:30 GMT, the second half past one,
+    # on the night they go back: in London the wall clock's hour is skipped or repeated between leaving and arriving.
+    # In UTC nothing changes, and the time to leave is the same.
+    datetime(2026, 3, 29, 1, 30, tzinfo=timezone.utc), datetime(2026, 10, 25, 1, 30, tzinfo=timezone.utc)])
+def test_the_time_to_leave_is_said_as_the_clock_will_show_it_across_a_clock_change(store, arrive):
+    # An hour's drive and the 10 minutes' buffer: 70 minutes before arriving, whichever way the clocks change.
+    arrive = arrive.astimezone()
+    home = FakeHome({"seconds": 3600, "clear_seconds": None, "metres": 10300})
+    now = (arrive - timedelta(hours=3)).astimezone()
+    answer = ask(make(store, home, FakeCalendar([event(arrive)])), "work", now=now, leave=True)
+    leave_by = datetime.fromtimestamp(arrive.timestamp() - 70 * 60).astimezone()
+    said = spoken_clock_time(leave_by.hour, leave_by.minute)
+    assert answer["message"].endswith(f"so leave by {said} tomorrow. Want a reminder?")
+    assert answer["ask_first"].params["leave_by"] == leave_by.timestamp()
+    # Google is asked for the drive at that time as the clock will show it.
+    assert home.asked[-1][3] == f"{leave_by:%H:%M}"
+
+
+# --- The day asked about.
+
+
+def test_a_day_asked_about_is_that_days_first_event_not_the_next_one(store):
+    # "What time do I leave for work tomorrow?" at seven, with a shift at nine today.
+    home = FakeHome({"seconds": 1440, "clear_seconds": None, "metres": 10300})
+    calendar = FakeCalendar([event(at(2026, 11, 18, 9)), event(at(2026, 11, 19, 10)), event(at(2026, 11, 19, 14))])
+    answer = ask(make(store, home, calendar), "work", now=SEVEN, leave=True, day="2026-11-19")
+    assert answer["message"] == ("Work starts at 10:00 AM tomorrow. The drive is about 24 minutes, "
+                                 "so leave by 9:26 AM tomorrow. Want a reminder?")
+    assert answer["ask_first"].params["arrive"] == at(2026, 11, 19, 10).timestamp()
+    # That day alone is read, for the Work calendar alone.
+    assert calendar.read == [(date(2026, 11, 19), 1, ["work-id"])]
+    # With no day it is the next 24 hours' first, as it always was.
+    calendar.read.clear()
+    answer = ask(make(store, home, calendar), "work", now=SEVEN, leave=True)
+    assert answer["message"].startswith("Work starts at 9:00 AM. ")
+    assert calendar.read == [(SEVEN.date(), 2, ["work-id"])]
+
+
+def test_a_day_however_far_off_is_said_by_its_name(store):
+    home = FakeHome({"seconds": 1440, "clear_seconds": None, "metres": 10300})
+    calendar = FakeCalendar([event(at(2026, 11, 20, 9))])
+    answer = ask(make(store, home, calendar), "shift", now=SEVEN, leave=True, day="2026-11-20")
+    assert answer["message"] == ("Work starts at 9:00 AM on Friday. The drive is about 24 minutes, "
+                                 "so leave by 8:26 AM on Friday. Want a reminder?")
+
+
+def test_a_day_of_today_is_its_first_timed_event_not_yet_begun(store):
+    home = FakeHome({"seconds": 1440, "clear_seconds": None, "metres": 10300})
+    calendar = FakeCalendar([event(at(2026, 11, 18, 9)), event(EIGHT.date(), all_day=True),
+                             event(at(2026, 11, 18, 17))])
+    answer = ask(make(store, home, calendar), "work", now=at(2026, 11, 18, 9, 10), leave=True, day="2026-11-18")
+    assert answer["message"].startswith("Work starts at 5:00 PM. The drive is about 24 minutes, so leave by 4:26 PM.")
+
+
+@pytest.mark.parametrize("day,said", [("2026-11-18", "today"), ("2026-11-19", "tomorrow"), ("2026-11-20", "on Friday")])
+def test_a_day_with_no_event_says_so_and_gives_the_journey_time(store, day, said):
+    home = FakeHome({"seconds": 1440, "clear_seconds": None, "metres": 10300})
+    # One begun today, one all day tomorrow, and one on Saturday.
+    calendar = FakeCalendar([event(at(2026, 11, 18, 9)), event(date(2026, 11, 19), all_day=True),
+                             event(at(2026, 11, 21, 9))])
+    answer = ask(make(store, home, calendar), "work", now=at(2026, 11, 18, 10), leave=True, day=day)
+    assert answer == {"success": True, "message": f"You've no work {said}. The drive to Work is 24 minutes, 6.4 miles."}
+
+
+@pytest.mark.parametrize("said", ["tomorrow", "2026-11-17", "2026-13-01", "19/11/2026", "2026-11-19 09:00", "20261119",
+                                  "2026-11-1"])
+def test_a_day_which_isnt_one_or_has_gone_asks_nothing(store, said):
+    home = FakeHome()
+    calendar = work_at(at(2026, 11, 18, 9))
+    answer = ask(make(store, home, calendar), "work", leave=True, day=said)
+    assert answer == {"success": False, "message": "I didn't catch which day."}
+    assert home.asked == [] and calendar.read == []
+
+
+def test_a_day_is_only_for_when_to_leave_by_the_calendar(store):
+    home = FakeHome({"seconds": 1440, "clear_seconds": None, "metres": 10300})
+    calendar = work_at(at(2026, 11, 18, 9))
+    # A time said, with its date if it isn't the next one, already says the day.
+    answer = ask(make(store, home, calendar), "gran's", now=at(2026, 11, 18, 17), leave=True, arrive_at="18:00",
+                 day="2026-11-20")
+    assert answer["message"].startswith("The drive to Gran's is 24 minutes, so leave by 5:26 PM to be there for 6:00 PM.")
+    assert calendar.read == []
+    # How long it takes has no day.
+    assert ask(make(store, home, calendar), "work", day="whenever") == {
+        "success": True, "message": "The drive to Work is 24 minutes, 6.4 miles."}
 
 
 def test_the_walk_and_the_cycle_say_so_and_are_not_watched(store):
@@ -845,9 +1000,10 @@ def test_a_yes_sets_the_reminder_and_keeps_the_watch(store, real_clock):
     assert real_clock._timers[timer["id"]]["label"] == "Leave for Work"
     assert real_clock._timers[timer["id"]]["satellite"] == "kitchen"
     assert abs(real_clock.timer_due(timer["id"]) - (params["leave_by"] - 300)) < 3
+    # Its journey was looked at for the ask, so the time it was set is its last look.
     assert store.get("watches") == {str(timer["id"]): {
         "destination": "zone.work", "origin": "zone.home", "place": "Work", "arrive": params["arrive"],
-        "leave_by": params["leave_by"], "satellite": "kitchen", "seen_home": False}}
+        "leave_by": params["leave_by"], "satellite": "kitchen", "seen_home": False, "looked": now.timestamp()}}
 
 
 def test_a_walk_is_reminded_but_not_watched(store, real_clock):
@@ -938,25 +1094,35 @@ class Watching:
     """A reminder to leave for Work, set on a real clock and watched, with what the watcher said and where."""
 
     def __init__(self, store, clock, hands, answer, at_home=True, settings=None, leave_in=1800, satellite="kitchen",
-                 start=MORNING, journey_gap=1800):
+                 start=MORNING, journey_gap=1800, set_early=300):
+        """
+        The reminder is set set_early seconds before start - by default the five minutes of check_every_minutes,
+        as the journey was looked at for the ask then, so the first check, at start, is due a look.
+        """
         self.store, self.clock, self.hands, self.start = store, clock, hands, start
-        hands.now = start
+        hands.now = start - set_early
         self.settings = dict(SETTINGS, **(settings or {}))
         self.home = FakeHome(answer)
         self.where = at_home
+        self.homes_asked = 0
         self.said = []
         self.journey = Journeys(self.home, None, clock, store, lambda: self.settings)
         leave_by = start + leave_in
-        now = datetime.fromtimestamp(start).astimezone()
+        now = datetime.fromtimestamp(start - set_early).astimezone()
         self.journey.remind("Work", "zone.work", "zone.home", "driving", leave_by + journey_gap, leave_by, True,
                             satellite=satellite, now=now)
+        hands.now = start
         [timer] = clock.overview()["timers"]
         self.id = timer["id"]
         self.watcher = self.make_watcher(self.journey)
 
+    def home_now(self):
+        self.homes_asked += 1
+        return self.where
+
     def make_watcher(self, journey):
         return JourneyWatcher(journey, lambda satellite, message: self.said.append((satellite, message)),
-                              lambda: self.where, lambda: self.settings)
+                              self.home_now, lambda: self.settings)
 
     def check(self, later=0):
         self.hands.now = self.start + later
@@ -1017,11 +1183,13 @@ def test_a_reminder_due_but_not_yet_rung_is_left_alone_for_that_look(watching, r
     assert watched.watch is None
 
 
-def test_being_home_is_noted_and_being_away_after_it_drops_the_reminder_and_the_watch(watching, caplog):
-    watched = watching(leave_in=3 * 3600)
+def test_being_home_in_the_window_is_noted_and_being_away_after_it_drops_the_reminder_and_the_watch(watching, caplog):
+    # Half an hour before the time to leave, inside the 45 minutes' window.
+    watched = watching()
     assert watched.watch["seen_home"] is False
     watched.check()
     assert watched.watch["seen_home"] is True
+    assert len(watched.home.asked) == 1
     watched.where = False
     # The root logger at INFO, so what the clock logs of the removal is seen too.
     with caplog.at_level(logging.INFO):
@@ -1030,7 +1198,30 @@ def test_being_home_is_noted_and_being_away_after_it_drops_the_reminder_and_the_
     assert "Dropped the reminder to leave, as Home Assistant says the user has left" in caplog.text
     assert f"Dropped timer {watched.id}" in caplog.text
     assert "Work" not in caplog.text and "settings page" not in caplog.text
-    assert watched.home.asked == []
+    # Gone, so not looked at again.
+    assert len(watched.home.asked) == 1
+
+
+def test_away_hours_before_the_window_isnt_having_left_and_nothing_is_asked(watching):
+    # Asked at nine about being somewhere for six, he pops out at eleven: the reminder is still wanted.
+    watched = watching(leave_in=4 * 3600)
+    watched.check()
+    watched.where = False
+    watched.check(3600)
+    assert watched.watch["seen_home"] is False and watched.rings == MORNING + 4 * 3600 - 300
+    assert watched.homes_asked == 0 and watched.home.asked == [] and watched.said == []
+
+
+def test_away_from_the_start_of_the_window_isnt_having_left(watching):
+    # At home hours before, which isn't noted, and away once the window opens: he may have left long ago and be
+    # on his way back, so it isn't known that he has left for this.
+    watched = watching(leave_in=3 * 3600)
+    watched.check()
+    watched.where = False
+    watched.check(3 * 3600 - 44 * 60)
+    assert watched.watch["seen_home"] is False and watched.rings is not None
+    # It's looked at all the same, for the user is on the way, say, and the reminder is still of use.
+    assert watched.homes_asked == 1 and len(watched.home.asked) == 1
 
 
 def test_away_from_the_start_isnt_having_left(watching):
@@ -1043,7 +1234,7 @@ def test_away_from_the_start_isnt_having_left(watching):
 
 @pytest.mark.parametrize("unsure", [None, "raises"])
 def test_not_knowing_where_the_user_is_changes_nothing(watching, unsure):
-    watched = watching(leave_in=3 * 3600)
+    watched = watching()
     watched.check()
     if unsure:
         def cant():
@@ -1056,14 +1247,12 @@ def test_not_knowing_where_the_user_is_changes_nothing(watching, unsure):
 
 
 def test_home_is_asked_once_for_all_the_watches_in_a_pass(watching):
-    watched = watching(leave_in=3 * 3600)
-    asked = []
-    watched.watcher._home_now = lambda: asked.append(1) or True
-    watched.journey.remind("Uni", "zone.uni", "zone.home", "driving", LEAVE_BY + 7200, LEAVE_BY + 3 * 3600, True,
+    watched = watching()
+    watched.journey.remind("Uni", "zone.uni", "zone.home", "driving", LEAVE_BY + 1800, LEAVE_BY + 600, True,
                            satellite="kitchen", now=datetime.fromtimestamp(MORNING).astimezone())
     assert len(watched.store.get("watches")) == 2
     watched.check()
-    assert asked == [1]
+    assert watched.homes_asked == 1
 
 
 def test_google_isnt_asked_before_the_watch_window(watching):
@@ -1086,6 +1275,18 @@ def test_google_isnt_asked_again_within_check_every_minutes_of_the_last_look(wat
     assert len(watched.home.asked) == 1
     watched.check(300)
     assert len(watched.home.asked) == 2
+
+
+def test_a_reminder_set_in_the_window_isnt_looked_at_until_check_every_minutes_after_it_was_set(watching):
+    # Its journey was looked at for the ask a moment before.
+    watched = watching(set_early=0)
+    assert watched.watch["looked"] == MORNING
+    watched.check()
+    watched.check(60)
+    watched.check(299)
+    assert watched.home.asked == []
+    watched.check(300)
+    assert len(watched.home.asked) == 1
 
 
 def test_the_window_and_the_pace_are_read_at_each_use(watching):
@@ -1291,7 +1492,8 @@ def test_a_watch_which_fails_doesnt_stop_the_others_or_the_pass(watching, caplog
 
     watched.clock.timer_due = due
     with caplog.at_level(logging.ERROR, logger="voice_assistant.journeys"):
-        watched.check()
+        # Five minutes after the second was set, so it is due a look.
+        watched.check(300)
     assert "Watching a reminder to leave failed" in caplog.text
     assert [satellite for satellite, _ in watched.said] == ["bedroom"]
 

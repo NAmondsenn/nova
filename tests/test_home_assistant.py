@@ -1402,7 +1402,9 @@ def test_entries_which_cant_be_read_are_a_failure_not_no_journeys(make_home, ent
     {**GOOD_JOURNEY, "destination": "light.Kitchen"}, {**GOOD_JOURNEY, "origin": "Sensor.Phone_Battery"},
     # The Kelvin sign is a letter which lower-cases to "k", as Home Assistant's own lookup does.
     {**GOOD_JOURNEY, "destination": "light.\u212aitchen"},
-    {**GOOD_JOURNEY, "origin": "person.nathaniel; rm"}, {**GOOD_JOURNEY, "destination": "x" * 81},
+    {**GOOD_JOURNEY, "origin": "person.sam; rm"}, {**GOOD_JOURNEY, "destination": "x" * 81},
+    # A person is only ever where the user is, the origin: never where to, which would ask Google for their phone.
+    {**GOOD_JOURNEY, "destination": "person.sam"}, {**GOOD_JOURNEY, "destination": "Person.Sam"},
     {**GOOD_JOURNEY, "destination": ""}, {**GOOD_JOURNEY, "destination": " Work"}, {**GOOD_JOURNEY, "mode": "flying"},
     {**GOOD_JOURNEY, "mode": "transit"}, {**GOOD_JOURNEY, "departure_time": "now"},
     {**GOOD_JOURNEY, "departure_time": "08:05:30"}, {**GOOD_JOURNEY, "departure_time": None},
@@ -1452,6 +1454,14 @@ def test_the_transit_action_takes_no_mode_or_time(make_home):
 def test_a_journey_may_be_asked_of_a_zone_a_person_or_a_place(make_home, place):
     home = make_home({TRAVEL: _travel([ROUTE])})
     data = {**GOOD_JOURNEY, "origin": place}
+    assert home._call_service("google_travel_time", "get_travel_times", data, returns=True) == {"routes": [ROUTE]}
+    assert home._session.requests == [("POST", TRAVEL, {"json": data})]
+
+
+@pytest.mark.parametrize("place", ["zone.home", "Work", "the Metrocentre", "Gran's, 1-2 Main St. & co/x"])
+def test_a_journey_may_be_asked_to_a_zone_or_a_place(make_home, place):
+    home = make_home({TRAVEL: _travel([ROUTE])})
+    data = {**GOOD_JOURNEY, "origin": "person.sam", "destination": place}
     assert home._call_service("google_travel_time", "get_travel_times", data, returns=True) == {"routes": [ROUTE]}
     assert home._session.requests == [("POST", TRAVEL, {"json": data})]
 
