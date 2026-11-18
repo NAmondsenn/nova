@@ -218,6 +218,31 @@ def test_moving_a_reminder_is_logged_by_its_id_and_time_never_its_label(make_clo
     assert "Work" not in caplog.text and "999" not in caplog.text
 
 
+def test_a_reminder_is_dropped_and_logged_by_its_id_never_its_label(make_clock, caplog):
+    told = []
+    clock = make_clock(on_change=lambda: told.append(True))
+    timer_id = clock.set_timer(600, label="Leave for Work")["id"]
+    other = clock.set_timer(900, label="pizza")["id"]
+    told.clear()
+    with caplog.at_level(logging.INFO):
+        assert clock.drop_timer(timer_id) is True
+        assert clock.drop_timer(timer_id) is False
+        assert clock.drop_timer(999) is False
+    assert f"Dropped timer {timer_id}" in caplog.text
+    assert "Work" not in caplog.text and "settings page" not in caplog.text and "999" not in caplog.text
+    assert clock.timer_due(timer_id) is None and clock.timer_due(other) is not None
+    assert told
+    # Kept dropped across a restart.
+    assert make_clock().timer_due(timer_id) is None
+
+
+def test_a_reminder_which_has_rung_is_not_dropped(make_clock):
+    clock = make_clock()
+    timer_id = clock.set_timer(600, label="Leave for Work")["id"]
+    clock._tick(clock.timer_due(timer_id) + 1)
+    assert clock.drop_timer(timer_id) is False
+
+
 def test_reminder_without_a_name_is_asked_for(make_clock):
     clock = make_clock()
     result = clock.set_timer(1200, is_reminder=True)

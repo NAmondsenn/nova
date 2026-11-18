@@ -486,6 +486,27 @@ class ClockRequests:
         logger.info(f"Moved timer {timer_id} to {time.strftime('%H:%M', time.localtime(due_at))}", extra=TRANSCRIPT)
         return True
 
+    def drop_timer(self, timer_id: int) -> bool:
+        """
+        Removes a waiting timer or reminder which something else has no more use for - a reminder to leave
+        for a journey which the user has gone on, say. Unlike remove, which is the settings page's and gives
+        the page a copy to put back, it keeps nothing, and logs only the id.
+
+        Args:
+            timer_id: Its id, from set_timer's reply or overview().
+
+        Returns:
+            True once removed. False if no timer is waiting with that id (it has rung, or been
+            cancelled or removed).
+        """
+        with self._changing():
+            if self._timers.pop(timer_id, None) is None:
+                return False
+            self._save()
+        # By its id, as a label can hold a place.
+        logger.info(f"Dropped timer {timer_id}", extra=TRANSCRIPT)
+        return True
+
     def timer_due(self, timer_id: int) -> Optional[float]:
         """
         When a waiting timer or reminder goes off.

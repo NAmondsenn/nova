@@ -9,7 +9,7 @@ import json
 import logging
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import requests
@@ -879,16 +879,18 @@ def clock_hands(monkeypatch):
 class Watching:
     """A reminder to leave for Work, set on a real clock and watched, with what the watcher said and where."""
 
-    def __init__(self, store, clock, hands, answer, at_home=True, settings=None, leave_in=1800, satellite="kitchen"):
-        self.store, self.clock, self.hands = store, clock, hands
+    def __init__(self, store, clock, hands, answer, at_home=True, settings=None, leave_in=1800, satellite="kitchen",
+                 start=MORNING, journey_gap=1800):
+        self.store, self.clock, self.hands, self.start = store, clock, hands, start
+        hands.now = start
         self.settings = dict(SETTINGS, **(settings or {}))
         self.home = FakeHome(answer)
         self.where = at_home
         self.said = []
         self.journey = Journeys(self.home, None, clock, store, lambda: self.settings)
-        leave_by = MORNING + leave_in
-        now = datetime.fromtimestamp(MORNING).astimezone()
-        self.journey.remind("Work", "zone.work", "zone.home", "driving", leave_by + 1800, leave_by, True,
+        leave_by = start + leave_in
+        now = datetime.fromtimestamp(start).astimezone()
+        self.journey.remind("Work", "zone.work", "zone.home", "driving", leave_by + journey_gap, leave_by, True,
                             satellite=satellite, now=now)
         [timer] = clock.overview()["timers"]
         self.id = timer["id"]
@@ -899,7 +901,7 @@ class Watching:
                               lambda: self.where, lambda: self.settings)
 
     def check(self, later=0):
-        self.hands.now = MORNING + later
+        self.hands.now = self.start + later
         self.watcher.check(self.hands.now)
 
     @property
@@ -931,6 +933,13 @@ def test_a_reminder_which_has_rung_is_forgotten_and_nothing_is_said_or_asked(wat
     assert watched.watch is None and watched.said == [] and watched.home.asked == []
 
 
+def test_a_reminder_cancelled_by_voice_is_forgotten_and_nothing_is_said_or_asked(watching, real_clock):
+    watched = watching()
+    assert real_clock.cancel_timer(label="Leave for Work")["success"]
+    watched.check()
+    assert watched.watch is None and watched.said == [] and watched.home.asked == []
+
+
 def test_a_reminder_which_was_removed_is_forgotten(watching, real_clock):
     watched = watching()
     real_clock.remove("timer", watched.id)
@@ -956,11 +965,13 @@ def test_being_home_is_noted_and_being_away_after_it_drops_the_reminder_and_the_
     watched.check()
     assert watched.watch["seen_home"] is True
     watched.where = False
-    with caplog.at_level(logging.INFO, logger="voice_assistant.journeys"):
+    # The root logger at INFO, so what the clock logs of the removal is seen too.
+    with caplog.at_level(logging.INFO):
         watched.check(600)
     assert watched.watch is None and watched.rings is None and watched.said == []
     assert "Dropped the reminder to leave, as Home Assistant says the user has left" in caplog.text
-    assert "Work" not in caplog.text
+    assert f"Dropped timer {watched.id}" in caplog.text
+    assert "Work" not in caplog.text and "settings page" not in caplog.text
     assert watched.home.asked == []
 
 
@@ -1045,9 +1056,11 @@ def test_a_change_of_the_whole_five_minutes_is_said(watching):
     assert watched.said == [("kitchen", "Traffic to Work is heavier now. Leave by 7:55 AM, not 8:00 AM.")]
 
 
-def test_heavier_traffic_moves_the_reminder_and_is_said_on_the_satellite_that_asked(watching):
+def test_heavier_traffic_moves_the_reminder_and_is_said_on_the_satellite_that_asked(watching, caplog):
     watched = watching(drive_of(28))
-    watched.check()
+    with caplog.at_level(logging.INFO):
+        watched.check()
+    assert f"Moved timer {watched.id} to" in caplog.text and "Work" not in caplog.text
     # Eight minutes earlier, and the reminder is five before that.
     assert watched.said == [("kitchen", "Traffic to Work is heavier now. Leave by 7:52 AM, not 8:00 AM.")]
     assert watched.rings == LEAVE_BY - 480 - 300
@@ -1068,6 +1081,24 @@ def test_a_part_minute_of_drive_is_rounded_up(watching):
     watched = watching({"seconds": 28 * 60 - 59, "clear_seconds": None, "metres": 10300})
     watched.check()
     assert watched.said[0][1].endswith("Leave by 7:52 AM, not 8:00 AM.")
+
+
+@pytest.mark.parametrize("arrive", [
+    # 01:30 GMT on the day the clocks go back, and 01:30 GMT, which is 02:30 BST, on the day they go forward: in
+    # London the wall clock's hour is repeated or skipped between the time to leave and the arrival. In UTC
+    # nothing changes, and the time to leave is the same.
+    datetime(2026, 10, 25, 1, 30, tzinfo=timezone.utc).timestamp(),
+    datetime(2026, 3, 29, 1, 30, tzinfo=timezone.utc).timestamp()])
+def test_the_time_to_leave_is_the_arrival_less_the_journey_and_buffer_whatever_the_clocks_do(watching, arrive):
+    # A drive of 30 minutes and the 10 of buffer is 40 minutes before arriving, which was 50 when it was set: it
+    # has eased by 10 minutes, whichever way the clocks change in between.
+    leave_by = arrive - 3000
+    watched = watching(drive_of(30), start=leave_by - 1800, journey_gap=3000)
+    assert watched.watch["leave_by"] == leave_by
+    watched.check()
+    assert [message.split(".")[0] for _, message in watched.said] == ["Traffic to Work has eased"]
+    assert watched.watch["leave_by"] == arrive - 2400
+    assert watched.rings == arrive - 2400 - 300
 
 
 def test_a_watch_without_a_satellite_is_said_on_the_default_one(watching):
@@ -1102,9 +1133,13 @@ def test_a_reminder_is_never_moved_to_before_a_minute_from_now(watching):
 
 
 @pytest.mark.parametrize("minutes", [49, 60, 90])
-def test_a_time_to_leave_under_two_minutes_off_or_past_says_to_leave_now_and_ends_the_watch(watching, minutes):
+def test_a_time_to_leave_under_two_minutes_off_or_past_says_to_leave_now_and_ends_the_watch(
+        watching, minutes, caplog):
     watched = watching(drive_of(minutes))
-    watched.check()
+    with caplog.at_level(logging.INFO):
+        watched.check()
+    assert f"Dropped timer {watched.id}" in caplog.text
+    assert "Work" not in caplog.text and "settings page" not in caplog.text
     assert watched.said == [("kitchen", "Traffic to Work is heavier now. You need to leave now.")]
     assert watched.rings is None and watched.watch is None
 

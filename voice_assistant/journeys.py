@@ -615,7 +615,7 @@ class JourneyWatcher:
                 self._update(key, seen_home=True)
                 watch["seen_home"] = True
         elif home is False and watch.get("seen_home"):
-            clock.remove("timer", timer_id)
+            clock.drop_timer(timer_id)
             self._forget(key)
             logger.info("Dropped the reminder to leave, as Home Assistant says the user has left")
             return
@@ -634,13 +634,15 @@ class JourneyWatcher:
         self._warned.discard(key)
 
         minutes = _minutes(found["seconds"])
-        leave_by = datetime.fromtimestamp(watch["arrive"]) - timedelta(minutes=minutes + self._setting("buffer_minutes"))
+        # Aware, as _leave's is: a clock change between now and the arrival doesn't move the time to leave by an hour.
+        leave_by = datetime.fromtimestamp(watch["arrive"]).astimezone() \
+            - timedelta(minutes=minutes + self._setting("buffer_minutes"))
         new = leave_by.replace(second=0, microsecond=0).timestamp()
         if abs(new - watch["leave_by"]) < self._setting("change_minutes") * 60:
             return
         place, here = watch["place"], datetime.fromtimestamp(now).astimezone()
         if new - now < LEAVE_NOW.total_seconds():
-            clock.remove("timer", timer_id)
+            clock.drop_timer(timer_id)
             self._forget(key)
             self._say(watch.get("satellite"), f"Traffic to {place} is heavier now. You need to leave now.")
             return
