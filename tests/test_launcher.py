@@ -2,7 +2,7 @@
 Launcher Test
 Checks the PC's launcher waits longer each time the satellite fails quickly, goes back
 to the shortest wait after a run which lasted, forgets the last logon's running mark,
-keeps what the satellite writes to stderr, and that the settings install.ps1 writes for
+keeps what the satellite writes to stderr (rotating it when large), and that the settings install.ps1 writes for
 the PC are ones Nova accepts.
 """
 
@@ -118,6 +118,29 @@ def test_the_satellites_stderr_is_added_to_a_log_of_its_own(launched):
     starts = run()
     assert [(start["stderr"], start["mode"]) for start in starts] == [(str(log), "ab")] * 2
     assert log.read_bytes() == b"earlier\nstart 1\nstart 2\n"
+
+
+def test_a_stderr_log_over_the_limit_replaces_the_old_copy(tmp_path):
+    log = tmp_path / "satellite-stderr.log"
+    old = tmp_path / "satellite-stderr.log.1"
+    old.write_bytes(b"older")
+    log.write_bytes(b"x" * 11)
+    load_launcher().rotate_if_large(str(log), most=10)
+    assert not log.exists()
+    assert old.read_bytes() == b"x" * 11
+
+
+def test_a_stderr_log_at_or_under_the_limit_is_left_alone(tmp_path):
+    log = tmp_path / "satellite-stderr.log"
+    log.write_bytes(b"x" * 10)
+    load_launcher().rotate_if_large(str(log), most=10)
+    assert log.read_bytes() == b"x" * 10
+    assert not (tmp_path / "satellite-stderr.log.1").exists()
+
+
+def test_a_missing_stderr_log_does_nothing(tmp_path):
+    load_launcher().rotate_if_large(str(tmp_path / "satellite-stderr.log"))
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_the_settings_install_writes_are_ones_nova_accepts(tmp_path):

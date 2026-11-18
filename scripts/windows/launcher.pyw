@@ -29,6 +29,9 @@ FIRST_WAIT = 2
 # The longest wait, so a satellite which can't start (no password yet, the brain
 # unreachable) is tried again every five minutes at most.
 LONGEST_WAIT = 300
+# The satellite's stderr log is moved aside before a start when it is larger than this, so
+# it and its one earlier copy hold about twice as much at most.
+STDERR_LOG_MOST = 1_000_000
 
 
 class Backoff:
@@ -52,6 +55,24 @@ class Backoff:
         wait = self.wait
         self.wait = min(self.wait * 2, LONGEST_WAIT)
         return wait
+
+
+def rotate_if_large(path: str, most: int = STDERR_LOG_MOST) -> None:
+    """
+    Moves a log which has grown past a size to `<path>.1`, replacing the one there, so the
+    next start writes a fresh file. A missing file is left alone, and a failure is logged.
+
+    Args:
+        path: The log file.
+        most: The size in bytes above which it is moved.
+    """
+    try:
+        if os.path.getsize(path) > most:
+            os.replace(path, path + ".1")
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        logger.warning(f"Couldn't rotate {path}: {error}")
 
 
 def main():
@@ -88,8 +109,11 @@ def main():
         try:
             # pythonw has no console to write to, so the satellite's own log is the record -
             # and what it writes to stderr, a failure before that log is set up included, is
-            # added to a log of its own.
-            with open(os.path.join(logs, "satellite-stderr.log"), "ab") as errors:
+            # added to a log of its own. That holds a copy of the satellite's log too, so
+            # it is rotated when large: about 2 MB is kept, the last crash's traceback in it.
+            stderr_log = os.path.join(logs, "satellite-stderr.log")
+            rotate_if_large(stderr_log)
+            with open(stderr_log, "ab") as errors:
                 code = subprocess.Popen(command, cwd=app, env=environment, stdin=subprocess.DEVNULL,
                                         stdout=subprocess.DEVNULL, stderr=errors,
                                         creationflags=subprocess.CREATE_NO_WINDOW).wait()
