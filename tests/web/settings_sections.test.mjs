@@ -106,9 +106,10 @@ const STATE = {
   displays: { port: 0, list: [] }, keys: [], settings: [], settings_problem: "", restart_needed: false, page: "one",
 };
 
-// The page's scripts over a stand-in page, at the address `hash` and logged in or, with
-// `loggedIn` false, through NPM and not yet. `state` is what Nova says of itself.
-function page({ hash = "", loggedIn = true, state = STATE } = {}) {
+// The page's scripts over a stand-in page, at the address `hash` (whose history entry has the
+// state `entry`, as a reloaded one does) and logged in or, with `loggedIn` false, through NPM
+// and not yet; on a wide screen if `wide`. `state` is what Nova says of itself.
+function page({ hash = "", entry = null, loggedIn = true, wide = false, state = STATE } = {}) {
   const nodes = new Map();
   const document = {
     hidden: false,
@@ -126,7 +127,7 @@ function page({ hash = "", loggedIn = true, state = STATE } = {}) {
   // The address and the history, as the browser keeps them: the entries, which is the
   // current one, and what the page did to them, in words.
   const location = { hash, pathname: "/settings", search: "" };
-  const entries = [{ state: null, hash }];
+  const entries = [{ state: entry, hash }];
   let at = 0;
   const done = [];
   const hashOf = (url) => (url.includes("#") ? url.slice(url.indexOf("#")) : "");
@@ -154,6 +155,7 @@ function page({ hash = "", loggedIn = true, state = STATE } = {}) {
   const scrolls = [];
   const window = {
     scrollY: 0,
+    matchMedia: () => ({ matches: wide }),
     scrollTo(left, top) {
       scrolls.push(top);
       window.scrollY = top;
@@ -277,31 +279,60 @@ test("the browser's own Back, with no section in the address, closes it the same
   assert.equal(shown.done.join("|"), "push #devices");
 });
 
-test("loading at #music opens it with nothing pushed, and closing then replaces the address", async () => {
+test("loading at #music opens it above the bare page, so Back goes to the list and #back goes back", async () => {
   const shown = page({ hash: "#music" });
   assert.equal(shown.body.dataset.open, undefined, "nothing opens until the page is let in");
   await arrived(shown);
   assert.equal(shown.body.dataset.open, "music");
   assert.equal(shown.shown(), "music");
-  assert.equal(shown.done.join("|"), "");
+  // The link's entry made the bare page, with the section pushed over it.
+  assert.equal(shown.done.join("|"), "replace /settings|push #music");
   assert.equal(shown.focusedOn("music-title"), true);
   await shown.node("back").click();
-  // Back would have left the page, so the address is made the bare page instead.
-  assert.equal(shown.done.join("|"), "replace /settings");
+  assert.equal(shown.done.join("|"), "replace /settings|push #music|back");
+  shown.arrive();
   assert.equal(shown.body.dataset.open, undefined);
   assert.equal(shown.focusedOnRow("music"), true);
 });
 
-test("a section's entry kept across a reload still goes back to the list", async () => {
+test("loading at #music again after a reload inside the section pushes nothing", async () => {
+  const shown = page({ hash: "#music", entry: { nova: true } });
+  await arrived(shown);
+  assert.equal(shown.body.dataset.open, "music");
+  assert.equal(shown.done.join("|"), "");
+  // Its entry is the page's own, so #back goes back to the entry before it.
+  await shown.node("back").click();
+  assert.equal(shown.done.join("|"), "back");
+});
+
+test("with a section open, tapping another takes its entry's place, so #back still goes to the list", async () => {
+  const shown = page({ wide: true });
+  await arrived(shown);
+  await shown.row("music").click();
+  await shown.row("clock").click();
+  await shown.row("devices").click();
+  assert.equal(shown.body.dataset.open, "devices");
+  assert.equal(shown.done.join("|"), "push #music|replace #clock|replace #devices");
+  assert.equal(shown.focusedOn("devices-title"), true);
+  await shown.node("back").click();
+  assert.equal(shown.done.join("|"), "push #music|replace #clock|replace #devices|back");
+  shown.arrive();
+  assert.equal(shown.body.dataset.open, undefined);
+  assert.equal(shown.shown(), "");
+});
+
+test("'All of Nova' pressed twice before the browser has gone back goes back once", async () => {
   const shown = page();
   await arrived(shown);
   await shown.row("music").click();
-  // A reload keeps the history, and its entry's state: a second page over the same entry.
-  const again = page({ hash: "#music" });
-  again.context.history.pushState({ nova: true }, "", "#music");
-  await arrived(again);
-  await again.node("back").click();
-  assert.equal(again.done.join("|"), "push #music|back");
+  await shown.node("back").click();
+  await shown.node("back").click();
+  assert.equal(shown.done.join("|"), "push #music|back");
+  shown.arrive();
+  // And again once the list has come back, for the next section.
+  await shown.row("clock").click();
+  await shown.node("back").click();
+  assert.equal(shown.done.join("|"), "push #music|back|push #clock|back");
 });
 
 test("loading at an address which is no section leaves the list", async () => {
@@ -324,7 +355,7 @@ test("while the page is locked nothing opens, and what the address names opens o
   shown.login.logged_in = true;
   await shown.context.checkLogin();
   assert.equal(shown.body.dataset.open, "music");
-  assert.equal(shown.done.join("|"), "");
+  assert.equal(shown.done.join("|"), "replace /settings|push #music");
 });
 
 test("a look at Nova while a section is open neither closes it, scrolls, nor moves the focus", async () => {
@@ -351,6 +382,43 @@ test("with nothing open the Status row is the one showing, and the open section'
   await shown.row("music").click();
   assert.equal(shown.row("status").classes.has("showing"), false);
   assert.equal(shown.row("music").classes.has("showing"), true);
+});
+
+test("Status's problems aren't drawn by opening it before Nova has been heard from", async () => {
+  const shown = page();
+  await shown.context.checkLogin();
+  await shown.row("status").click();
+  assert.equal(shown.body.dataset.open, "status");
+  // No "No problems lately." as if there were none, when nothing is known.
+  assert.equal(shown.node("problems").children.length, 0);
+  await shown.context.load();
+  assert.equal(shown.node("problems").children.length, 1);
+});
+
+test("Status's problems are measured again as Status comes into view, and not while it stays hidden", async () => {
+  const shown = page();
+  await arrived(shown);
+  // Emptied, to tell whether they're drawn again.
+  const drawn = () => shown.node("problems").children.length;
+  shown.node("problems").replaceChildren();
+  await shown.row("music").click();
+  await shown.row("clock").click();
+  assert.equal(drawn(), 0);
+  await shown.node("back").click();
+  shown.arrive();
+  assert.equal(drawn(), 0, "the list alone on a phone leaves Status hidden");
+  await shown.row("status").click();
+  assert.equal(drawn(), 1);
+});
+
+test("on a wide screen Status is in view with the list, so it is measured as the list comes back", async () => {
+  const shown = page({ wide: true });
+  await arrived(shown);
+  await shown.row("music").click();
+  shown.node("problems").replaceChildren();
+  await shown.node("back").click();
+  shown.arrive();
+  assert.equal(shown.node("problems").children.length, 1);
 });
 
 test("the page has exactly one section for each of the list's, and no other", () => {

@@ -822,6 +822,7 @@ function showStatus(status) {
   ].map(tile));
 
   recentProblems = status.problems;
+  statusDrawn = true;
   showProblems();
 }
 
@@ -2811,6 +2812,14 @@ let listScroll = 0;
 // Each section's row in the list, by the section's id, for the focus to go back to.
 const rowButtons = new Map();
 
+// Whether "All of Nova" has gone back in the history and the browser hasn't yet said it has
+// arrived, so a second press in that moment doesn't go back again, out of the page.
+let goingBack = false;
+
+// Whether Nova's state has been drawn into Status yet: until it has, what Status holds is
+// not known, and drawing its problems would say there are none.
+let statusDrawn = false;
+
 // The id of the section which is open, or null while the list shows.
 function openSectionId() {
   return document.body.dataset.open || null;
@@ -2847,7 +2856,10 @@ function setUpList() {
   });
   document.getElementById("rows").replaceChildren(...groups);
   document.getElementById("back").addEventListener("click", closeSection);
-  window.addEventListener("popstate", () => showAddress("back"));
+  window.addEventListener("popstate", () => {
+    goingBack = false;
+    showAddress("back");
+  });
   markRows();
 }
 
@@ -2861,8 +2873,11 @@ function showOnly(id) {
   }
   markRows();
   // Measured as they're drawn, and a hidden section has no size to measure: so the problems
-  // are measured again as Status comes into view, for "Show all" to be right.
-  if (!id || id === "status") showProblems();
+  // are measured again as Status comes into view, for "Show all" to be right. Only then: with
+  // Status still hidden it would only undo a "Show all", and before Nova has been heard from
+  // it would say there are no problems. With nothing open Status is in view on a wide screen.
+  const statusShown = id ? id === "status" : window.matchMedia("(min-width: 1180px)").matches;
+  if (statusShown && statusDrawn) showProblems();
 }
 
 function markRows() {
@@ -2875,15 +2890,30 @@ function markRows() {
 }
 
 // Opens a section from the top, with the focus on its heading. `how` is "tap" for a row
-// tapped, which is a step in the history of its own, or "back" - the browser's Back, Forward
-// or a typed address - or "load" - the address the page was opened at - which already are.
+// tapped, "back" for the browser's Back, Forward or a typed address - which are steps in the
+// history already - or "load" for the address the page was opened at.
+//
+// The history keeps one entry of the page's own above the list however many sections are
+// opened one after another, as on a wide screen, where the list stays beside them: a tap
+// with one already open takes that entry's place rather than adding to it, so Back goes to
+// the list, and a second Back leaves the page. A link to a section has no entry of the
+// page's own above the list yet, so one is made, with the link's entry made the bare page
+// under it - unless the page was reloaded inside a section, whose entry is already there.
+//
 // While the page is locked nothing opens: the address is looked at again once it's let in.
 function openSection(id, how = "tap") {
   const section = document.getElementById(`section-${id}`);
   if (locked || !section || !NovaList.SECTIONS.some((one) => one.id === id) || openSectionId() === id) return;
   if (!openSectionId()) listScroll = window.scrollY;
   // Marked as the page's own, so closing knows going back reaches the list, not another site.
-  if (how === "tap") history.pushState({ nova: true }, "", `#${id}`);
+  if (how === "tap" && openSectionId()) {
+    history.replaceState({ nova: true }, "", `#${id}`);
+  } else if (how === "tap") {
+    history.pushState({ nova: true }, "", `#${id}`);
+  } else if (how === "load" && !(history.state && history.state.nova)) {
+    history.replaceState(null, "", location.pathname + location.search);
+    history.pushState({ nova: true }, "", `#${id}`);
+  }
   showOnly(id);
   window.scrollTo(0, 0);
   const heading = document.getElementById(`${id}-title`);
@@ -2900,13 +2930,14 @@ function showList(was) {
 }
 
 // Closes the open section. Going back in the history, if the section was pushed there, shows
-// the list as the browser's Back does, through popstate; one opened from a link or a reload
-// has nothing of the page's before it, so going back would leave the page, and the address is
-// made the bare page instead.
+// the list as the browser's Back does, through popstate; one with no entry of the page's own
+// (the history was cut from under it) has nothing of the page's before it, so going back
+// would leave the page, and the address is made the bare page instead.
 function closeSection() {
   const was = openSectionId();
-  if (!was) return;
+  if (!was || goingBack) return;
   if (history.state && history.state.nova) {
+    goingBack = true;
     history.back();
     return;
   }

@@ -344,6 +344,10 @@ body:not([data-open]) .board > #section-status { display: block; }
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   grid-template-areas: "icon name chevron" "icon line chevron";
+  /* The two rows are only as tall as the name and the line, and are centred together, so a
+     row with no line has its name in the middle rather than at the top of the extra room. */
+  grid-template-rows: auto auto;
+  align-content: center;
   align-items: center;
   column-gap: 14px;
   width: 100%;
@@ -393,9 +397,13 @@ body:not([data-open]) .board > #section-status { display: block; }
 
 .row:focus-visible { outline-offset: -2px; }
 
+/* A section's heading takes the focus as it opens, so reading starts there; it isn't a
+   control, and a ring round it across the page would say it was. */
+.board > section > .heading:focus-visible { outline: none; }
+
 /* Below the wide breakpoint, the list or the open section, never both. Centred, as a
    page of only one of them is, on a tablet. */
-@media (max-width: 1179px) {
+@media (max-width: 1179.98px) {
   .shell > #list,
   .shell > .board {
     max-width: 760px;
@@ -1394,6 +1402,24 @@ input[type="range"]:focus-visible::-moz-range-thumb {
 .satellites .button {
   min-width: 44px;
   min-height: 44px;
+}
+
+/* On a phone the actions take the row under the name: "Travels with me" with its switch
+   across the width, the words at the left and the switch at the right as other switches
+   are, then the buttons on a line of their own, as tall as each other and sharing it. */
+@media (max-width: 719px) {
+  .satellites .actions {
+    flex-basis: 100%;
+    justify-content: flex-start;
+    gap: 8px;
+  }
+
+  .satellites .choice {
+    flex: 1 1 100%;
+    justify-content: space-between;
+  }
+
+  .satellites .actions .button { flex: 1 1 auto; }
 }
 
 /* The new satellite's name has the row to itself, so its example isn't cut short, and
