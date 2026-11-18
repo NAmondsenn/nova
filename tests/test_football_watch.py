@@ -246,14 +246,14 @@ def test_a_phase_home_assistant_has_added_since_counts_as_none():
 def test_the_record_is_the_match_as_it_is_now():
     _, record = _events(None, _match("in", "second_half", 1, 2, minutes=-60))
     assert record == {"home": 1, "away": 2, "waiting": None, "phase": "second_half", "state": "in", "starting": False,
-                      "called_off": False, "off_since": None, "at": NOW, "kickoff": NOW - 3600}
+                      "called_off_for": None, "off_since": None, "at": NOW, "kickoff": NOW - 3600}
     assert _events(None, _match(minutes=10))[1] == {
         "home": None, "away": None, "waiting": None, "phase": None, "state": "pre", "starting": True,
-        "called_off": False, "off_since": None, "at": NOW, "kickoff": NOW + 600}
+        "called_off_for": None, "off_since": None, "at": NOW, "kickoff": NOW + 600}
     # Said to be off, once, is kept, and the starting warning isn't: it was never said.
     assert _events(None, _match(minutes=10, phase="off", clock="Postponed"))[1] == {
         "home": None, "away": None, "waiting": None, "phase": "off", "state": "pre", "starting": False,
-        "called_off": True, "off_since": None, "at": NOW, "kickoff": NOW + 600}
+        "called_off_for": NOW + 600, "off_since": None, "at": NOW, "kickoff": NOW + 600}
 
 
 def test_a_goal_which_flickers_away_and_back_is_said_once():
@@ -612,9 +612,9 @@ def _off(minutes, clock="Postponed", state="pre", **more):
 def test_a_match_which_is_off_is_said_once_at_the_warning_time(london):
     # Not before the time the warning would have come, however long it has been off.
     said, seen = _events(None, _off(16))
-    assert said == [] and seen["called_off"] is False
+    assert said == [] and seen["called_off_for"] is None
     said, seen = _events(seen, _off(15))
-    assert said == [("starting", POSTPONED)] and seen["called_off"] is True
+    assert said == [("starting", POSTPONED)] and seen["called_off_for"] is not None
     # Nor again at any look after, however near or far past kick-off.
     for minutes in (14, 1, 0, -1, -60):
         said, seen = _events(seen, _off(minutes))
@@ -667,7 +667,7 @@ def test_a_match_found_off_after_kickoff_is_said_once_when_first_seen_if_it_is_s
     assert _events(seen, _off(-29, state=state))[0] == []
     # One whose kick-off was yesterday (10 hours before NOW is 22:00 the evening before) is no news today.
     said, seen = _events(None, _off(-600, state=state))
-    assert said == [] and seen["called_off"] is False
+    assert said == [] and seen["called_off_for"] is None
 
 
 def test_a_match_called_off_is_never_a_warning_a_kickoff_or_anything_else(london):
@@ -719,7 +719,7 @@ def test_a_match_which_is_back_after_being_off_still_gets_its_warning():
     assert said == [("starting", "Stevenage play Notts County in 10 minutes.")]
 
 
-def test_a_match_said_off_which_is_seen_to_come_inside_the_lead_again_is_given_no_warning():
+def test_a_match_said_off_which_is_seen_to_come_inside_the_lead_again_is_given_no_warning(london):
     # An old copy of the match from ESPN, or a BBC page missing for a run, shows it still to be played.
     said, seen = _events(None, _off(15))
     assert said == [("starting", POSTPONED)]
@@ -740,21 +740,54 @@ def test_a_late_postponement_after_the_warning_is_said_once(london):
 def test_a_match_moved_to_another_day_and_called_off_again_is_said_again(london):
     said, seen = _events(None, _off(10))
     assert said == [("starting", POSTPONED)]
-    # The same match, its kick-off now tomorrow, is still off: nothing until its time comes, and the flag is cleared.
+    today = seen["called_off_for"]
+    # The same match, its kick-off now tomorrow, is still off: nothing until its time comes. What it was said off for stays.
     said, seen = _events(seen, _off(24 * 60 + 10))
-    assert said == [] and seen["called_off"] is False
+    assert said == [] and seen["called_off_for"] == today
     said, seen = events(seen, _off(24 * 60 + 10), NOW + 86400, 900, {"285"})
     assert [(event.kind, event.message) for event in said] == [("starting", POSTPONED)]
+    assert seen["called_off_for"] == NOW + 86400 + 600
     # Moved to a later hour of the same day, it is the same call: not said again.
     _, seen = _events(None, _off(10))
     assert _events(seen, _off(10 * 60))[0] == []
-    assert _events(seen, _off(10 * 60))[1]["called_off"] is True
+    assert _events(seen, _off(10 * 60))[1]["called_off_for"] == today
+
+
+def test_a_flicker_of_the_old_day_after_a_move_is_neither_said_again_nor_warned_of(london):
+    _, seen = _events(None, _off(10))
+    today = seen["called_off_for"]
+    _, moved = _events(seen, _off(24 * 60 + 10))
+    assert moved["kickoff"] == NOW + 86400 + 600 and moved["called_off_for"] == today
+    # An old copy of the match, with its old kick-off and still off, is the call already said.
+    said, after = _events(moved, _off(10))
+    assert said == [] and after["called_off_for"] == today
+    # One which shows it still to be played, inside the lead, is no warning of a match which was called off.
+    assert _events(moved, _match(minutes=10))[0] == []
+    # And the day it was moved to has its call said once, whichever look came last.
+    said, seen = events(after, _off(24 * 60 + 10), NOW + 86400, 900, {"285"})
+    assert [(event.kind, event.message) for event in said] == [("starting", POSTPONED)]
+    assert events(seen, _off(24 * 60 + 10), NOW + 86400 + 30, 900, {"285"})[0] == []
+
+
+def test_a_hold_which_starts_on_a_record_older_than_the_gap_lasts_two_minutes_not_one_look(london):
+    _, seen = _events(None, _match("in", "second_half", 1, 0))
+    off = _match("post", "off", 1, 0, clock="Abandoned")
+    # The record is too old to compare with, so the look is taken as it stands, with the note of the first reading.
+    said, seen = _events({**seen, "at": NOW - GAP - 1}, off, reported=READING_1)
+    assert said == [] and seen["off_since"] == READING_1
+    # The next looks are on a record which is "post" and off, and still don't say it: one reading, then the next.
+    for reading in (READING_1, READING_2):
+        said, seen = _events(seen, off, reported=reading)
+        assert said == [] and seen["off_since"] == READING_1
+    said, seen = _events(seen, off, reported=READING_3)
+    assert said == [("starting", ABANDONED)] and seen["off_since"] is None
+    assert _events(seen, off, reported=READING_4)[0] == []
 
 
 def test_an_off_phase_in_play_on_one_reading_is_not_said_and_changes_nothing(london):
     _, seen = _events(None, _match("in", "second_half", 1, 0), reported=READING_1 - 60)
     said, seen = _events(seen, _match("in", "off", 1, 0, clock="Abandoned"), reported=READING_1)
-    assert said == [] and seen["called_off"] is False and seen["off_since"] == READING_1
+    assert said == [] and seen["called_off_for"] is None and seen["off_since"] == READING_1
     # The record is the match as it was, so that what it shows next is compared with that: a goal is still a goal.
     assert (seen["phase"], seen["state"], seen["home"], seen["away"]) == ("second_half", "in", 1, 0)
     said, seen = _events(seen, _match("in", "second_half", 1, 1), reported=READING_2)
@@ -771,7 +804,7 @@ def test_an_off_phase_in_play_is_said_once_a_reading_two_minutes_on_still_shows_
         said, seen = _events(seen, off, reported=reading)
         assert said == [] and seen["off_since"] == READING_1
     said, seen = _events(seen, off, reported=READING_3)
-    assert said == [("starting", ABANDONED)] and seen["called_off"] is True and seen["off_since"] is None
+    assert said == [("starting", ABANDONED)] and seen["called_off_for"] is not None and seen["off_since"] is None
     assert _events(seen, off, reported=READING_4)[0] == []
 
 
@@ -797,7 +830,7 @@ def test_a_match_of_the_evening_before_isnt_said_just_after_midnight_in_summer(l
     before_midnight = datetime(2026, 6, 13, 22, 50, tzinfo=timezone.utc).timestamp()
     match = _match("pre", "off", clock="Postponed", kickoff=kickoff)
     said, seen = events(None, match, after_midnight, 900, {"285"})
-    assert said == [] and seen["called_off"] is False
+    assert said == [] and seen["called_off_for"] is None
     # At ten to midnight it is still the evening of the match: said, as tonight's.
     said, _ = events(None, match, before_midnight, 900, {"285"})
     assert [(event.kind, event.message) for event in said] == [
@@ -806,9 +839,9 @@ def test_a_match_of_the_evening_before_isnt_said_just_after_midnight_in_summer(l
 
 def test_a_record_from_before_called_off_was_kept_has_none_said(london):
     _, seen = _events(None, _match(minutes=40))
-    old = {key: value for key, value in seen.items() if key != "called_off"}
+    old = {key: value for key, value in seen.items() if key not in ("called_off_for", "off_since")}
     said, seen = _events(old, _off(10))
-    assert said == [("starting", POSTPONED)] and seen["called_off"] is True
+    assert said == [("starting", POSTPONED)] and seen["called_off_for"] is not None
 
 
 def test_a_look_with_no_phase_known_keeps_the_phase_of_a_record_however_old():
@@ -1680,7 +1713,7 @@ def test_a_match_which_is_off_is_said_once_across_restarts(tmp_path, london):
     rig.look(_team("285", "Stevenage", now=_off(10)))
     assert rig.said == [POSTPONED]
     rig.look(_team("285", "Stevenage", now=_off(10)), at=NOW + 30)
-    assert rig.said == [POSTPONED] and rig.choices.seen("401")["called_off"] is True
+    assert rig.said == [POSTPONED] and rig.choices.seen("401")["called_off_for"] is not None
     # A new watcher on the same file, as after a restart, before, at and after kick-off.
     for at in (NOW + 60, NOW + 600, NOW + 3600):
         again = Rig(tmp_path)
@@ -1803,16 +1836,37 @@ def test_a_match_first_found_off_after_kickoff_is_said_once_and_never_after_the_
     # One whose kick-off was the day before is left alone: nothing said, and no record that it was.
     late = Rig(tmp_path / "late")
     late.look(_team("285", "Stevenage", now=_off(-600)))
-    assert late.said == [] and late.choices.seen("401")["called_off"] is False
+    assert late.said == [] and late.choices.seen("401")["called_off_for"] is None
 
 
 def test_a_called_off_match_leaves_a_record_a_restart_reads_back(tmp_path, london):
     rig = Rig(tmp_path)
     rig.look(_team("285", "Stevenage", now=_off(10)))
     on_disk = json.loads((tmp_path / "football.json").read_text())["seen"]["401"]
-    assert on_disk["called_off"] is True and on_disk["phase"] == "off"
-    assert FootballChoices(str(tmp_path / "football.json")).seen("401")["called_off"] is True
-    # A hand-edited record whose flag isn't true or false is no record, as with the others.
-    on_disk["called_off"] = "yes"
-    (tmp_path / "football.json").write_text(json.dumps({"seen": {"401": on_disk}}))
-    assert FootballChoices(str(tmp_path / "football.json")).seen("401") is None
+    assert on_disk["called_off_for"] == NOW + 600 and on_disk["phase"] == "off"
+    assert FootballChoices(str(tmp_path / "football.json")).seen("401")["called_off_for"] is not None
+    # A hand-edited record whose kick-off said for isn't a number is no record, as with the others.
+    for bad in ("yes", True, [NOW]):
+        (tmp_path / "football.json").write_text(json.dumps({"seen": {"401": {**on_disk, "called_off_for": bad}}}))
+        assert FootballChoices(str(tmp_path / "football.json")).seen("401") is None, bad
+
+
+def test_a_record_without_the_keys_of_a_called_off_match_is_one_as_before(tmp_path, london):
+    rig = Rig(tmp_path)
+    rig.look(_team("285", "Stevenage", now=_match(minutes=10)))
+    on_disk = json.loads((tmp_path / "football.json").read_text())["seen"]["401"]
+    old = {key: value for key, value in on_disk.items() if key not in ("called_off_for", "off_since")}
+    (tmp_path / "football.json").write_text(json.dumps({"seen": {"401": old}}))
+    seen = FootballChoices(str(tmp_path / "football.json")).seen("401")
+    assert seen is not None and "called_off_for" not in seen
+    # None of it said, and nothing waiting: a match off at the next look is said at its time as any other is.
+    again = Rig(tmp_path)
+    again.look(_team("285", "Stevenage", now=_off(10)), at=NOW + 30)
+    assert again.said == [POSTPONED]
+    # A hand-edited note of the first reading which showed a match in play off which isn't a number is no record either.
+    for bad in ("yes", True, [READING_1]):
+        (tmp_path / "football.json").write_text(json.dumps({"seen": {"401": {**on_disk, "off_since": bad}}}))
+        assert FootballChoices(str(tmp_path / "football.json")).seen("401") is None, bad
+    # Absent, or null, is a note of none.
+    (tmp_path / "football.json").write_text(json.dumps({"seen": {"401": {**on_disk, "off_since": None}}}))
+    assert FootballChoices(str(tmp_path / "football.json")).seen("401") is not None

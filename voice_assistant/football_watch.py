@@ -96,7 +96,7 @@ def _is_record(record) -> bool:
             and (record["waiting"] is None or _is_waiting(record["waiting"]))
             and isinstance(record["starting"], bool)
             # Left out of a record kept before a match being called off was said: none was, and none waits to be.
-            and isinstance(record.get("called_off", False), bool)
+            and (record.get("called_off_for") is None or _is_number(record["called_off_for"]))
             and (record.get("off_since") is None or _is_number(record["off_since"]))
             and _is_number(record["at"])
             and _is_number(record["kickoff"])
@@ -395,7 +395,9 @@ def _off_in_play(before: Optional[Dict], match: Match, first: Optional[float], r
         Whether to say it now, and the time to keep as the first reading which showed it off: None once said, when
         it isn't held, and where it can't be told.
     """
-    if match.state != "in" and (before is None or before["state"] != "in"):
+    # A hold which is under way goes on, whatever state the match is in now: the record it was started on may be one of
+    # a look which was taken as it stands, with the state it showed then, and the hold is of two minutes, not one look.
+    if first is None and match.state != "in" and (before is None or before["state"] != "in"):
         return True, None
     if reported is None:
         return False, None
@@ -553,10 +555,11 @@ def events(
     Returns:
         The events in the order to say them - goals first, then one of half time, the second
         half or full time - and the record to keep: the match as it is now, {"home", "away",
-        "waiting", "phase", "state", "starting", "called_off", "off_since", "at", "kickoff"}, with "at" always the time of
-        this look. It keeps from before whether starting and a match being off have been said, and the higher score
-        and the phase where the look can't be trusted to take them. "off_since" is when Home Assistant wrote the first
-        reading which showed a match in play off, while that waits for a later one to confirm it, else None.
+        "waiting", "phase", "state", "starting", "called_off_for", "off_since", "at", "kickoff"}, with "at" always the
+        time of this look. It keeps from before whether starting has been said, the kick-off the match was said to be
+        off for (None if it wasn't), and the higher score and the phase where the look can't be trusted to take them.
+        "off_since" is when Home Assistant wrote the first reading which showed a match in play off, while that waits
+        for a later one to confirm it, else None.
     """
     phase = _phase_of(match)
     recent = before is not None and now - before["at"] <= GAP
@@ -566,8 +569,10 @@ def events(
     said: List[Event] = []
     kickoff = match.kickoff.timestamp()
     # Said once and for good, so a match which goes off, comes back and goes off again isn't said twice - unless it was
-    # moved to another day since, which is another call.
-    called_off = bool(before and before.get("called_off") and _same_day(before["kickoff"], kickoff))
+    # moved to another day since, which is another call. The record keeps the kick-off it was said off for, and not the
+    # last look's, so that an old copy of the match from before the move, which is still off, is the call already said.
+    called_off_for = before.get("called_off_for") if before else None
+    called_off = called_off_for is not None and _same_day(called_off_for, kickoff)
     starting = bool(before and before["starting"])
     # A match said to be off isn't about to start, whatever an old copy of it shows: said, that is a false warning.
     if not starting and not called_off:
@@ -583,7 +588,7 @@ def events(
             now_said, off_since = _off_in_play(before, match, first, reported)
             if now_said:
                 said.append(event)
-                called_off = True
+                called_off_for = kickoff
             elif recent:
                 # Held, so the look is passed over as an old copy of the match is: the record keeps all but the time of
                 # the look and the first reading, and a look which shows the match on again is compared with it as ever.
@@ -614,7 +619,7 @@ def events(
         "phase": kept_phase,
         "state": match.state,
         "starting": starting,
-        "called_off": called_off,
+        "called_off_for": called_off_for,
         "off_since": off_since,
         "at": now,
         "kickoff": kickoff,
