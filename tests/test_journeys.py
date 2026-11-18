@@ -7,7 +7,8 @@ folder - so nothing ever asks Google. The places are made up: Work, Uni, Gran's 
 
 import json
 import logging
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 
 import pytest
 import requests
@@ -830,3 +831,19 @@ def test_a_satellite_which_has_gone_is_told_so_and_nothing_is_kept(store, real_c
     answer, params, now = remind(store, real_clock, satellite="bedroom")
     assert answer["success"] is False and "gone" in answer["message"]
     assert real_clock.overview()["timers"] == [] and store.get("watches") == {}
+
+
+def test_the_reminder_is_said_and_set_in_the_minute_asked_for_however_the_second_falls(store, real_clock, monkeypatch):
+    # A time to leave is always on a whole minute, and now is not: 0.7 of a second past one made it ring a
+    # moment before the minute, which was then said as the minute before.
+    leave_by = (datetime.now().astimezone() + timedelta(minutes=30)).replace(second=0, microsecond=0)
+    now = leave_by - timedelta(minutes=30) + timedelta(seconds=0.7)
+    monkeypatch.setattr(time, "time", lambda: now.timestamp())
+    journey = Journeys(FakeHome(), None, real_clock, store, lambda: SETTINGS)
+    answer = journey.remind("Work", "zone.work", "zone.home", "driving", leave_by.timestamp() + 1800,
+                            leave_by.timestamp(), True, satellite="kitchen", now=now)
+    rings = leave_by - timedelta(minutes=5)
+    assert answer == {"success": True, "message": f"I'll remind you at {spoken_clock_time(rings.hour, rings.minute)}."}
+    [timer] = real_clock.overview()["timers"]
+    due = real_clock.timer_due(timer["id"])
+    assert rings.timestamp() <= due < rings.timestamp() + 1

@@ -25,6 +25,7 @@ function it's given, a missing or unusable one being its default.
 """
 
 import logging
+import math
 import re
 from datetime import datetime, time, timedelta
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -483,7 +484,9 @@ class Journeys:
         now = (now or datetime.now()).astimezone()
         rings = leave_by - self._setting("reminder_minutes") * 60
         # A moment which is here or all but is a minute on, so it still rings - the clock won't set one gone.
-        seconds = max(60, round(rings - now.timestamp()))
+        # Rounded up: the time to leave is on a whole minute and now isn't, so rounding down could ring a moment
+        # before the minute, and say the one before.
+        seconds = max(60, math.ceil(rings - now.timestamp()))
         reply = self.clock.set_timer(duration_seconds=seconds, label=f"Leave for {place}", is_reminder=True,
                                      satellite=satellite)
         if not reply.get("success"):
