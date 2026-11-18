@@ -305,6 +305,32 @@ football:
   # settings page, and read at each look, so a change is used straight away.
   kickoff_minutes: 15
 
+journeys:
+  # Nova works out how long a journey takes, and when to leave for it, from Home Assistant's Google
+  # Maps Travel Time - see voice_assistant/journeys.py. Every setting here is on the settings page,
+  # and read at each use, so a change is used straight away.
+  # Minutes taken off the time to leave, to be there a little early: from 0 to 60.
+  buffer_minutes: 10
+  # How many minutes before the time to leave the reminder rings: from 0 to 30.
+  reminder_minutes: 5
+  # Minutes between the looks at the traffic while a reminder is watched: from 2 to 30.
+  check_every_minutes: 5
+  # How many minutes before the time to leave the watch starts, from 10 to 120. A journey
+  # further off than this is asked at the time of leaving, as Google forecasts it, and
+  # said as "about".
+  watch_minutes: 45
+  # A move of the time to leave which is worth saying, in minutes: from 2 to 30.
+  change_minutes: 5
+  # Traffic is heavy when a drive takes this many minutes more than on a clear road, from 1 to 60,
+  heavy_minutes: 5
+  # and this share of the clear road's time more, as a percentage from 0 to 100.
+  heavy_percent: 20
+  # The most times Nova asks Google in a calendar month, from 0 to 5000; 0 asks none. Google
+  # gives 5,000 a month free, and Home Assistant's own sensor may use some of them.
+  monthly_requests: 3000
+  # How a distance is said: "miles" or "km".
+  distance_unit: miles
+
 wrapped:
   # A Wrapped of your listening, made from SoulSync's stats and kept on the brain - see
   # voice_assistant/wrapped.py. Nova checks once an hour, and ntfy's phone topic is told when one is

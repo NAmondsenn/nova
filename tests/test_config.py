@@ -264,6 +264,30 @@ def test_a_football_setting_which_cant_work_is_refused_by_name(tmp_path, setting
     assert f"'football.{setting}'" in str(caught.value)
 
 
+def test_the_journey_defaults_are_checked(tmp_path):
+    journeys = Config(path=str(tmp_path / "none.yaml")).section("journeys")
+    assert journeys == {"buffer_minutes": 10, "reminder_minutes": 5, "check_every_minutes": 5, "watch_minutes": 45,
+                        "change_minutes": 5, "heavy_minutes": 5, "heavy_percent": 20, "monthly_requests": 3000,
+                        "distance_unit": "miles"}
+
+
+@pytest.mark.parametrize("setting", ["check_every_minutes", "watch_minutes", "change_minutes", "heavy_minutes"])
+@pytest.mark.parametrize("own", ["", "0", "-5", '"soon"', "true"])
+def test_a_journey_setting_which_cant_work_is_refused_by_name(tmp_path, setting, own):
+    # An empty one is read as nothing at all, which only the check for a number above zero refuses.
+    (tmp_path / "config.yaml").write_text(f"journeys:\n  {setting}: {own}\n")
+    with pytest.raises(ConfigError) as caught:
+        Config(path=str(tmp_path / "config.yaml"))
+    assert f"'journeys.{setting}'" in str(caught.value)
+
+
+def test_a_distance_unit_which_isnt_miles_or_km_is_refused(tmp_path):
+    (tmp_path / "config.yaml").write_text("journeys:\n  distance_unit: furlongs\n")
+    with pytest.raises(ConfigError) as caught:
+        Config(path=str(tmp_path / "config.yaml"))
+    assert "'journeys.distance_unit' should be one of miles, km, not 'furlongs'" in str(caught.value)
+
+
 # For each limit, what passes and what just doesn't - the table in design 0009.
 IN_AND_OUT = {
     ("ntfy", "quiet_from"): (["23:59", "00:00"], ["24:00", "7:00", "11pm", 2300, ""]),
@@ -292,6 +316,15 @@ IN_AND_OUT = {
     ("football", "check_every"): ([10, 30, 60], [9, 61, 30.5, True]),
     ("football", "stale_after"): ([120, 300], [119, 301, 200.5, True]),
     ("football", "kickoff_minutes"): ([2, 15, 120], [1, 121, 15.5, True]),
+    # 0 is no buffer, no heads-up, no percentage and no asking Google at all.
+    ("journeys", "buffer_minutes"): ([0, 10, 60], [-1, 61, 10.5, True]),
+    ("journeys", "reminder_minutes"): ([0, 5, 30], [-1, 31, 5.5, True]),
+    ("journeys", "check_every_minutes"): ([2, 5, 30], [1, 31, 5.5, True]),
+    ("journeys", "watch_minutes"): ([10, 45, 120], [9, 121, 45.5, True]),
+    ("journeys", "change_minutes"): ([2, 5, 30], [1, 31, 5.5, True]),
+    ("journeys", "heavy_minutes"): ([1, 5, 60], [0, 61, 5.5, True]),
+    ("journeys", "heavy_percent"): ([0, 20, 100], [-1, 101, 20.5, True]),
+    ("journeys", "monthly_requests"): ([0, 3000, 5000], [-1, 5001, 3000.5, True]),
     # 0 is no spending alert.
     ("usage", "daily_limit"): ([0, 0.25, 100], [-1, -0.01, 100.5, True]),
     ("usage", "pounds_per_dollar"): ([0.1, 0.79, 10], [0, 0.09, 10.5, True]),
