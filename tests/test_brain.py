@@ -38,6 +38,7 @@ from voice_assistant.batteries import Battery, BatteryChoices, BatteryWatcher
 from voice_assistant.config import Config
 from voice_assistant.displays import Displays
 from voice_assistant.downloads import Downloads
+from voice_assistant.clean_schedule import CleanSchedule
 from voice_assistant.following import FollowWatcher
 from voice_assistant.football import Football
 from voice_assistant.football_watch import FootballChoices, FootballWatcher
@@ -3021,6 +3022,58 @@ def test_the_library_check_hears_and_swaps_through_the_same_ones(brain):
     check = brain.clean_check
     assert check._ears is brain.ears and check._swapper is brain.swapper and check._store is brain.clean_store
     assert check._library is brain.ears._library and check._folder is brain.swapper._folder
+
+
+def test_the_nightly_check_and_weekly_note_run_while_the_brain_runs(make_brain):
+    brain = make_brain(wrapped={"enabled": True, "monthly": True, "yearly_month": 12,
+                                "link": "https://nova.example.com"},
+                       clean_check={"nightly": True, "nightly_time": "05:30"})
+    schedule = brain.clean_schedule
+    # Given the library check, the clean songs file, ntfy, and the settings and page address as they are now.
+    assert isinstance(schedule, CleanSchedule)
+    assert schedule._check is brain.clean_check and schedule._store is brain.clean_store
+    assert schedule._ntfy is brain.ntfy
+    assert schedule._settings()["nightly_time"] == "05:30"
+    brain.apply_settings({("clean_check", "nightly_time"): "04:00"})
+    assert schedule._settings()["nightly_time"] == "04:00"
+    assert schedule._page_url() == "https://nova.example.com"
+    brain.apply_settings({("wrapped", "link"): ""})
+    assert schedule._page_url() == ""
+    assert schedule._thread is None
+    looked = threading.Event()
+    schedule.look = looked.set
+    running = []
+
+    def serve():
+        running.append(looked.wait(5) and any(thread.name == "clean-schedule" and thread.is_alive()
+                                              for thread in threading.enumerate()))
+
+    brain.serve = serve
+    brain.run()
+    assert running == [True]
+    assert not any(thread.name == "clean-schedule" for thread in threading.enumerate())
+    assert schedule._thread is None
+
+
+def test_the_brain_starts_the_nightly_schedule_after_carrying_on_the_library_check(stopping, monkeypatch):
+    # So a check a restart came in the middle of is carried on, not started afresh by the night's look.
+    started = []
+    monkeypatch.setattr(stopping.clean_check, "resume", lambda: started.append("check"))
+    monkeypatch.setattr(stopping.clean_schedule, "start", lambda: started.append("schedule"))
+    stopping.serve = stopping.shutdown
+
+    with pytest.raises(SystemExit):
+        stopping.run()
+
+    assert started == ["check", "schedule"]
+
+
+def test_the_brain_stops_the_nightly_schedule_before_the_library_check(stopping):
+    # So no night's look starts a check as the check is being closed.
+    stopping.clean_schedule = Recorder("clean_schedule", stopping.closed)
+    stopping.clean_check = Recorder("clean_check", stopping.closed)
+    stopping._clean_up()
+    assert stopping.closed == ["clock", "clean_schedule", "clean_check", "bedroom", "tts"]
 
 
 def test_a_download_message_is_said_on_the_satellite_that_asked(brain, connect):

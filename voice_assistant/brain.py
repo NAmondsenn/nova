@@ -32,6 +32,7 @@ from voice_assistant import logging_setup, paths, protocol, storage, watchdog
 from voice_assistant.batteries import BatteryChoices, BatteryWatcher
 from voice_assistant.choices import ChoiceStore
 from voice_assistant.clean_check import CleanCheck
+from voice_assistant.clean_schedule import CleanSchedule
 from voice_assistant.clean_store import CleanStore
 from voice_assistant.clean_swap import Ears, Swapper, listening_library
 from voice_assistant.clock import Clock, spoken_clock_time
@@ -438,6 +439,12 @@ class Brain:
         # The settings page's "Check library": every song heard in the background, the
         # clean ones swapped quietly - see clean_check.py.
         self.clean_check = CleanCheck(self.ears, self.swapper, self.clean_store, heard_through, music_folder)
+        # That check started each night, and a weekly note of clean songs sent to the phone - see
+        # clean_schedule.py - with the settings as they are at each look, and the page's address
+        # Wrapped's notification links to. Started by run().
+        self.clean_schedule = CleanSchedule(self.clean_check, self.clean_store, self.ntfy,
+                                            lambda: self.config.section("clean_check"),
+                                            lambda: self.config.section("wrapped").get("link") or "")
         # Music fetched through SoulSync, each download said on the satellite which asked
         # for it - see downloads.py. One for every satellite, so the same song asked for
         # on two is only requested once.
@@ -1744,6 +1751,8 @@ class Brain:
         self.downloads.resume_swaps()
         # And a library check a restart came in the middle of, from the song it was on.
         self.clean_check.resume()
+        # Once that's carried on, so a night's look finds it running rather than starting one afresh.
+        self.clean_schedule.start()
         # Alerts are only said from now on, once there's everything to say them with.
         if self.ntfy:
             self.ntfy.start()
@@ -1827,7 +1836,7 @@ class Brain:
     def _clean_up(self):
         """
         Closes everything down in order - the clock, so nothing else starts ringing,
-        the library check, and the downloads, so nothing more is said of them, and the worker songs are
+        the nightly schedule and the library check, and the downloads, so nothing more is said of them, and the worker songs are
         heard in, then the batteries, the football
         watcher, the listening stats, what's playing, the usage device, ntfy, the settings page and the clock
         displays' server and feed, then every satellite's session, so its device in Home
@@ -1836,6 +1845,8 @@ class Brain:
         """
         self.running = False
         self.clock.stop()
+        # First, so no night's look starts the check as it closes.
+        self.clean_schedule.stop()
         # Before the downloads stop the Swapper, so the check never starts a swap which would
         # only be saved and dropped; the song it's on, cut short as the worker closes, is
         # heard again at the next start.

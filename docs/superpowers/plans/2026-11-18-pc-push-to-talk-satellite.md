@@ -215,7 +215,7 @@ Rules (the spec's "The room acts as one"):
 **Files:**
 - Create: `requirements-pc.txt` (the six packages, pinned to `requirements.lock`'s versions)
 - Create: `scripts/windows/launcher.pyw`, `scripts/windows/install.ps1`, `scripts/deploy_pc.sh`
-- Create: `docs/decisions/0024-the-pc-as-a-push-to-talk-satellite.md`
+- Create: `docs/decisions/0026-the-pc-as-a-push-to-talk-satellite.md`
 - Modify: `docs/roadmap.md` (Phase 6 lines 11 and 104), `README.md` (a short "The PC" section)
 - Test: `tests/test_launcher.py` (new)
 

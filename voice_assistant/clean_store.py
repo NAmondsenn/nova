@@ -1,7 +1,7 @@
 """
 Clean Store Module
 What Nova has heard of each song, the lists the settings page shows, the swaps in progress and
-the library check's progress, kept in one JSON file in the data folder (decision 0022,
+the library check's progress and what the nightly check and weekly note have done, kept in one JSON file in the data folder (decision 0022,
 sections 4 and 5).
 
 A swap's saved state says which file was moved where, so a restart can carry it on or put the
@@ -18,7 +18,8 @@ import json
 import logging
 import os
 import threading
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Callable, Dict, List, Optional
 
 from voice_assistant import storage
 from voice_assistant.clean_ear import Verdict
@@ -35,6 +36,9 @@ LIST_LIMIT = 200
 # so a hand-edited "done": "3" can't break the check.
 CHECK_TYPES = {"running": (bool,), "paused": (bool,), "done": (int,), "total": (int,), "current": (str, type(None)),
                "queue": (list, type(None)), "last_finished": (int, float, type(None)), "error": (str, type(None))}
+# The same for the nightly check's and weekly note's record (see clean_schedule.py), so a hand-edited
+# "night_done": 20261117 can't break them.
+SCHEDULE_TYPES = {"night_done": (str,), "week_sent": (str,), "note_at": (int, float)}
 
 
 class CleanStore:
@@ -44,12 +48,15 @@ class CleanStore:
     out is a copy.
     """
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, clock: Optional[Callable[[], float]] = None):
         """
         Args:
             path: The file to keep it all in, e.g. clean_songs.json in the data folder.
+            clock: Gives the time in epoch seconds, to stamp each list entry with when it was
+                added; the wall clock by default.
         """
         self.path = path
+        self._clock = clock or time.time
         self._lock = threading.RLock()
         # Set when the file is there but couldn't be read or set aside: it may hold swaps with
         # songs in .nova-held, so it's never written over, and nothing is saved until a restart.
@@ -129,18 +136,41 @@ class CleanStore:
             kind: "swapped", "only_clean", "unsure" or "couldnt".
             name: What the song is called, e.g. "Gunna - Endless".
             reason: Why, shown on the page, e.g. "SoulSync found no explicit copy".
-            **extra: Anything else the page shows, e.g. song_id or the time.
+            **extra: Anything else the page shows, e.g. song_id. The entry also gets "at", the
+                time it was added in epoch seconds, unless one is given here: the weekly note
+                counts the week's entries by it. Entries saved before this have none, and count
+                as old.
 
         Raises:
             ValueError for any other kind. OSError if it couldn't be saved; the store is as it was.
         """
         _check_kind(kind)
-        entry = {**extra, "name": name, "reason": reason}
+        entry = {"at": self._clock(), **extra, "name": name, "reason": reason}
         with self._lock:
             entries = [entry] + [e for e in self._state["lists"][kind] if e.get("name") != name]
             lists = dict(self._state["lists"])
             lists[kind] = copy.deepcopy(entries[:LIST_LIMIT])
             self._keep("lists", lists)
+
+    def discard(self, kind: str, song_id: str):
+        """
+        Takes a song off a list by its Navidrome id, so a song which has since ended another way
+        isn't on two. One not there is no error.
+
+        Args:
+            kind: "swapped", "only_clean", "unsure" or "couldnt".
+            song_id: The id the entry was added with.
+
+        Raises:
+            ValueError for any other kind. OSError if it couldn't be saved; the store is as it was.
+        """
+        _check_kind(kind)
+        with self._lock:
+            entries = [e for e in self._state["lists"][kind] if e.get("song_id") != song_id]
+            if len(entries) != len(self._state["lists"][kind]):
+                lists = dict(self._state["lists"])
+                lists[kind] = entries
+                self._keep("lists", lists)
 
     def swaps(self) -> List[Dict]:
         """
@@ -212,6 +242,30 @@ class CleanStore:
         with self._lock:
             self._keep("check", copy.deepcopy(state))
 
+    def schedule(self) -> Dict:
+        """
+        Returns:
+            What the nightly check and the weekly note have done, as last saved: night_done, the
+            day of the last night's check ("2026-11-17"), week_sent, the day the last weekly note
+            was due ("2026-11-16"), and note_at, when it was dealt with (epoch seconds); empty if
+            nothing yet.
+        """
+        with self._lock:
+            return copy.deepcopy(self._state["schedule"])
+
+    def save_schedule(self, record: Dict):
+        """
+        Keeps what the nightly check and the weekly note have done.
+
+        Args:
+            record: night_done, week_sent and note_at.
+
+        Raises:
+            OSError or TypeError if it couldn't be saved; the store is as it was.
+        """
+        with self._lock:
+            self._keep("schedule", copy.deepcopy(record))
+
     def _keep(self, part: str, value: Any):
         """
         Saves the whole file with one part changed, and only then keeps the change.
@@ -236,7 +290,7 @@ class CleanStore:
             and everything starts empty. One which can't be read at all starts empty too, but
             is left as it is and never saved over.
         """
-        state = {"verdicts": {}, "lists": {kind: [] for kind in KINDS}, "swaps": [], "check": {}}
+        state = {"verdicts": {}, "lists": {kind: [] for kind in KINDS}, "swaps": [], "check": {}, "schedule": {}}
         try:
             saved = storage.load_json(self.path, {})
         except ValueError as e:
@@ -255,7 +309,7 @@ class CleanStore:
             self._set_aside()
             return state
 
-        for part in ("verdicts", "check"):
+        for part in ("verdicts", "check", "schedule"):
             if part in saved:
                 if isinstance(saved[part], dict):
                     state[part] = saved[part]
@@ -267,13 +321,8 @@ class CleanStore:
         if len(verdicts) != len(state["verdicts"]):
             logger.warning(f"{self.path} had {len(state['verdicts']) - len(verdicts)} unusable verdicts, left out")
         state["verdicts"] = verdicts
-        check = {field: value for field, value in state["check"].items()
-                 if field not in CHECK_TYPES or (isinstance(value, CHECK_TYPES[field])
-                                                 and not (isinstance(value, bool) and bool not in CHECK_TYPES[field]))}
-        if len(check) != len(state["check"]):
-            logger.warning(f"{self.path} had check fields of the wrong type, left out: "
-                           f"{sorted(set(state['check']) - set(check))}")
-        state["check"] = check
+        state["check"] = self._typed(state["check"], CHECK_TYPES, "check")
+        state["schedule"] = self._typed(state["schedule"], SCHEDULE_TYPES, "schedule")
         if "lists" in saved:
             if isinstance(saved["lists"], dict):
                 for kind in KINDS:
@@ -284,6 +333,19 @@ class CleanStore:
             # A swap with no key can't be found again to be ended, so it isn't carried on.
             state["swaps"] = self._entries(saved["swaps"], "swaps", needs="key")
         return state
+
+    def _typed(self, fields: Dict, types: Dict, what: str) -> Dict:
+        """
+        The fields of a saved part which are of their type - a bool is no number - with any
+        others left out, and a warning.
+        """
+        kept = {field: value for field, value in fields.items()
+                if field not in types or (isinstance(value, types[field])
+                                          and not (isinstance(value, bool) and bool not in types[field]))}
+        if len(kept) != len(fields):
+            logger.warning(f"{self.path} had {what} fields of the wrong type, left out: "
+                           f"{sorted(set(fields) - set(kept))}")
+        return kept
 
     def _entries(self, found: Any, what: str, needs: str = "name") -> List[Dict]:
         """The dicts in a saved list which have the key they need; anything else is dropped with a warning."""

@@ -42,7 +42,7 @@ POSITIVE = {("batteries", "check_every"), ("batteries", "stale_after"),
 
 class Limit(NamedTuple):
     """What a setting may be: its form, and for a number, its range."""
-    form: str  # "number", "time", "address", "topic", "topics", "playlist", "host" or "path".
+    form: str  # "number", "time", "day", "address", "topic", "topics", "playlist", "host" or "path".
     low: Optional[float] = None
     high: Optional[float] = None
     whole: bool = False
@@ -117,6 +117,11 @@ LIMITS: Dict[Tuple[str, str], Limit] = {
     ("clean_check", "explicit_share"): Limit("number", 0, 1),
     ("clean_check", "clean_share"): Limit("number", 0, 1),
     ("clean_check", "music_folder"): Limit("path"),
+    # The nightly check's time, and the weekly note's day and time (decision 0022, section 8). The day is kept as
+    # written, "Monday" or "monday", and read in any capitals.
+    ("clean_check", "nightly_time"): Limit("time"),
+    ("clean_check", "weekly_day"): Limit("day"),
+    ("clean_check", "weekly_time"): Limit("time"),
     # 0 is no following. Over 50 reaches artists played a handful of times a year, whose every release
     # would download.
     ("new_music", "follow_top_artists"): Limit("number", 0, 50, True),
@@ -128,6 +133,8 @@ LIMITS: Dict[Tuple[str, str], Limit] = {
 }
 
 _TIME = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
+# A "day" setting's days, as they're compared: in small letters, Monday first, as datetime's weekday() counts.
+WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 _TOPIC = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _HOST = re.compile(r"[A-Za-z0-9.:-]*")
 
@@ -248,6 +255,9 @@ def limit_problem(section: str, name: str, value: Any) -> Optional[str]:
     if limit.form == "time":
         ok = isinstance(value, str) and _TIME.fullmatch(value)
         return None if ok else "should be a time of day, from 00:00 to 23:59"
+    if limit.form == "day":
+        ok = isinstance(value, str) and value.strip().casefold() in WEEKDAYS
+        return None if ok else "should be a day of the week, from Monday to Sunday"
     if limit.form == "address":
         ok = isinstance(value, str) and (value == "" or re.match(r"https?://.", value))
         return None if ok else "should be an address starting http:// or https://"

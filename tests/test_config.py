@@ -311,6 +311,12 @@ IN_AND_OUT = {
     # Empty is no music folder, so nothing is swapped; a relative one would depend on where Nova started.
     ("clean_check", "music_folder"): (["/mnt/music", "/srv/media/music", ""],
                                       ["mnt/music", "music", "~/music", "/mnt/\0music", 5, None]),
+    # The nightly check and the weekly note: a time of day as the night's ends are, and a day of the week in any
+    # capitals, kept as written.
+    ("clean_check", "nightly_time"): (["05:30", "00:00", "23:59"], ["5:30", "24:00", "5.30am", 530, None]),
+    ("clean_check", "weekly_time"): (["09:30"], ["9:30", "25:00", ""]),
+    ("clean_check", "weekly_day"): (["Monday", "sunday", "FRIDAY", " Tuesday "],
+                                    ["Mon", "Funday", "", "Monday,Tuesday", 1, None]),
     # 0 is no following.
     ("new_music", "follow_top_artists"): ([0, 25, 50], [-1, 51, 2.5, True]),
     ("new_music", "days"): ([1, 14, 60], [0, 61, 2.5, True]),
@@ -361,13 +367,17 @@ def test_the_repositorys_config_has_the_download_settings(tmp_path):
 def test_the_repositorys_config_has_the_clean_check_settings(tmp_path):
     clean_check = Config(path=str(tmp_path / "none.yaml")).section("clean_check")
     assert clean_check == {"lyric_minimum": 3, "explicit_share": 0.35, "clean_share": 0.15, "swap_tries": 2,
-                           "music_folder": "/mnt/music", "soulsync_admin": ""}
+                           "music_folder": "/mnt/music", "soulsync_admin": "", "nightly": True,
+                           "nightly_time": "05:30", "weekly_note": True, "weekly_day": "Monday",
+                           "weekly_time": "09:30"}
     # Each setting with a limit is inside it; the folder is any full path, and the profile any text.
     for name, value in clean_check.items():
         assert limit_problem("clean_check", name, value) is None, name
     assert limit_problem("clean_check", "music_folder", "/anywhere") is None
     assert limit_problem("clean_check", "music_folder", "music") == "should be a folder's full path, starting /"
     assert limit_problem("clean_check", "soulsync_admin", "any name") is None
+    assert limit_problem("clean_check", "weekly_day", "Mon") == "should be a day of the week, from Monday to Sunday"
+    assert limit_problem("clean_check", "nightly_time", "5am") == "should be a time of day, from 00:00 to 23:59"
 
 
 def test_the_repositorys_config_has_the_new_music_settings(tmp_path):

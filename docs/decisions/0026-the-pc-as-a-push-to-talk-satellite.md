@@ -1,4 +1,4 @@
-# 0024: The PC as a push-to-talk satellite
+# 0026: The PC as a push-to-talk satellite
 
 18 November 2026 · Phase 6, first piece · Agreed with the user in chat, and built · Design: [the spec](../superpowers/specs/2026-11-18-pc-push-to-talk-satellite-design.md)
 

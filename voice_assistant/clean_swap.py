@@ -2,7 +2,7 @@
 Clean Swap Module
 Hears a song against its lyrics to judge it clean or explicit (Ears), and swaps a clean copy
 for an explicit one (Swapper), for a download and for the library check - decision 0022,
-sections 1 to 4.
+sections 1 to 4 and 8.
 
 Ears fetches what it needs from Navidrome - the file's size and time, the lyrics, the sound -
 and gives the sound to the listening worker, then keeps the verdict with the file's size and
@@ -12,9 +12,12 @@ library.
 
 The Swapper sets the clean copy aside in the music folder's .nova-held, has Navidrome and
 SoulSync forget it, asks SoulSync for it again and hears what comes, a set number of times.
-The user must never end up without a copy of a song he had: whatever fails, the copy last set
-aside goes back where it was, and nothing is ever deleted. Each step is saved before it's
-taken, so a restart carries a swap on, or puts the song back.
+Only a copy heard explicit is kept: one heard unsure, or not heard, or clean on the last try, is
+set aside too and the original clean copy put back (section 8). The user must never end up
+without a copy of a song he had: however a swap ends without an explicit copy, his original -
+the first copy set aside - goes back where it was, every later copy stays held, and nothing is
+ever deleted. Each step is saved before it's taken, so a restart carries a swap on, or puts the
+song back.
 """
 
 import logging
@@ -87,8 +90,10 @@ FETCHING = "fetching"
 WATCHING = "watching"
 PUTTING_BACK = "putting_back"
 
-# Which list each way a swap ends goes on, if any: an unsure copy is listed as it's heard.
-LISTS = {"swapped": "swapped", "only_clean": "only_clean", "couldnt": "couldnt", "not_judged": "couldnt"}
+# Which list each way a swap ends goes on, if any. "unsure" is the new copy set aside, the original
+# put back; Ears lists an unsure song as it's heard, but without the original's id.
+LISTS = {"swapped": "swapped", "only_clean": "only_clean", "couldnt": "couldnt", "not_judged": "couldnt",
+         "unsure": "unsure"}
 
 
 def song_name(song: Dict) -> str:
@@ -363,10 +368,12 @@ class Swapper:
 
         Returns:
             "swapped" for an explicit copy (or one with nothing to bleep); "only_clean" when every
-            try came down clean, the last kept; "unsure" or "not_judged" for a copy kept as it
-            couldn't be judged either way; "couldnt", with its reason, when it was put back or
-            never moved; or "stopped", as Nova stops. Each but "stopped" is on the page's lists,
-            bar "couldnt" for a song a saved swap already handles ("Nova is already swapping it").
+            try came down clean; "unsure" or "not_judged" when the new copy couldn't be judged
+            explicit; "couldnt", with its reason, when it was put back or never moved; or
+            "stopped", as Nova stops. Whenever it ends without an explicit copy, every copy the
+            tries brought is set aside and the original clean copy put back. Each but "stopped" is on
+            the page's lists, bar "couldnt" for a song a saved swap already handles ("Nova is
+            already swapping it").
         """
         name = song_name(song)
         parts = self._parts()
@@ -421,9 +428,10 @@ class Swapper:
         """
         Carries on each swap Nova was part way through when it stopped: one watching for a copy
         goes on watching while its time limit lasts, and is put back once it's past; one moved
-        but not yet fetched for goes on, as does one about to set aside a later try's copy. One
-        whose copy moved before where it went was saved puts back the copy set aside before it,
-        if there is one, and says where to look. Without the music folder they're all left for
+        but not yet fetched for goes on, as does one about to set aside a later try's copy, or
+        the copies of a try not heard explicit before the original goes back. One whose copy
+        moved before where it went was saved puts back the original, if one was set aside before
+        it, and says where to look. Without the music folder they're all left for
         later, as nothing can be put back. Swaps running now are left alone.
 
         Args:
@@ -495,16 +503,21 @@ class Swapper:
                 return self._end(swap, "couldnt", WHERE_NOT_SAVED)
             if not in_place:
                 # A later try's copy moved before where it went was saved: never guessed at, but the
-                # copy set aside before it goes back, so the library isn't left without the song.
+                # original goes back, so the library isn't left without the song.
                 return self._put_back(swap, (folder, self._soulsync(), None, self._library()), WHERE_NOT_SAVED)
             # A later try's copy, not moved yet: the swap carries on from that try.
+            if swap.get("rejected"):
+                # Setting aside copies which weren't heard explicit needs only the music folder: nothing
+                # is forgotten or fetched, and the original goes back after them.
+                return self._carry_on(swap, (folder, self._soulsync(), None, self._library()))
         # Watching and putting back need no admin profile; every other step leads to forgetting a
         # copy, which does.
         parts = self._parts(admin_needed=stage not in (WATCHING, PUTTING_BACK))
         if isinstance(parts, str):
             if stage == SETTING_ASIDE:
-                # The copy this try brought is still in the library; the earlier ones stay held.
-                return self._end(swap, "couldnt", parts)
+                # The copy this try brought is still in the library, and the original goes back
+                # beside it where its path is free; the earlier ones stay held.
+                return self._put_back(swap, (folder, self._soulsync(), None, self._library()), parts)
             # Can't be carried on, but the copy can still go back - for one already putting back,
             # with the reason it first had.
             reason = (swap.get("reason") or parts) if stage == PUTTING_BACK else parts
@@ -562,17 +575,34 @@ class Swapper:
         while not self._stopping.is_set():
             stage = swap["stage"]
             if stage == SETTING_ASIDE:
-                if admin is None:
-                    # It would need forgetting before another try: left where it is.
-                    return self._end(swap, "couldnt", NO_ADMIN)
+                rejected = swap.get("rejected")
+                if admin is None and not rejected:
+                    # It would need forgetting before another try: left where it is, and the
+                    # original goes back beside it where its path is free.
+                    return self._put_back(swap, parts, NO_ADMIN)
                 try:
                     held = folder.set_aside(swap["copy"]["rel"])
                 except MusicFolderError as e:
                     # Nothing of this copy moved: set_aside puts back what it moved. Copies set
-                    # aside by earlier tries stay held, as clean as this one.
+                    # aside by earlier tries stay held, as clean as this one. The original goes back
+                    # where its path is free; if the copy which wouldn't move is still there, both
+                    # are kept. With nothing set aside yet, nothing moved at all.
+                    if swap["held"]:
+                        return self._put_back(swap, parts, e.reason)
                     return self._end(swap, "couldnt", e.reason)
-                swap["held"].append(asdict(held))
-                self._next(swap, DROPPING)
+                # With the copy's id, so one put back in place of an original gone from .nova-held is
+                # known to the library check.
+                swap["held"].append({**asdict(held), "id": swap["copy"].get("id")})
+                if not rejected:
+                    self._next(swap, DROPPING)
+                elif swap.get("pending"):
+                    # Another copy the same try brought, set aside in its turn.
+                    swap["copy"] = swap["pending"].pop(0)
+                    self._save(swap)
+                else:
+                    # Nothing to forget or fetch for these: the original goes back, saved as such first.
+                    swap["reason"] = None
+                    self._next(swap, PUTTING_BACK)
             elif stage == DROPPING:
                 dropped = self._dropped(library, swap["copy"])
                 if dropped is None:
@@ -606,12 +636,23 @@ class Swapper:
                 if new is None:
                     break
                 if not new:
+                    if swap["tries"] > 1:
+                        # Every try which landed came down clean, and the last didn't land: the song
+                        # only comes down clean (seen live on 17 Nov), so the check leaves it for good.
+                        # Kept with the swap, so an original which can't go back yet ends so too.
+                        landed = swap["tries"] - 1
+                        swap["rejected"] = {"kind": "only_clean", "listed": None, "ids": [],
+                                            "reason": f"{landed} {'copy' if landed == 1 else 'copies'} came "
+                                                      f"down clean, and {NOT_IN_TIME}"}
+                        return self._put_back(swap, parts, None, unwish=True)
                     return self._put_back(swap, parts, NOT_IN_TIME, unwish=True)
-                ended = self._judge(swap, library, new)
+                ended = self._judge(swap, library, new, parts)
                 if ended:
                     return ended
             elif stage == PUTTING_BACK:
-                return self._put_back(swap, parts, swap.get("reason") or WENT_WRONG)
+                # A reason of None is the rejection's own: the original goes back and the swap ends
+                # as the new copy was heard.
+                return self._put_back(swap, parts, swap["reason"] if "reason" in swap else WENT_WRONG)
             else:
                 return self._put_back(swap, parts, f"its saved step, {stage!r}, wasn't one Nova knows")
         return STOPPED
@@ -642,11 +683,12 @@ class Swapper:
         logger.info(f"Asked SoulSync for {swap['name']} again, try {swap['tries']}")
         return None
 
-    def _judge(self, swap: Dict, library: NavidromeLibrary, new: List[Dict]) -> Optional[Outcome]:
+    def _judge(self, swap: Dict, library: NavidromeLibrary, new: List[Dict], parts: Parts) -> Optional[Outcome]:
         """
-        Hears the copies SoulSync brought and ends the swap by what they are - or, when they're
-        all clean with tries to spare, sets each of them aside in turn, and returns None to
-        fetch again.
+        Hears the copies SoulSync brought and ends the swap by what they are: an explicit one
+        is swapped in; one heard unsure, or not heard, is set aside with the rest and the
+        original put back; and when they're all clean with tries to spare, each is set aside in
+        turn, and None is returned to fetch again.
         """
         verdict, copy = self.ears.hear_copies(new, download=not swap["quiet"])
         if self._stopping.is_set():
@@ -655,27 +697,69 @@ class Swapper:
         if verdict.kind in ("explicit", "too_few"):
             return self._end(swap, "swapped", "")
         if verdict.kind == "unsure":
-            # Kept, never swapped; Ears has listed it.
-            return self._end(swap, "unsure", f"heard {verdict.heard} of its {verdict.expected} swears")
+            # Only an explicit copy is swapped in, so this one goes the way of a clean one, and the
+            # original comes back; Ears has listed it as unsure.
+            return self._reject(swap, parts, new, copy, "unsure",
+                                f"heard {verdict.heard} of its {verdict.expected} swears")
         if verdict.kind != "clean":
-            return self._end(swap, "not_judged", verdict.reason,
-                             listed=f"couldn't check the copy SoulSync brought: {verdict.reason}")
+            return self._reject(swap, parts, new, copy, "not_judged", verdict.reason,
+                                listed=f"couldn't check the copy SoulSync brought: {verdict.reason}")
         if swap["tries"] > self._tries():
-            # The last copies stay in the library; the earlier ones stay held. Their ids are
-            # listed, so the library check knows them as only clean, not as clean songs it
-            # couldn't swap - SoulSync may file them somewhere else, under another id.
-            return self._end(swap, "only_clean", f"{swap['tries']} copies came down clean",
-                             kept=[other.get("id") for other in new])
+            # Every try came down clean: the last try's copies are set aside as the earlier ones
+            # were, and his original goes back - seen live on 17 Nov, when his FLAC was left held
+            # and the last try's MP3, as clean, kept in its place. Their ids are listed, so the
+            # library check knows them as only clean, not as clean songs it couldn't swap -
+            # SoulSync may file them somewhere else, under another id.
+            return self._reject(swap, parts, new, copy, "only_clean", f"{swap['tries']} copies came down clean")
         # Clean is only ever the verdict when every copy heard was clean: each goes, the one
         # given first.
+        return self._set_aside_all(swap, parts, new, copy, "clean copy")
+
+    def _reject(self, swap: Dict, parts: Parts, new: List[Dict], copy: Dict, kind: str, reason: str,
+                listed: Optional[str] = None) -> Optional[Outcome]:
+        """
+        Sets aside every copy a try brought, none of which was heard explicit - or the last
+        try's clean ones - so the original clean copy can go back: the swap is saved as
+        rejecting first, and each copy is set aside in turn by _run, which then puts the
+        original back and ends the swap as the copies were heard. Nothing is deleted.
+
+        Args:
+            swap: The swap.
+            parts: The music folder, SoulSync, its admin and Navidrome.
+            new: The copies the try brought.
+            copy: The one the verdict is of.
+            kind: How the swap ends once the original is back, "unsure", "not_judged" or "only_clean".
+            reason: Why, as the outcome gives it.
+            listed: The reason as the page's list gives it, if not the same.
+
+        Returns:
+            None while there is more to do, or the outcome if the swap ended here.
+        """
+        # The copies' ids go on the list the swap ends on, so the library check leaves them be.
+        ids = [other.get("id") for other in [copy] + [other for other in new if other.get("id") != copy.get("id")]]
+        return self._set_aside_all(swap, parts, new, copy, "copy",
+                                   rejected={"kind": kind, "reason": reason, "listed": listed, "ids": ids})
+
+    def _set_aside_all(self, swap: Dict, parts: Parts, new: List[Dict], copy: Dict, what: str,
+                       rejected: Optional[Dict] = None) -> Optional[Outcome]:
+        """
+        Saves a swap as about to set aside each of the copies a try brought, the one given
+        first, with where each is. Returns None once it's saved, or the outcome if it couldn't be.
+        """
         copies = [copy] + [other for other in new if other.get("id") != copy.get("id")]
+        if rejected:
+            swap["rejected"] = rejected
         try:
-            files = [_copy(clean, library.song_file(clean["id"])["path"]) for clean in copies]
+            files = [_copy(other, parts[3].song_file(other["id"])["path"]) for other in copies]
         except NavidromeError as e:
-            return self._end(swap, "couldnt", f"couldn't find the clean copy SoulSync brought: {e}")
+            # Nothing of these copies moved: they stay in the library, the earlier ones held, and the
+            # original goes back where its path is free.
+            return self._put_back(swap, parts, f"couldn't find the {what} SoulSync brought: {e}")
         swap.update(stage=SETTING_ASIDE, copy=files[0], pending=files[1:])
         if not self._save(swap):
-            return self._end(swap, "couldnt", NOT_SAVED)
+            # Nothing new moves without where it goes being saved; the copies stay in the library,
+            # and the original goes back where its path is free.
+            return self._put_back(swap, parts, NOT_SAVED)
         return None
 
     def _tries(self) -> int:
@@ -741,34 +825,44 @@ class Swapper:
             logger.warning(f"Couldn't look for {sought.name} in Navidrome this time, so the swap waits on")
             return None
 
-    def _put_back(self, swap: Dict, parts, reason: str, unwish: bool = False) -> Outcome:
+    def _put_back(self, swap: Dict, parts, reason: Optional[str], unwish: bool = False) -> Outcome:
         """
-        Ends a swap which couldn't go on: takes its request off SoulSync's wishlist, if it made
-        one, so nothing lands later beside the copy put back; puts back the copy it last set
-        aside; and asks Navidrome to scan for it.
+        Ends a swap without an explicit copy: takes its request off SoulSync's wishlist, if it
+        made one, so nothing lands later beside the copy put back; puts back the original, the
+        first copy set aside - the copies of the tries after it stay held; and asks Navidrome to
+        scan for it.
 
         Args:
             swap: The swap.
             parts: The music folder, SoulSync, its admin and Navidrome - SoulSync or Navidrome
                 None if they aren't set up, when that part is left out.
-            reason: Why it couldn't go on.
+            reason: Why it couldn't go on; None, for a swap which set aside copies not heard
+                explicit (or only clean), when nothing went wrong and it ends as they were heard.
             unwish: Whether SoulSync was asked for it, so it comes off the wishlist.
 
         Returns:
-            "couldnt", with the reason and what became of the copy set aside. A copy which
-            couldn't be put back keeps the swap saved, to be tried again as swaps are carried on.
+            "couldnt", with the reason and what became of the copy set aside - or, with a reason
+            of None and the original put back, how the copies were heard ("unsure", "not_judged"
+            or "only_clean"). A copy which couldn't be put back keeps the swap saved, to be tried
+            again as swaps are carried on.
         """
         folder, soulsync, _admin, library = parts
+        rejected = swap.get("rejected")
+        given = reason
+        if reason is None:
+            reason = rejected["reason"] if rejected else WENT_WRONG
         if unwish and swap.get("track_id"):
             if soulsync is not None:
                 soulsync.unwish(swap["track_id"])
             else:
                 logger.warning(f"{swap['name']} couldn't be taken off SoulSync's wishlist, as it isn't set up")
-        put = folder.put_back(_held(swap["held"][-1])) if swap.get("held") else None
+        put, original = self._put_original(folder, swap.get("held") or [])
         if library is not None:
             library.start_scan()
-        if put in (None, PUT_BACK):
+        if put in (None, PUT_BACK) and original:
             said = reason
+        elif put == PUT_BACK:
+            said = f"{reason}, and the original has gone from {HELD}, so the copy set aside last was put back"
         elif put == NEW_COPY:
             said = (f"{reason}, and a new file is where it was, so both are kept: the new file, "
                     f"and the old copy in {HELD}")
@@ -776,18 +870,59 @@ class Swapper:
             said = f"{reason}, and the copy set aside has gone from {HELD}"
         else:
             said = f"{reason}, and it couldn't be put back ({put}), so it's still in {HELD}"
-        if put not in (None, PUT_BACK):
-            logger.warning(f"Putting {swap['name']} back: {put}")
+        if put not in (None, PUT_BACK) or not original:
+            logger.warning(f"Putting {swap['name']} back: {put}" + ("" if original else ", the original being gone"))
         if put not in (None, PUT_BACK, NEW_COPY, HELD_GONE):
             # A real failure, e.g. "couldn't move the song: Read-only file system": ending the swap
             # would leave the copy held for good, so it's kept and tried again. A new copy where it
             # was keeps both, and a copy emptied from .nova-held would never be found: both end.
             # Quiet from here, as how it ended has just been said: tries made as each download
             # starts mustn't say it again.
-            swap.update(stage=PUTTING_BACK, reason=reason, quiet=True)
+            swap.update(stage=PUTTING_BACK, reason=given, quiet=True)
             self._save(swap)
             return self._list(swap["name"], swap.get("song_id"), "couldnt", said)
-        return self._end(swap, "couldnt", said)
+        if rejected and given is None and put in (None, PUT_BACK) and original:
+            return self._end(swap, rejected["kind"], rejected["reason"], listed=rejected.get("listed"),
+                             kept=rejected.get("ids") or [])
+        # The copies a rejected swap meant to set aside are listed, so the library check leaves them be.
+        extra = {"kept": rejected.get("ids") or []} if rejected else {}
+        if put == PUT_BACK and not original:
+            # The copy put back in the original's place, and the others held, are listed, so the library
+            # check leaves them for 30 days rather than swapping again the next night. Held records saved
+            # before they had ids have the copy last set aside's.
+            later = [saved.get("id") for saved in swap["held"][1:]] + [(swap.get("copy") or {}).get("id")]
+            extra["kept"] = list(dict.fromkeys(extra.get("kept", []) + [copy_id for copy_id in later if copy_id]))
+        elif put == PUT_BACK and original:
+            # Marked, so the library check leaves the song for a while rather than fetching again the
+            # next night what most likely won't come then either.
+            extra["original_back"] = True
+        return self._end(swap, "couldnt", said, **extra)
+
+    @staticmethod
+    def _put_original(folder: MusicFolder, held: List[Dict]) -> Tuple[Optional[str], bool]:
+        """
+        Puts back the original, the first copy set aside. If it has gone from .nova-held - emptied
+        by hand - the latest copy set aside which is still there goes back instead, so the library
+        is never left without the song: setting aside the last try's copy, to put the original
+        back, would otherwise leave none. Something already at the original's path means it went
+        back before a restart, or the store couldn't forget the swap: it counts as put back, and
+        nothing more moves.
+
+        Returns:
+            What put_back said - None with nothing set aside - and whether it was of the original.
+        """
+        if not held:
+            return None, True
+        put = folder.put_back(_held(held[0]))
+        if put != HELD_GONE:
+            return put, True
+        if os.path.lexists(os.path.join(folder.root, held[0]["original"])):
+            return PUT_BACK, True
+        for later in reversed(held[1:]):
+            other = folder.put_back(_held(later))
+            if other != HELD_GONE:
+                return other, False
+        return HELD_GONE, True
 
     def _next(self, swap: Dict, stage: str):
         """Moves a swap on to its next step, saved."""
@@ -830,6 +965,26 @@ class Swapper:
         self._end_saved(swap)
         logger.info(f"The swap of {swap['name']} ended {kind}" + (f": {reason}" if reason else ""))
         if kind in LISTS:
+            # Ears listed a copy heard unsure under its own name and id: with the swap's entry, which
+            # has every copy's id, that would be two.
+            for copy_id in extra.get("kept") or ():
+                try:
+                    self.store.discard("unsure", copy_id)
+                except (OSError, ValueError) as e:
+                    logger.error(f"Couldn't take {swap['name']} off the unsure list: {type(e).__name__}")
+            if LISTS[kind] != "couldnt" and swap.get("song_id"):
+                # A put-back which failed was listed as couldn't swap at once: it mustn't stay on two lists.
+                try:
+                    self.store.discard("couldnt", swap["song_id"])
+                except (OSError, ValueError) as e:
+                    logger.error(f"Couldn't take {swap['name']} off the couldn't swap list: {type(e).__name__}")
+            if LISTS[kind] != "unsure" and swap.get("song_id"):
+                # A swap rejected as unsure over 30 days ago left the original on Unsure; tried again and
+                # "swapped" or "couldn't swap", it mustn't stay on two lists.
+                try:
+                    self.store.discard("unsure", swap["song_id"])
+                except (OSError, ValueError) as e:
+                    logger.error(f"Couldn't take {swap['name']} off the unsure list: {type(e).__name__}")
             self._list(swap["name"], swap.get("song_id"), LISTS[kind], listed or reason, **extra)
         return Outcome(kind, reason)
 

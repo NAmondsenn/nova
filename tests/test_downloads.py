@@ -384,10 +384,13 @@ def test_a_song_heard_neither_way_says_so_and_is_never_swapped(watching, clock, 
     (Outcome("couldnt", "SoulSync admin profile isn't set up"),
      "Gooba by 6ix9ine has been downloaded, but it's the clean version, and I couldn't swap it: SoulSync admin "
      "profile isn't set up."),
+    # The new copy was set aside and the clean original put back: nothing has been downloaded.
     (Outcome("unsure", "heard 2 of its 10 swears"),
-     "Gooba by 6ix9ine has been downloaded, but I couldn't tell if it's the clean version."),
+     "Gooba by 6ix9ine came down again, but not plainly explicit, so you've still got the clean version. The new "
+     "copy is set aside."),
     (Outcome("not_judged", "listening took too long"),
-     "Gooba by 6ix9ine has been downloaded, but I couldn't check it for a clean version."),
+     "Gooba by 6ix9ine came down again, but I couldn't check the new copy, so you've still got the clean version. "
+     "The new copy is set aside."),
 ])
 def test_a_song_heard_clean_is_swapped_before_anything_is_said(watching, clock, said, ears, swapper, swapped,
                                                                outcome):
@@ -588,6 +591,12 @@ def test_a_song_had_only_clean_by_the_title_asked_for_and_soulsyncs_artist_is_re
     ("clean", Outcome("couldnt", "Navidrome still lists it"),
      "I couldn't download endless by Gunna, so you've still got the clean version: Navidrome still lists it."),
     # Heard again first, in case its file changed since: never swapped unless it's still clean.
+    ("clean", Outcome("unsure", "heard 2 of its 10 swears"),
+     "endless by Gunna came down again, but not plainly explicit, so you've still got the clean version. The new "
+     "copy is set aside."),
+    ("clean", Outcome("not_judged", "listening took too long"),
+     "endless by Gunna came down again, but I couldn't check the new copy, so you've still got the clean version. "
+     "The new copy is set aside."),
     ("explicit", None, "You've already got endless by Gunna."),
     ("unsure", None, "You've already got endless by Gunna, but I couldn't tell if it's the clean version."),
     ("not_judged", None, "You've already got endless by Gunna, but I couldn't check it for a clean version."),
@@ -762,6 +771,32 @@ def test_an_album_says_how_many_were_swapped_and_how_many_werent(watching, clock
                                    "clean, so I've kept them. One of its tracks came down clean, and I couldn't swap "
                                    "it. I couldn't tell if one of its tracks is the clean version. I couldn't check "
                                    "one of its tracks for a clean version.")
+
+
+@pytest.mark.parametrize("outcomes, message", [
+    ({"r1": Outcome("unsure"), "r2": Outcome("unsure")},
+     "Rumours by Fleetwood Mac has been downloaded. 2 of its tracks came down again but not plainly explicit, so "
+     "they're still the clean versions."),
+    ({"r1": Outcome("unsure")},
+     "Rumours by Fleetwood Mac has been downloaded. One of its tracks came down again but not plainly explicit, so "
+     "it's still the clean version."),
+    ({"r1": Outcome("not_judged", "listening took too long"), "r2": Outcome("not_judged", "no lyrics")},
+     "Rumours by Fleetwood Mac has been downloaded. 2 of its tracks came down again, but I couldn't check the new copies, so "
+     "they're still the clean versions."),
+    ({"r1": Outcome("not_judged", "no lyrics")},
+     "Rumours by Fleetwood Mac has been downloaded. One of its tracks came down again, but I couldn't check the new copy, so "
+     "it's still the clean version."),
+])
+def test_an_albums_tracks_whose_new_copy_was_set_aside_are_said_to_be_still_clean(watching, clock, said, ears,
+                                                                               swapper, outcomes, message):
+    # Not the clauses for a track heard unsure on landing: that one is kept, as it came.
+    tracks = [DREAMS, GO_YOUR_OWN_WAY][:len(outcomes)]
+    ears.kinds.update({"r1": "clean", "r2": "clean"})
+    swapper.outcomes.update(outcomes)
+    watching(FakeSoulSync(album=AlbumRequest(None, [], 11, len(tracks))),
+             FakeLibrary(clock, tracks=[[], tracks]))._watch(RUMOURS_WANTED, "kitchen")
+
+    assert said[-1] == ("kitchen", message)
 
 
 def test_part_of_an_album_by_its_time_limit_is_heard_too(watching, clock, said, ears, swapper):

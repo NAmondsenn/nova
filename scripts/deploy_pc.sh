@@ -9,7 +9,7 @@
 # the PC. There it stops the task, the launcher and the satellite, runs
 # scripts/windows/install.ps1, and starts the task again with the new code. The
 # PC's password for the brain (config\.env) is never touched, and nothing is sent to
-# the PC but the code. See docs/decisions/0024.
+# the PC but the code. See docs/decisions/0026.
 #
 # Each run is the user's own named job: it replaces the code on the PC and restarts
 # the satellite there.
