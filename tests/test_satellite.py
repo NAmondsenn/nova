@@ -122,6 +122,9 @@ class FakeReader:
         self.position = position
 
     def read(self, count):
+        # The PC's microphone is only open while it's held - see Microphone.hold.
+        if not self.microphone.always_open and not self.microphone.holds:
+            self.microphone.unheld_reads += 1
         while self.microphone.position < self.position + count:
             time.sleep(0.001)
         heard = samples(self.position, self.position + count)
@@ -132,9 +135,19 @@ class FakeReader:
 class FakeMicrophone:
     """Has been listening for a second when it starts, and hears SPEED times faster than real time."""
 
-    def __init__(self, sample_rate=48000, echo=None):
+    def __init__(self, sample_rate=48000, echo=None, always_open=True):
         self.started = time.monotonic()
         self.closed = False
+        self.always_open = always_open
+        self.holds = 0
+        self.unheld_reads = 0
+
+    def hold(self):
+        self.holds += 1
+
+    def release(self):
+        assert self.holds > 0
+        self.holds -= 1
 
     @property
     def position(self):
@@ -221,8 +234,9 @@ class FakePlayback:
 
 
 class FakeSpeaker:
-    def __init__(self, sample_rate=48000, echo_reference=None):
+    def __init__(self, sample_rate=48000, echo_reference=None, always_open=True):
         self.sample_rate = sample_rate
+        self.always_open = always_open
         self.playing = []
         self.silenced = set()
         self.closed = False
@@ -1924,6 +1938,31 @@ def test_a_press_while_the_fallback_rings_dismisses_it(brain, make, tmp_path):
     assert wait_for(lambda: "announcement" not in made.speaker.silenced)
     assert made.speaker.files() == [alarm]
     assert PHRASE not in made.speaker.files()
+
+
+def test_push_to_talk_opens_the_microphone_only_while_recording(brain, make):
+    # So the PC can sleep, and its microphone light is only on while it listens.
+    made = pressable(brain, make)
+    assert made.microphone.always_open is False and made.speaker.always_open is False
+    assert made.microphone.holds == 0
+
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    assert made.microphone.holds == 1
+    brain.say("stop_listening")
+    assert wait_for(lambda: made.microphone.holds == 0)
+
+    # And for the answer to a question.
+    brain.say("listen", recording="listen-1")
+    assert wait_for(lambda: len(brain.recordings()) >= 4)
+    assert made.microphone.holds == 1
+    brain.say("stop_listening", recording="listen-1")
+    assert wait_for(lambda: made.microphone.holds == 0)
+    assert made.microphone.unheld_reads == 0
+
+    # The Pi's are open throughout, as they always were.
+    wake_word = make()
+    assert wake_word.microphone.always_open is True and wake_word.speaker.always_open is True
 
 
 def test_a_push_to_talk_satellite_tells_the_watchdog_while_it_waits(brain, make, monkeypatch):

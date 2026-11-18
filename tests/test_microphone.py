@@ -198,6 +198,82 @@ def test_starts_without_a_microphone_and_picks_it_up_later(streams):
     assert list(reader.read(480)) == list(range(480))
 
 
+# Opened only when needed
+
+def test_an_on_demand_microphone_opens_only_when_held(streams):
+    # The PC's: an open stream keeps Windows awake, and its microphone light on.
+    microphone = Microphone(sample_rate=RATE, always_open=False)
+    assert streams == []
+
+    microphone.hold()
+    assert len(streams) == 1 and not streams[0].closed
+    microphone.hold()
+    microphone.release()
+    assert len(streams) == 1 and not streams[0].closed
+
+    microphone.release()
+    wait_for(lambda: streams[0].closed)
+    assert len(streams) == 1
+
+
+def test_the_pis_microphone_stays_open_through_a_recording(streams):
+    microphone = Microphone(sample_rate=RATE)
+    assert len(streams) == 1
+    microphone.hold()
+    microphone.release()
+    assert len(streams) == 1 and not streams[0].closed and microphone._stream is streams[0]
+
+
+def test_each_hold_opens_a_fresh_stream(streams):
+    # So the PC waking from sleep, or a headset plugged in, is picked up by the next press.
+    microphone = Microphone(sample_rate=RATE, always_open=False)
+    microphone.hold()
+    microphone.release()
+    microphone.hold()
+
+    assert len(streams) == 2
+    wait_for(lambda: streams[0].closed)
+    assert not streams[1].closed
+    # Each on whichever device is the default as it opens, not the one the first had.
+    assert streams[0].settings["device"] is None and streams[1].settings["device"] is None
+
+
+def test_reading_after_a_reopen_gets_new_audio(streams):
+    microphone = Microphone(sample_rate=RATE, stall_timeout=1.0, always_open=False)
+    microphone.hold()
+    streams[0].feed(np.arange(0, 480))
+    microphone.release()
+    closed_at = microphone.position
+    # A late block from the closed stream is thrown away rather than mixed in.
+    streams[0].feed(np.arange(5000, 5480))
+    # As if the PC had sat idle for an hour, which mustn't count as the new stream stalling.
+    microphone._last_activity -= 3600
+
+    microphone.hold()
+    assert microphone.position >= closed_at
+    reader = microphone.listen()
+    # After a slice or two of waiting, which is when a stall is looked for.
+    threading.Timer(0.4, streams[1].feed, args=(np.arange(1000, 1480),)).start()
+
+    assert list(reader.read(480)) == list(range(1000, 1480))
+    assert len(streams) == 2
+
+
+def test_a_released_microphone_is_never_reopened_as_stalled(streams):
+    microphone = Microphone(sample_rate=RATE, always_open=False)
+    microphone._recover()
+    assert streams == []
+
+    microphone.hold()
+    microphone.release()
+    microphone._recover()
+    assert len(streams) == 1
+    # Held, it is.
+    microphone.hold()
+    microphone._recover()
+    assert len(streams) == 3
+
+
 # Recording
 
 class FakeDetector:

@@ -211,15 +211,19 @@ class Satellite:
         self.press_port = config.section("satellite").get("press_port", 10401)
         self.latency_file = os.path.join(paths.LOGS_DIR, "latency.jsonl")
 
-        # The one speaker and the one microphone, with what's played taken back out of
-        # what's heard - see echo.py.
-        self.echo = make_echo_canceller(config, self.sample_rate)
-        self.speaker = Speaker(sample_rate=self.sample_rate, echo_reference=self.echo.played if self.echo else None)
-        self.microphone = Microphone(sample_rate=self.sample_rate, echo=self.echo)
         # A push-to-talk satellite, such as the PC, starts a recording from a key press
         # and so has no wake word to load - nor any clips of it. Its mute is then kept in
         # the state copy alone.
         self.push_to_talk = config.section("satellite").get("trigger", "wake_word") == "push_to_talk"
+
+        # The one speaker and the one microphone, with what's played taken back out of
+        # what's heard - see echo.py. Push-to-talk, each is open only when needed, so
+        # the PC can go to sleep and its microphone light is off between presses.
+        self.echo = make_echo_canceller(config, self.sample_rate)
+        self.speaker = Speaker(sample_rate=self.sample_rate, echo_reference=self.echo.played if self.echo else None,
+                               always_open=not self.push_to_talk)
+        self.microphone = Microphone(sample_rate=self.sample_rate, echo=self.echo,
+                                     always_open=not self.push_to_talk)
         self.wake: Optional[WakeWordDetector] = None
         self.clips: Optional[WakeClips] = None
         if not self.push_to_talk:
@@ -598,11 +602,17 @@ class Satellite:
             Why it ended: "stopped" by the brain, "pressed" by the key, at the "limit", or
             "dropped" with the connection.
         """
-        reader = self.microphone.listen(start=start)
+        # Opened for the recording, push-to-talk, and closed again once it's over.
+        self.microphone.hold()
         limit = round(self.longest_request * RATE)
         sizes = itertools.chain([pre_roll] if pre_roll else [], itertools.repeat(round(PIECE_SECONDS * RATE)))
         sent = 0
         try:
+            if self.push_to_talk:
+                # Nothing from before the microphone opened: what it still holds from
+                # then is the last recording's.
+                start = max(start, self.microphone.position)
+            reader = self.microphone.listen(start=start)
             for size in sizes:
                 audio = reader.read(min(size, limit - sent))
                 self._exit_if_asked()
@@ -631,6 +641,7 @@ class Satellite:
             self.link.send("audio_end", reason="cancelled")
             raise
         finally:
+            self.microphone.release()
             with self._lock:
                 if self._recording is stopped:
                     self._recording = None
