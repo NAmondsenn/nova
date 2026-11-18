@@ -23,6 +23,7 @@ goals, penalties and red cards only as Home Assistant lists them, no result work
 they don't know.
 """
 
+import itertools
 import logging
 import re
 from dataclasses import replace
@@ -46,6 +47,9 @@ NOT_A_NAME = "I didn't catch which team or competition."
 
 # What is said when line-ups are asked for with no team named and none of the followed teams has a match today.
 NO_LINEUP_TEAM = "None of the followed teams is playing today. Name a team for its line-up."
+
+# What is said after a match which is off when line-ups are asked for with no team named and it is the only match today.
+NO_LINEUPS_FOR_IT = "No line-ups are listed for it."
 
 # What is said when a match is asked about with no team named and none of the followed teams has a match in play, or
 # over, on the day asked (today when no day is given) or just played: one still to come, or off, has nothing which happened
@@ -533,7 +537,9 @@ def said_followed(reading: Reading, now: datetime, cant_get: Sequence[str] = ())
             while some are.
 
     Returns:
-        One line for each team, starting with its name, e.g. "Stevenage: no fixtures listed.";
+        One line for each team, starting with its name, e.g. "Stevenage: no fixtures listed." (a match
+        called off today is "Today: ...", and one at the head of its next fixtures "Tomorrow: ...", each a part of
+        its own, so that "Next:" is its next match which is on);
         then, if Home Assistant left some teams out, that only some are shown; then, if cant_get
         has names, that they can't be got ("I can't get South Shields right now."); and LAG as
         the last line if any match is in play. "No teams are followed." with none.
@@ -548,17 +554,24 @@ def said_followed(reading: Reading, now: datetime, cant_get: Sequence[str] = ())
     shown: List[Match] = []
     for team in reading.teams:
         parts: List[str] = []
-        later = _other_than(team.next, team.now)[:1]
+        coming = _other_than(team.next, team.now)
+        # Matches called off at the head of its next fixtures are each a part of their own, so that they don't take the
+        # place of its next match which is on: tomorrow's, postponed, then "Next:" is the one after.
+        off = list(itertools.takewhile(_is_off, coming))
+        later = coming[len(off):][:1]
         past = _other_than(team.last, team.now)[:1]
         if team.now:
             parts.append(("Playing now: " if _in_play(team.now) else "Today: ") + said_match(team.now, now))
+        for match in off:
+            parts.append(("Tomorrow: " if _on(match.kickoff.astimezone().date(), now) == "tomorrow" else "Called off: ")
+                         + said_match(match, now))
         if later:
             parts.append("Next: " + said_match(later[0], now))
-        elif team.now is None:
+        elif team.now is None and not off:
             parts.append("no fixtures listed.")
         if past:
             parts.append("Last: " + said_match(past[0], now))
-        shown += ([team.now] if team.now else []) + later + past
+        shown += ([team.now] if team.now else []) + off + later + past
         lines.append(f"{team.name}: " + " ".join(parts))
     if reading.trimmed:
         lines.append("Home Assistant is showing only some of the followed teams.")
@@ -1337,7 +1350,8 @@ def _team_playing(reading: Reading, now: datetime, for_match: bool = False, day:
     Returns:
         For a line-up: the team whose match is in play; else the one whose match is still to come today, the
         earliest first, as its line-up is the one which is about to come out; else the one whose match was
-        today and is over, the earliest first; or None where no team has a match today. Within each of those a
+        today and is over, the earliest first; or None where no team has a match today, or none which isn't off, as
+        a match which is off has no line-up (see _called_off_today). Within each of those a
         team whose match is from BBC Sport (its id begins "bbc:") comes after one whose isn't, however early
         its kick-off, as BBC's matches never have line-ups: South Shields, first in the box, don't win over
         Stevenage, whose line-up there is to say. Two in play, or two kicking off together, go by the box's
@@ -1401,12 +1415,30 @@ def _team_playing(reading: Reading, now: datetime, for_match: bool = False, day:
         if over:
             return max(over, key=lambda chosen: chosen[1].kickoff)[0]
     else:
-        today_matches = [(team, match) for team, match in with_match if on_the_day(match)]
+        # One which is off has no line-up and nothing in it: left out as the match branch leaves it, not picked over
+        # another team's match which is on or over (see _called_off_today for what is said when it is the only one).
+        today_matches = [(team, match) for team, match in with_match if on_the_day(match) and not _is_off(match)]
         if today_matches:
             return min(today_matches, key=lambda chosen: (not _to_come(chosen[1]), ranks_last(chosen[1]), chosen[1].kickoff))[0]
     if len(fresh) < len(reading.teams):
         raise _cant_get("a followed team's matches are an old copy", logging.WARNING)
     return None
+
+
+def _called_off_today(reading: Reading, now: datetime) -> List[Match]:
+    """
+    The followed teams' matches which are off and were to be played today, each once, in the order of the box.
+
+    Args:
+        reading: What the sensor said.
+        now: The current time, aware and local, for which day is today.
+    """
+    today = now.astimezone().date()
+    found: Dict[str, Match] = {}
+    for team in reading.teams:
+        if team.now is not None and _is_off(team.now) and team.now.kickoff.astimezone().date() == today:
+            found.setdefault(team.now.id, team.now)
+    return list(found.values())
 
 
 def describe(football: Football, team=None, competition=None, about=None, date=None, days=None, against=None,
@@ -1448,7 +1480,9 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
         {"success": True, "message": the words} - including where ESPN found nothing by the
         name asked for, which is said, including an overview which names the followed teams
         it can't get while saying the rest, and including line-ups with no team named where no
-        team is followed, which say so ("No teams are followed."), as the overview does; and, for a
+        team is followed, which say so ("No teams are followed."), as the overview does, and where the only
+        followed matches today are off, which are said as said_match says them, with that no line-ups are listed
+        for each and nothing asked of Home Assistant; and, for a
         match with no team named, that a team is to be named where none of the followed teams has
         a match in play, over on the day or just played (see _team_playing), and always where another team is
         given with none named, as a followed team's match isn't the one of two teams; and, for the last time two teams played, where Home Assistant
@@ -1487,6 +1521,11 @@ def describe(football: Football, team=None, competition=None, about=None, date=N
             day = datetime.strptime(asked_date, "%Y%m%d").date() if asked_date and not lineups else None
             playing = _team_playing(reading, now, for_match=not lineups, day=day)
             if playing is None:
+                off = _called_off_today(reading, now) if lineups else []
+                if off:
+                    # Home Assistant looks for a line-up among matches still to be played, so asked, it would give another
+                    # day's: the match which is off is said from the reading, with that it has none.
+                    return {"success": True, "message": "\n".join(f"{said_match(match, now)} {NO_LINEUPS_FOR_IT}" for match in off)}
                 return {"success": True, "message": NO_LINEUP_TEAM if lineups else NO_MATCH_TEAM}
             # By the entry of the box which found it, the one name Home Assistant is known to find it by.
             team = playing.asked or playing.name
