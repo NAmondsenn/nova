@@ -596,8 +596,8 @@ class SettingsPage:
     def _satellites(self, names: List[str]) -> List[Dict]:
         """
         Each satellite the brain lets in, whether it's the default, and whether it's
-        connected - with what it's doing, its mute and, if Spotify is the player, the
-        speaker it plays on. Never its password.
+        connected - with what it's doing, its mute, whether it records on a press of a
+        key and, if Spotify is the player, the speaker it plays on. Never its password.
 
         Args:
             names: The satellites, as the brain has them - the first is the default.
@@ -615,7 +615,7 @@ class SettingsPage:
             found.append({"name": name, "connected": session is not None,
                           "activity": session.activity if session is not None else "idle",
                           "muted": session is not None and session.muted, "default": name == default,
-                          "spotify_speaker": speaker})
+                          "spotify_speaker": speaker, "push_to_talk": self.brain.rooms.push_to_talk(name)})
         return found
 
     def state(self, satellite: Optional[str] = None) -> Dict:

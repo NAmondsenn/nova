@@ -239,6 +239,16 @@ class NoDisplays:
         return []
 
 
+class FakeRooms:
+    """Stands in for what the brain keeps of each satellite's kind: the names of those which record on a press."""
+
+    def __init__(self, *push_to_talk):
+        self.pressed = set(push_to_talk)
+
+    def push_to_talk(self, name):
+        return name in self.pressed
+
+
 class FakeBrain:
     """Stands in for the brain: what every satellite shares, and the sessions of those connected."""
 
@@ -250,6 +260,7 @@ class FakeBrain:
         self.home = self.lists = self.weather = self.pc = None
         self.football = self.football_watcher = self.wrapped_store = None
         self.displays, self.display_server = NoDisplays(), None
+        self.rooms = FakeRooms()
         self._night = Ntfy("")
         self.ran = []
         for name, part in parts.items():
@@ -1492,6 +1503,8 @@ def test_the_pages_script_and_style_are_served_with_its_safety_headers(served, p
         assert b'"/api/satellites/remove"' in body and b'"/api/satellites/default"' in body
         # The speaker a satellite says it plays Spotify on is put on the page only as text.
         assert b'element("span", `Spotify plays on ${satellite.spotify_speaker}`, "detail")' in body
+        # A satellite which records on a press says so after its name.
+        assert b'if (satellite.push_to_talk) what.append(element("span", "push-to-talk", "badge"));' in body
         # No longer than the name rule lets a name be.
         assert b'id="satellite-name"' in _ask(served, "/")[2] and b'maxlength="63"' in _ask(served, "/")[2]
         # A new password for a satellite is asked for with its name typed, saying what it stops.
@@ -2114,13 +2127,21 @@ def test_the_page_lists_each_satellite(files):
 
     assert state["satellites"] == [
         {"name": "bedroom", "connected": True, "activity": "speaking", "muted": False, "default": True,
-         "spotify_speaker": "Voice-Assistant"},
+         "spotify_speaker": "Voice-Assistant", "push_to_talk": False},
         {"name": "kitchen", "connected": True, "activity": "idle", "muted": True, "default": False,
-         "spotify_speaker": "Voice-Assistant"},
+         "spotify_speaker": "Voice-Assistant", "push_to_talk": False},
         {"name": "garage", "connected": False, "activity": "idle", "muted": False, "default": False,
-         "spotify_speaker": None}]
+         "spotify_speaker": None, "push_to_talk": False}]
     # What's shown below is the default's, unless another is asked for.
     assert state["muted"] is False and page.state("kitchen")["muted"] is True
+
+
+def test_the_satellite_list_marks_push_to_talk(files):
+    # The pc is one the brain knows records on a press - and still does while it isn't connected.
+    sessions = {"bedroom": FakeSession(), "pc": FakeSession()}
+    page = _page(sessions=sessions, known=["bedroom", "pc", "laptop"], rooms=FakeRooms("pc", "laptop"))
+    assert [(each["name"], each["push_to_talk"]) for each in page.state()["satellites"]] == [
+        ("bedroom", False), ("pc", True), ("laptop", True)]
 
 
 def test_the_satellites_list_shows_each_speaker(files, make_config):
@@ -2208,7 +2229,7 @@ def test_alarms_and_routines_work_with_no_satellite(files):
     assert state["volumes"] == {} and state["muted"] is False
     assert state["satellites"] == [
         {"name": "bedroom", "connected": False, "activity": "idle", "muted": False, "default": True,
-         "spotify_speaker": None}]
+         "spotify_speaker": None, "push_to_talk": False}]
     # Without any satellite added at all, too.
     assert _page(sessions={}, known=[]).state()["satellites"] == []
 

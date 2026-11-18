@@ -53,6 +53,7 @@ from voice_assistant.ntfy import Alert
 from voice_assistant.recording import RATE
 from voice_assistant.remote import RemoteSatellite
 from voice_assistant.satellite_passwords import SatellitePasswords
+from voice_assistant.satellite_rooms import SatelliteRooms
 from voice_assistant.soulsync import SoulSync
 from voice_assistant.usage import UsageLog
 from voice_assistant.usage_device import UsageDevice
@@ -284,7 +285,7 @@ class Satellite:
     stream finished as soon as it has all arrived.
     """
 
-    def __init__(self, brain, name="bedroom", password=BEDROOM, unclean=False, away=NOTHING_AWAY):
+    def __init__(self, brain, name="bedroom", password=BEDROOM, unclean=False, away=NOTHING_AWAY, push_to_talk=False):
         self.socket = socket.create_connection(("127.0.0.1", brain.port), timeout=5)
         self.stream = self.socket.makefile("rwb")
         self.lock = threading.Lock()
@@ -292,7 +293,7 @@ class Satellite:
         # Set once the brain has let it go.
         self.gone = threading.Event()
         try:
-            protocol.greet(self.stream, name, f"{name}-pi", password, 48000, unclean)
+            protocol.greet(self.stream, name, f"{name}-pi", password, 48000, unclean, push_to_talk=push_to_talk)
         except BaseException:
             # As satellite_link does, so the brain sees it hang up.
             self.socket.close()
@@ -418,6 +419,34 @@ def test_a_satellite_which_connects_gets_its_state_alarms_and_phrase(brain, conn
     assert message["rate"] == 22050
     assert np.array_equal(np.frombuffer(payload, "<i2"), np.full(2205, 16383))
     assert connected(brain).satellite.hostname == "bedroom-pi"
+
+
+def test_a_connecting_satellite_is_remembered_as_push_to_talk(brain, connect):
+    serving(brain)
+    connect(brain, "bedroom", BEDROOM, push_to_talk=True)
+    connect(brain, "kitchen", KITCHEN)
+    connected(brain, "bedroom"), connected(brain, "kitchen")
+
+    assert brain.rooms.push_to_talk("bedroom") is True and brain.rooms.push_to_talk("kitchen") is False
+    # And kept, so it's known while it's away and after a restart.
+    assert SatelliteRooms(os.path.join(paths.DATA_DIR, "satellite_rooms.json")).push_to_talk("bedroom") is True
+
+
+def test_the_brain_lists_the_satellites_of_a_room_own_first(brain, connect):
+    serving(brain)
+    connect(brain, "bedroom", BEDROOM)
+    connect(brain, "kitchen", KITCHEN)
+    own, other = connected(brain, "bedroom"), connected(brain, "kitchen")
+
+    # Not known to share a room, until Home Assistant says so.
+    assert brain.room_of("kitchen") == ["kitchen"] and brain.room_sessions("kitchen") == [other]
+    brain.rooms.set_area("bedroom", "Study")
+    brain.rooms.set_area("kitchen", "Study")
+    assert brain.room_of("kitchen") == ["kitchen", "bedroom"]
+    assert brain.room_sessions("kitchen") == [other, own] and brain.room_sessions("bedroom") == [own, other]
+    # Only those connected.
+    other.satellite.close()
+    assert brain.room_sessions("bedroom") == [own]
 
 
 def test_a_second_connection_replaces_the_first(brain, connect, caplog):

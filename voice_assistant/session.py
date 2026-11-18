@@ -611,7 +611,8 @@ class Session:
         try:
             with self._conversation_lock:
                 self.conversation.start(ringing, talked_over=talked_over)
-            return self._handle_interaction(wake["feed"], timeline=timeline, pre_roll=wake.get("pre_roll"))
+            return self._handle_interaction(wake["feed"], timeline=timeline, pre_roll=wake.get("pre_roll"),
+                                            pressed=wake.get("pressed", False))
         except Exception as e:
             # Said out loud, rather than only logged, so it isn't taken for the
             # assistant not having heard. Only for something which went wrong
@@ -623,7 +624,7 @@ class Session:
             timeline.save(self.latency_file)
 
     def _handle_interaction(self, feed, follow_up: bool = False, timeline: Optional[Timeline] = None,
-                            pre_roll: Optional[int] = None) -> Optional[Dict]:
+                            pre_roll: Optional[int] = None, pressed: bool = False) -> Optional[Dict]:
         """
         Handles one full interaction after the wake word: records the query from what
         the satellite sends, transcribes it, has the conversation work out the reply
@@ -638,6 +639,10 @@ class Session:
             pre_roll: How many samples at the start of the feed are from before the
                 wake word, as the satellite said - or None, when audio.pre_roll's
                 worth are taken to be. Never any for a follow-up.
+            pressed: True when the recording began on a press of a key, which the
+                satellite has already answered with a sound of its own - so the brain
+                plays neither the listening sound nor the falling one for a recording with
+                no speech in it.
 
         Returns:
             The wake word heard over the reply, which the next request starts from - see
@@ -661,7 +666,7 @@ class Session:
         # way to tell the wake word was heard, or when to start talking. The satellite
         # is already sending what its microphone hears, so nothing said while the sound
         # plays goes missing, and it's far too short to count as the user starting to speak.
-        if self.listening_sound_enabled:
+        if self.listening_sound_enabled and not pressed:
             self._play_sound("listening.wav")
 
         # Speech-to-text is given the recording as it's made, so it can work out the
@@ -705,7 +710,7 @@ class Session:
         if audio_data is None or len(audio_data) == 0:
             listening.cancel()
             timeline.note(outcome="no_speech")
-            self._not_heard()
+            self._not_heard(pressed)
             return None
 
         # The words, once speech-to-text has caught up with the end of the recording,
@@ -915,13 +920,17 @@ class Session:
         if not self.brain.stt.hung:
             self.moved_at = time.monotonic()
 
-    def _not_heard(self):
+    def _not_heard(self, pressed: bool = False):
         """
         Plays the listening sound backwards - a short falling blip - when nothing was
         heard or understood. Giving up used to be silent, which was easy to take for
         the assistant still listening, or still thinking.
+
+        Args:
+            pressed: True for a recording begun on a press of a key, where nothing said
+                is the user changing their mind - so it stays quiet.
         """
-        if self.listening_sound_enabled:
+        if self.listening_sound_enabled and not pressed:
             self._play_sound("not_heard.wav")
 
     def _apologise(self):
@@ -1273,6 +1282,9 @@ class Session:
             except Exception as e:
                 logger.error(f"Couldn't look for the {self.satellite.name} satellite's device in Home Assistant: {e}")
                 found = False
+            # Kept, so the brain knows which satellites share a room - and still does
+            # once this one has gone, or after a restart.
+            self.brain.rooms.set_area(self.satellite.name, self.home.area)
             if self._room() != before:
                 # What's playing here depends on the room, and nothing else would tell the satellite: a film
                 # already on when the brain restarts doesn't change what's playing, only the room found after.

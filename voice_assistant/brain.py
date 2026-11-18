@@ -62,6 +62,7 @@ from voice_assistant.remote import RemoteSatellite
 from voice_assistant.routines import Routines
 from voice_assistant.satellite_link import SOCKET_TIMEOUT, Stream
 from voice_assistant.satellite_passwords import SatellitePasswords, name_problem
+from voice_assistant.satellite_rooms import SatelliteRooms
 from voice_assistant.session import Session
 from voice_assistant.settings_page import SettingsPage
 from voice_assistant.soulsync import SoulSync, SoulSyncAdmin
@@ -266,6 +267,10 @@ class Brain:
             logger.error(f"Couldn't read the satellites' passwords: {e}")
             self._names_seen = []
 
+        # What's known of each satellite - whether it records on a press, and its room in
+        # Home Assistant - which outlasts its connection. Made before any session, as
+        # each says its room to it.
+        self.rooms = SatelliteRooms(os.path.join(paths.DATA_DIR, "satellite_rooms.json"))
         # Each satellite's session, by its name, for as long as it's connected.
         self.sessions: Dict[str, Session] = {}
         # Guards sessions and the other notes below. Only ever held for a moment, and
@@ -753,6 +758,32 @@ class Brain:
         with self._lock:
             return list(self.sessions.values())
 
+    def room_of(self, name: str) -> List[str]:
+        """
+        Args:
+            name: A satellite's name.
+
+        Returns:
+            Every satellite which may connect that's in the same room as it, itself
+            first - connected or not - or just itself if its room isn't known.
+        """
+        return self.rooms.room_of(name, self.satellites())
+
+    def room_sessions(self, name: str) -> List[Session]:
+        """
+        Args:
+            name: A satellite's name.
+
+        Returns:
+            The sessions of those in its room which are connected, its own first.
+        """
+        sessions = []
+        for each in self.room_of(name):
+            session = self.session_for(each)
+            if session is not None:
+                sessions.append(session)
+        return sessions
+
     def session_for(self, satellite: Optional[str]) -> Optional[Session]:
         """
         Args:
@@ -866,6 +897,8 @@ class Brain:
         hello, password = admitted
         name = hello["name"]
         logger.info(f"The {name} satellite connected")
+        # Before its session is made, as that looks up its room, which is kept with this.
+        self.rooms.seen(name, hello["push_to_talk"])
         if hello["unclean"]:
             self._tell_restarted(name)
 
