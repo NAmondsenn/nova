@@ -7,8 +7,10 @@ window, because its own restart on failure doesn't reliably restart a process wh
 exits. Where the satellite is installed is install.ps1's business: everything is under
 %LOCALAPPDATA%\\nova (app, config and data), the user's own.
 
-Windows never sends SIGTERM, so a logoff or shutdown ends the satellite without its
-clean-up, and the next start counts it as an unclean stop. That's accepted.
+Windows never sends SIGTERM, so a logoff, a shutdown or a deploy ends the satellite
+without its clean-up, leaving its running mark. A fresh launcher follows each of those,
+so it takes the mark away before its first start, and the brain isn't told of an unclean
+stop; a satellite which crashes while the launcher runs still leaves it for the next.
 """
 
 import logging
@@ -73,13 +75,24 @@ def main():
     command = [os.path.join(app, "venv", "Scripts", "pythonw.exe"), os.path.join(app, "satellite.py")]
     backoff = Backoff()
     logger.info("Launcher started")
+    # The satellite's RUNNING_MARK, left by the last logon's satellite or the one a deploy
+    # ended, neither of which was a crash - see above.
+    try:
+        os.remove(os.path.join(data, "running"))
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        logger.warning(f"Couldn't take away the last run's mark: {error}")
     while True:
         started = time.monotonic()
         try:
-            # pythonw has no console to write to, so the satellite's own log is the record.
-            code = subprocess.Popen(command, cwd=app, env=environment, stdin=subprocess.DEVNULL,
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                    creationflags=subprocess.CREATE_NO_WINDOW).wait()
+            # pythonw has no console to write to, so the satellite's own log is the record -
+            # and what it writes to stderr, a failure before that log is set up included, is
+            # added to a log of its own.
+            with open(os.path.join(logs, "satellite-stderr.log"), "ab") as errors:
+                code = subprocess.Popen(command, cwd=app, env=environment, stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.DEVNULL, stderr=errors,
+                                        creationflags=subprocess.CREATE_NO_WINDOW).wait()
         except OSError as error:
             logger.error(f"Couldn't start the satellite: {error}")
             code = None

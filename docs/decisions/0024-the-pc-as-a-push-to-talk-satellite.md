@@ -17,7 +17,7 @@
 - Pressing again while listening sends what he said, rather than throwing it away; two quick presses over a reply just silence it.
 - The PC's settings file names only the brain's address (`nova:10400`), its name (`pc`, since its machine name is `nathanspc`), `satellite.trigger: push_to_talk` and `audio.echo_cancellation: false`. The echo canceller loads `libspeexdsp`, which the PC hasn't, and a press pauses the music and stops a reply first, so there is little to cancel; its alignment across the speaker stream's gaps is untested, so it stays off.
 - Timers go to the Pi because the PC is often asleep or off, and an alarm which goes unheard is a failure.
-- A logoff or shutdown is an unclean stop for the satellite (Windows never sends `SIGTERM`), and so is the deploy ending it. Accepted.
+- Windows never sends `SIGTERM`, so a logoff, a shutdown or the deploy ends the satellite without its clean-up. A fresh launcher follows each, so it takes the satellite's running mark away before its first start, and only a crash while it runs is told to the brain as an unclean stop. What the satellite writes to stderr goes to `data\logs\satellite-stderr.log`, so an error before its own log starts isn't lost.
 - Updating is from CT 109 over `ssh pc`, not from GitHub, and each run is his named job.
 - The key's script (`flow100.ahk`, homelab repo, `desktop/pc/`) must post to `http://127.0.0.1:10401/press` with `X-Nova-Press: 1`, not to `localhost`, whose `Host` the listener refuses.
 
