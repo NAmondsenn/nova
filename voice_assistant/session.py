@@ -1027,8 +1027,12 @@ class Session:
             instead when it wasn't.
         """
         # The music is held from now, before waiting for any conversation to finish,
-        # so it doesn't come back in the gap between the two.
-        self.music.hold()
+        # so it doesn't come back in the gap between the two. Every satellite's in the
+        # room, as a conversation holds them, so a timer on the Pi isn't lost under music
+        # on the PC beside it - and the same ones are let go of, however the room changes.
+        room = self._room_now()
+        for session in room:
+            session.music.hold()
         if not ringing and not self.reminder_sound_enabled:
             sound = None
         try:
@@ -1037,7 +1041,8 @@ class Session:
         finally:
             # Let back a few seconds later rather than straight away, since a timer's
             # next round comes three seconds after this one.
-            self.music.release(after=5)
+            for session in room:
+                session.music.release(after=5)
 
     def _announce_in_turn(self, message, sound, boost, still_wanted, start, length, level, ringing):
         """The body of announce, run once any other announcement has finished. Returns what it does."""

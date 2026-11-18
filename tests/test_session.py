@@ -820,6 +820,31 @@ def test_a_wake_holds_the_music_on_the_whole_room(make_session, brain):
     assert held == [("hold", "pc"), ("hold", "pi"), ("release", "pc"), ("release", "pi")]
 
 
+@pytest.mark.parametrize("ringing", [True, False])
+def test_what_goes_off_holds_the_music_on_the_whole_room(make_session, brain, ringing):
+    # A timer ringing on the Pi isn't lost under music playing on the PC beside it.
+    pi, pc = make_session(), make_session()
+    held = []
+    for name, session in (("pi", pi), ("pc", pc)):
+        session.music = SimpleNamespace(hold=lambda name=name: held.append(("hold", name)),
+                                        release=lambda after=0.0, name=name: held.append(("release", name, after)))
+    brain.room_sessions = lambda name: [pi, pc]
+
+    def ring(*args):
+        # The room changing part way through doesn't change what's let go of.
+        brain.room_sessions = lambda name: [pi]
+        return True
+
+    pi._announce_in_turn = ring
+    assert pi.announce("Your timer is done.", ringing=ringing) is True
+    assert held == [("hold", "pi"), ("hold", "pc"), ("release", "pi", 5), ("release", "pc", 5)]
+
+    # Alone in its room, only its own, as before.
+    held.clear()
+    pi.announce("Your timer is done.", ringing=ringing)
+    assert held == [("hold", "pi"), ("release", "pi", 5)]
+
+
 def test_a_room_which_cant_be_looked_up_still_has_the_wake_answered_and_let_go(make_session, brain):
     # Held and let go alone, rather than the session being left busy for good.
     pi = make_session()
