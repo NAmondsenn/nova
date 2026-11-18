@@ -170,6 +170,11 @@ def _unknown(words: str) -> str:
     return f"I don't know where {' '.join(words.split())} is. Add it as a zone in Home Assistant."
 
 
+def _label(place: str) -> str:
+    """What the reminder to leave for a place is called, which is how one already set is found."""
+    return f"Leave for {place}"
+
+
 def _minutes(seconds: int) -> int:
     """A journey's seconds as minutes, rounded up, and never less than one."""
     return max(1, -(-int(seconds) // 60))
@@ -590,6 +595,13 @@ class Journeys:
         message = sentence + (self._heavy(found, mode) if not about else "")
         answer = {"success": True, "message": message}
         if offer and self.clock is not None:
+            # One reminder for one arrival: asked again, it's told when the one already set rings, not offered
+            # another. One which rings after this arrival is for a later one.
+            rings = self.clock.reminder_due(_label(place))
+            if rings is not None and rings <= arrival.timestamp():
+                set_for = _when(datetime.fromtimestamp(rings).astimezone(), now)
+                answer["message"] += f" Your reminder's set for {set_for}."
+                return answer
             params = {"place": place, "destination": destination, "origin": origin, "mode": mode,
                       "arrive": arrival.timestamp(), "leave_by": leave_by.timestamp(),
                       "watch": mode == "driving" and origin == "zone.home"}
@@ -624,7 +636,7 @@ class Journeys:
         # Rounded up: the time to leave is on a whole minute and now isn't, so rounding down could ring a moment
         # before the minute, and say the one before.
         seconds = max(60, math.ceil(rings - now.timestamp()))
-        reply = self.clock.set_timer(duration_seconds=seconds, label=f"Leave for {place}", is_reminder=True,
+        reply = self.clock.set_timer(duration_seconds=seconds, label=_label(place), is_reminder=True,
                                      satellite=satellite)
         if not reply.get("success"):
             return reply

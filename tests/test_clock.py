@@ -179,6 +179,23 @@ def test_a_reminder_is_moved_and_stays_moved_after_a_restart(make_clock):
     assert restarted.timer_due(timer_id) == clock.timer_due(timer_id)
 
 
+def test_a_waiting_reminder_is_found_by_its_label(make_clock):
+    clock = make_clock()
+    assert clock.reminder_due("Leave for Work") is None
+    later = clock.set_timer(1200, label="Leave for Work")["id"]
+    sooner = clock.set_timer(600, label="Leave for Work")["id"]
+    clock.set_timer(300, label="Leave for Uni")
+    clock.set_timer(60)
+
+    # The soonest of that name - its whole name, as it was set.
+    assert clock.reminder_due("Leave for Work") == clock.timer_due(sooner)
+    assert clock.reminder_due("Leave for") is None and clock.reminder_due("leave for work") is None
+    # Not one which has rung or gone.
+    assert clock.drop_timer(sooner) and clock.reminder_due("Leave for Work") == clock.timer_due(later)
+    clock._tick(clock.timer_due(later) + 1)
+    assert clock.reminder_due("Leave for Work") is None
+
+
 def test_a_reminder_that_is_gone_or_a_time_gone_by_is_not_moved(make_clock):
     told = []
     clock = make_clock(on_change=lambda: told.append(True))

@@ -522,6 +522,20 @@ class ClockRequests:
             timer = self._timers.get(timer_id)
             return None if timer is None else timer["due_at"]
 
+    def reminder_due(self, label: str) -> Optional[float]:
+        """
+        When the soonest waiting reminder of a name goes off - for one that is only ever
+        wanted once, such as the reminder to leave for somewhere.
+
+        Args:
+            label: Its whole name, as it was set, e.g. "Leave for Work".
+
+        Returns:
+            Its due time in epoch seconds, or None if none of that name is waiting.
+        """
+        with self._lock:
+            return min((timer["due_at"] for timer in self._timers.values() if timer["label"] == label), default=None)
+
     def put_back(self, kind: str, item: Dict, now: Optional[float] = None) -> Dict:
         """
         Puts back a timer, reminder or alarm just removed on the settings page, as it

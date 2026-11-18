@@ -111,10 +111,17 @@ def store(tmp_path):
     return ChoiceStore(str(tmp_path / "journeys.json"), JOURNEY_DEFAULTS)
 
 
+class NoReminders:
+    """A clock with no reminder waiting, which is all an ask ever asks of one."""
+
+    def reminder_due(self, label):
+        return None
+
+
 def make(store, home=None, calendar=None, clock=True, settings=None):
-    """Journeys over fakes; the clock is only ever asked whether there is one."""
+    """Journeys over fakes; the clock is only ever asked whether a reminder to leave is waiting."""
     settings = dict(SETTINGS, **(settings or {}))
-    return Journeys(home or FakeHome(), calendar, object() if clock else None, store, lambda: settings)
+    return Journeys(home or FakeHome(), calendar, NoReminders() if clock else None, store, lambda: settings)
 
 
 def ask(journey, place, mode="driving", now=EIGHT, **kwargs):
@@ -935,7 +942,7 @@ def test_the_count_counts_a_journey_which_fails_too(store, monkeypatch):
 @pytest.mark.parametrize("bad", [None, "lots", -5, 61, True, 2.5, [], {}])
 def test_a_buffer_which_is_unusable_is_the_default_of_ten_minutes(store, bad):
     settings = {"buffer_minutes": bad}
-    journey = Journeys(FakeHome(), work_at(at(2026, 11, 18, 9)), object(), store, lambda: settings)
+    journey = Journeys(FakeHome(), work_at(at(2026, 11, 18, 9)), NoReminders(), store, lambda: settings)
     assert "so leave by 8:26 AM." in ask(journey, "work", leave=True)["message"]
 
 
@@ -1004,6 +1011,42 @@ def test_a_yes_sets_the_reminder_and_keeps_the_watch(store, real_clock):
     assert store.get("watches") == {str(timer["id"]): {
         "destination": "zone.work", "origin": "zone.home", "place": "Work", "arrive": params["arrive"],
         "leave_by": params["leave_by"], "satellite": "kitchen", "seen_home": False, "looked": now.timestamp()}}
+
+
+def test_a_reminder_already_set_for_it_is_said_and_not_offered_again(store, real_clock, monkeypatch):
+    # Asked twice about one shift, as the user did on 18 November: the second answer offered a second reminder.
+    monkeypatch.setattr(time, "time", lambda: EIGHT.timestamp())
+    journey = Journeys(FakeHome(), work_at(at(2026, 11, 18, 9)), real_clock, store, lambda: SETTINGS)
+    first = ask(journey, "work", leave=True)
+    assert first["message"].endswith("so leave by 8:26 AM. Want a reminder?")
+    assert journey.remind(**first["ask_first"].params, satellite="kitchen", now=EIGHT)["success"]
+
+    again = ask(journey, "my shift", leave=True)
+    assert again == {"success": True, "message": "Work starts at 9:00 AM. The drive is 24 minutes, so leave by 8:26 AM. "
+                                                 "Your reminder's set for 8:21 AM."}
+    # However the time was given, and for a walk as for a drive.
+    said = ask(journey, "work", leave=True, arrive_at="09:00")
+    assert said["message"].endswith("to be there for 9:00 AM. Your reminder's set for 8:21 AM.") and "ask_first" not in said
+    assert "ask_first" not in ask(journey, "work", "walking", leave=True)
+    assert len(real_clock.overview()["timers"]) == 1
+
+    # One for another place, or for a later arrival at the same one, is offered as ever.
+    uni = Journeys(FakeHome(), FakeCalendar([event(at(2026, 11, 18, 9))], activities=("Uni",)), real_clock, store,
+                   lambda: SETTINGS)
+    assert ask(uni, "uni", leave=True)["message"].endswith("so leave by 8:26 AM. Want a reminder?")
+    # Once it has rung or been cancelled, it's offered again.
+    [timer] = real_clock.overview()["timers"]
+    assert real_clock.drop_timer(timer["id"])
+    assert ask(journey, "work", leave=True)["message"].endswith("Want a reminder?")
+
+
+def test_a_reminder_for_an_earlier_arrival_doesnt_stand_in_for_a_later_one(store, real_clock, monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: EIGHT.timestamp())
+    journey = Journeys(FakeHome(), None, real_clock, store, lambda: SETTINGS)
+    # A reminder to leave for Work which rings at 6:00 PM, after the 9:00 AM arrival asked about now.
+    real_clock.set_timer(36000, label="Leave for Work", is_reminder=True)
+    answer = ask(journey, "work", leave=True, arrive_at="09:00")
+    assert answer["message"].endswith("Want a reminder?") and "ask_first" in answer
 
 
 def test_a_walk_is_reminded_but_not_watched(store, real_clock):
