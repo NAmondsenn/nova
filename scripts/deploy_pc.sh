@@ -6,8 +6,8 @@
 # What it sends is the commit the brain is running (CT 107's checkout), never work in
 # progress here, so the protocol always matches the brain's. It reads that commit,
 # refuses unless this repository has it, makes an archive of it, copies the archive to
-# the PC and runs scripts/windows/install.ps1 there. Then it ends the running
-# satellite, which the launcher starts again within seconds with the new code. The
+# the PC. There it stops the task, the launcher and the satellite, runs
+# scripts/windows/install.ps1, and starts the task again with the new code. The
 # PC's password for the brain (config\.env) is never touched, and nothing is sent to
 # the PC but the code. See docs/decisions/0024.
 #
@@ -37,36 +37,46 @@ git -C "$repo" archive --format=zip -o "$work/nova.zip" "$commit"
 scp -q "$work/nova.zip" pc:AppData/Local/Temp/nova-deploy.zip
 
 # Run on the PC. Kept short: the whole of it goes on ssh's command line, encoded.
-# The satellite is found by its command line (the venv's pythonw running
-# app\satellite.py), so the launcher, and any other Python on the PC, are left alone.
-# Windows has no SIGTERM, so ending it is a hard stop, which the satellite's next start
-# counts as unclean. The launcher is started, through its task, only if it isn't
-# running, and only once there is a password for it to use.
+# Everything running is stopped first, since the running satellite holds numpy's and
+# the sound libraries' files open and pip can't replace them, and stopping the
+# satellite alone isn't enough, as the launcher starts it again within seconds. So the
+# task is stopped, then the launcher and the satellite, found by their command lines
+# (the venv's pythonw running app\launcher.pyw or app\satellite.py), so any other
+# Python on the PC is left alone. Then it installs, and starts the task again once
+# there is a password for it to use. Windows has no SIGTERM, so ending the satellite
+# is a hard stop, which its next start counts as unclean.
 script=$(cat <<'POWERSHELL'
 $ErrorActionPreference = 'Stop'
+$base = Join-Path $env:LOCALAPPDATA 'nova'
+$app = Join-Path $base 'app'
+function Find-Running {
+    Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe'" | Where-Object {
+        $_.CommandLine -and ($_.CommandLine.IndexOf((Join-Path $app 'satellite.py'), [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $_.CommandLine.IndexOf((Join-Path $app 'scripts\windows\launcher.pyw'), [StringComparison]::OrdinalIgnoreCase) -ge 0) }
+}
+# No task yet, on a first install, is fine.
+try { Stop-ScheduledTask -TaskName 'Nova satellite' -ErrorAction Stop } catch { }
+for ($try = 0; $try -lt 20 -and @(Find-Running).Count -gt 0; $try++) {
+    foreach ($process in @(Find-Running)) {
+        Write-Host "Ending process $($process.ProcessId)"
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Milliseconds 500
+}
+if (@(Find-Running).Count -gt 0) { throw 'Nova is still running, so the install would fail partway' }
 $temp = Join-Path $env:LOCALAPPDATA 'Temp'
 $zip = Join-Path $temp 'nova-deploy.zip'
 $src = Join-Path $temp 'nova-deploy'
 if (Test-Path $src) { Remove-Item $src -Recurse -Force }
 Expand-Archive -LiteralPath $zip -DestinationPath $src
 & (Join-Path $src 'scripts\windows\install.ps1') -Source $src
-$base = Join-Path $env:LOCALAPPDATA 'nova'
-$app = Join-Path $base 'app'
 Set-Content -LiteralPath (Join-Path $app 'COMMIT') -Value $COMMIT -Encoding ASCII
-function Find-Running($name) {
-    Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe'" | Where-Object {
-        $_.CommandLine -and $_.CommandLine.IndexOf((Join-Path $app $name), [StringComparison]::OrdinalIgnoreCase) -ge 0 }
-}
-foreach ($process in @(Find-Running 'satellite.py')) {
-    Write-Host "Ending the satellite (process $($process.ProcessId))"
-    Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
-}
-if (-not (Test-Path (Join-Path $base 'config\.env'))) {
-    Write-Host 'No config\.env yet, so the launcher is not started: add NOVA_BACKEND_TOKEN, then start the task Nova satellite'
-}
-elseif (-not (Find-Running 'scripts\windows\launcher.pyw')) {
+if (Test-Path (Join-Path $base 'config\.env')) {
     Write-Host 'Starting the launcher'
     Start-ScheduledTask -TaskName 'Nova satellite'
+}
+else {
+    Write-Host 'No config\.env yet, so the launcher is not started: add NOVA_BACKEND_TOKEN, then start the task Nova satellite'
 }
 Remove-Item $zip -Force
 Remove-Item $src -Recurse -Force
@@ -81,4 +91,4 @@ script="\$COMMIT = '${commit}'"$'\n'"${script}"
 encoded=$(printf '%s\n' "$script" | iconv -f utf-8 -t utf-16le | base64 -w0)
 ssh pc "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}"
 
-echo "Deployed ${commit:0:10}. The launcher starts the new satellite within seconds."
+echo "Deployed ${commit:0:10}."
