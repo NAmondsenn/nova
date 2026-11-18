@@ -6,6 +6,7 @@ commands reach Nova while nothing anyone says goes the other way - with stand-in
 for paho-mqtt's client, the broker and Nova itself.
 """
 
+import dataclasses
 import json
 import logging
 import threading
@@ -16,6 +17,7 @@ import pytest
 
 from voice_assistant import ha_device
 from voice_assistant.ha_device import DeviceControls, NovaDevice
+from voice_assistant.logging_setup import TRANSCRIPT
 
 BASE = "nova/nova_test"
 DISCOVERY = "homeassistant/device/nova_test/config"
@@ -741,3 +743,91 @@ def test_playlists_which_could_not_be_read_keep_the_old_ones(with_player, player
     player.names = ["Gym"]
     device.refresh_playlists()
     assert _components(device)["playlist"]["options"] == ["Gym"]
+
+
+# Ask Nova
+
+TYPED = "play Fashion Killa"
+
+
+@pytest.fixture
+def asked():
+    """What was typed into Ask Nova, in the order it came."""
+    return []
+
+
+@pytest.fixture
+def asking(nova, asked):
+    """A started NovaDevice which can be asked things, with the client it made - no music."""
+    made = []
+
+    def factory(client_id):
+        made.append(FakeClient(client_id))
+        return made[-1]
+
+    controls = dataclasses.replace(nova.controls(), ask=asked.append)
+    device = NovaDevice("broker.local", 1883, "nova", "secret", controls, node_id="nova_test",
+                        client_factory=factory)
+    device.start()
+    try:
+        yield device, made[0]
+    finally:
+        device.stop()
+
+
+def test_ask_is_announced_only_when_nova_can_be_asked(started, asking):
+    plain, _ = started
+    assert "ask" not in _components(plain)
+    assert f"{BASE}/ask/set" not in {topic for topic, _ in plain._subscriptions()}
+
+    device, _ = asking
+    ask = _components(device)["ask"]
+    assert ask["p"] == "text"
+    assert ask["name"] == "Ask Nova"
+    assert ask["command_topic"] == f"{BASE}/ask/set"
+    assert ask["state_topic"] == f"{BASE}/ask"
+    assert ask["max"] == 255
+    assert ask["icon"] == "mdi:keyboard-outline"
+    assert ask["default_entity_id"] == "text.nova_ask"
+    controls = _components(device)
+    assert len({control["unique_id"] for control in controls.values()}) == len(controls)
+
+
+def test_what_is_typed_reaches_nova_and_is_never_sent_back(asking, asked):
+    device, client = asking
+    client.connects()
+    assert (f"{BASE}/ask/set", 1) in client.subscribed
+    client.delivers(f"{BASE}/ask/set", TYPED)
+    assert _eventually(lambda: asked == [TYPED])
+
+    # Home Assistant's box is told it's empty, so it never shows, nor keeps, what was typed.
+    device.publish_state()
+    assert client.sent(f"{BASE}/ask")
+    assert all(payload == "" for _, payload, _, _ in client.sent(f"{BASE}/ask"))
+    assert not any("Fashion Killa" in topic or "Fashion Killa" in str(payload)
+                   for topic, payload, _, _ in client.published)
+
+
+def test_what_is_typed_is_logged_only_as_a_transcript(asking, asked, caplog):
+    device, client = asking
+    caplog.set_level(logging.INFO)
+    client.connects()
+    client.delivers(f"{BASE}/ask/set", TYPED)
+    assert _eventually(lambda: asked == [TYPED])
+    device.publish_state()
+
+    heard = [record for record in caplog.records if "Fashion Killa" in record.getMessage()]
+    assert heard
+    assert all(getattr(record, "transcript", False) is TRANSCRIPT["transcript"] for record in heard)
+
+
+def test_a_kept_or_empty_ask_is_ignored(asking, asked, nova):
+    device, client = asking
+    client.connects()
+    client.delivers(f"{BASE}/ask/set", "hello", retain=True)
+    client.delivers(f"{BASE}/ask/set", "   ")
+    # Commands are carried out in the order they came, so once this one has been, an
+    # ask above which was going to be has been too.
+    client.delivers(f"{BASE}/stop", "PRESS")
+    assert _eventually(lambda: ("stop",) in nova.calls)
+    assert asked == []
