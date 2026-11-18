@@ -44,6 +44,7 @@ from voice_assistant.football import Football
 from voice_assistant.football_watch import FootballChoices, FootballWatcher
 from voice_assistant.google_calendar import GoogleCalendar
 from voice_assistant.ha_registry import HomeRegistry
+from voice_assistant.journeys import JourneyWatcher
 from voice_assistant.listening import Listening
 from voice_assistant.wrapped import WrappedStore, WrappedWatcher
 from voice_assistant.media_watch import MediaWatcher
@@ -2483,6 +2484,48 @@ def test_the_brain_has_the_lists_only_with_home_assistant(make_brain, home_assis
     assert make_brain().lists is None
 
 
+def test_the_brain_has_journeys_only_with_home_assistant_and_reads_their_settings_each_time(
+        make_brain, home_assistant_token, monkeypatch, tmp_path):
+    brain = make_brain(home_assistant=HOME_ASSISTANT, journeys={"buffer_minutes": 20})
+    journeys = brain.journeys
+    assert (journeys.home, journeys.calendar, journeys.clock) == (brain.home, brain.calendar, brain.clock)
+    # The month's count and the watched reminders are kept in the brain's own data folder.
+    assert journeys.store.path == str(tmp_path / "journeys.json")
+    assert journeys.settings()["buffer_minutes"] == 20
+    assert brain.apply_settings({("journeys", "buffer_minutes"): 30}) == []
+    assert journeys.settings()["buffer_minutes"] == 30
+
+    monkeypatch.delenv("HA_TOKEN")
+    assert make_brain(home_assistant=HOME_ASSISTANT).journeys is None
+    assert make_brain().journeys is None
+
+
+def test_the_journey_watcher_is_made_with_journeys_and_is_given_what_it_needs(
+        make_brain, home_assistant_token, monkeypatch):
+    brain = make_brain(home_assistant=HOME_ASSISTANT, journeys={"watch_minutes": 30})
+    watcher = brain.journey_watcher
+    assert isinstance(watcher, JourneyWatcher) and watcher._journeys is brain.journeys
+    assert watcher._say == brain._say_journey
+    # Not running until run() starts it.
+    assert watcher._thread is None
+    assert not [thread for thread in threading.enumerate() if thread.name == "journeys"]
+    # Its settings are read as they are now.
+    assert watcher._settings()["watch_minutes"] == 30
+    assert brain.apply_settings({("journeys", "watch_minutes"): 60}) == []
+    assert watcher._settings()["watch_minutes"] == 60
+    # Home Assistant's word on whether the user is home.
+    brain.home.people = lambda: [{"state": "home"}]
+    assert watcher._home_now() is True
+    brain.home.people = lambda: [{"state": "not_home"}]
+    assert watcher._home_now() is False
+    brain.home.people = lambda: []
+    assert watcher._home_now() is None
+
+    monkeypatch.delenv("HA_TOKEN")
+    assert make_brain(home_assistant=HOME_ASSISTANT).journey_watcher is None
+    assert make_brain().journey_watcher is None
+
+
 def test_the_brain_reads_the_registry_when_home_assistant_is_set_up(make_brain, home_assistant_token, monkeypatch):
     brain = make_brain(home_assistant=HOME_ASSISTANT)
     assert isinstance(brain.registry, HomeRegistry)
@@ -2853,6 +2896,27 @@ def test_the_football_thread_runs_while_the_brain_does_and_stops_with_it(make_br
     assert brain.football_watcher._thread is None
 
 
+def test_the_journey_thread_runs_while_the_brain_does_and_stops_with_it(make_brain, home_assistant_token):
+    brain = make_brain(home_assistant=HOME_ASSISTANT)
+    # Nothing here may reach a real Home Assistant.
+    brain.home.batteries = lambda timeout=None: []
+    brain.home.people = lambda: []
+    brain.registry.refresh = lambda: True
+    looked = threading.Event()
+    brain.journey_watcher.check = lambda now: looked.set()
+    running = []
+
+    def serve():
+        running.append(looked.wait(5) and any(thread.name == "journeys" and thread.is_alive()
+                                              for thread in threading.enumerate()))
+
+    brain.serve = serve
+    brain.run()
+    assert running == [True]
+    assert not any(thread.name == "journeys" for thread in threading.enumerate())
+    assert brain.journey_watcher._thread is None
+
+
 def test_the_listening_stats_are_read_while_the_brain_runs_and_stop_with_it(make_brain):
     # Made with or without Home Assistant, as it says itself when SoulSync isn't set up.
     brain = make_brain()
@@ -3146,6 +3210,80 @@ def test_a_download_message_the_satellite_failed_to_say_goes_to_the_phone(brain,
     kitchen.announce = fail
     brain._say_download("kitchen", "Gooba by 6ix9ine has been downloaded.")
     assert brain.ntfy.sent == [("phone", "Music download", "Gooba by 6ix9ine has been downloaded.")]
+
+
+def test_a_journey_message_is_said_on_the_satellite_that_set_the_reminder_and_sent_to_the_phone(brain, connect):
+    brain.ntfy = FakeNtfy()
+    serving(brain)
+    connect(brain)
+    connect(brain, "kitchen", KITCHEN)
+    bedroom, kitchen = connected(brain), connected(brain, "kitchen")
+
+    brain._say_journey("kitchen", "Traffic to Work is heavier now. Leave by 7:52 AM, not 8:00 AM.")
+    assert kitchen.announced == ["Traffic to Work is heavier now. Leave by 7:52 AM, not 8:00 AM."]
+    assert bedroom.announced == []
+    assert kitchen.sounds == ["announcement_sound.wav"] and kitchen.rung == [False]
+    # Said, and sent to the phone as well: the user may already be out.
+    assert brain.ntfy.sent == [("phone", "Leaving time", "Traffic to Work is heavier now. Leave by 7:52 AM, not 8:00 AM.")]
+
+    # With no satellite, the default one.
+    brain._say_journey(None, "Traffic to Work has eased. Leave by 8:08 AM, not 8:00 AM.")
+    assert bedroom.announced == ["Traffic to Work has eased. Leave by 8:08 AM, not 8:00 AM."]
+    assert len(brain.ntfy.sent) == 2
+
+
+def test_a_journey_message_is_said_in_the_quiet_hours_too(brain, connect, monkeypatch):
+    brain.ntfy = FakeNtfy()
+    brain.ntfy.quiet = lambda: True
+    monkeypatch.setattr(brain._night, "quiet", lambda: True)
+    serving(brain)
+    connect(brain, "kitchen", KITCHEN)
+    kitchen = connected(brain, "kitchen")
+
+    brain._say_journey("kitchen", "Traffic to Work is heavier now. You need to leave now.")
+    assert kitchen.announced == ["Traffic to Work is heavier now. You need to leave now."]
+    assert brain.ntfy.sent == [("phone", "Leaving time", "Traffic to Work is heavier now. You need to leave now.")]
+
+
+def test_a_journey_message_goes_to_the_phone_with_its_satellite_away_or_failing(brain, connect, caplog):
+    brain.ntfy = FakeNtfy()
+    serving(brain)
+    connect(brain, "kitchen", KITCHEN)
+    kitchen = connected(brain, "kitchen")
+
+    with caplog.at_level(logging.WARNING, logger="voice_assistant.brain"):
+        # The bedroom isn't connected.
+        brain._say_journey("bedroom", "Traffic to Work has eased. Leave by 8:08 AM, not 8:00 AM.")
+        kitchen.said = False
+        brain._say_journey("kitchen", "Traffic to Work has eased. Leave by 8:08 AM, not 8:00 AM.")
+
+        def fail(message, *args, **kwargs):
+            raise OSError("the satellite went mid-sentence")
+
+        kitchen.announce = fail
+        brain._say_journey("kitchen", "Traffic to Work has eased. Leave by 8:08 AM, not 8:00 AM.")
+    assert [sent[:2] for sent in brain.ntfy.sent] == [("phone", "Leaving time")] * 3
+    # Nothing of what was said, which names the place, is in the log.
+    assert "Work" not in caplog.text
+
+
+def test_a_journey_message_with_nowhere_to_go_or_no_way_to_send_is_logged_and_never_raises(brain, caplog):
+    class Unstartable(FakeNtfy):
+        def send_soon(self, topic, message, title="", priority=0):
+            raise RuntimeError("can't start new thread")
+
+    with caplog.at_level(logging.WARNING, logger="voice_assistant.brain"):
+        assert brain.ntfy is None
+        brain._say_journey("kitchen", "Traffic to Work has eased. Leave by 8:08 AM, not 8:00 AM.")
+        brain.ntfy = FakeNtfy()
+        brain.ntfy.phone = ""
+        brain._say_journey("kitchen", "Traffic to Work has eased. Leave by 8:08 AM, not 8:00 AM.")
+        assert brain.ntfy.sent == []
+        brain.ntfy = Unstartable()
+        brain._say_journey("kitchen", "Traffic to Work has eased. Leave by 8:08 AM, not 8:00 AM.")
+    assert any("couldn't be sent to the phone" in record.getMessage() for record in caplog.records
+               if record.levelno >= logging.ERROR)
+    assert "Work" not in caplog.text
 
 
 def test_a_download_message_the_phone_cant_be_sent_is_logged_and_never_raises(brain, caplog):

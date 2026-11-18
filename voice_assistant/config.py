@@ -30,14 +30,21 @@ logger = logging.getLogger(__name__)
 # Settings which only make sense within a range, or as one of a few words - checked
 # beyond being the right kind.
 BETWEEN_0_AND_1 = {("thresholds", "vad_threshold"), ("thresholds", "silence_threshold"), ("llm", "temperature")}
-CHOICES = {("music", "player"): ("navidrome", "spotify"), ("satellite", "trigger"): ("wake_word", "push_to_talk")}
+CHOICES = {
+    ("music", "player"): ("navidrome", "spotify"),
+    ("satellite", "trigger"): ("wake_word", "push_to_talk"),
+    ("journeys", "distance_unit"): ("miles", "km"),
+}
 # Battery marks are percentages, and how many each kind of device has - the settings page
 # allows no other number. The battery watcher can't check every 0 seconds or call a
 # reading old after -5, nor can the football watcher, or say a match is starting 0 minutes
-# before it does.
+# before it does, and the journey watch can't look every 0 minutes, start 0 minutes before, or call
+# 0 minutes of change a move, nor traffic heavy at 0 minutes over.
 MARKS = {("batteries", "mobile_marks"): 1, ("batteries", "other_marks"): 2}
 POSITIVE = {("batteries", "check_every"), ("batteries", "stale_after"),
-            ("football", "check_every"), ("football", "stale_after"), ("football", "kickoff_minutes")}
+            ("football", "check_every"), ("football", "stale_after"), ("football", "kickoff_minutes"),
+            ("journeys", "check_every_minutes"), ("journeys", "watch_minutes"), ("journeys", "change_minutes"),
+            ("journeys", "heavy_minutes")}
 
 
 class Limit(NamedTuple):
@@ -86,6 +93,20 @@ LIMITS: Dict[Tuple[str, str], Limit] = {
     # Under 2 minutes a look every minute could miss the time before kick-off altogether, and over 2 hours
     # is long before a match is near.
     ("football", "kickoff_minutes"): Limit("number", 2, 120, True),
+    # Journeys. A buffer of over an hour, or a reminder over half an hour ahead, is a slip. A look every minute
+    # would spend the month's requests in days, and one over half an hour would miss the traffic changing. A
+    # watch under 10 minutes would hardly look before the time to leave, and over 2 hours would ask Google about
+    # traffic which is hours from mattering. A move of under 2 minutes is the forecast's own noise.
+    ("journeys", "buffer_minutes"): Limit("number", 0, 60, True),
+    ("journeys", "reminder_minutes"): Limit("number", 0, 30, True),
+    ("journeys", "check_every_minutes"): Limit("number", 2, 30, True),
+    ("journeys", "watch_minutes"): Limit("number", 10, 120, True),
+    ("journeys", "change_minutes"): Limit("number", 2, 30, True),
+    # Heavy is a share of the clear time as well as minutes, so a long drive isn't called heavy for a few minutes.
+    ("journeys", "heavy_minutes"): Limit("number", 1, 60, True),
+    ("journeys", "heavy_percent"): Limit("number", 0, 100, True),
+    # 0 asks Google nothing. Google's free month is 5,000, so more is a bill.
+    ("journeys", "monthly_requests"): Limit("number", 0, 5000, True),
     ("mqtt", "host"): Limit("host"),
     ("mqtt", "port"): Limit("number", 1, 65535, True),
     # Not a port below 1024, which a user's own program can't listen on.

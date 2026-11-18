@@ -261,7 +261,7 @@ class Session:
                                       lists=brain.lists, pc=brain.pc, calendar=brain.calendar,
                                       downloads=brain.downloads, football=brain.football,
                                       listening=brain.listening, wrapped=brain.wrapped_store, config=config,
-                                      new_music=brain.new_music_playlist,
+                                      new_music=brain.new_music_playlist, journeys=brain.journeys,
                                       ring_on=brain.ring_on, room_of=brain.room_of,
                                       room_players=self._room_players)
 

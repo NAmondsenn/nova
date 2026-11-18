@@ -1260,6 +1260,14 @@ input[type="range"]:focus-visible::-moz-range-thumb {
   gap: 6px;
 }
 
+/* "Travels with me": its words, then its switch, 44px tall as the batteries' choices are. */
+.satellites .choice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+}
+
 .satellites .button {
   min-width: 44px;
   min-height: 44px;

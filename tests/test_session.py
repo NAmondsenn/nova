@@ -260,6 +260,7 @@ def brain(tmp_path, monkeypatch, make_config):
                            routines=Routines(path=str(tmp_path / "routines.json")), ntfy=None, weather=None,
                            batteries=None, lists=None, pc=None, registry=None, calendar=None, media=None,
                            downloads=None, football=None, listening=None, wrapped_store=None, usage=None, new_music_playlist=None,
+                           journeys=None,
                            tts=FakePiper(), stt=FakeSpeechToText(), sounds_folder=Path(paths.SOUNDS_DIR))
 
 

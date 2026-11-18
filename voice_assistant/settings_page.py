@@ -118,6 +118,16 @@ EDITABLE = [
     ("clean_check", "weekly_day", "Weekly note on", "now"),
     ("clean_check", "weekly_time", "Weekly note at", "now"),
     ("football", "kickoff_minutes", "Minutes before kick-off that Nova says a match is starting", "now"),
+    # Read at each journey asked, and each look at a watched one - see journeys.py.
+    ("journeys", "buffer_minutes", "Minutes to spare when working out when to leave", "now"),
+    ("journeys", "reminder_minutes", "Minutes before the time to leave that the reminder rings", "now"),
+    ("journeys", "check_every_minutes", "Minutes between looks at the traffic for a reminder", "now"),
+    ("journeys", "watch_minutes", "Minutes before the time to leave that Nova starts looking at the traffic", "now"),
+    ("journeys", "change_minutes", "Minutes the time to leave must move by to be worth saying", "now"),
+    ("journeys", "heavy_minutes", "Minutes over a clear road that make traffic heavy", "now"),
+    ("journeys", "heavy_percent", "Percent over a clear road that make traffic heavy", "now"),
+    ("journeys", "monthly_requests", "Most journeys Nova asks Google for in a month", "now"),
+    ("journeys", "distance_unit", "Distances said in", "now"),
     ("home_assistant", "url", "Home Assistant's address", "restart"),
     ("ntfy", "url", "Your ntfy server", "restart"),
     ("ntfy", "alerts", "Topics read out as they arrive, separated by commas", "restart"),
@@ -603,13 +613,15 @@ class SettingsPage:
         """
         Each satellite the brain lets in, whether it's the default, and whether it's
         connected - with what it's doing, its mute, whether it records on a press of a
-        key and, if Spotify is the player, the speaker it plays on. Never its password.
+        key, whether it travels with the user and, if Spotify is the player, the speaker
+        it plays on. Never its password.
 
         Args:
             names: The satellites, as the brain has them - the first is the default.
         """
         found = []
         default = names[0] if names else None
+        journeys = self.brain.journeys
         # With Navidrome as the player, Spotify plays nowhere, so none is said. Spotify
         # is the player when none is chosen, as with no config at all.
         spotify = self.brain.config is None or _chosen(self.brain.config) == "spotify"
@@ -621,7 +633,9 @@ class SettingsPage:
             found.append({"name": name, "connected": session is not None,
                           "activity": session.activity if session is not None else "idle",
                           "muted": session is not None and session.muted, "default": name == default,
-                          "spotify_speaker": speaker, "push_to_talk": self.brain.rooms.push_to_talk(name)})
+                          "spotify_speaker": speaker, "push_to_talk": self.brain.rooms.push_to_talk(name),
+                          # Never true without journeys, which is what keeps it.
+                          "travels": journeys is not None and journeys.travels(name)})
         return found
 
     def state(self, satellite: Optional[str] = None) -> Dict:
@@ -1996,6 +2010,14 @@ class SettingsPage:
         with self._playlists_lock:
             self._playlists.pop(name, None)
         logger.info(f"Settings page: {who} removed the {name} satellite")
+        # Added again with the same name, it shouldn't come back travelling with the user.
+        # Failing to save that doesn't undo the removal, which has been made.
+        if self.brain.journeys is not None:
+            try:
+                self.brain.journeys.set_travels(name, False)
+            except OSError as e:
+                logger.error(f"Settings page: couldn't save that the removed {name} satellite no longer "
+                             f"travels with the user: {e}")
         if not emptied:
             # Said whatever the question said, which was asked from what the page
             # last heard - connected then, it may have gone since.
@@ -2031,6 +2053,41 @@ class SettingsPage:
             return missing
         logger.info(f"Settings page: {who} made the {name} satellite the default")
         return {"success": True, "message": f"{name} is the default now."}
+
+    def set_travels(self, name, on, who: str) -> Dict:
+        """
+        Marks a satellite as one which travels with the user, so its journeys start from
+        where the user's phone is, or as one which stays at home. See Journeys.set_travels.
+        The types are checked here, as bool("false") would be True. Journeys keeps its own
+        file under its own lock, so _saving isn't held.
+
+        Args:
+            name: The satellite, as the page sent it.
+            on: Whether it travels.
+            who: The Tailscale login asking, for the log.
+
+        Returns:
+            Dict with 'success' and a 'message'.
+        """
+        if not (isinstance(name, str) and isinstance(on, bool)):
+            return {"success": False, "message": "That didn't make sense."}
+        journeys = self.brain.journeys
+        if journeys is None:
+            return {"success": False, "message": "Journeys need Home Assistant."}
+        names = self._satellite_names()
+        if names is None:
+            return {"success": False, "message": SATELLITES_UNREADABLE}
+        if name not in names:
+            return {"success": False, "message": f"There's no satellite called {name}."}
+        try:
+            journeys.set_travels(name, on)
+        except OSError as e:
+            logger.error(f"Settings page: couldn't save that {name} travels with the user: {e}")
+            return {"success": False, "message": "That couldn't be saved."}
+        logger.info(f"Settings page: {who} {'made' if on else 'stopped making'} the {name} satellite "
+                    f"travel with the user")
+        return {"success": True,
+                "message": f"{name} travels with you now." if on else f"{name} stays at home now."}
 
     # The clock displays. Their file keeps its own lock, as the satellites' passwords
     # do, so none of these holds _saving either. See docs/decisions/0013.
@@ -2331,6 +2388,7 @@ ACTIONS: Dict[str, Callable[[SettingsPage, Dict, str], Dict]] = {
     "/api/satellites/password": lambda page, body, who: page.new_password(body["name"], who),
     "/api/satellites/remove": lambda page, body, who: page.remove_satellite(body["name"], who),
     "/api/satellites/default": lambda page, body, who: page.make_default(body["name"], who),
+    "/api/satellites/travels": lambda page, body, who: page.set_travels(body["name"], body["on"], who),
     # A new clock's fields are sent as one, as the page adds the satellite it's looking
     # after to every change it sends, which would otherwise be taken for the clock's.
     # Its satellite is always sent - null for the default's.

@@ -145,6 +145,7 @@ const GROUPS = [
   ["Music", ["music.", "navidrome.", "soulsync.", "spotify.", "clean_check.", "new_music."]],
   ["Wrapped", ["wrapped."]],
   ["Football", ["football."]],
+  ["Journeys", ["journeys."]],
   ["Voice", ["voice."]],
   ["Sounds", ["sounds."]],
   ["Claude", ["web_search.", "conversation.", "usage."]],
@@ -878,6 +879,22 @@ function showSatellites(state) {
         : "Not connected", "detail"));
     if (satellite.spotify_speaker) what.append(element("span", `Spotify plays on ${satellite.spotify_speaker}`, "detail"));
     const actions = element("span", undefined, "actions");
+    // Whether its journeys start from where the phone is. The label holds the switch, so
+    // no id is needed to join them, as a satellite's name may have a space in it.
+    const travels = element("label", undefined, "choice");
+    travels.title = "Journeys are worked out from where your phone is.";
+    const travelsBox = element("input");
+    Object.assign(travelsBox, { type: "checkbox", checked: Boolean(satellite.travels) });
+    travelsBox.setAttribute("role", "switch");
+    // The rows are drawn again whatever the data says, as a switch which failed to save is
+    // still showing what wasn't saved.
+    travelsBox.addEventListener("change", () =>
+      change("/api/satellites/travels", { name: satellite.name, on: travelsBox.checked }, () => {
+        delete drawn.satellites;
+        return load();
+      }));
+    travels.append(element("span", "Travels with me"), travelsBox);
+    actions.append(travels);
     if (!satellite.default) {
       const makeDefault = element("button", "Make default", "button quiet");
       makeDefault.type = "button";
@@ -903,6 +920,10 @@ function showSatellites(state) {
     ? "The satellites' file can't be read, so they can't be shown or changed - see the brain's log."
     : "No satellites have been added.";
   drawIfChanged("satellites", [satellites, none], () => {
+    // Not while a switch or button is held down: the row drawn again under the pointer
+    // loses the click, if it's slow enough to land just after a satellite's state changed.
+    // Nothing is marked as drawn then, so the next look tries again.
+    if (document.getElementById("satellites").querySelector(":active")) return false;
     document.getElementById("satellites").replaceChildren(...(rows.length ? rows : [emptyRow(none)]));
     renewButtons = buttons;
   });

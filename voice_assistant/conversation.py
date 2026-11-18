@@ -23,6 +23,7 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 from voice_assistant.actions import Action, ActionExecutor, ActionResult, confirm
 from voice_assistant.clock_ringing import Where, heard_in
 from voice_assistant.devices import told_claude
+from voice_assistant.journeys import told_claude as journey_told_claude
 from voice_assistant.logging_setup import TRANSCRIPT
 from voice_assistant.timeline import Timeline
 
@@ -534,13 +535,15 @@ def _only_question(reply: str, results: List[ActionResult]) -> Optional[Action]:
 def _stand_ins(actions: List[Action], results: List[ActionResult]) -> Dict[int, str]:
     """
     What Claude's history has in place of each private answer, by its action's place in the
-    turn - e.g. {0: "I said where your phone is."}.
+    turn - e.g. {0: "I said where your phone is."}, or for a journey worked out from where the
+    user is, that it was said and the question it asked (see journeys.told_claude).
 
     Args:
         actions: The actions the turn ran.
         results: What each said, in the same order.
     """
-    return {index: told_claude(str(action.params.get("device") or "phone"))
+    return {index: journey_told_claude(result.say) if action.tool == "journey"
+            else told_claude(str(action.params.get("device") or "phone"))
             for index, (action, result) in enumerate(zip(actions, results)) if result.private}
 
 

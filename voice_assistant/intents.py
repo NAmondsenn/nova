@@ -60,6 +60,19 @@ ACTIVITY = r"(?P<activity>[a-z0-9' ]+?)"
 # unless a day follows.
 BARE_BEFORE_ACTIVITY = r"(?:when is|when's|am i)(?: at| in)? "
 
+# A place said in a journey question - "work", "the Metrocentre", "my gran's" - of one to four
+# words, as said. None starts with a digit or is a word that begins something else: a time
+# ("to be at work for 9"), a day ("for work tomorrow", "on Monday", "this afternoon", "right
+# now") or a "from", "with" or "via". Those are left to Claude, who has the arrival time and
+# the day to take them, rather than made part of a place sent to Google. And the first word is
+# never "it", "there", "that" or "here", which say a place without naming it.
+JOURNEY_WORD = (r"(?!(?:at|by|before|for|be|in|on|from|with|via|now|right|today|tonight|tomorrow|this|next|"
+                + "|".join(WEEKDAYS) + r")\b)[a-z][a-z']*")
+JOURNEY_PLACE = rf"(?P<place>(?!(?:it|there|that|here)\b){JOURNEY_WORD}(?: {JOURNEY_WORD}){{0,3}})"
+# How a journey is made, by the verb or noun said, in the words the journey tool has them.
+JOURNEY_MODES = {"drive": "driving", "walk": "walking", "cycle": "cycling"}
+JOURNEY_BY = r"(?:by (?:bus|train|public transport)|on public transport)"
+
 # The devices a battery is asked about by - the kind words batteries.find knows. A
 # device with a name of its own ("the S25 Ultra") is left to Claude.
 BATTERY_DEVICE = "mac|phone|tablet|laptop|computer"
@@ -367,6 +380,20 @@ class LocalIntents:
              self._calendar),
             (rf"(?:am i|are we) (?:busy|free)(?: (?:on|for))? {DAY}", self._calendar),
             (rf"do i have anything(?: on| planned)?(?: (?:on|for))? {DAY}", self._calendar),
+            # A journey - when to leave, and how long it takes - before the activity rules,
+            # whose "when do I ..." would take "when do I need to leave for uni?" for an
+            # activity. Only the main phrases, with no time said (see JOURNEY_PLACE): Claude
+            # has the rest, with the same tool. A "how long" question is only taken when it
+            # names a way of travelling, so "how long to get to work?" is Claude's, who can
+            # tell work from "how long to get to sleep?".
+            (rf"(?:what time|when) (?:do i|should i|shall i|do i need to|do i have to) "
+             rf"(?:leave|set off|head off)(?: for| to get to) {JOURNEY_PLACE}",
+             self._journey("driving", leave=True)),
+            (rf"how long (?:is|will be) the (?P<verb>drive|walk|cycle) to {JOURNEY_PLACE}", self._journey()),
+            (rf"how long (?:does it take |will it take )?to (?P<verb>drive|walk|cycle) to {JOURNEY_PLACE}",
+             self._journey()),
+            (rf"how long (?:does it take |will it take )?to get to {JOURNEY_PLACE} {JOURNEY_BY}",
+             self._journey("transit")),
             # Work, uni and the like, from the calendar - "what time do I have work
             # tomorrow?". Without a day, it's today.
             # "When's gym tomorrow?" too.
@@ -497,6 +524,20 @@ class LocalIntents:
 
     def _playback(self, command: str):
         return lambda found: self._result("Okay.", [Action("control_playback", {"action": command})])
+
+    def _journey(self, mode: Optional[str] = None, leave: bool = False):
+        """
+        The handler for a journey question.
+
+        Args:
+            mode: How it's made, or None to take it from the rule's "verb" - drive, walk or cycle.
+            leave: Whether it's when to leave that was asked, and not how long it takes.
+        """
+        def handle(found) -> Dict:
+            how = mode or JOURNEY_MODES[found["verb"]]
+            # All three keys, always: the place as said, the zones being found by the journeys module.
+            return self._result("Okay.", [Action("journey", {"place": found["place"], "mode": how, "leave": leave})])
+        return handle
 
     def _resume(self, found) -> Dict:
         # A play with nothing named carries on with whatever was playing.

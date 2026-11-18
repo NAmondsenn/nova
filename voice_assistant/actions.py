@@ -58,6 +58,7 @@ UNAVAILABLE = {
     "calendar": "The calendar isn't set up yet.",
     "downloads": "Downloading music isn't set up.",
     "football": "Football needs Home Assistant.",
+    "journeys": "Journeys need Home Assistant.",
     "listening": "Listening stats need SoulSync.",
     "wrapped": "Wrapped isn't set up.",
 }
@@ -286,7 +287,7 @@ class ActionExecutor:
     def __init__(self, music=None, clock=None, volume=None, weather=None, home=None, memory=None, ntfy=None,
                  satellite: Optional[str] = None, batteries=None, lists=None, pc=None, calendar=None,
                  downloads=None, football=None, listening=None, wrapped=None, config=None, new_music=None,
-                 ring_on: Callable[[str], str] = lambda name: name,
+                 journeys=None, ring_on: Callable[[str], str] = lambda name: name,
                  room_of: Callable[[str], List[str]] = lambda name: [name],
                  room_players: Optional[Callable[[], List]] = None):
         """
@@ -321,6 +322,8 @@ class ActionExecutor:
                 at each call - new_music.playlist.
             new_music: NewMusicPlaylist, which knows the id of the playlist Nova made, or None
                 if there isn't one - find_new_music plays that one by its id when it has it.
+            journeys: Journeys, for how long a journey takes and when to leave for it, or None if
+                Home Assistant isn't set up.
             ring_on: Given the satellite the user is talking to, the one a timer or alarm set
                 there rings on - itself, unless it's a push-to-talk satellite, which hands
                 them to an always-on one.
@@ -349,6 +352,7 @@ class ActionExecutor:
         self.wrapped = wrapped
         self.config = config
         self.new_music = new_music
+        self.journeys = journeys
         self.ring_on = ring_on
         self.room_of = room_of
         self.room_players = room_players or (lambda: [self.music])
@@ -1801,6 +1805,54 @@ class ActionExecutor:
     )
     def press_pc_button(self, action: Optional[str] = None, name: Optional[str] = None):
         return self.pc.press(action or "", name or None)
+
+    # Journeys - see journeys.py
+
+    @tool(
+        "Say how long a journey takes, or when to leave for one - 'how long's the drive to work?', 'how long to "
+        "walk to the station?', 'what time do I leave for uni?', 'when should I set off to be at my gran's "
+        "for 6?'. Give the place as the user said it, never a guess at an address. Leave mode out for driving. "
+        "Set leave when they ask when to leave or set off, and arrive_at only when they say a time to be there. "
+        "What's found is said for you, so just reply 'Okay.' If it asks 'When do you need to be there?', call "
+        "this again with leave and arrive_at once they've said.",
+        needs="journeys",
+        required=["place"],
+        place={"type": "string", "description": "Where to, as the user said it - 'work', 'my gran's', 'the station'."},
+        mode={"type": "string", "enum": ["driving", "walking", "cycling", "transit"],
+              "description": "How they're travelling; left out for driving."},
+        leave={"type": "boolean", "description": "True when they ask when to leave or set off."},
+        arrive_at={"type": "string", "description": "The time they need to be there, only when they said one: "
+                   "local 24-hour 'HH:MM', or 'YYYY-MM-DD HH:MM' for another day."},
+        day={"type": "string", "description": "The day asked about, as YYYY-MM-DD, worked out from today's date - "
+             "only when the user names a day, e.g. tomorrow. Leave it out otherwise."},
+    )
+    def journey(self, place=None, mode=None, leave=None, arrive_at=None, day=None):
+        return self.journeys.ask(place or "", mode or "driving", bool(leave), arrive_at or None,
+                                 satellite=self.satellite, day=day or None)
+
+    # Only ever run by the conversation, on the user's yes to journey's "Want a reminder?" - so Claude,
+    # which isn't offered it, can't set one without a yes.
+    @tool(
+        "Set the reminder to leave, once the user has said yes.",
+        needs="journeys",
+        required=["place", "destination", "origin", "mode", "arrive", "leave_by"],
+        for_model=False,
+        place={"type": "string", "description": "What the place is called."},
+        destination={"type": "string", "description": "Where to, as it was asked."},
+        origin={"type": "string", "description": "Where from."},
+        mode={"type": "string", "description": "How they're travelling."},
+        arrive={"type": "number", "description": "When they need to be there, in epoch seconds."},
+        leave_by={"type": "number", "description": "When they need to leave, in epoch seconds."},
+        watch={"type": "boolean", "description": "Whether the traffic is watched until then."},
+    )
+    def set_leave_reminder(self, place=None, destination=None, origin=None, mode=None, arrive=None, leave_by=None,
+                           watch=None):
+        # A reminder like any other, so one set at a push-to-talk satellite rings, and the traffic's changes are
+        # said, on the always-on one it's handed to.
+        ring = self._ring_on_satellite()
+        return self._say_where_it_rings(
+            self.journeys.remind(place or "", destination or "", origin or "zone.home", mode or "driving",
+                                 float(arrive or 0), float(leave_by or 0), bool(watch), satellite=ring), ring)
 
     # Notifications
 

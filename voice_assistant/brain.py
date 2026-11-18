@@ -46,6 +46,7 @@ from voice_assistant.football_watch import FootballChoices, FootballWatcher, use
 from voice_assistant.google_calendar import READ_FAILURES, GoogleCalendar
 from voice_assistant.ha_registry import REGISTRY_TIMEOUT, HomeRegistry, HomeSocket
 from voice_assistant.home_assistant import HomeAssistant
+from voice_assistant.journeys import JOURNEY_DEFAULTS, JourneyWatcher, Journeys
 from voice_assistant.listener import Listener
 from voice_assistant.listening import Listening
 from voice_assistant.lists import Lists
@@ -419,6 +420,17 @@ class Brain:
         self.clock = Clock(on_timer_finished=self._announce, on_unanswered=self._unanswered,
                            on_change=self._alarms_changed.set, can_hear=lambda satellite: satellite in self._caught_up,
                            let_in=lambda satellite: not self._gone_from_file(satellite), config=config, start=False)
+        # How long a journey takes and when to leave for it, which sets its reminder on the clock - after the
+        # home, the calendar and the clock it's made of. Its settings are read at each use - see journeys.py.
+        self.journeys = (Journeys(self.home, self.calendar, self.clock,
+                                  ChoiceStore(os.path.join(paths.DATA_DIR, "journeys.json"), JOURNEY_DEFAULTS),
+                                  lambda: self.config.section("journeys"))
+                         if self.home else None)
+        # What looks at the traffic while a reminder to leave waits, and moves it. Started by run().
+        self.journey_watcher = (JourneyWatcher(self.journeys, say=self._say_journey,
+                                               home_now=lambda: user_home(self.home),
+                                               settings=lambda: self.config.section("journeys"))
+                                if self.journeys else None)
         # Each download heard before it's said, and a clean one swapped for an explicit copy
         # - see clean_swap.py and docs/decisions/0022. One store of what's been heard, one
         # listening worker and one Navidrome library to hear through, which the downloads and
@@ -1539,6 +1551,36 @@ class Brain:
             # download's watch with a traceback instead.
             logger.exception(f"A download message couldn't be sent to the phone: {message}")
 
+    def _say_journey(self, satellite: Optional[str], message: str) -> None:
+        """
+        Says a change to when to leave on the satellite which set the reminder, as _say_download has
+        it said - at any hour, as the user asked for the reminder - and sends it to the user's phone as
+        well, whether or not it was said: they may be on the move already, away from any satellite.
+        Never raises. Nothing of the message is logged, as it names the place.
+
+        Args:
+            satellite: The satellite which set the reminder, or None for the default one.
+            message: What to say, e.g. "Traffic to Work is heavier now. Leave by 8:05 AM, not 8:20 AM."
+        """
+        where = f"the {satellite} satellite" if satellite else "the default satellite"
+        try:
+            session = self.session_for(satellite)
+            if session is None:
+                logger.warning(f"A journey message wasn't said, as {where} isn't connected")
+            elif not session.announce(message):
+                logger.warning(f"A journey message wasn't said on {where}")
+        except Exception:
+            # The satellite going away mid-sentence, most likely.
+            logger.exception(f"A journey message couldn't be said on {where}")
+        # Read once, so a topic cleared on the settings page meanwhile is never sent to as "".
+        phone = self.ntfy.phone if self.ntfy else ""
+        if not phone:
+            return
+        try:
+            self.ntfy.send_soon(phone, message, title="Leaving time")
+        except Exception:
+            logger.exception("A journey message couldn't be sent to the phone")
+
     def _spending_alert(self, today: float, limit: float):
         """
         Tells the user's phone that today's spending on Claude has passed the limit, once
@@ -1769,6 +1811,8 @@ class Brain:
             self.batteries.start()
         if self.football_watcher:
             self.football_watcher.start()
+        if self.journey_watcher:
+            self.journey_watcher.start()
         self.listening.start()
         self.wrapped_watcher.start()
         self.follow_watcher.start()
@@ -1861,6 +1905,8 @@ class Brain:
         self.listener.close()
         if self.batteries:
             self.batteries.stop()
+        if self.journey_watcher:
+            self.journey_watcher.stop()
         if self.football_watcher:
             self.football_watcher.stop()
         self.new_music_playlist.stop()
