@@ -77,7 +77,7 @@ HEAR_IT = "This is how fast I'll talk."
 
 # How long Nova waits for a typed answer when its reply to something typed in Home
 # Assistant asks a question, in seconds - the microphone stays shut, so it's the only
-# way to answer, and typing one takes longer than saying it. See docs/decisions/0025.
+# way to answer, and typing one takes longer than saying it. See docs/decisions/0027.
 TYPED_ANSWER_WAIT = 60
 
 # How many characters of a typed request are kept - as many as Home Assistant's Ask
@@ -512,7 +512,7 @@ class Session:
         if feed is not None:
             self.satellite.stop_listening(feed)
 
-    # Asked by typing - see docs/decisions/0025
+    # Asked by typing - see docs/decisions/0027
 
     def ask(self, text: str) -> None:
         """
