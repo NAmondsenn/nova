@@ -2414,6 +2414,22 @@ def test_the_brain_has_the_lists_only_with_home_assistant(make_brain, home_assis
     assert make_brain().lists is None
 
 
+def test_the_brain_has_journeys_only_with_home_assistant_and_reads_their_settings_each_time(
+        make_brain, home_assistant_token, monkeypatch, tmp_path):
+    brain = make_brain(home_assistant=HOME_ASSISTANT, journeys={"buffer_minutes": 20})
+    journeys = brain.journeys
+    assert (journeys.home, journeys.calendar, journeys.clock) == (brain.home, brain.calendar, brain.clock)
+    # The month's count and the watched reminders are kept in the brain's own data folder.
+    assert journeys.store.path == str(tmp_path / "journeys.json")
+    assert journeys.settings()["buffer_minutes"] == 20
+    assert brain.apply_settings({("journeys", "buffer_minutes"): 30}) == []
+    assert journeys.settings()["buffer_minutes"] == 30
+
+    monkeypatch.delenv("HA_TOKEN")
+    assert make_brain(home_assistant=HOME_ASSISTANT).journeys is None
+    assert make_brain().journeys is None
+
+
 def test_the_brain_reads_the_registry_when_home_assistant_is_set_up(make_brain, home_assistant_token, monkeypatch):
     brain = make_brain(home_assistant=HOME_ASSISTANT)
     assert isinstance(brain.registry, HomeRegistry)

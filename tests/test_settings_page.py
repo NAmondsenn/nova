@@ -2042,6 +2042,24 @@ def test_the_new_music_settings_are_on_the_page_and_used_straight_away(files):
     assert running.section("new_music")["follow_top_artists"] == 0
 
 
+def test_every_journeys_setting_is_on_the_page_and_used_straight_away(files):
+    page, running = _running(files)
+    shown = {s["key"]: s for s in page.state()["settings"] if s["key"].startswith("journeys.")}
+    assert set(shown) == {f"journeys.{name}" for name in running.section("journeys")}
+    for key, setting in shown.items():
+        assert setting["used"] == NOW and setting["label"], key
+        # Each is a number with its range, or the unit's choice - none is left to be typed freely.
+        assert setting["kind"] == ("text" if key == "journeys.distance_unit" else "number"), key
+        assert setting.get("choices") or setting["max"] > setting["min"] >= 0, key
+    assert shown["journeys.distance_unit"]["choices"] == ["miles", "km"]
+    assert shown["journeys.buffer_minutes"]["label"] == "Minutes to spare when working out when to leave"
+    assert page.save_settings({"journeys.buffer_minutes": "15", "journeys.distance_unit": "km"}, LOGIN)["success"]
+    assert (running.section("journeys")["buffer_minutes"], running.section("journeys")["distance_unit"]) == (15, "km")
+    for wrong in ({"journeys.buffer_minutes": "61"}, {"journeys.check_every_minutes": "1"},
+                  {"journeys.distance_unit": "furlongs"}, {"journeys.monthly_requests": "5001"}):
+        assert not page.save_settings(wrong, LOGIN)["success"], wrong
+
+
 def test_every_setting_on_the_page_has_a_group_of_its_own(files):
     # One under no group is shown under Other, as the spending alert and Claude's prices
     # were, rather than with the settings it goes with.
@@ -2052,6 +2070,7 @@ def test_every_setting_on_the_page_has_a_group_of_its_own(files):
               for name, line in re.findall(r'^\s*\["([^"]+)", (\[.*\])\],$', groups, re.M)}
     assert "usage." in starts["Claude"]
     assert starts["Football"] == ["football."]
+    assert starts["Journeys"] == ["journeys."]
     # The clean songs' settings go with the music they're about.
     assert "clean_check." in starts["Music"]
     assert "new_music." in starts["Music"]

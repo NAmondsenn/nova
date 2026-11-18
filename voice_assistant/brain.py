@@ -46,6 +46,7 @@ from voice_assistant.football_watch import FootballChoices, FootballWatcher, use
 from voice_assistant.google_calendar import READ_FAILURES, GoogleCalendar
 from voice_assistant.ha_registry import REGISTRY_TIMEOUT, HomeRegistry, HomeSocket
 from voice_assistant.home_assistant import HomeAssistant
+from voice_assistant.journeys import JOURNEY_DEFAULTS, Journeys
 from voice_assistant.listener import Listener
 from voice_assistant.listening import Listening
 from voice_assistant.lists import Lists
@@ -414,6 +415,12 @@ class Brain:
         self.clock = Clock(on_timer_finished=self._announce, on_unanswered=self._unanswered,
                            on_change=self._alarms_changed.set, can_hear=lambda satellite: satellite in self._caught_up,
                            let_in=lambda satellite: not self._gone_from_file(satellite), config=config, start=False)
+        # How long a journey takes and when to leave for it, which sets its reminder on the clock - after the
+        # home, the calendar and the clock it's made of. Its settings are read at each use - see journeys.py.
+        self.journeys = (Journeys(self.home, self.calendar, self.clock,
+                                  ChoiceStore(os.path.join(paths.DATA_DIR, "journeys.json"), JOURNEY_DEFAULTS),
+                                  lambda: self.config.section("journeys"))
+                         if self.home else None)
         # Each download heard before it's said, and a clean one swapped for an explicit copy
         # - see clean_swap.py and docs/decisions/0022. One store of what's been heard, one
         # listening worker and one Navidrome library to hear through, which the downloads and

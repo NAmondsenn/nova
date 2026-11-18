@@ -458,3 +458,40 @@ class Journeys:
             answer["message"] += " Want a reminder?"
             answer["ask_first"] = Action("set_leave_reminder", params)
         return answer
+
+    def remind(self, place: str, destination: str, origin: str, mode: str, arrive: float, leave_by: float,
+               watch: bool, satellite: Optional[str] = None, now: Optional[datetime] = None) -> Dict:
+        """
+        Sets the reminder to leave, on the user's yes to "Want a reminder?" - the params of the
+        Action ask offered - and, for a drive from home, keeps it to be watched for the traffic.
+
+        Args:
+            place: What the place is called, for "Leave for Work" and for saying it back.
+            destination: What was asked of Google - a zone's id or the words.
+            origin: Where from - zone.home, or the user's person.
+            mode: How they travel.
+            arrive: When they need to be there, in epoch seconds.
+            leave_by: When they need to leave, in epoch seconds.
+            watch: Whether the traffic is looked at as the time to leave nears - see the watcher.
+            satellite: The satellite it rings on, the one it was asked on.
+            now: The time now, local - only given by the tests.
+
+        Returns:
+            Dict with 'success' and the 'message' to say: "I'll remind you at 8:15." - or the
+            clock's own refusal, a clash or a satellite which is gone, as it was given.
+        """
+        now = (now or datetime.now()).astimezone()
+        rings = leave_by - self._setting("reminder_minutes") * 60
+        # A moment which is here or all but is a minute on, so it still rings - the clock won't set one gone.
+        seconds = max(60, round(rings - now.timestamp()))
+        reply = self.clock.set_timer(duration_seconds=seconds, label=f"Leave for {place}", is_reminder=True,
+                                     satellite=satellite)
+        if not reply.get("success"):
+            return reply
+        if watch:
+            watched = {"destination": destination, "origin": origin, "place": place, "arrive": arrive,
+                       "leave_by": leave_by, "satellite": satellite, "seen_home": False}
+            self.store.keep(lambda state: state["watches"].update({str(reply["id"]): watched}),
+                            "journey being watched")
+        ringing = datetime.fromtimestamp(now.timestamp() + seconds).astimezone()
+        return {"success": True, "message": f"I'll remind you at {_when(ringing, now)}."}

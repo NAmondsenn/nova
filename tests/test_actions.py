@@ -1976,3 +1976,67 @@ def test_whats_new_when_navidrome_isnt_set_up_or_cant_be_asked(make_executor, mo
                         monkeypatch=monkeypatch)
     assert (result.ok, result.say) == (False, "I can't reach Navidrome right now.")
     assert "abc123token" not in result.say
+
+
+# Journeys
+
+class FakeJourneys:
+    """Journeys as far as the tools go: what each was asked, and an answer which offers a reminder."""
+
+    def __init__(self):
+        self.asked, self.reminded = [], []
+
+    def ask(self, place, mode="driving", leave=False, arrive_at=None, satellite=None, now=None):
+        self.asked.append((place, mode, leave, arrive_at, satellite))
+        return {"success": True, "message": "The drive to Work is 24 minutes. Want a reminder?",
+                "ask_first": Action("set_leave_reminder", {"place": place})}
+
+    def remind(self, place, destination, origin, mode, arrive, leave_by, watch, satellite=None, now=None):
+        self.reminded.append((place, destination, origin, mode, arrive, leave_by, watch, satellite))
+        return {"success": True, "message": "I'll remind you at 8:15 AM."}
+
+
+def test_the_journey_tool_asks_for_the_satellite_it_was_said_on():
+    journeys = FakeJourneys()
+    executor = ActionExecutor(journeys=journeys, satellite="kitchen")
+    result = executor.execute(Action("journey", {"place": "work", "leave": True, "arrive_at": "09:00"},
+                                     from_model=True))
+    assert journeys.asked == [("work", "driving", True, "09:00", "kitchen")]
+    assert result.ok and result.say.endswith("Want a reminder?")
+    # Left out, a journey is a drive and only how long it takes.
+    executor.execute(Action("journey", {"place": "the station", "mode": "walking"}, from_model=True))
+    assert journeys.asked[1] == ("the station", "walking", False, None, "kitchen")
+
+
+def test_the_journey_tool_is_described_for_claude():
+    schema = {tool["name"]: tool for tool in ActionExecutor(journeys=FakeJourneys()).tool_schemas()}["journey"]
+    assert schema["input_schema"]["required"] == ["place"]
+    properties = schema["input_schema"]["properties"]
+    assert properties["mode"]["enum"] == ["driving", "walking", "cycling", "transit"]
+    assert set(properties) == {"place", "mode", "leave", "arrive_at"}
+    for words in ("how long's the drive to work?", "what time do I leave for uni?", "never a guess at an address",
+                  "just reply 'Okay.'", "When do you need to be there?"):
+        assert words in schema["description"]
+
+
+def test_claude_is_never_offered_the_leave_reminder():
+    journeys = FakeJourneys()
+    executor = ActionExecutor(journeys=journeys)
+    assert "set_leave_reminder" not in {tool["name"] for tool in executor.tool_schemas()}
+    asked = Action("set_leave_reminder", {"place": "Work", "leave_by": 1.0}, from_model=True)
+    assert executor.execute(asked).ok is False and journeys.reminded == []
+    # Nova's own, on a yes, sets it - for the satellite it was said on.
+    executor.satellite = "kitchen"
+    params = {"place": "Work", "destination": "zone.work", "origin": "zone.home", "mode": "driving",
+              "arrive": 1000.5, "leave_by": 900.5, "watch": True}
+    result = executor.execute(Action("set_leave_reminder", params))
+    assert result.ok and result.say == "I'll remind you at 8:15 AM."
+    assert journeys.reminded == [("Work", "zone.work", "zone.home", "driving", 1000.5, 900.5, True, "kitchen")]
+
+
+def test_without_home_assistant_journeys_say_so():
+    executor = ActionExecutor()
+    assert not {"journey", "set_leave_reminder"} & {tool["name"] for tool in executor.tool_schemas()}
+    for tool in ("journey", "set_leave_reminder"):
+        result = executor.execute(Action(tool, {"place": "Work"}))
+        assert (result.ok, result.say) == (False, "Journeys need Home Assistant.")

@@ -864,6 +864,51 @@ def test_a_yes_in_a_new_conversation_presses_nothing(tmp_path):
     assert home.pressed == []
 
 
+# Asking whether to set the reminder to leave
+
+class FakeJourneys:
+    """Journeys which offer a reminder for the drive to Work, noting what the yes sets."""
+
+    PARAMS = {"place": "Work", "destination": "zone.work", "origin": "zone.home", "mode": "driving",
+              "arrive": 2000.0, "leave_by": 1000.0, "watch": True}
+
+    def __init__(self):
+        self.reminded = []
+
+    def ask(self, place, mode="driving", leave=False, arrive_at=None, satellite=None, now=None):
+        return {"success": True, "message": "The drive to Work is 24 minutes, so leave by 8:15 AM. Want a reminder?",
+                "ask_first": Action("set_leave_reminder", dict(self.PARAMS))}
+
+    def remind(self, place, destination, origin, mode, arrive, leave_by, watch, satellite=None, now=None):
+        self.reminded.append({"place": place, "destination": destination, "origin": origin, "mode": mode,
+                              "arrive": arrive, "leave_by": leave_by, "watch": watch})
+        return {"success": True, "message": "I'll remind you at 8:10 AM."}
+
+
+def _journey_conversation(*replies):
+    journeys = FakeJourneys()
+    asking = Action("journey", {"place": "work", "leave": True, "arrive_at": "09:00"}, from_model=True)
+    llm = FakeLLM(*(replies or (_answer("Okay.", asking),)))
+    return _conversation(intents=LocalIntents(), llm=llm, actions=AskingActions(journeys=journeys)), journeys, llm
+
+
+def test_a_yes_to_want_a_reminder_sets_it():
+    conversation, journeys, llm = _journey_conversation()
+    reply = conversation.handle("when should I leave for work to be there for nine")
+    assert reply.say.endswith("Want a reminder?") and reply.listen_again
+    assert journeys.reminded == []
+    # Read before the follow-up window would send it to Claude.
+    assert conversation.handle("yes please", follow_up=True).say == "I'll remind you at 8:10 AM."
+    assert journeys.reminded == [FakeJourneys.PARAMS] and len(llm.asked) == 1
+
+
+def test_a_no_to_want_a_reminder_leaves_it():
+    conversation, journeys, llm = _journey_conversation()
+    conversation.handle("when should I leave for work to be there for nine")
+    assert conversation.handle("no", follow_up=True).say == "Okay, I'll leave it."
+    assert journeys.reminded == [] and len(llm.asked) == 1
+
+
 @pytest.mark.parametrize("answer", ["yes", "Yes please.", "Nova, yeah.", "yep", "go ahead", "Go on.", "sure",
                                     "Do it.", "Okay, do it.", "ok do it please", "Yes.", "'yes'",
                                     "\u2018yes\u2019"])

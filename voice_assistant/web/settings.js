@@ -145,6 +145,7 @@ const GROUPS = [
   ["Music", ["music.", "navidrome.", "soulsync.", "spotify.", "clean_check.", "new_music."]],
   ["Wrapped", ["wrapped."]],
   ["Football", ["football."]],
+  ["Journeys", ["journeys."]],
   ["Voice", ["voice."]],
   ["Sounds", ["sounds."]],
   ["Claude", ["web_search.", "conversation.", "usage."]],

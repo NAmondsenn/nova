@@ -12,10 +12,12 @@ from datetime import datetime
 import pytest
 import requests
 
+from voice_assistant import clock as clock_module
 from voice_assistant import journeys
 from voice_assistant.actions import Action
 from voice_assistant.choices import ChoiceStore
-from voice_assistant.clock_words import format_duration
+from voice_assistant.clock import Clock
+from voice_assistant.clock_words import format_duration, spoken_clock_time
 from voice_assistant.config import Config
 from voice_assistant.google_calendar import SignInNeeded
 from voice_assistant.home_assistant import CANT_REACH, NoJourneys, NotAllowed
@@ -750,3 +752,81 @@ def test_an_unknown_way_of_travelling_is_refused_without_asking(store):
     home = FakeHome()
     answer = ask(make(store, home), "work", "teleporting")
     assert not answer["success"] and home.asked == []
+
+
+# Setting the reminder, on a yes
+
+@pytest.fixture
+def real_clock(tmp_path, monkeypatch, make_config):
+    """A real Clock, as tests/test_clock.py makes one, saving into a temporary folder and ringing nothing."""
+    monkeypatch.setattr(clock_module, "TIMERS_FILE", str(tmp_path / "timers.json"))
+    monkeypatch.setattr(clock_module, "ALARMS_FILE", str(tmp_path / "alarms.json"))
+    return Clock(on_timer_finished=lambda *args, **kwargs: None, config=make_config(timers={"announcements": 1}),
+                 start=False)
+
+
+def remind(store, clock, leave_in=1800, watch=True, satellite="kitchen", **kwargs):
+    """The reminder for a drive to Work which must be left for in leave_in seconds, and the moment it was asked."""
+    now = datetime.now().astimezone()
+    leave_by = now.timestamp() + leave_in
+    journey = Journeys(FakeHome(), None, clock, store, lambda: SETTINGS)
+    params = {"place": "Work", "destination": "zone.work", "origin": "zone.home", "mode": "driving",
+              "arrive": leave_by + 1800, "leave_by": leave_by, "watch": watch}
+    return journey.remind(**{**params, **kwargs}, satellite=satellite, now=now), params, now
+
+
+def test_a_yes_sets_the_reminder_and_keeps_the_watch(store, real_clock):
+    answer, params, now = remind(store, real_clock)
+    assert answer["success"]
+    # Said as the moment it rings, which is the reminder's five minutes before the time to leave.
+    rings = datetime.fromtimestamp(params["leave_by"] - 300)
+    assert answer["message"].startswith(f"I'll remind you at {spoken_clock_time(rings.hour, rings.minute)}")
+    [timer] = real_clock.overview()["timers"]
+    assert real_clock._timers[timer["id"]]["label"] == "Leave for Work"
+    assert real_clock._timers[timer["id"]]["satellite"] == "kitchen"
+    assert abs(real_clock.timer_due(timer["id"]) - (params["leave_by"] - 300)) < 3
+    assert store.get("watches") == {str(timer["id"]): {
+        "destination": "zone.work", "origin": "zone.home", "place": "Work", "arrive": params["arrive"],
+        "leave_by": params["leave_by"], "satellite": "kitchen", "seen_home": False}}
+
+
+def test_a_walk_is_reminded_but_not_watched(store, real_clock):
+    answer, params, now = remind(store, real_clock, watch=False, mode="walking")
+    assert answer["success"] and len(real_clock.overview()["timers"]) == 1
+    assert store.get("watches") == {}
+
+
+@pytest.mark.parametrize("leave_in", [200, 330, -30])
+def test_a_reminder_almost_due_is_set_a_minute_on(store, real_clock, leave_in):
+    # Five minutes before a time to leave which is under six minutes off has gone, or all but.
+    answer, params, now = remind(store, real_clock, leave_in=leave_in)
+    assert answer["success"]
+    [timer] = real_clock.overview()["timers"]
+    assert abs(real_clock.timer_due(timer["id"]) - (now.timestamp() + 60)) < 3
+
+
+def test_the_reminder_minutes_are_read_at_each_use(store, real_clock):
+    answer, params, now = remind(store, real_clock, leave_in=3600)
+    [timer] = real_clock.overview()["timers"]
+    assert abs(real_clock.timer_due(timer["id"]) - (params["leave_by"] - 300)) < 3
+    journey = Journeys(FakeHome(), None, real_clock, store, lambda: dict(SETTINGS, reminder_minutes=0))
+    journey.remind("Uni", "zone.uni", "zone.home", "walking", params["arrive"], params["leave_by"], False, now=now)
+    due = real_clock.timer_due(timer["id"] + 1)
+    assert abs(due - params["leave_by"]) < 3
+
+
+def test_the_clocks_refusal_is_passed_on(store):
+    class RefusingClock:
+        def set_timer(self, **asked):
+            return {"success": False, "message": "That reminder's already set."}
+
+    answer, params, now = remind(store, RefusingClock())
+    assert answer == {"success": False, "message": "That reminder's already set."}
+    assert store.get("watches") == {}
+
+
+def test_a_satellite_which_has_gone_is_told_so_and_nothing_is_kept(store, real_clock):
+    real_clock.let_in = lambda satellite: False
+    answer, params, now = remind(store, real_clock, satellite="bedroom")
+    assert answer["success"] is False and "gone" in answer["message"]
+    assert real_clock.overview()["timers"] == [] and store.get("watches") == {}
