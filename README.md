@@ -141,7 +141,7 @@ bash uninstall.sh
 
 ### The PC
 
-A Windows PC can be a satellite too, in the same room as a Pi: it listens only when a key is pressed (Numpad 3, from the user's AutoHotkey script), plays replies and music on its own speakers, and hands the timers and alarms set at it to the Pi, which is always on. It has no wake word, so it needs no model, and its microphone and speaker are open only while it's in use. See [docs/decisions/0026](docs/decisions/0026-the-pc-as-a-push-to-talk-satellite.md).
+A Windows PC can be a satellite too, in the same room as a Pi: it listens only when a key is pressed (Numpad 3, from the user's AutoHotkey script), plays replies and music on its own speakers, and hands the timers and alarms set at it to the Pi, which is always on. It has no wake word, so it needs no model, and its microphone and speaker are open only while it's in use. See [docs/decisions/0027](docs/decisions/0027-the-pc-as-a-push-to-talk-satellite.md).
 
 It's installed from a machine which can `ssh pc` to the PC and `ssh nova` to the brain (CT 109, here), with this repository checked out:
 
@@ -365,7 +365,7 @@ Nova can also be a device of its own in Home Assistant, set up on the brain, thr
 
 The microphone switch works from Home Assistant or the settings page, and stays as it was through a restart. While it's muted, Nova doesn't hear "Hey Nova", but what you send it with Speak is still said.
 
-Ask Nova is a box to type a request in, answered out loud on that satellite as if you'd said it, muted or not, once any conversation going on has finished; the reply is never sent back to Home Assistant, and what you type is logged only as what you say is. If Nova asks something back, type the answer within a minute - or, after a spoken request, type it while Nova listens. See [docs/decisions/0025](docs/decisions/0025-ask-nova-by-typing.md).
+Ask Nova is a box to type a request in, answered out loud on that satellite as if you'd said it, muted or not, once any conversation going on has finished; the reply is never sent back to Home Assistant, and what you type is logged only as what you say is. If Nova asks something back, type the answer within a minute - or, after a spoken request, type it while Nova listens. See [docs/decisions/0026](docs/decisions/0026-ask-nova-by-typing.md).
 
 ### ntfy, for alerts and your phone
 

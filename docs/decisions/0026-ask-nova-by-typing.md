@@ -1,8 +1,8 @@
-# 0025: Ask Nova by typing, in Home Assistant
+# 0026: Ask Nova by typing, in Home Assistant
 
 18 November 2026 · Agreed with the user in chat, as part of the Nova view (docs/superpowers/specs/2026-11-18-nova-view-design.md) · Built
 
-The PC push-to-talk branch, which held 0024 at the time, took 0026 when it was merged after this one.
+Numbered 0025 when it was built. Leaving time, built at the same time and published first, kept 0025, so this record became 0026 and the PC as a push-to-talk satellite, which held 0024 and then 0026, became 0027 when the three were merged.
 
 **Context.** The Nova view in Home Assistant is a controller page for Nova: its status, mute, volumes, timers, music and Speak. The user wants to be able to ask Nova something there too, by typing, for when talking isn't wanted or the microphone is muted. [0005](0005-nova-in-home-assistant.md) says nothing anyone says to Nova, and none of its answers, goes to Home Assistant; a typed request has to go there by its nature, so how far that changes 0005 had to be settled.
 

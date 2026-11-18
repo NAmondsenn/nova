@@ -1327,7 +1327,7 @@ def test_watchers_hear_each_change(brain, connect, make_session, caplog):
     thread.join(5)
 
 
-# Asked by typing, in Home Assistant - see docs/decisions/0025
+# Asked by typing, in Home Assistant - see docs/decisions/0026
 
 def _waiting_for_a_typed_answer(session):
     """Whether a typed question is left open for its answer, with its turn over - so nothing waits on it."""
