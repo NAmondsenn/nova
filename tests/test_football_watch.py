@@ -25,6 +25,16 @@ NOW = 1_800_000_000.0
 READING_1, READING_2, READING_3, READING_4 = NOW - 180, NOW - 120, NOW - 60, NOW
 
 
+@pytest.fixture
+def london(monkeypatch):
+    """Runs a test on UK time, whatever the machine's own time zone: NOW is eight in the morning of 15 January 2027 there."""
+    monkeypatch.setenv("TZ", "Europe/London")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
 def _match(state="pre", phase=None, home_score=None, away_score=None, minutes=None, **more):
     """Notts County (340) at home to Stevenage (285), kicking off minutes from NOW - two hours ago if not given."""
     kickoff = NOW + (minutes if minutes is not None else -120) * 60
@@ -35,6 +45,12 @@ def _match(state="pre", phase=None, home_score=None, away_score=None, minutes=No
         winner=None, shootout=None, extra_time=False, venue=None, odds=None)
     found.update(more)
     return Match(**found)
+
+
+# What is said of Stevenage's match with Notts County (kicking off at eight in the morning, with NOW at about that
+# time, so "today") when it is called off: its clock the source's word for it.
+POSTPONED = "Stevenage's match against Notts County today is postponed."
+ABANDONED = "Stevenage's match against Notts County today was abandoned."
 
 
 def _events(before, match, lead=15, followed=("285",), reported=None):
@@ -54,9 +70,8 @@ def test_starting_first_seen_late_says_what_is_left():
     assert _events(None, _match(minutes=0.5))[0] == [("starting", "Stevenage play Notts County in 1 minute.")]
 
 
-def test_nothing_is_said_too_early_or_for_a_match_which_is_off():
+def test_nothing_is_said_too_early_or_for_a_match_which_is_delayed():
     assert _events(None, _match(minutes=16))[0] == []
-    assert _events(None, _match(minutes=10, phase="off"))[0] == []
     assert _events(None, _match(minutes=10, clock="Delayed"))[0] == []
 
 
@@ -203,9 +218,11 @@ def test_a_goal_straight_after_the_warning():
     assert _events(seen, _match("in", "first_half", 0, 0))[0] == []
 
 
-def test_a_match_called_off_is_never_full_time():
+def test_a_match_called_off_is_never_full_time(london):
     _, seen = _events(None, _match("in", "first_half", 0, 0))
-    assert _events(seen, _match("post", "off", 0, 0))[0] == []
+    said, seen = _events(seen, _match("post", "off", 0, 0, clock="Abandoned"))
+    assert said == [("starting", ABANDONED)]
+    assert _events(seen, _match("post", "off", 0, 0, clock="Abandoned"))[0] == []
 
 
 def test_no_phase_from_an_older_home_assistant():
@@ -226,10 +243,14 @@ def test_a_phase_home_assistant_has_added_since_counts_as_none():
 def test_the_record_is_the_match_as_it_is_now():
     _, record = _events(None, _match("in", "second_half", 1, 2, minutes=-60))
     assert record == {"home": 1, "away": 2, "waiting": None, "phase": "second_half", "state": "in", "starting": False,
-                      "at": NOW, "kickoff": NOW - 3600}
+                      "called_off": False, "at": NOW, "kickoff": NOW - 3600}
     assert _events(None, _match(minutes=10))[1] == {
         "home": None, "away": None, "waiting": None, "phase": None, "state": "pre", "starting": True,
-        "at": NOW, "kickoff": NOW + 600}
+        "called_off": False, "at": NOW, "kickoff": NOW + 600}
+    # Said to be off, once, is kept, and the starting warning isn't: it was never said.
+    assert _events(None, _match(minutes=10, phase="off", clock="Postponed"))[1] == {
+        "home": None, "away": None, "waiting": None, "phase": "off", "state": "pre", "starting": False,
+        "called_off": True, "at": NOW, "kickoff": NOW + 600}
 
 
 def test_a_goal_which_flickers_away_and_back_is_said_once():
@@ -547,14 +568,15 @@ def test_a_full_time_which_flickers_is_said_once():
     assert _events(seen, _match("post", "full_time", 1, 2, winner="away"))[0] == []
 
 
-def test_a_match_which_is_off_says_nothing_whatever_its_score_does():
+def test_a_match_which_is_off_says_nothing_of_goals_whatever_its_score_does(london):
     _, seen = _events(None, _match("in", "first_half", 1, 0))
     said, off = _events(seen, _match("post", "off", 0, 0))
-    assert said == []
+    # Only that it is off: no goal ruled out, no full time.
+    assert said == [("starting", "Stevenage's match against Notts County today is off.")]
     assert (off["state"], off["phase"], off["home"], off["away"]) == ("post", "off", 0, 0)
-    assert _events(seen, _match("post", "off", 2, 0))[0] == []
+    assert _events(off, _match("post", "off", 2, 0))[0] == []
     # Scores Home Assistant can no longer read arrive as none, which isn't 0-0.
-    assert _events(seen, _match("post", "off"))[0] == []
+    assert _events(off, _match("post", "off"))[0] == []
 
 
 def test_a_match_which_comes_back_from_being_off_is_taken_as_it_stands():
@@ -565,14 +587,130 @@ def test_a_match_which_comes_back_from_being_off_is_taken_as_it_stands():
     assert _events(seen, _match("in", "first_half", 1, 1))[0] == [("goals", "Goal for Stevenage. Notts County 1, Stevenage 1.")]
 
 
-def test_a_match_which_is_off_in_play_and_then_back_is_taken_as_it_stands():
+def test_a_match_which_is_off_in_play_and_then_back_is_taken_as_it_stands(london):
     # Off and still "in", with no scores: the goal is not 0-0 to 1-0 when the match is back, whatever its state was.
     _, seen = _events(None, _match("in", "first_half", 1, 0))
     said, seen = _events(seen, _match("in", "off"))
-    assert said == [] and seen["phase"] == "off"
+    assert said == [("starting", "Stevenage's match against Notts County today is off.")] and seen["phase"] == "off"
     said, seen = _events(seen, _match("in", "first_half", 1, 0))
     assert said == [] and (seen["home"], seen["away"], seen["phase"]) == (1, 0, "first_half")
     assert _events(seen, _match("in", "first_half", 1, 1))[0] == [("goals", "Goal for Stevenage. Notts County 1, Stevenage 1.")]
+
+
+def _off(minutes, clock="Postponed", state="pre", **more):
+    """Notts County v Stevenage, called off, kicking off minutes from NOW (two hours ago if not given)."""
+    return _match(state, "off", minutes=minutes, clock=clock, **more)
+
+
+def test_a_match_which_is_off_is_said_once_at_the_warning_time():
+    # Not before the time the warning would have come, however long it has been off.
+    said, seen = _events(None, _off(16))
+    assert said == [] and seen["called_off"] is False
+    said, seen = _events(seen, _off(15))
+    assert said == [("starting", POSTPONED)] and seen["called_off"] is True
+    # Nor again at any look after, however near or far past kick-off.
+    for minutes in (14, 1, 0, -1, -60):
+        said, seen = _events(seen, _off(minutes))
+        assert said == [], minutes
+
+
+def test_a_match_which_is_off_is_said_at_the_warning_time_of_the_setting(london):
+    assert _events(None, _off(30), lead=30)[0] == [("starting", POSTPONED)]
+    assert _events(None, _off(31), lead=30)[0] == []
+
+
+def test_a_match_which_is_off_is_said_when_first_seen_after_the_warning_time():
+    # Like the warning, said whether first seen 15 minutes away or 4.
+    assert _events(None, _off(4.5))[0] == [("starting", POSTPONED)]
+    # And after a gap in looking, with a record from long before.
+    _, seen = _events(None, _off(40))
+    assert _events({**seen, "at": NOW - 3600}, _off(10))[0] == [("starting", POSTPONED)]
+
+
+def test_a_match_which_is_off_is_said_as_tonight_in_the_evening(london):
+    # 19:00 on the day of NOW, for a kick-off at 19:15.
+    said, _ = events(None, _off(11 * 60 + 15), NOW + 11 * 3600, 900, {"285"})
+    assert [(event.kind, event.message) for event in said] == [
+        ("starting", "Stevenage's match against Notts County tonight is postponed.")]
+
+
+def test_a_match_which_is_off_names_the_followed_team_first(london):
+    away = _off(10, home="Worksop Town", home_id="bbc:worksop", away="South Shields", away_id="18312")
+    # A name ending in s takes the apostrophe alone.
+    assert _events(None, away, followed=("18312",))[0] == [
+        ("starting", "South Shields' match against Worksop Town today is postponed.")]
+    assert _events(None, _off(10), followed=("340",))[0] == [("starting", "Notts County's match against Stevenage today is postponed.")]
+    assert _events(None, _off(10), followed=("340", "285"))[0] == [
+        ("starting", "Notts County's match against Stevenage today is postponed.")]
+
+
+@pytest.mark.parametrize("clock, said", [
+    ("Postponed", "is postponed"), ("Cancelled", "is cancelled"), ("Canceled", "is cancelled"), ("Abandoned", "was abandoned"),
+    ("Suspended", "is off"), ("", "is off")])
+def test_each_word_for_a_match_which_is_off_is_said_in_plain_words(clock, said):
+    message = _events(None, _off(10, clock=clock))[0][0][1]
+    assert message == f"Stevenage's match against Notts County today {said}."
+    assert not re.search(r"\d\s*[-\u2010-\u2015\u2212]\s*\d", message)
+
+
+@pytest.mark.parametrize("state", ["pre", "in", "post"])
+def test_a_match_found_off_after_kickoff_is_said_once_when_first_seen_if_it_is_still_today(london, state):
+    said, seen = _events(None, _off(-30, state=state))
+    assert said == [("starting", POSTPONED)]
+    assert _events(seen, _off(-29, state=state))[0] == []
+    # One whose kick-off was yesterday (10 hours before NOW is 22:00 the evening before) is no news today.
+    said, seen = _events(None, _off(-600, state=state))
+    assert said == [] and seen["called_off"] is False
+
+
+def test_a_match_called_off_is_never_a_warning_a_kickoff_or_anything_else(london):
+    said, seen, everything = [], None, []
+    # Looks from an hour before kick-off to an hour after, as a match found off is looked at all the while.
+    for minutes in (60, 30, 16, 15, 14, 10, 1, 0, -1, -30, -60):
+        said, seen = _events(seen, _off(minutes))
+        everything += said
+    assert everything == [("starting", POSTPONED)]
+    assert not any(" in " in message or "play" in message for _, message in everything)
+
+
+def test_a_match_which_is_off_in_play_is_said_once_as_abandoned_and_never_as_full_time(london):
+    _, seen = _events(None, _match("in", "second_half", 1, 0))
+    said, seen = _events(seen, _match("in", "off", 1, 0, clock="Abandoned"))
+    assert said == [("starting", ABANDONED)]
+    # Whatever the match goes on to say: over, with or without a phase, its score going down or up.
+    for after in (_match("post", "off", 1, 0, clock="Abandoned"), _match("post", "full_time", 1, 0, winner="home"),
+                  _match("post", "off", 0, 0, clock="Abandoned"), _match("in", "off", 2, 0, clock="Abandoned")):
+        said, seen = _events(seen, after)
+        assert not any("Full time" in message or "ruled out" in message or "Goal" in message for _, message in said)
+    assert said == []
+
+
+def test_a_match_first_seen_abandoned_in_play_is_said_once(london):
+    said, seen = _events(None, _match("in", "off", 1, 0, clock="Abandoned"))
+    assert said == [("starting", ABANDONED)]
+    assert _events(seen, _match("post", "off", 1, 0, clock="Abandoned"))[0] == []
+
+
+def test_a_match_which_goes_off_comes_back_and_goes_off_again_is_said_once(london):
+    _, seen = _events(None, _match("in", "first_half", 0, 0))
+    said, seen = _events(seen, _off(-120, state="in"))
+    assert said == [("starting", POSTPONED)]
+    assert _events(seen, _match("in", "first_half", 0, 0))[0] == []
+    assert _events(seen, _off(-120, state="in"))[0] == []
+
+
+def test_a_match_which_is_back_after_being_off_still_gets_its_warning():
+    # Off a long way before kick-off, which says nothing yet; back on within the lead, it is about to start.
+    _, seen = _events(None, _off(60))
+    said, seen = _events(seen, _match(minutes=10))
+    assert said == [("starting", "Stevenage play Notts County in 10 minutes.")]
+
+
+def test_a_record_from_before_called_off_was_kept_has_none_said():
+    _, seen = _events(None, _match(minutes=40))
+    old = {key: value for key, value in seen.items() if key != "called_off"}
+    said, seen = _events(old, _off(10))
+    assert said == [("starting", POSTPONED)] and seen["called_off"] is True
 
 
 def test_a_look_with_no_phase_known_keeps_the_phase_of_a_record_however_old():
@@ -1437,3 +1575,110 @@ def _person(state, person_id="person.n"):
         "no state", "unreachable", "not json", "wrong shape"])
 def test_user_home(found, expected):
     assert user_home(FakePeople(found)) is expected
+
+
+def test_a_match_which_is_off_is_said_once_across_restarts(tmp_path, london):
+    rig = Rig(tmp_path)
+    rig.look(_team("285", "Stevenage", now=_off(10)))
+    assert rig.said == [POSTPONED]
+    rig.look(_team("285", "Stevenage", now=_off(10)), at=NOW + 30)
+    assert rig.said == [POSTPONED] and rig.choices.seen("401")["called_off"] is True
+    # A new watcher on the same file, as after a restart, before, at and after kick-off.
+    for at in (NOW + 60, NOW + 600, NOW + 3600):
+        again = Rig(tmp_path)
+        again.look(_team("285", "Stevenage", now=_off(10)), at=at)
+        assert again.said == []
+
+
+def test_a_match_which_is_off_is_said_when_it_comes_to_the_warning_time_not_when_it_is_first_seen(tmp_path):
+    rig = Rig(tmp_path)
+    # Off since the day before, as the head of next, a day away: nothing yet, and nothing at each look until then.
+    off = _off(24 * 60)
+    for at in (NOW, NOW + 6 * 3600, NOW + 86400 - 1200):
+        rig.look(_team("285", "Stevenage", next=(off,)), at=at)
+        assert rig.said == []
+    # And it is the same match as it moves from next to now at midnight.
+    rig.look(_team("285", "Stevenage", now=off), at=NOW + 86400 - 900)
+    assert rig.said == ["Stevenage's match against Notts County today is postponed."]
+    rig.look(_team("285", "Stevenage", now=off), at=NOW + 86400 - 870)
+    assert len(rig.said) == 1
+
+
+def test_a_match_which_is_off_is_said_from_the_head_of_next_too(tmp_path):
+    rig = Rig(tmp_path)
+    rig.look(_team("285", "Stevenage", next=(_off(10),)))
+    assert rig.said == [POSTPONED]
+
+
+def test_a_match_off_in_both_followed_teams_is_said_once(tmp_path):
+    rig = Rig(tmp_path)
+    rig.look(_team("285", "Stevenage", now=_off(10)), _team("340", "Notts County", now=_off(10)))
+    assert rig.said == ["Notts County's match against Stevenage today is postponed."]
+
+
+def test_a_match_which_is_off_is_under_the_starting_switch(tmp_path):
+    rig = Rig(tmp_path)
+    rig.choices.set("285", "Stevenage", "starting", False)
+    rig.look(_team("285", "Stevenage", now=_off(10)))
+    assert rig.said == []
+    # The switch is read each time: back on, it is still not said for this match, as it was dropped, not held.
+    rig.choices.set("285", "Stevenage", "starting", True)
+    rig.look(_team("285", "Stevenage", now=_off(10)), at=NOW + 30)
+    assert rig.said == []
+    # Another switch, off, makes no difference, and the other team's being on is enough for a match they share.
+    other = Rig(tmp_path / "goals")
+    other.choices.set("285", "Stevenage", "goals", False)
+    other.look(_team("285", "Stevenage", now=_off(10)))
+    assert other.said == [POSTPONED]
+    shared = Rig(tmp_path / "shared")
+    shared.choices.set("285", "Stevenage", "starting", False)
+    shared.look(_team("285", "Stevenage", now=_off(10)), _team("340", "Notts County", now=_off(10)))
+    assert shared.said == ["Notts County's match against Stevenage today is postponed."]
+
+
+def test_a_match_which_is_off_is_not_said_in_quiet_hours_or_to_a_user_who_is_out_and_never_later(tmp_path):
+    for place, rig in enumerate((Rig(tmp_path / "quiet", quiet=True), Rig(tmp_path / "out", at_home=False),
+                                 Rig(tmp_path / "unsaid", can_say=False))):
+        rig.look(_team("285", "Stevenage", now=_off(10)))
+        assert rig.said == [], place
+        # Quiet hours over, the user back, a satellite connected: it is dropped, not held for later.
+        rig.quiet, rig.at_home, rig.can_say = False, True, True
+        rig.look(_team("285", "Stevenage", now=_off(10)), at=NOW + 60)
+        rig.look(_team("285", "Stevenage", now=_off(-20, state="post")), at=NOW + 1800)
+        assert rig.said == [], place
+    # Home Assistant not able to say where the user is doesn't stop it, as for any other.
+    unsure = Rig(tmp_path / "unsure", at_home=None)
+    unsure.look(_team("285", "Stevenage", now=_off(10)))
+    assert unsure.said == [POSTPONED]
+
+
+def test_a_match_abandoned_in_play_is_said_once_and_not_as_full_time(tmp_path, london):
+    rig = Rig(tmp_path)
+    rig.look(_team("285", "Stevenage", now=_match("in", "second_half", 1, 0)))
+    rig.look(_team("285", "Stevenage", now=_match("in", "off", 1, 0, clock="Abandoned")), at=NOW + 30)
+    rig.look(_team("285", "Stevenage", now=_match("post", "off", 1, 0, clock="Abandoned")), at=NOW + 60)
+    rig.look(_team("285", "Stevenage", now=_match("post", "off", 1, 0, clock="Abandoned")), at=NOW + 90)
+    assert rig.said == [ABANDONED]
+
+
+def test_a_match_first_found_off_after_kickoff_is_said_once_and_never_after_the_day(tmp_path, london):
+    rig = Rig(tmp_path)
+    rig.look(_team("285", "Stevenage", now=_off(-45)))
+    rig.look(_team("285", "Stevenage", now=_off(-45)), at=NOW + 30)
+    assert rig.said == [POSTPONED]
+    # One whose kick-off was the day before is left alone: nothing said, and no record that it was.
+    late = Rig(tmp_path / "late")
+    late.look(_team("285", "Stevenage", now=_off(-600)))
+    assert late.said == [] and late.choices.seen("401")["called_off"] is False
+
+
+def test_a_called_off_match_leaves_a_record_a_restart_reads_back(tmp_path):
+    rig = Rig(tmp_path)
+    rig.look(_team("285", "Stevenage", now=_off(10)))
+    on_disk = json.loads((tmp_path / "football.json").read_text())["seen"]["401"]
+    assert on_disk["called_off"] is True and on_disk["phase"] == "off"
+    assert FootballChoices(str(tmp_path / "football.json")).seen("401")["called_off"] is True
+    # A hand-edited record whose flag isn't true or false is no record, as with the others.
+    on_disk["called_off"] = "yes"
+    (tmp_path / "football.json").write_text(json.dumps({"seen": {"401": on_disk}}))
+    assert FootballChoices(str(tmp_path / "football.json")).seen("401") is None

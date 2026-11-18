@@ -1,6 +1,7 @@
 """
 Football Watch Module
-What Nova says by itself about a followed team's match, from decision 7 of docs/decisions/0014.
+What Nova says by itself about a followed team's match, from decision 7 of docs/decisions/0014, and, from decision 2
+of docs/decisions/0024, that a match is called off.
 
 Two pure parts: FootballChoices, which keeps which announcements are switched on for which
 team and what was last seen of each match, and events, which says what a change in a match
@@ -8,8 +9,9 @@ means. The third is FootballWatcher, the thread which reads Home Assistant (see 
 for what it says and when it can't be trusted), works out with events what is due, and says it.
 
 Neither FootballChoices nor events reads the clock or Home Assistant: events is given the time
-and the match, so it says the same in any time zone, and says only what the match shows - the
-names and scores Home Assistant gave, never a scorer or a result worked out from anything else.
+and the match, so it says the same in any time zone (bar the one thing which is a day of the machine's own: whether
+a match which is off was to be played today, and "today" or "tonight" in what is said of it), and says only what the
+match shows - the names and scores Home Assistant gave, never a scorer or a result worked out from anything else.
 """
 
 import copy
@@ -18,11 +20,14 @@ import math
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from voice_assistant.batteries import HOME_FAILURES
 from voice_assistant.choices import ChoiceStore
 from voice_assistant.football import Football, FootballUnavailable, Match, Reading, _is_whole
+# The underscored name is football_words' own, used here to say a team's match as the answers say it.
+from voice_assistant.football_words import _possessive, called_off_day, called_off_words
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +95,8 @@ def _is_record(record) -> bool:
             and all(record[key] is None or _is_whole(record[key]) for key in ("home", "away"))
             and (record["waiting"] is None or _is_waiting(record["waiting"]))
             and isinstance(record["starting"], bool)
+            # Left out of a record kept before a match being called off was said: none was.
+            and isinstance(record.get("called_off", False), bool)
             and _is_number(record["at"])
             and _is_number(record["kickoff"])
         )
@@ -305,6 +312,16 @@ def _minutes(count: int) -> str:
     return f"{count} minute" if count == 1 else f"{count} minutes"
 
 
+def _followed_first(match: Match, followed: Set[str]) -> Tuple[str, str]:
+    """
+    Gives a match's two sides' names, the followed team first, as it is the one that was asked about: only if just
+    the away side is followed does the order change, so that two followed teams keep the home side first.
+    """
+    if match.away_id in followed and match.home_id not in followed:
+        return match.away, match.home
+    return match.home, match.away
+
+
 def _starting(match: Match, now: float, lead: float, followed: Set[str]) -> Optional[Event]:
     """
     Says that a match which hasn't started is about to.
@@ -322,12 +339,36 @@ def _starting(match: Match, now: float, lead: float, followed: Set[str]) -> Opti
     left = match.kickoff.timestamp() - now
     if match.state != "pre" or _phase_of(match) or match.clock or not 0 < left <= lead:
         return None
-    # The followed team first, as it is the one that was asked about: only if just the away side
-    # is followed does the order change, so that two followed teams keep the home side first.
-    first, second = match.home, match.away
-    if match.away_id in followed and match.home_id not in followed:
-        first, second = second, first
+    first, second = _followed_first(match, followed)
     return Event("starting", f"{first} play {second} in {_minutes(math.ceil(left / 60))}.")
+
+
+def _called_off(match: Match, now: float, lead: float, followed: Set[str]) -> Optional[Event]:
+    """
+    Says that a match is off (postponed, cancelled or abandoned), at the time the warning of its start would have
+    come, so it is under the same switch as that warning ("starting").
+
+    Args:
+        match: The match.
+        now: The time, in epoch seconds.
+        lead: Seconds before kick-off the warning of its start comes at.
+        followed: The ids of the followed teams in the match.
+
+    Returns:
+        The event, e.g. "South Shields' match against Harborough Town tonight is postponed.", or None unless the match
+        is off and it is time: it kicks off within the lead, or it kicked off earlier today (a match found off only
+        then, or called off after it started, is news when it is first seen, though one from before today is not, as
+        the day is the machine's own). Whether it has been said already is the caller's to decide.
+    """
+    if _phase_of(match) != "off":
+        return None
+    kickoff = match.kickoff.timestamp()
+    left = kickoff - now
+    if left > lead or (left <= 0 and datetime.fromtimestamp(kickoff).date() != datetime.fromtimestamp(now).date()):
+        return None
+    first, second = _followed_first(match, followed)
+    day = called_off_day(match.kickoff, datetime.fromtimestamp(now).astimezone())
+    return Event("starting", f"{_possessive(first)} match against {second} {day} {called_off_words(match.clock)}.")
 
 
 def _goals(before: Dict, match: Match, reported: Optional[float], over: bool = False) -> Tuple[Optional[Event], Dict]:
@@ -458,7 +499,8 @@ def events(
     than the record's, or no score where it had one) is passed over, the record keeping all
     but the time of the look; a score which has gone down waits for a reading about two minutes later (see _goals);
     and a look with no known phase doesn't take the record's away, however old the record. A match
-    which is off says nothing, and one which comes back from off is taken as it stands. A lower score waiting
+    which is off is said to be, once (see _called_off), and says nothing else, never a warning, a goal or full time;
+    one which comes back from off is taken as it stands. A lower score waiting
     when the reading which ends the match arrives and shows it is said as a goal ruled out, before full time.
 
     Args:
@@ -475,8 +517,8 @@ def events(
     Returns:
         The events in the order to say them - goals first, then one of half time, the second
         half or full time - and the record to keep: the match as it is now, {"home", "away",
-        "waiting", "phase", "state", "starting", "at", "kickoff"}, with "at" always the time of
-        this look. It keeps from before whether starting has been said, and the higher score
+        "waiting", "phase", "state", "starting", "called_off", "at", "kickoff"}, with "at" always the time of
+        this look. It keeps from before whether starting and a match being off have been said, and the higher score
         and the phase where the look can't be trusted to take them.
     """
     phase = _phase_of(match)
@@ -491,6 +533,13 @@ def events(
         if event:
             said.append(event)
             starting = True
+    # Said once and for good, so a match which goes off, comes back and goes off again isn't said twice.
+    called_off = bool(before and before.get("called_off"))
+    if not called_off:
+        event = _called_off(match, now, lead, followed)
+        if event:
+            said.append(event)
+            called_off = True
 
     kept_phase = phase
     scores = {"home": match.home_score, "away": match.away_score, "waiting": None}
@@ -517,6 +566,7 @@ def events(
         "phase": kept_phase,
         "state": match.state,
         "starting": starting,
+        "called_off": called_off,
         "at": now,
         "kickoff": match.kickoff.timestamp(),
     }
@@ -550,7 +600,8 @@ def user_home(home) -> Optional[bool]:
 class FootballWatcher:
     """
     Looks at the followed teams' matches every 30 seconds or so, and says what is due: that a match
-    is about to start, a goal, half time, the second half and full time (decision 7 of docs/decisions/0014).
+    is about to start, a goal, half time, the second half and full time (decision 7 of docs/decisions/0014), or that
+    a match is off (decision 2 of docs/decisions/0024), under the switch for a match being about to start.
 
     Each is said on the default satellite, but not in quiet hours and not while Home Assistant says
     the user is out. One which can't be said is dropped and logged, never held for later.

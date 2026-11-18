@@ -9,7 +9,8 @@ decisions 2 to 4 of docs/decisions/0019 (odds said only where Home Assistant loo
 not-found line, and a team asked against itself), decisions 2 and 6 of docs/decisions/0021 (what happened in last
 night's match with no team named, and BBC Sport named in the not-found line where its results were read), and decision
 2 of docs/decisions/0023 (the nearest names among a team's opponents, said after a not-found line so that Claude asks
-"Did you mean ...?" rather than guess another team).
+"Did you mean ...?" rather than guess another team), and decision 2 of docs/decisions/0024 (a match which is off said in
+plain words: "is postponed", "is cancelled", "was abandoned").
 
 Nova gives Claude plain text built from what Home Assistant returned, not Home Assistant's
 JSON: the full names, the kick-off as a local day and time, the ground, the odds and who
@@ -75,6 +76,9 @@ _PHASE_WORDS = {
     "extra_time": "extra time", "penalties": "penalties", "full_time": "full time",
 }
 _OFF = "off"
+
+# The hour from which a match which is today is said to be "tonight" and not "today".
+_EVENING = 17
 
 # The events which put a goal on the board, as the Contract has them. A penalty missed and a red card don't.
 _SCORING = ("goal", "penalty", "own_goal")
@@ -173,6 +177,45 @@ def _on(day: date, now: datetime) -> str:
     return said if said in ("today", "tomorrow") else f"on {said}"
 
 
+def called_off_day(kickoff: datetime, now: datetime) -> str:
+    """
+    The day a match which is off was to be played, as it is said: "tonight" for one today from five in the evening,
+    "today" for one earlier in the day, "tomorrow", or "on Saturday the 21st of November".
+
+    Args:
+        kickoff: When it was to kick off, aware.
+        now: The current time, aware.
+
+    Returns:
+        The words, with no time in them.
+    """
+    local = kickoff.astimezone()
+    day = _on(local.date(), now)
+    return "tonight" if day == "today" and local.hour >= _EVENING else day
+
+
+def called_off_words(clock: str) -> str:
+    """
+    What is said of a match which is off, from the source's own word for it (its clock). Nova keeps no list of the
+    words a source might use: the three the Contract has are told apart, and any other is just "off".
+
+    Args:
+        clock: The match's clock: "Postponed", "Cancelled" (or ESPN's "Canceled"), "Abandoned", or any other word or
+            none, in any case.
+
+    Returns:
+        "is postponed", "is cancelled", "was abandoned" (a match is only abandoned once it has started), or "is off".
+    """
+    word = clock.strip().lower()
+    if word.startswith("postpone"):
+        return "is postponed"
+    if word.startswith("cancel"):
+        return "is cancelled"
+    if word.startswith("abandon"):
+        return "was abandoned"
+    return "is off"
+
+
 def _the(name: str, capital: bool = False) -> str:
     """A competition's name with "the" in front, e.g. "the Carabao Cup", unless it has one already."""
     said = name if name.lower().startswith("the ") else f"the {name}"
@@ -252,8 +295,9 @@ def said_match(match: Match, now: datetime) -> str:
         Liverpool 55, draw 23, Manchester United 22." to come, "Notts County 0, Stevenage 1, EFL
         League One, in play, second half, 67'." in play, "Crystal Palace 1, Liverpool 3, Premier
         League, on Sunday the 8th of November. Liverpool won." when over, or "Notts County v
-        Stevenage, EFL League One, on Saturday the 21st of November: off (Postponed)." The
-        odds are said only before kick-off, and the ground wherever there is one.
+        Stevenage, EFL League One, on Saturday the 21st of November at 3:00 PM, is postponed." for one which is off
+        (or "is cancelled", "was abandoned", "is off", by its clock; "tonight" for one today from five in the
+        evening). The odds are said only before kick-off, and the ground wherever there is one.
 
     Raises:
         KeyError: If the odds of a match to come lack a chance.
@@ -262,8 +306,9 @@ def said_match(match: Match, now: datetime) -> str:
     local = match.kickoff.astimezone()
     day = _on(local.date(), now)
     if _is_off(match):
-        off = f"{match.home} v {match.away}, {match.league}, {day}: off"
-        return f"{off} ({match.clock})." if match.clock else f"{off}."
+        # Not its odds or its ground, as it isn't being played; its time is the one it was to be played at.
+        when = f"{called_off_day(match.kickoff, now)} at {spoken_clock_time(local.hour, local.minute)}"
+        return f"{match.home} v {match.away}, {match.league}, {when}, {called_off_words(match.clock)}."
     where = f", at {match.venue}" if match.venue else ""
     if _to_come(match):
         text = f"{match.home} v {match.away}, {match.league}, {day} at {spoken_clock_time(local.hour, local.minute)}{where}."

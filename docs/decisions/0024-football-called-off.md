@@ -1,6 +1,6 @@
 # 0024: Football, round eight: a called-off match is said
 
-17 November 2026 · Agreed with the user in chat ("yes to both") · Approved, being built
+17 November 2026 · Agreed with the user in chat ("yes to both") · Built
 
 **Context.** South Shields v Harborough Town (17 November, 19:45) was postponed. Home Assistant's script dropped the match as soon as BBC Sport marked it, so the card on the Home views lost it, no warning was given (rightly), and asked about South Shields at 20:17 Nova said they weren't playing and named their next match: nothing said it was postponed. Nova already says a match that is off ("off (Postponed)") where Home Assistant gives one; the script never gives one for a followed team's day.
 
