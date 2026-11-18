@@ -1227,6 +1227,355 @@ def test_watchers_hear_each_change(brain, connect, make_session, caplog):
     thread.join(5)
 
 
+# Asked by typing, in Home Assistant - see docs/decisions/0025
+
+def _waiting_for_a_typed_answer(session):
+    """Whether a typed question is left open for its answer, with its turn over - so nothing waits on it."""
+    return session._typed_question is not None and session._idle.is_set() and session.activity == "idle"
+
+
+def test_a_typed_request_is_answered_without_the_microphone(brain, connect, make_session, caplog):
+    caplog.set_level(logging.DEBUG)
+    satellite, pi = connect()
+    session = make_session(satellite)
+    session.conversation = ScriptedConversation(Reply(say="It's ten o'clock."))
+    seen = []
+    session.watch(lambda: seen.append(session.activity))
+    thread = running(session)
+
+    session.ask("What time is it?")
+    assert wait_for(lambda: pi.messages("allow") and session._idle.is_set())
+
+    # Heard as speech is, after speech-to-text, and said out loud - with no listening
+    # sound, and the satellite never asked to listen.
+    assert session.conversation.heard == [("What time is it?", False)]
+    assert session.heard == "What time is it?"
+    assert brain.tts.said == ["It's ten o'clock."] and len(pi.messages("play_stream")) == 1
+    assert pi.messages("listen") == [] and pi.messages("play_sound") == [] and brain.stt.made == []
+    # Thinking from the start, as there's nothing to listen to.
+    assert seen[0] == "thinking" and "listening" not in seen
+    # What was typed is logged only as what's heard is, so the transcripts setting decides.
+    typed = [record for record in caplog.records if "What time is it?" in record.getMessage()]
+    assert all(getattr(record, "transcript", False) for record in typed)
+    pi.go()
+    thread.join(5)
+
+
+def test_a_typed_request_is_cut_to_the_longest_and_a_blank_one_dropped(make_session):
+    session = make_session()
+    session.ask("   ")
+    session.ask("")
+    session.ask("  " + "a" * (session_module.ASK_MOST + 20) + "  ")
+    assert session._typed.get_nowait()[0] == "a" * session_module.ASK_MOST
+    assert session._typed.empty()
+
+
+def test_a_typed_request_waits_for_the_turn_in_progress(brain, connect, make_session):
+    satellite, pi = connect()
+    session = make_session(satellite)
+    session.conversation = ScriptedConversation(Reply(say="Today, you've got..."), Reply(say="Okay."))
+    brain.stt.texts = ["What's on today?"]
+    # The first reply plays on until the test lets it finish.
+    pi.held = {1}
+    thread = running(session)
+
+    pi.wake(said())
+    assert wait_for(lambda: pi.messages("play_stream"))
+    session.ask("Next one.")
+    time.sleep(3 * session_module.WAKE_CHECK)
+    # Not answered over the reply, nor does it stop it.
+    held = pi.messages("play_stream")[0]["id"]
+    assert session.conversation.heard == [("What's on today?", False)]
+    assert not any(message.get("id") == held for message in pi.messages("stop"))
+
+    pi.say("played", id=held)
+    assert wait_for(lambda: len(session.conversation.heard) == 2 and session._idle.is_set())
+    assert session.conversation.heard == [("What's on today?", False), ("Next one.", False)]
+    assert brain.tts.said == ["Today, you've got...", "Okay."]
+    assert not any(message.get("id") == held for message in pi.messages("stop"))
+    pi.go()
+    thread.join(5)
+
+
+def test_a_question_after_a_typed_request_takes_a_typed_answer(brain, connect, make_session):
+    satellite, pi = connect()
+    session = make_session(satellite)
+    session.conversation = ScriptedConversation(Reply(say="Which room?", listen_again=True),
+                                                Reply(say="The kitchen lights are on."))
+    thread = running(session)
+
+    session.ask("Turn the lights on.")
+    assert wait_for(lambda: _waiting_for_a_typed_answer(session))
+    session.ask("The kitchen.")
+    assert wait_for(lambda: len(brain.tts.said) == 2 and session._idle.is_set())
+
+    # The answer, in the same conversation, which isn't started again for it - so a typed
+    # "yes" confirms - and the microphone stays shut throughout.
+    assert session.conversation.heard == [("Turn the lights on.", False), ("The kitchen.", True)]
+    assert session.conversation.started == [False]
+    assert pi.messages("listen") == [] and pi.messages("play_sound") == []
+    assert session._typed_question is None
+    pi.go()
+    thread.join(5)
+
+
+def test_an_answer_typed_while_the_question_is_said_is_taken(brain, connect, make_session):
+    # A long question - typed straight back before it has finished, the answer still counts.
+    satellite, pi = connect()
+    session = make_session(satellite)
+    session.conversation = ScriptedConversation(Reply(say="I've found three lights. Which room?", listen_again=True),
+                                                Reply(say="The kitchen lights are on."))
+    pi.held = {1}
+    thread = running(session)
+
+    session.ask("Turn the lights on.")
+    assert wait_for(lambda: pi.messages("play_stream"))
+    session.ask("The kitchen.")
+    time.sleep(0.2)
+    question = pi.messages("play_stream")[0]["id"]
+    # The question isn't cut short for it.
+    assert not any(message.get("id") == question for message in pi.messages("stop"))
+    pi.say("played", id=question)
+
+    assert wait_for(lambda: len(brain.tts.said) == 2 and session._idle.is_set())
+    assert session.conversation.heard == [("Turn the lights on.", False), ("The kitchen.", True)]
+    assert pi.messages("listen") == []
+    pi.go()
+    thread.join(5)
+
+
+def test_a_typed_answer_ends_a_spoken_follow_up(brain, connect, make_session):
+    satellite, pi = connect()
+    session = make_session(satellite)
+    session.conversation = ScriptedConversation(Reply(say="Which room?", listen_again=True),
+                                                Reply(say="The kitchen lights are on."))
+    # What speech-to-text would have made of the answer, had it been listened to the end.
+    brain.stt.texts = ["Turn the lights on.", "The hall."]
+    thread = running(session)
+
+    pi.wake(said())
+    # Nothing is said back, so the listen stays open until the typed answer ends it.
+    assert wait_for(lambda: pi.messages("listen"))
+    session.ask("The kitchen.")
+    assert wait_for(lambda: len(brain.tts.said) == 2 and session._idle.is_set())
+
+    assert session.conversation.heard == [("Turn the lights on.", False), ("The kitchen.", True)]
+    # That listen was ended there and then, and its transcription let go of.
+    recording = pi.messages("listen")[0]["recording"]
+    assert any(message.get("recording") == recording for message in pi.messages("stop_listening"))
+    assert brain.stt.made[1].cancelled and brain.stt.made[1].finished_with is None
+    assert len(pi.messages("listen")) == 1
+    pi.go()
+    thread.join(5)
+
+
+def test_typed_requests_work_while_muted(brain, connect, make_session):
+    # Typing uses no microphone, so mute - "Nova doesn't listen" - doesn't stop it.
+    satellite, pi = connect()
+    session = make_session(satellite)
+    session.set_muted(True)
+    session.conversation = ScriptedConversation(Reply(say="It's ten o'clock."))
+    thread = running(session)
+
+    session.ask("What time is it?")
+    assert wait_for(lambda: pi.messages("allow") and session._idle.is_set())
+    assert session.conversation.heard == [("What time is it?", False)]
+    assert brain.tts.said == ["It's ten o'clock."] and len(pi.messages("play_stream")) == 1
+    assert pi.messages("listen") == [] and pi.messages("play_sound") == []
+    assert session.muted
+    pi.go()
+    thread.join(5)
+
+
+def test_no_typed_answer_ends_the_turn_quietly(brain, connect, make_session, monkeypatch):
+    monkeypatch.setattr(session_module, "TYPED_ANSWER_WAIT", 0.2)
+    satellite, pi = connect()
+    session = make_session(satellite)
+    session.conversation = ScriptedConversation(Reply(say="Which room?", listen_again=True), Reply(say="Okay."))
+    thread = running(session)
+
+    session.ask("Turn the lights on.")
+    # Left open, then given up on once its time is up.
+    assert wait_for(lambda: session._typed_question is not None)
+    assert wait_for(lambda: pi.messages("allow") and session._idle.is_set())
+    assert wait_for(lambda: session._typed_question is None)
+    assert session.conversation.heard == [("Turn the lights on.", False)]
+    # Nothing more is said, nor any sound played, and nothing listened for.
+    assert brain.tts.said == ["Which room?"]
+    assert pi.messages("play_sound") == [] and pi.messages("listen") == []
+    assert session.activity == "idle"
+
+    # And something typed after it is a fresh request, in a conversation of its own.
+    session.ask("Never mind.")
+    assert wait_for(lambda: len(session.conversation.heard) == 2)
+    assert session.conversation.heard[1] == ("Never mind.", False)
+    assert session.conversation.started == [False, False]
+    pi.go()
+    thread.join(5)
+
+
+def test_a_typed_answer_wait_ends_when_the_satellite_goes(brain, connect, make_session, caplog):
+    satellite, pi = connect()
+    session = make_session(satellite)
+    session.conversation = ScriptedConversation(Reply(say="Which room?", listen_again=True))
+    thread = running(session)
+
+    session.ask("Turn the lights on.")
+    assert wait_for(lambda: _waiting_for_a_typed_answer(session))
+    pi.go()
+    thread.join(2)
+
+    assert not thread.is_alive()
+    assert [record for record in caplog.records if record.levelno >= logging.ERROR] == []
+
+
+def test_a_timer_rings_while_a_typed_answer_is_awaited(brain, connect, make_session):
+    # Waiting in the turn, a timer went off up to a minute late while nobody typed.
+    satellite, pi = connect()
+    session = make_session(satellite)
+    session.conversation = ScriptedConversation(Reply(say="Shut down the PC?", listen_again=True),
+                                                Reply(say="Shutting it down."))
+    thread = running(session)
+
+    session.ask("Shut down my PC.")
+    assert wait_for(lambda: _waiting_for_a_typed_answer(session))
+    rang = []
+    ringing = threading.Thread(target=lambda: rang.append(session.announce("Your timer's done.", ringing=True)),
+                               daemon=True)
+    ringing.start()
+    ringing.join(3)
+    assert rang == [True] and "Your timer's done." in brain.tts.said
+
+    # The answer still counts, in the conversation which asked.
+    session.ask("Yes.")
+    assert wait_for(lambda: len(session.conversation.heard) == 2 and session._idle.is_set())
+    assert session.conversation.heard == [("Shut down my PC.", False), ("Yes.", True)]
+    assert session.conversation.started == [False]
+    assert brain.tts.said[-1] == "Shutting it down."
+    pi.go()
+    thread.join(5)
+
+
+def test_a_wake_word_clears_a_typed_question(brain, connect, make_session):
+    satellite, pi = connect()
+    session = make_session(satellite)
+    session.conversation = ScriptedConversation(Reply(say="Which room?", listen_again=True), Reply(say="Okay."),
+                                                Reply(say="Sorry?"))
+    brain.stt.texts = ["Stop."]
+    thread = running(session)
+
+    session.ask("Turn the lights on.")
+    assert wait_for(lambda: _waiting_for_a_typed_answer(session))
+    pi.wake(said())
+    assert wait_for(lambda: len(brain.tts.said) == 2 and session._idle.is_set())
+    assert session.conversation.heard == [("Turn the lights on.", False), ("Stop.", False)]
+    assert session._typed_question is None
+
+    # So what's typed next is a fresh request, not that question's answer.
+    session.ask("The kitchen.")
+    assert wait_for(lambda: len(brain.tts.said) == 3 and session._idle.is_set())
+    assert session.conversation.heard[2] == ("The kitchen.", False)
+    assert session.conversation.started == [False, False, False]
+    pi.go()
+    thread.join(5)
+
+
+def test_a_routine_clears_a_typed_question(brain, make_session):
+    # Its conversation of its own drops what a yes to the question would have done.
+    session = make_session()
+    session.music = SimpleNamespace(hold=lambda: None, release=lambda after=0: None)
+    session.conversation = SimpleNamespace(start=lambda: None, run_routine=lambda routine: Reply())
+    session._typed_question = (time.monotonic(), time.monotonic() + 60)
+
+    session.run_routine({"name": "Good morning", "steps": ["what's the weather"]})
+    assert session._typed_question is None
+
+
+def test_an_answer_typed_before_its_question_is_talked_over_is_answered_after(brain, connect, make_session):
+    # Kept as a fresh request rather than lost, once the wake word said over the question is answered.
+    satellite, pi = connect()
+    session = make_session(satellite)
+    session.conversation = ScriptedConversation(Reply(say="I've found three lights. Which room?", listen_again=True),
+                                                Reply(say="Okay."), Reply(say="Sorry?"))
+    brain.stt.texts = ["Stop."]
+    pi.held = {1}
+    thread = running(session)
+
+    session.ask("Turn the lights on.")
+    assert wait_for(lambda: pi.messages("play_stream"))
+    session.ask("The kitchen.")
+    assert wait_for(lambda: session._typed_answer == "The kitchen.")
+    pi.wake(said(), talked_over=True)
+    assert wait_for(lambda: len(session.conversation.heard) == 3 and session._idle.is_set())
+
+    assert session.conversation.heard == [("Turn the lights on.", False), ("Stop.", False), ("The kitchen.", False)]
+    assert session.conversation.started == [False, True, False]
+    pi.go()
+    thread.join(5)
+
+
+def test_something_typed_before_a_typed_question_isnt_its_answer(brain, connect, make_session):
+    # Typed while the first request was still being worked out, before Nova knew it would ask.
+    satellite, pi = connect()
+    session = make_session(satellite)
+    working, let_go = threading.Event(), threading.Event()
+
+    class Slow(ScriptedConversation):
+        def handle(self, text, follow_up=False, timeline=None):
+            if not self.heard:
+                working.set()
+                let_go.wait(5)
+            return super().handle(text, follow_up=follow_up, timeline=timeline)
+
+    session.conversation = Slow(Reply(say="Which room?", listen_again=True), Reply(say="Okay."))
+    thread = running(session)
+
+    session.ask("Turn the lights on.")
+    assert working.wait(5)
+    session.ask("What time is it?")
+    let_go.set()
+    assert wait_for(lambda: len(session.conversation.heard) == 2 and session._idle.is_set())
+
+    # A fresh request, which drops the question.
+    assert session.conversation.heard == [("Turn the lights on.", False), ("What time is it?", False)]
+    assert session.conversation.started == [False, False]
+    assert session._typed_question is None
+    pi.go()
+    thread.join(5)
+
+
+def test_a_typed_request_waits_for_an_announcement_being_said(brain, connect, make_session):
+    # Answered over it, it silenced a Speak, an alert or a routine part way - which then
+    # counted as said, so a battery warning, sent again until it is, was lost.
+    satellite, pi = connect()
+    session = make_session(satellite)
+    session.conversation = ScriptedConversation(Reply(say="It's ten o'clock."))
+    pi.held = {1}
+    thread = running(session)
+    said_out_loud = []
+    announcing = threading.Thread(target=lambda: said_out_loud.append(session.announce("The washing's done.")),
+                                  daemon=True)
+    announcing.start()
+    assert wait_for(lambda: pi.messages("play_stream"))
+
+    session.ask("What time is it?")
+    time.sleep(3 * session_module.WAKE_CHECK)
+    assert pi.messages("silence") == [] and session.conversation.heard == []
+
+    pi.say("played", id=pi.messages("play_stream")[0]["id"])
+    announcing.join(3)
+    assert said_out_loud == [True]
+    assert wait_for(lambda: session.conversation.heard == [("What time is it?", False)] and session._idle.is_set())
+    assert brain.tts.said == ["The washing's done.", "It's ten o'clock."]
+    pi.go()
+    thread.join(5)
+
+
+def test_the_device_is_given_ask(make_session):
+    session = make_session()
+    assert session._device_controls().ask == session.ask
+
+
 # The satellite's device in Home Assistant
 
 def test_home_assistant_sees_and_changes_nova_as_the_settings_page_does(brain, connect, make_session):
@@ -1336,6 +1685,120 @@ def test_home_assistants_stop_is_the_same_code(make_session):
     # can never drift apart.
     session = make_session()
     assert session._device_controls().stop == session.stop_what_rings_and_speaks
+
+
+class StubPlayer:
+    """Stands in for a music player: says what it is playing, and has the one cover and the playlists given."""
+
+    def __init__(self, playing=None):
+        self.playing = playing
+        self.closed = False
+
+    def now_playing(self):
+        return self.playing
+
+    def cover(self):
+        return b"jpeg", "image/jpeg"
+
+    def playlists(self):
+        return ["Gym", "Evening"]
+
+    def close(self):
+        self.closed = True
+
+
+class RecordingActions:
+    """Stands in for the session's actions, keeping what Home Assistant had them do."""
+
+    def __init__(self):
+        self.calls = []
+
+    def control_playback(self, action=None):
+        self.calls.append(("control_playback", action))
+        return {"success": True, "message": "Okay."}
+
+    def play_without_offer(self, query=None, search_type=None):
+        self.calls.append(("play_without_offer", query))
+        return {"success": True, "message": "Playing."}
+
+    def play_playlist(self, name=""):
+        self.calls.append(("play_playlist", name))
+        return {"success": True, "message": "Playing."}
+
+
+@pytest.fixture
+def with_music(brain, monkeypatch, make_session):
+    """Makes a session with a stub player saying what it is playing, and actions that keep what they were asked."""
+    def make(playing=None):
+        player = StubPlayer(playing)
+        monkeypatch.setattr(session_module, "make_player", lambda config, speaker, volume, spotify_speaker=None: player)
+        session = make_session()
+        session.actions = RecordingActions()
+        return session, player
+
+    return make
+
+
+def test_without_a_player_the_device_has_no_music(make_session):
+    controls = make_session()._device_controls()
+    assert controls.now_playing is None and controls.cover is None and controls.playlists is None
+    assert controls.playback is None and controls.play_playlist is None
+
+
+def test_with_a_player_the_device_reads_the_music_from_it(with_music):
+    session, player = with_music({"playing": True, "title": "Song", "artist": "Band"})
+    controls = session._device_controls()
+    assert controls.now_playing() == {"playing": True, "title": "Song", "artist": "Band"}
+    assert controls.cover() == (b"jpeg", "image/jpeg")
+    assert controls.playlists() == ["Gym", "Evening"]
+
+
+def test_play_pause_pauses_what_plays_and_plays_what_does_not(with_music):
+    session, player = with_music({"playing": True})
+    controls = session._device_controls()
+    controls.playback("play_pause")
+    assert session.actions.calls == [("control_playback", "pause")]
+
+    # Paused, or nothing playing at all, it plays - as "play some music" does.
+    for playing in ({"playing": False}, None):
+        player.playing = playing
+        session.actions.calls.clear()
+        controls.playback("play_pause")
+        assert session.actions.calls == [("play_without_offer", None)]
+
+
+def test_next_and_previous_go_through_the_spoken_actions(with_music):
+    session, _ = with_music({"playing": True})
+    controls = session._device_controls()
+    controls.playback("next")
+    controls.playback("previous")
+    assert session.actions.calls == [("control_playback", "skip"), ("control_playback", "previous")]
+
+
+def test_something_else_from_home_assistant_does_nothing(with_music):
+    session, _ = with_music({"playing": True})
+    session._device_controls().playback("rewind")
+    assert session.actions.calls == []
+
+
+def test_a_playlist_from_home_assistant_plays_through_the_actions(with_music):
+    session, _ = with_music()
+    session._device_controls().play_playlist("Gym")
+    assert session.actions.calls == [("play_playlist", "Gym")]
+
+
+def test_what_home_assistant_does_to_the_music_is_logged_without_what_plays(with_music, caplog):
+    session, _ = with_music({"playing": True, "title": "Secret Song"})
+    controls = session._device_controls()
+    with caplog.at_level(logging.INFO):
+        controls.playback("play_pause")
+        controls.playback("next")
+        controls.playback("previous")
+        controls.play_playlist("Private Gym")
+    logged = " ".join(record.getMessage() for record in caplog.records)
+    assert "Play/pause from Home Assistant" in logged
+    assert "Next from Home Assistant" in logged and "Previous from Home Assistant" in logged
+    assert "Secret Song" not in logged and "Private Gym" not in logged
 
 
 def test_stop_never_deletes_a_repeating_alarm(brain, make_session):
