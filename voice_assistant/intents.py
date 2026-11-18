@@ -380,18 +380,17 @@ class LocalIntents:
             # A journey - when to leave, and how long it takes - before the activity rules,
             # whose "when do I ..." would take "when do I need to leave for uni?" for an
             # activity. Only the main phrases, with no time said (see JOURNEY_PLACE): Claude
-            # has the rest, with the same tool. A bare "how long to ..." isn't one, only
-            # "get to", a way of going or a way of travelling, so "how long to boil an egg?"
-            # is Claude's.
+            # has the rest, with the same tool. A "how long" question is only taken when it
+            # names a way of travelling, so "how long to get to work?" is Claude's, who can
+            # tell work from "how long to get to sleep?".
             (rf"(?:what time|when) (?:do i|should i|shall i|do i need to|do i have to) "
              rf"(?:leave|set off|head off)(?: to get)?(?: for| to) {JOURNEY_PLACE}",
              self._journey("driving", leave=True)),
             (rf"how long (?:is|will be) the (?P<verb>drive|walk|cycle) to {JOURNEY_PLACE}", self._journey()),
             (rf"how long (?:does it take |will it take )?to (?P<verb>drive|walk|cycle) to {JOURNEY_PLACE}",
              self._journey()),
-            (rf"how long (?:does it take |will it take )?to (?:get to )?{JOURNEY_PLACE} {JOURNEY_BY}",
+            (rf"how long (?:does it take |will it take )?to get to {JOURNEY_PLACE} {JOURNEY_BY}",
              self._journey("transit")),
-            (rf"how long (?:does it take |will it take )?to get to {JOURNEY_PLACE}", self._journey("driving")),
             # Work, uni and the like, from the calendar - "what time do I have work
             # tomorrow?". Without a day, it's today.
             # "When's gym tomorrow?" too.

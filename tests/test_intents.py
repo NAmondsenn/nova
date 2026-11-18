@@ -784,9 +784,7 @@ def test_when_to_leave_is_heard_without_claude(text, place):
     ("How long to cycle to work?", "work", "cycling"),
     ("How long is the cycle to work?", "work", "cycling"),
     ("How long to get to work by bus?", "work", "transit"),
-    ("How long to work on public transport?", "work", "transit"),
-    ("How long to get to work?", "work", "driving"),
-    ("How long does it take to get to my gran's?", "my gran's", "driving"),
+    ("How long does it take to get to work on public transport?", "work", "transit"),
     ("Please, how long does it take to drive to work", "work", "driving"),
 ])
 def test_how_long_a_journey_takes_is_heard_without_claude(text, place, mode):
@@ -801,6 +799,9 @@ def test_how_long_a_journey_takes_is_heard_without_claude(text, place, mode):
     "How long is left on my timer?", "How long until my alarm?", "What time is it?",
     # No place, or no journey: Claude's.
     "When should I leave?", "How long to boil an egg?",
+    # No way of travelling named: Claude's, who can tell work from sleep.
+    "How long to get to work?", "How long does it take to get to my gran's?", "How long to get to sleep?",
+    "How long to work on public transport?",
     # A time said is left to Claude.
     "What time do I leave to be at work for 9?", "When do I need to leave to get to work for 9?",
 ])
