@@ -35,7 +35,7 @@
   --panel-round: 18px;
   --field-round: 10px;
   /* How far up the toasts sit: clear of an iPhone's home bar - and, while the save bar
-     is on screen, above it (see html.save-bar-shown below). */
+     is shown, above it (see body.save-bar-shown below). */
   --toasts-at: max(24px, env(safe-area-inset-bottom));
   color-scheme: dark;
 }
@@ -51,14 +51,16 @@
 html {
   min-height: 100%;
   background: var(--deep) linear-gradient(180deg, var(--night), var(--deep)) no-repeat;
-  /* So a field tabbed to isn't left under the save bar - --save-bar is its height as
-     drawn, set by followSaveBar in settings.js, and the guess is a line's worth until then. */
+  /* So a field tabbed to isn't left under the save bar, which is fixed to the screen's
+     bottom - --save-bar is its height as drawn, set by followSaveBar in settings.js, and the
+     guess is a line's worth until then. */
   scroll-padding-bottom: calc(var(--save-bar, 84px) + 12px);
 }
 
-/* The save bar is on screen, so the toasts go above it, however tall it is - a long
-   save error takes three lines on a phone. */
-html.save-bar-shown { --toasts-at: calc(var(--save-bar, 84px) + 12px); }
+/* The save bar is shown, so the toasts go above it, however tall it is - a long save error
+   takes three lines on a phone - and the page's end is kept clear of it. */
+body.save-bar-shown { --toasts-at: calc(var(--save-bar, 84px) + 12px); }
+body.save-bar-shown .page { padding-bottom: calc(var(--save-bar, 84px) + 24px); }
 
 body {
   margin: 0;
@@ -1004,6 +1006,14 @@ input[type="range"]:focus-visible::-moz-range-thumb {
 
 .group + .group { border-top: 1px solid var(--hairline); }
 
+/* A section's settings, as the last block of the section - the gap above it is the heading's
+   own where it is all the section has. */
+.settings-of { margin-top: 24px; }
+.heading + .settings-of { margin-top: 0; }
+
+/* A section whose settings have no sub-heading: the fields have the whole width. */
+.group.bare { grid-template-columns: minmax(0, 1fr); }
+
 .group h3 {
   margin: 6px 0 0;
   font-weight: 400;
@@ -1061,21 +1071,43 @@ input[type="range"]:focus-visible::-moz-range-thumb {
 /* A setting changed but not saved yet, marked with a little of Nova's light. */
 .field.changed label { color: var(--starlight); }
 
-/* Kept at the bottom of the screen while the settings are in view, so a change made
-   half-way down a phone's long page is saved, or Nova restarted, there and then. It's
-   solid - the glass, over the bottom of the sky - as the fields scroll by under it,
-   and clear of an iPhone's home bar. */
-.save-bar {
-  position: sticky;
+/* The one save bar, for the settings in every section: fixed to the bottom of the screen,
+   above an iPhone's home bar, while anything is changed and unsaved or a restart is offered
+   (settings.js hides the form otherwise). The form spans the screen without catching a tap,
+   so that from 1,180px the bar itself can sit under the open section's column alone, where
+   the list's column and the page's margins are on the form's padding. It's solid - the glass,
+   over the bottom of the sky - as the page scrolls by under it. */
+.save-form {
+  position: fixed;
+  right: 0;
   bottom: 0;
-  z-index: 1;
+  left: 0;
+  z-index: 5;
+  margin: 0;
+  pointer-events: none;
+}
+
+.save-bar {
   display: flex;
   align-items: center;
   gap: 16px;
-  padding: 14px 16px max(14px, env(safe-area-inset-bottom)) 20px;
-  border-top: 1px solid var(--hairline);
-  border-radius: 0 0 var(--panel-round) var(--panel-round);
+  padding: 14px max(16px, env(safe-area-inset-right)) max(14px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
+  border-top: 1px solid var(--glass-edge);
   background: var(--deep) linear-gradient(var(--glass), var(--glass));
+  pointer-events: auto;
+}
+
+@media (min-width: 1180px) {
+  .save-form {
+    padding-right: calc(max((100% - 1400px) / 2, 0px) + max(32px, env(safe-area-inset-right)));
+    padding-left: calc(max((100% - 1400px) / 2, 0px) + max(32px, env(safe-area-inset-left)) + 384px);
+  }
+
+  .save-bar {
+    border: 1px solid var(--glass-edge);
+    border-bottom: 0;
+    border-radius: var(--panel-round) var(--panel-round) 0 0;
+  }
 }
 
 .save-bar .button {
@@ -1088,10 +1120,6 @@ input[type="range"]:focus-visible::-moz-range-thumb {
   color: var(--dusk);
   font-size: 14px;
 }
-
-/* Stuck to the screen's bottom, mid-form, its rounded corners would show the fields
-   scrolling by behind them - they're only for where it ends the form. */
-.save-bar.stuck { border-radius: 0; }
 
 /* Why a save didn't work, said here too as it stays in view. */
 .save-bar p.bad { color: var(--ember); }
@@ -1871,6 +1899,7 @@ input[type="range"].warmth::-moz-range-progress { background: transparent; }
    which needs a login is - so a device without one sees only the login form, not an
    empty page behind it. */
 .locked .shell,
+.locked .save-form,
 .locked #stop,
 .locked .doing,
 .locked #undos { display: none !important; }

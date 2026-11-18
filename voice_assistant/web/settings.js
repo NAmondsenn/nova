@@ -139,22 +139,15 @@ const VOLUMES = {
   music: { label: "Music", icon: "i-music" },
 };
 
-// The settings, grouped by what they're for. One that's under none of these goes
-// under Other, so a new setting turns up on the page without it changing.
-const GROUPS = [
-  ["Music", ["music.", "navidrome.", "soulsync.", "spotify.", "clean_check.", "new_music."]],
-  ["Wrapped", ["wrapped."]],
-  ["Football", ["football."]],
-  ["Journeys", ["journeys."]],
-  ["Voice", ["voice."]],
-  ["Sounds", ["sounds."]],
-  ["Claude", ["web_search.", "conversation.", "usage."]],
-  ["Home", ["home_assistant.", "mqtt."]],
-  ["Notifications", ["ntfy."]],
-  ["Listening", ["thresholds."]],
-  ["Privacy", ["logging."]],
-  ["Clock displays", ["display."]],
-];
+// The sub-headings inside a section, in the order they are shown: settings_list.js says
+// which one a setting is under, and this says which comes before which where a section has
+// more than one - the order the old groups were in.
+const HEADINGS = ["Music", "Wrapped", "Voice", "Sounds", "Listening", "Home", "Privacy", "Other"];
+
+// Every setting's input or select, wherever it is drawn: each is part of the one settings
+// form by its form attribute, so this is what that form holds - its events don't reach it
+// from outside it, and an input outside it isn't found from it by a selector.
+const SETTING_INPUTS = 'input[form="settings"], select[form="settings"]';
 
 // The night's two settings - quiet hours, which there are none of while they're the same.
 const NIGHT = ["ntfy.quiet_from", "ntfy.quiet_until"];
@@ -216,6 +209,11 @@ let calendars = null;
 
 // What /api/home-choices said last.
 let homeChoices = null;
+
+// What /api/state last said of why Nova's saved settings can't be read, or "" when they can,
+// and the paragraphs which say it, one at the top of each section's settings.
+let settingsProblem = "";
+let problemLines = [];
 
 // Whether the save bar offers to restart Nova rather than to save - once a save has
 // something which waits for a restart, while nothing else is waiting to be saved - and
@@ -765,7 +763,7 @@ function editingSomething() {
   if (open.some((id) => !document.getElementById(id).hidden)) return true;
   return Boolean(document.getElementById("keys").querySelector(".key.open")
     || document.getElementById("page-password").querySelector(".key.open")
-    || document.getElementById("settings").querySelector(".changed"));
+    || settingsChanged());
 }
 
 // Draws part of the page again if what it's drawn from has changed - unless drawing
@@ -2529,31 +2527,59 @@ function pagePasswordTile(state) {
   return form;
 }
 
+// Draws each setting into the block of the section it belongs to, under its sub-heading
+// where it has one. A section with none has its block empty and hidden. Not while any
+// setting, in any section, is being changed.
 function showSettings(settings) {
-  const form = document.getElementById("settings");
-  // Not while they're being changed.
-  if (form.querySelector(".changed, input:focus, select:focus")) return false;
-  const groups = new Map([...GROUPS.map(([name]) => [name, []]), ["Other", []]]);
+  if (settingsChanged() || settingInputs().includes(document.activeElement)) return false;
+  // Each section's settings by sub-heading, in the order Nova gave them.
+  const sections = new Map();
   for (const setting of settings) {
-    const group = GROUPS.find(([, starts]) => starts.some((start) => setting.key.startsWith(start)));
-    groups.get(group ? group[0] : "Other").push(setting);
+    const id = NovaList.sectionOf(setting.key);
+    const heading = NovaList.subheadingOf(setting.key);
+    if (!sections.has(id)) sections.set(id, new Map());
+    const headings = sections.get(id);
+    if (!headings.has(heading)) headings.set(heading, []);
+    headings.get(heading).push(setting);
   }
-  const rows = [];
-  for (const [name, members] of groups) {
-    if (!members.length) continue;
-    const row = element("div", undefined, "group");
-    const title = element("h3", name);
-    title.id = `group-${name.toLowerCase()}`;
-    row.setAttribute("role", "group");
-    row.setAttribute("aria-labelledby", title.id);
-    const fields = element("div", undefined, "fields");
-    fields.append(...members.map(settingField));
-    row.append(title, fields);
-    rows.push(row);
+  problemLines = [];
+  for (const section of NovaList.SECTIONS) {
+    const block = document.querySelector(`[data-settings="${section.id}"]`);
+    if (!block) continue;
+    const headings = sections.get(section.id);
+    block.hidden = !headings;
+    if (!headings) {
+      block.replaceChildren();
+      continue;
+    }
+    const problem = element("p", undefined, "panel problem");
+    problemLines.push(problem);
+    const groups = [...headings].sort(([one], [other]) => HEADINGS.indexOf(one) - HEADINGS.indexOf(other))
+      .map(([name, members]) => settingsGroup(name, members));
+    const panel = element("div", undefined, "panel settings");
+    panel.append(...groups);
+    block.replaceChildren(problem, panel);
   }
-  document.getElementById("setting-groups").replaceChildren(...rows);
+  showSettingsProblem(settingsProblem);
   countChanges();
   showNight();
+}
+
+// Some settings in a panel, under a sub-heading of their own - or, with none, as the
+// section's only ones.
+function settingsGroup(name, members) {
+  const group = element("div", undefined, name ? "group" : "group bare");
+  const fields = element("div", undefined, "fields");
+  fields.append(...members.map(settingField));
+  if (name) {
+    const title = element("h3", name);
+    title.id = `group-${name.toLowerCase()}`;
+    group.setAttribute("role", "group");
+    group.setAttribute("aria-labelledby", title.id);
+    group.append(title);
+  }
+  group.append(fields);
+  return group;
 }
 
 // A setting, with when it's used under its label: "Used straight away".
@@ -2569,6 +2595,8 @@ function settingField(setting) {
   const input = setting.choices ? choiceInput(setting) : valueInput(setting);
   input.id = id;
   input.name = setting.key;
+  // Part of the one settings form, the save bar, which is in none of the sections.
+  input.setAttribute("form", "settings");
   // The slider moves a speed between its steps to the nearest - 1.12 typed into the
   // file becoming 1.1 - so it's what's saved that it's compared with, and the moved one
   // shows as a change rather than as what the file says.
@@ -2684,10 +2712,21 @@ function valueOf(input) {
   return input.type === "checkbox" ? String(input.checked) : input.value;
 }
 
-// Marks the settings changed since they were saved, says how many there are, and
-// gives them back.
+// Every setting's input, in whichever section it is drawn.
+function settingInputs() {
+  return [...document.querySelectorAll(SETTING_INPUTS)];
+}
+
+// Whether any setting differs from how it was saved.
+function settingsChanged() {
+  return settingInputs().some((input) => valueOf(input) !== input.dataset.saved);
+}
+
+// Marks the settings changed since they were saved, says how many there are in all the
+// sections, and gives them back. The save bar is shown while there are any, or a restart is
+// offered.
 function countChanges() {
-  const changed = [...document.querySelectorAll("#settings input, #settings select")].filter((input) => {
+  const changed = settingInputs().filter((input) => {
     const differs = valueOf(input) !== input.dataset.saved;
     input.closest(".field").classList.toggle("changed", differs);
     return differs;
@@ -2703,13 +2742,22 @@ function countChanges() {
   save.disabled = !changed.length;
   save.hidden = restarting;
   document.getElementById("restart-now").hidden = !restarting;
+  // Said to the toasts, which then sit above the bar, and to the page's end, which it would hide.
+  const shown = Boolean(changed.length) || offerRestart;
+  document.getElementById("settings").hidden = !shown;
+  document.body.classList.toggle("save-bar-shown", shown);
   return changed;
 }
 
+// Says that Nova's saved settings can't be read, if they can't, at the top of each section's
+// settings, in the same words - and keeps what Nova said of it for the list to use.
 function showSettingsProblem(problem) {
-  const shown = document.getElementById("settings-problem");
-  shown.hidden = !problem;
-  shown.textContent = problem ? `Couldn't read your saved settings, so Nova's own are shown: ${problem}` : "";
+  settingsProblem = problem || "";
+  for (const line of problemLines) {
+    line.hidden = !settingsProblem;
+    line.textContent = settingsProblem
+      ? `Couldn't read your saved settings, so Nova's own are shown: ${settingsProblem}` : "";
+  }
 }
 
 // The night sky behind the page - the same stars every time, from the same seed,
@@ -2957,49 +3005,29 @@ function showAddress(how) {
 // Keeps the toasts, and a field tabbed to, clear of the save bar, as tall as it's drawn -
 // a long save error, or an iPhone's home bar under it, makes it taller. Its height goes to
 // --save-bar through the CSSOM, which the page's CSP lets through where a style attribute
-// wouldn't be. The toasts are lifted only while the bar's on screen, and its corners are
-// rounded only where it ends the form, not while it's stuck to the screen's bottom.
+// wouldn't be. Only while it's shown, as a hidden bar has no height.
 function followSaveBar() {
+  if (!("ResizeObserver" in window)) return;
   const bar = document.querySelector(".save-bar");
   const page = document.documentElement;
-  if ("ResizeObserver" in window) {
-    new ResizeObserver(() => page.style.setProperty("--save-bar", `${bar.offsetHeight}px`)).observe(bar);
-  }
-  if (!("IntersectionObserver" in window)) {
-    // Lifted all the time, as it can't be told when the bar's in view.
-    page.classList.add("save-bar-shown");
-    return;
-  }
-  // The screen less its bottom pixel, so a bar stuck to the bottom is never wholly in it,
-  // while one ending the form, above the bottom, is.
-  new IntersectionObserver((entries) => {
-    // The newest, should several have queued up.
-    const seen = entries[entries.length - 1];
-    page.classList.toggle("save-bar-shown", seen.isIntersecting);
-    bar.classList.toggle("stuck", seen.isIntersecting && seen.intersectionRatio < 1);
-  }, { rootMargin: "0px 0px -1px 0px", threshold: [0, 1] }).observe(bar);
+  new ResizeObserver(() => {
+    if (bar.offsetHeight) page.style.setProperty("--save-bar", `${bar.offsetHeight}px`);
+  }).observe(bar);
 }
 
-document.addEventListener("DOMContentLoaded", () => {
-  setUpList();
-  drawSky();
-  followSaveBar();
-  setUpClean();
-  let resized = null;
-  window.addEventListener("resize", () => {
-    clearTimeout(resized);
-    resized = setTimeout(drawSky, 200);
-  });
-  tick();
-
-  const settings = document.getElementById("settings");
+// The settings form, which is only the save bar: what a change in any setting does to it,
+// and saving them all.
+function setUpSettings() {
+  // At the document, as an input drawn outside the form is part of it only by its form
+  // attribute: its events don't pass through the form.
   for (const happened of ["input", "change"]) {
-    settings.addEventListener(happened, () => {
+    document.addEventListener(happened, (event) => {
+      if (!event.target.getAttribute || event.target.getAttribute("form") !== "settings") return;
       countChanges();
       showNight();
     });
   }
-  settings.addEventListener("submit", async (event) => {
+  document.getElementById("settings").addEventListener("submit", async (event) => {
     event.preventDefault();
     const changed = countChanges();
     if (!changed.length) return;
@@ -3018,6 +3046,20 @@ document.addEventListener("DOMContentLoaded", () => {
       unsaved.classList.add("bad");
     }
   });
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  setUpList();
+  drawSky();
+  followSaveBar();
+  setUpSettings();
+  setUpClean();
+  let resized = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(resized);
+    resized = setTimeout(drawSky, 200);
+  });
+  tick();
 
   document.getElementById("add-satellite").addEventListener("submit", async (event) => {
     event.preventDefault();

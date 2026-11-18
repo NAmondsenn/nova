@@ -2088,19 +2088,18 @@ def test_every_journeys_setting_is_on_the_page_and_used_straight_away(files):
 
 
 def test_every_setting_on_the_page_has_a_group_of_its_own(files):
-    # One under no group is shown under Other, as the spending alert and Claude's prices
-    # were, rather than with the settings it goes with.
-    with open(os.path.join(page_module.WEB_FOLDER, "settings.js")) as file:
+    # One under no section is shown under Everything else, as the spending alert and Claude's
+    # prices were under Other, rather than with the settings it goes with. Which section holds which keys is one table, in settings_list.js.
+    with open(os.path.join(page_module.WEB_FOLDER, "settings_list.js")) as file:
         script = file.read()
-    groups = re.search(r"const GROUPS = \[\n(.*?)\n\];", script, re.S).group(1)
-    starts = {name: re.findall(r'"([a-z_]+\.)"', line)
-              for name, line in re.findall(r'^\s*\["([^"]+)", (\[.*\])\],$', groups, re.M)}
-    assert "usage." in starts["Claude"]
-    assert starts["Football"] == ["football."]
-    assert starts["Journeys"] == ["journeys."]
+    starts = {name: re.findall(r'"([a-z_]+\.)"', keys)
+              for name, keys in re.findall(r'^\s*\{ id: "([a-z]+)", .* starts: (\[.*?\]) \},$', script, re.M)}
+    assert "usage." in starts["claude"]
+    assert starts["football"] == ["football."]
+    assert starts["journeys"] == ["journeys."]
     # The clean songs' settings go with the music they're about.
-    assert "clean_check." in starts["Music"]
-    assert "new_music." in starts["Music"]
+    assert "clean_check." in starts["music"]
+    assert "new_music." in starts["music"]
     for section, name, *_ in page_module.EDITABLE:
         key = f"{section}.{name}"
         assert any(key.startswith(start) for prefixes in starts.values() for start in prefixes), key

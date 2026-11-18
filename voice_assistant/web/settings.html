@@ -153,6 +153,7 @@
             <p class="how" id="clean-held" hidden></p>
           </div>
           <div id="clean-lists"></div>
+          <div class="settings-of" data-settings="music" hidden></div>
         </section>
 
         <section id="section-devices" data-section="devices" aria-labelledby="devices-title">
@@ -171,6 +172,7 @@
 
         <section id="section-journeys" data-section="journeys" aria-labelledby="journeys-title">
           <h2 class="heading" id="journeys-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-car"></use></svg>Journeys</h2>
+          <div class="settings-of" data-settings="journeys" hidden></div>
         </section>
 
         <!-- The teams Home Assistant is following, each with what Nova says of its matches, and a
@@ -184,6 +186,7 @@
                    spellcheck="false">
             <button type="submit" class="button quiet">Follow</button>
           </form>
+          <div class="settings-of" data-settings="football" hidden></div>
         </section>
 
         <section id="section-calendars" data-section="calendars" aria-labelledby="calendars-title">
@@ -338,6 +341,7 @@
           <div class="tiles single" id="volumes"></div>
           <p class="panel note" id="volumes-missing" hidden>This satellite isn't connected, so its volumes can't be changed.</p>
           <p class="hint">As you drag, Nova beeps at the new level, so you can hear how loud it is.</p>
+          <div class="settings-of" data-settings="sound" hidden></div>
         </section>
 
         <section id="section-clock" data-section="clock" aria-labelledby="clock-title">
@@ -389,14 +393,17 @@
             <button type="submit" class="button quiet">Add a clock</button>
           </form>
           <p class="hint">Holding a finger on a clock makes Nova listen through its satellite's microphone. A change here reaches the clock within a second.</p>
+          <div class="settings-of" data-settings="displays" hidden></div>
         </section>
 
         <section id="section-claude" data-section="claude" aria-labelledby="claude-title">
           <h2 class="heading" id="claude-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-reply"></use></svg>Claude</h2>
+          <div class="settings-of" data-settings="claude" hidden></div>
         </section>
 
         <section id="section-notifications" data-section="notifications" aria-labelledby="notifications-title">
           <h2 class="heading" id="notifications-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-bell"></use></svg>Notifications</h2>
+          <div class="settings-of" data-settings="notifications" hidden></div>
         </section>
 
         <section id="section-memory" data-section="memory" aria-labelledby="memory-title">
@@ -420,19 +427,22 @@
 
         <section id="section-else" data-section="else" aria-labelledby="else-title">
           <h2 class="heading" id="else-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-settings"></use></svg>Everything else</h2>
-          <p class="panel problem" id="settings-problem" hidden></p>
-          <form class="panel settings" id="settings" novalidate>
-            <div id="setting-groups"></div>
-            <div class="save-bar">
-              <p id="unsaved">Nothing's changed yet.</p>
-              <button type="submit" class="button" id="save-settings" disabled>Save settings</button>
-              <button type="button" class="button" id="restart-now" hidden>Restart now</button>
-            </div>
-          </form>
+          <div class="settings-of" data-settings="else" hidden></div>
         </section>
       </main>
     </div>
   </div>
+
+  <!-- The one save bar, for the settings in every section: each setting's input is part of this form
+       by its form attribute, wherever settings.js draws it. Fixed to the bottom of the screen, and
+       shown by settings.js while anything is changed and unsaved or a restart is offered. -->
+  <form class="save-form" id="settings" novalidate hidden>
+    <div class="save-bar">
+      <p id="unsaved">Nothing's changed yet.</p>
+      <button type="submit" class="button" id="save-settings" disabled>Save settings</button>
+      <button type="button" class="button" id="restart-now" hidden>Restart now</button>
+    </div>
+  </form>
 
   <div class="undos" id="undos"></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
