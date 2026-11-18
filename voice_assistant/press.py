@@ -36,6 +36,12 @@ PRESS_DEBOUNCE = 0.4
 # says nothing can't hold a thread for good.
 CLIENT_TIMEOUT = 5
 
+# How many times the port is tried for, and how far apart in seconds, before giving up -
+# so a satellite started again at once, whose last run's port isn't free yet (on Windows,
+# while its connections finish closing), gets it rather than failing again and again.
+BIND_ATTEMPTS = 5
+BIND_WAIT = 1.0
+
 
 def _on_windows() -> bool:
     """Whether this is Windows, where the PC's push-to-talk satellite runs."""
@@ -119,12 +125,20 @@ class PressListener:
 
     def start(self):
         """
-        Starts listening.
+        Starts listening, trying for the port a few times - see BIND_ATTEMPTS.
 
         Raises:
-            OSError: The port is already taken.
+            OSError: The port is still taken at the last try.
         """
-        server = _Server((ADDRESS, self._port), _Handler)
+        for attempt in range(1, BIND_ATTEMPTS + 1):
+            try:
+                server = _Server((ADDRESS, self._port), _Handler)
+                break
+            except OSError as error:
+                if attempt == BIND_ATTEMPTS:
+                    raise
+                logger.warning(f"Couldn't listen on {ADDRESS}:{self._port} ({error}), trying again")
+                time.sleep(BIND_WAIT)
         server.listener = self
         self._server = server
         # What it was given if that was a port, and the one found if it was 0.

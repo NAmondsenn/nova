@@ -127,9 +127,37 @@ def test_the_port_is_the_one_bound_and_close_frees_it():
         again.close()
 
 
-def test_a_port_which_is_taken_raises(listener):
+def test_a_port_which_stays_taken_raises_after_five_tries_a_second_apart(listener, monkeypatch):
+    waits = []
+    monkeypatch.setattr(press.time, "sleep", waits.append)
     with pytest.raises(OSError):
         PressListener(listener.port, lambda: None).start()
+    assert waits == [1.0] * 4
+
+
+def test_a_port_freed_while_its_tried_for_is_had(monkeypatch):
+    # A satellite started again at once, whose last run's port isn't free yet, gets it
+    # rather than failing and being started again, and again.
+    taken = socket.socket()
+    taken.bind(("127.0.0.1", 0))
+    taken.listen()
+    port = taken.getsockname()[1]
+    waits = []
+
+    def wait(seconds):
+        waits.append(seconds)
+        if len(waits) == 2:
+            taken.close()
+
+    monkeypatch.setattr(press.time, "sleep", wait)
+    again = PressListener(port, lambda: None)
+    try:
+        again.start()
+        assert waits == [1.0, 1.0] and again.port == port
+        assert ask(again) == 204
+    finally:
+        again.close()
+        taken.close()
 
 
 def test_it_stops_answering_once_closed(listener):

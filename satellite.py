@@ -332,14 +332,15 @@ class Satellite:
         try:
             # Before the brain is reached, so it's told what still rings, and takes it over.
             self.ringer.resume(time.time())
+            if self.push_to_talk:
+                # Before the link, so one which can't have its port stops before the brain
+                # hears of it. A press meanwhile waits for the main loop, after the link.
+                self.press_listener = PressListener(self.press_port, self._pressed)
+                self.press_listener.start()
             self.link = SatelliteLink(self.address, self.name, self.hostname, self.password, self.sample_rate,
                                       self._note_start(), self._on_message, self._on_connected,
                                       speaker=self.spotify_speaker, push_to_talk=self.push_to_talk)
             self.link.start()
-            if self.push_to_talk:
-                # After the link, so a press as it starts has a brain to be told of it.
-                self.press_listener = PressListener(self.press_port, self._pressed)
-                self.press_listener.start()
             threading.Thread(target=self._ring_when_due, daemon=True, name="fallback").start()
             logger.info(f"Satellite '{self.name}' ready, for its brain at {self.address}")
             self._listen_forever()

@@ -2000,6 +2000,20 @@ def test_the_listener_is_made_only_for_a_push_to_talk_satellite_and_closed_with_
     assert wake_word.press_listener is None
 
 
+def test_a_satellite_which_cant_have_its_press_port_stops_before_reaching_the_brain(brain, make, monkeypatch):
+    # Bound before the link, so one which can't listen for presses is started again by
+    # the launcher without the brain hearing of it each time.
+    class Taken(FakePress):
+        def start(self):
+            raise OSError("Address already in use")
+
+    monkeypatch.setattr(satellite, "PressListener", Taken)
+    made = make(start=False, satellite={"trigger": "push_to_talk"})
+    with pytest.raises(OSError):
+        made.run()
+    assert made.link is None and brain.sockets == []
+
+
 def test_a_press_through_the_real_listener_starts_a_recording(brain, make, monkeypatch):
     # Port 0, as the setting can't be, so the test takes whichever port is free.
     monkeypatch.setattr(satellite, "PressListener", lambda port, on_press: PressListener(0, on_press))
