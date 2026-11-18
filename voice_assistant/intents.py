@@ -61,11 +61,14 @@ ACTIVITY = r"(?P<activity>[a-z0-9' ]+?)"
 BARE_BEFORE_ACTIVITY = r"(?:when is|when's|am i)(?: at| in)? "
 
 # A place said in a journey question - "work", "the Metrocentre", "my gran's" - of one to four
-# words, as said. None starts with a digit or is one of "at", "by", "before", "for", "be" or
-# "in", so a time said with it ("to be at work for 9", "for work at 8") isn't a place, and is
-# left to Claude along with the arrival time it asks for.
-JOURNEY_WORD = r"(?!(?:at|by|before|for|be|in)\b)[a-z][a-z']*"
-JOURNEY_PLACE = rf"(?P<place>{JOURNEY_WORD}(?: {JOURNEY_WORD}){{0,3}})"
+# words, as said. None starts with a digit or is a word that begins something else: a time
+# ("to be at work for 9"), a day ("for work tomorrow", "on Monday", "this afternoon", "right
+# now") or a "from", "with" or "via". Those are left to Claude, who has the arrival time and
+# the day to take them, rather than made part of a place sent to Google. And the first word is
+# never "it", "there", "that" or "here", which say a place without naming it.
+JOURNEY_WORD = (r"(?!(?:at|by|before|for|be|in|on|from|with|via|now|right|today|tonight|tomorrow|this|next|"
+                + "|".join(WEEKDAYS) + r")\b)[a-z][a-z']*")
+JOURNEY_PLACE = rf"(?P<place>(?!(?:it|there|that|here)\b){JOURNEY_WORD}(?: {JOURNEY_WORD}){{0,3}})"
 # How a journey is made, by the verb or noun said, in the words the journey tool has them.
 JOURNEY_MODES = {"drive": "driving", "walk": "walking", "cycle": "cycling"}
 JOURNEY_BY = r"(?:by (?:bus|train|public transport)|on public transport)"
@@ -384,7 +387,7 @@ class LocalIntents:
             # names a way of travelling, so "how long to get to work?" is Claude's, who can
             # tell work from "how long to get to sleep?".
             (rf"(?:what time|when) (?:do i|should i|shall i|do i need to|do i have to) "
-             rf"(?:leave|set off|head off)(?: to get)?(?: for| to) {JOURNEY_PLACE}",
+             rf"(?:leave|set off|head off)(?: for| to get to) {JOURNEY_PLACE}",
              self._journey("driving", leave=True)),
             (rf"how long (?:is|will be) the (?P<verb>drive|walk|cycle) to {JOURNEY_PLACE}", self._journey()),
             (rf"how long (?:does it take |will it take )?to (?P<verb>drive|walk|cycle) to {JOURNEY_PLACE}",

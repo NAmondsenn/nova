@@ -802,6 +802,15 @@ def test_how_long_a_journey_takes_is_heard_without_claude(text, place, mode):
     # No way of travelling named: Claude's, who can tell work from sleep.
     "How long to get to work?", "How long does it take to get to my gran's?", "How long to get to sleep?",
     "How long to work on public transport?",
+    # A day, or a "from" or "with", after the place: Claude's, who can take the day as the arrival.
+    "What time do I leave for work tomorrow?", "What time do I leave for work today?",
+    "When should I leave for work on Monday?", "When should I set off for my gran's this afternoon?",
+    "How long is the drive to work right now?", "How long to drive to the Metrocentre from work?",
+    "How long to walk to uni with the dog?",
+    # Not a place at all - a thing said instead of one.
+    "When should I leave for it?", "How long is the drive to there?",
+    "What time should I leave to go to work?", "When do I need to leave to catch my train?",
+    "When do I leave to get there?", "When should I head off to bed?",
     # A time said is left to Claude.
     "What time do I leave to be at work for 9?", "When do I need to leave to get to work for 9?",
 ])
