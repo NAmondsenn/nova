@@ -2335,6 +2335,15 @@ def test_lineups_with_no_team_where_the_only_match_today_is_off_say_so_and_ask_n
         "Liverpool v Arsenal, Premier League, today at 3:00 PM, is cancelled. No line-ups are listed for it."]
 
 
+def test_lineups_of_a_named_team_whose_match_today_is_off_say_it_is_off(london):
+    # Home Assistant answers a named team's line-ups on the day of its match called off with that match.
+    answer = {"team": {"id": "18312", "name": "South Shields", "followed": True}, "stale": False, "match": SHIELDS_OFF}
+    assert said_lineups(answer, AT.astimezone()).split("\n") == [SHIELDS_POSTPONED_TONIGHT, "No line-ups are listed for it."]
+    home = FakeHome([_team("18312", "South Shields", now=SHIELDS_OFF)], answer=answer)
+    assert _said(home, team="South Shields", about="lineups") == {"success": True, "message": SHIELDS_POSTPONED_TONIGHT + "\nNo line-ups are listed for it."}
+    assert home.asked == [("lineups", "South Shields", "", 1)]
+
+
 def test_lineups_with_no_team_are_not_for_a_match_which_is_off_over_another_teams_match(london):
     # Liverpool's, off, was at 12:30; Stevenage's was over at 15:00: the earlier kick-off must not win.
     off = _found_match(id="9", kickoff="2026-11-13T12:30:00+00:00", state="pre", phase="off", clock="Postponed")
