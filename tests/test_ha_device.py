@@ -475,8 +475,14 @@ def player():
 
 
 @pytest.fixture
-def with_player(nova, player):
-    """A NovaDevice for nova with a player, started, with the client it made - not yet connected."""
+def with_player(nova, player, monkeypatch):
+    """
+    A NovaDevice for nova with a player, started, with the client it made - not yet connected.
+
+    Its music thread reads the playlists as it starts and then waits so long between rounds that
+    it never publishes: the tests call publish_music themselves, so they aren't racing it.
+    """
+    monkeypatch.setattr(ha_device, "MUSIC_EVERY", 3600)
     made = []
 
     def factory(client_id):
@@ -614,21 +620,27 @@ def test_the_cover_is_fetched_once_per_song(with_player, player):
     assert player.reads.count("cover") == 2
 
 
-def test_the_state_thread_never_reads_the_music(nova):
-    def broken():
-        raise AssertionError("the state thread read the music")
-
+def test_the_state_thread_never_reads_the_music(nova, monkeypatch):
+    # The music thread's own rounds are put off, so only the state thread could read it. Its
+    # first read of the playlists is its job, so that one is allowed - and must not fail,
+    # or it would log in whichever test is running by then.
+    monkeypatch.setattr(ha_device, "MUSIC_EVERY", 3600)
+    read = []
     controls = nova.controls()
-    controls.now_playing, controls.cover, controls.playlists = broken, broken, broken
+    controls.now_playing = lambda: read.append("now_playing")
+    controls.cover = lambda: read.append("cover")
+    controls.playlists = lambda: read.append("playlists") or ["Chill"]
     made = []
     device = NovaDevice("broker.local", 1883, "nova", "secret", controls, node_id="nova_test",
                         client_factory=lambda client_id: made.append(FakeClient(client_id)) or made[-1])
     device.start()
     try:
+        assert _eventually(lambda: read == ["playlists"])
         made[0].connects()
         device.publish_state()
         assert made[0].sent(f"{BASE}/status")
         assert not made[0].sent(f"{BASE}/playing")
+        assert read == ["playlists"]
     finally:
         device.stop()
 
