@@ -482,6 +482,8 @@ class ClockRequests:
             # back), so what's said about its length agrees with the new time.
             timer["duration"] = max(1, round(due_at - now))
             self._save()
+        # By its id and the new time, as a label can hold a place.
+        logger.info(f"Moved timer {timer_id} to {time.strftime('%H:%M', time.localtime(due_at))}", extra=TRANSCRIPT)
         return True
 
     def timer_due(self, timer_id: int) -> Optional[float]:

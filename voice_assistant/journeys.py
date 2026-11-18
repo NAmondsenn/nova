@@ -22,11 +22,16 @@ nothing more: Google doesn't say which one to catch, so no time to leave can be 
 
 Its settings are the journeys: section of config.yaml, read at each use through the settings
 function it's given, a missing or unusable one being its default.
+
+JourneyWatcher is the thread which looks at the traffic while a "Leave for ..." reminder waits,
+moves the reminder when the time to leave changes, and says so.
 """
 
 import logging
 import math
 import re
+import threading
+import time as clock_time
 from datetime import datetime, time, timedelta
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -65,6 +70,11 @@ WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", 
 LEAVE_NOW = timedelta(minutes=2)
 # How far ahead an activity's next event may be found.
 LOOK_AHEAD = timedelta(hours=24)
+# Seconds between the watcher's passes over the reminders it watches. Each reminder is looked at for the traffic
+# only as often as check_every_minutes says: this is only how soon after that one is noticed to be due.
+PASS_EVERY = 60
+# The soonest a moved reminder may ring, from the look which moved it.
+MOVE_AT_LEAST = 60
 
 WHERE_TO = "Where to?"
 NEEDS_GOOGLE_MAPS = "Journeys need Google Maps Travel Time set up in Home Assistant."
@@ -498,3 +508,197 @@ class Journeys:
                             "journey being watched")
         ringing = datetime.fromtimestamp(now.timestamp() + seconds).astimezone()
         return {"success": True, "message": f"I'll remind you at {_when(ringing, now)}."}
+
+
+class JourneyWatcher:
+    """
+    Watches the reminders to leave which Journeys.remind keeps: while one waits, looks at the traffic from
+    time to time, moves it when the time to leave has changed enough to matter, and says so. It also drops
+    one once Home Assistant says the user has left - they've gone, so the reminder is of no use - and forgets
+    one which has rung or been cancelled.
+
+    Each look is of one watch, and one watch which fails never stops the others, nor the thread.
+    """
+
+    def __init__(self, journeys: Journeys, say: Callable[[Optional[str], str], None],
+                 home_now: Callable[[], Optional[bool]], settings: Callable[[], Dict]):
+        """
+        Args:
+            journeys: The Journeys which keeps the watches, asks Google and holds the clock.
+            say: Says a message on the satellite which set the reminder (None for the default one), and
+                wherever else it should reach the user - see Brain._say_journey. It must not raise.
+            home_now: Whether the user is at home now, None if that can't be told - see football_watch.user_home.
+            settings: Gives the journeys: section as it is now, read at each use.
+        """
+        self._journeys = journeys
+        self._say = say
+        self._home_now = home_now
+        self._settings = settings
+        # The watches whose failure to look has been logged, so it is once for each and not every look.
+        self._warned = set()
+        self._stopping = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def _setting(self, name: str) -> Any:
+        return setting(self._settings, name)
+
+    def check(self, now: float) -> None:
+        """
+        Does one pass: for each watched reminder, whatever it is time for (see _watch).
+
+        Args:
+            now: The time now, in epoch seconds.
+        """
+        clock, store = self._journeys.clock, self._journeys.store
+        watches = store.get("watches")
+        if clock is None or not watches:
+            return
+        at_home = []
+        for key, watch in watches.items():
+            try:
+                self._watch(clock, key, watch, now, at_home)
+            except Exception:
+                # One watch's trouble is its own: the rest are still looked at.
+                logger.exception("Watching a reminder to leave failed")
+
+    def _forget(self, key: str) -> None:
+        """Stops watching a reminder."""
+        self._warned.discard(key)
+        self._journeys.store.keep(lambda state: state["watches"].pop(key, None), "journey no longer watched")
+
+    def _update(self, key: str, **changes: Any) -> None:
+        """Saves what has changed of a watch - if it is still there - before anything else is done about it."""
+        def change(state: Dict):
+            if key in state["watches"]:
+                state["watches"][key].update(changes)
+        self._journeys.store.keep(change, "journey being watched")
+
+    def _at_home(self, at_home: list) -> Optional[bool]:
+        """Whether the user is home, asked once in a pass - the list is that pass's note of the answer."""
+        if not at_home:
+            try:
+                at_home.append(self._home_now())
+            except Exception:
+                logger.exception("Couldn't tell whether the user is home")
+                at_home.append(None)
+        return at_home[0]
+
+    def _watch(self, clock, key: str, watch: Dict, now: float, at_home: list) -> None:
+        """
+        One look at one watched reminder, in this order: forget it if it's gone; see where the user is; go no further
+        if it isn't yet time to look; look at the traffic and, if the time to leave has changed, move the reminder.
+
+        Args:
+            clock: The Clock which holds the reminder.
+            key: The reminder's id, as a string, which the watch is kept by.
+            watch: The watch, as Journeys.remind keeps it, with "looked", the time of the last look, once there is one.
+            now: The time now, in epoch seconds.
+            at_home: This pass's note of whether the user is home, for _at_home.
+        """
+        try:
+            due = clock.timer_due(int(key))
+        except ValueError:
+            due = None
+        if due is None:
+            # It has rung, or been cancelled or removed.
+            self._forget(key)
+            return
+        if due <= now:
+            # Due, but the clock hasn't rung it yet, and a reminder in that moment can't be moved: it is about
+            # to ring, and the next look forgets it.
+            return
+        timer_id = int(key)
+
+        home = self._at_home(at_home)
+        if home:
+            if not watch.get("seen_home"):
+                self._update(key, seen_home=True)
+                watch["seen_home"] = True
+        elif home is False and watch.get("seen_home"):
+            clock.remove("timer", timer_id)
+            self._forget(key)
+            logger.info("Dropped the reminder to leave, as Home Assistant says the user has left")
+            return
+
+        if watch["leave_by"] - now >= self._setting("watch_minutes") * 60:
+            return
+        if now - watch.get("looked", 0) < self._setting("check_every_minutes") * 60:
+            return
+        # Saved first, so a restart doesn't ask again at once, and a look which fails is tried again as often as
+        # any other and not on every pass.
+        self._update(key, looked=now)
+
+        found = self._look(key, watch)
+        if found is None:
+            return
+        self._warned.discard(key)
+
+        minutes = _minutes(found["seconds"])
+        leave_by = datetime.fromtimestamp(watch["arrive"]) - timedelta(minutes=minutes + self._setting("buffer_minutes"))
+        new = leave_by.replace(second=0, microsecond=0).timestamp()
+        if abs(new - watch["leave_by"]) < self._setting("change_minutes") * 60:
+            return
+        place, here = watch["place"], datetime.fromtimestamp(now).astimezone()
+        if new - now < LEAVE_NOW.total_seconds():
+            clock.remove("timer", timer_id)
+            self._forget(key)
+            self._say(watch.get("satellite"), f"Traffic to {place} is heavier now. You need to leave now.")
+            return
+        rings = max(new - self._setting("reminder_minutes") * 60, now + MOVE_AT_LEAST)
+        if not clock.move_timer(timer_id, rings):
+            # It rang, or was cancelled, just now.
+            self._forget(key)
+            return
+        # Saved before it's said, so a restart doesn't say it twice.
+        self._update(key, leave_by=new)
+        earlier = new < watch["leave_by"]
+        now_said = _when(datetime.fromtimestamp(new).astimezone(), here)
+        was_said = _when(datetime.fromtimestamp(watch["leave_by"]).astimezone(), here)
+        self._say(watch.get("satellite"), f"Traffic to {place} {'is heavier now' if earlier else 'has eased'}. "
+                  f"Leave by {now_said}, not {was_said}.")
+
+    def _look(self, key: str, watch: Dict) -> Optional[Dict]:
+        """
+        Looks at the drive.
+
+        Returns:
+            The journey, or None if it couldn't be had - then the reminder is left as it is, and the failure
+            is logged, by its kind and never the place, once for the watch until a look works.
+        """
+        try:
+            found = self._journeys.look(watch["origin"], watch["destination"], "driving")
+        except Exception as e:
+            reason = type(e).__name__
+        else:
+            if found is not None:
+                return found
+            reason = "no route"
+        if key not in self._warned:
+            self._warned.add(key)
+            logger.warning(f"Couldn't look at the traffic for a reminder to leave: {reason}")
+        return None
+
+    def start(self) -> None:
+        """Starts the daemon thread which makes a pass every PASS_EVERY seconds."""
+        self._stopping.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="journeys")
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Stops the thread, waiting briefly for a pass already under way to end."""
+        self._stopping.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
+
+    def _run(self) -> None:
+        while not self._stopping.is_set():
+            self._pass()
+            self._stopping.wait(PASS_EVERY)
+
+    def _pass(self) -> None:
+        """One pass of the thread, in which no error may end the thread."""
+        try:
+            self.check(clock_time.time())
+        except Exception:
+            logger.exception("Watching reminders to leave failed, will try again")

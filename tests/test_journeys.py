@@ -7,6 +7,7 @@ folder - so nothing ever asks Google. The places are made up: Work, Uni, Gran's 
 
 import json
 import logging
+import threading
 import time
 from datetime import datetime, timedelta
 
@@ -22,7 +23,7 @@ from voice_assistant.clock_words import format_duration, spoken_clock_time
 from voice_assistant.config import Config
 from voice_assistant.google_calendar import SignInNeeded
 from voice_assistant.home_assistant import CANT_REACH, NoJourneys, NotAllowed
-from voice_assistant.journeys import JOURNEY_DEFAULTS, Journeys, OverCap
+from voice_assistant.journeys import JOURNEY_DEFAULTS, JourneyWatcher, Journeys, OverCap
 
 ZONES = [{"id": "zone.home", "name": "Home"}, {"id": "zone.work", "name": "Work"},
          {"id": "zone.uni", "name": "Uni"}, {"id": "zone.grans", "name": "Gran's"}]
@@ -847,3 +848,390 @@ def test_the_reminder_is_said_and_set_in_the_minute_asked_for_however_the_second
     [timer] = real_clock.overview()["timers"]
     due = real_clock.timer_due(timer["id"])
     assert rings.timestamp() <= due < rings.timestamp() + 1
+
+
+# Watching a reminder to leave
+
+# Half past seven: the drive to Work must be left for at eight, to be there for half past, so the reminder rings at five to.
+MORNING = at(2026, 11, 18, 7, 30).timestamp()
+LEAVE_BY = MORNING + 1800
+ARRIVE = LEAVE_BY + 1800
+
+
+def drive_of(minutes):
+    return {"seconds": minutes * 60, "clear_seconds": None, "metres": 10300}
+
+
+class Time:
+    """The time now, which is only what a test says it is."""
+
+    def __init__(self, now=MORNING):
+        self.now = now
+
+
+@pytest.fixture
+def clock_hands(monkeypatch):
+    hands = Time()
+    monkeypatch.setattr(time, "time", lambda: hands.now)
+    return hands
+
+
+class Watching:
+    """A reminder to leave for Work, set on a real clock and watched, with what the watcher said and where."""
+
+    def __init__(self, store, clock, hands, answer, at_home=True, settings=None, leave_in=1800, satellite="kitchen"):
+        self.store, self.clock, self.hands = store, clock, hands
+        self.settings = dict(SETTINGS, **(settings or {}))
+        self.home = FakeHome(answer)
+        self.where = at_home
+        self.said = []
+        self.journey = Journeys(self.home, None, clock, store, lambda: self.settings)
+        leave_by = MORNING + leave_in
+        now = datetime.fromtimestamp(MORNING).astimezone()
+        self.journey.remind("Work", "zone.work", "zone.home", "driving", leave_by + 1800, leave_by, True,
+                            satellite=satellite, now=now)
+        [timer] = clock.overview()["timers"]
+        self.id = timer["id"]
+        self.watcher = self.make_watcher(self.journey)
+
+    def make_watcher(self, journey):
+        return JourneyWatcher(journey, lambda satellite, message: self.said.append((satellite, message)),
+                              lambda: self.where, lambda: self.settings)
+
+    def check(self, later=0):
+        self.hands.now = MORNING + later
+        self.watcher.check(self.hands.now)
+
+    @property
+    def watch(self):
+        return self.store.get("watches").get(str(self.id))
+
+    @property
+    def rings(self):
+        return self.clock.timer_due(self.id)
+
+
+@pytest.fixture
+def watching(store, real_clock, clock_hands):
+    def make(answer=drive_of(20), **kwargs):
+        return Watching(store, real_clock, clock_hands, answer, **kwargs)
+    return make
+
+
+def test_the_reminder_is_rung_at_five_to_eight_and_watched_from_the_start(watching):
+    watched = watching()
+    assert watched.rings == LEAVE_BY - 300
+    assert watched.watch["leave_by"] == LEAVE_BY and watched.watch["arrive"] == ARRIVE
+
+
+def test_a_reminder_which_has_rung_is_forgotten_and_nothing_is_said_or_asked(watching, real_clock):
+    watched = watching()
+    real_clock._tick(watched.rings + 1)
+    watched.check(1500)
+    assert watched.watch is None and watched.said == [] and watched.home.asked == []
+
+
+def test_a_reminder_which_was_removed_is_forgotten(watching, real_clock):
+    watched = watching()
+    real_clock.remove("timer", watched.id)
+    watched.check()
+    assert watched.watch is None and watched.said == [] and watched.home.asked == []
+
+
+def test_a_reminder_due_but_not_yet_rung_is_left_alone_for_that_look(watching, real_clock):
+    watched = watching(drive_of(30))
+    due = watched.rings
+    watched.check(1501)
+    assert watched.home.asked == [] and watched.said == []
+    assert watched.watch["leave_by"] == LEAVE_BY and real_clock.timer_due(watched.id) == due
+    # The clock rings it, and the next look forgets it.
+    real_clock._tick(due + 2)
+    watched.check(1510)
+    assert watched.watch is None
+
+
+def test_being_home_is_noted_and_being_away_after_it_drops_the_reminder_and_the_watch(watching, caplog):
+    watched = watching(leave_in=3 * 3600)
+    assert watched.watch["seen_home"] is False
+    watched.check()
+    assert watched.watch["seen_home"] is True
+    watched.where = False
+    with caplog.at_level(logging.INFO, logger="voice_assistant.journeys"):
+        watched.check(600)
+    assert watched.watch is None and watched.rings is None and watched.said == []
+    assert "Dropped the reminder to leave, as Home Assistant says the user has left" in caplog.text
+    assert "Work" not in caplog.text
+    assert watched.home.asked == []
+
+
+def test_away_from_the_start_isnt_having_left(watching):
+    watched = watching(at_home=False)
+    watched.check()
+    assert watched.watch["seen_home"] is False and watched.rings is not None
+    # It's looked at all the same, for the user is on the way, say, and the reminder is still of use.
+    assert len(watched.home.asked) == 1
+
+
+@pytest.mark.parametrize("unsure", [None, "raises"])
+def test_not_knowing_where_the_user_is_changes_nothing(watching, unsure):
+    watched = watching(leave_in=3 * 3600)
+    watched.check()
+    if unsure:
+        def cant():
+            raise RuntimeError("no")
+        watched.watcher._home_now = cant
+    else:
+        watched.where = None
+    watched.check(600)
+    assert watched.watch["seen_home"] is True and watched.rings is not None and watched.said == []
+
+
+def test_home_is_asked_once_for_all_the_watches_in_a_pass(watching):
+    watched = watching(leave_in=3 * 3600)
+    asked = []
+    watched.watcher._home_now = lambda: asked.append(1) or True
+    watched.journey.remind("Uni", "zone.uni", "zone.home", "driving", LEAVE_BY + 7200, LEAVE_BY + 3 * 3600, True,
+                           satellite="kitchen", now=datetime.fromtimestamp(MORNING).astimezone())
+    assert len(watched.store.get("watches")) == 2
+    watched.check()
+    assert asked == [1]
+
+
+def test_google_isnt_asked_before_the_watch_window(watching):
+    # Three hours off, and the window is 45 minutes.
+    watched = watching(leave_in=3 * 3600)
+    watched.check()
+    assert watched.home.asked == [] and watched.said == []
+    # 44 minutes before the time to leave it is.
+    watched.check(3 * 3600 - 44 * 60)
+    assert len(watched.home.asked) == 1
+
+
+def test_google_isnt_asked_again_within_check_every_minutes_of_the_last_look(watching):
+    watched = watching()
+    watched.check()
+    assert watched.home.asked == [("zone.home", "zone.work", "driving", None)]
+    assert watched.watch["looked"] == MORNING
+    watched.check(60)
+    watched.check(299)
+    assert len(watched.home.asked) == 1
+    watched.check(300)
+    assert len(watched.home.asked) == 2
+
+
+def test_the_window_and_the_pace_are_read_at_each_use(watching):
+    watched = watching(leave_in=3600)
+    watched.check()
+    assert watched.home.asked == []
+    watched.settings["watch_minutes"] = 90
+    watched.check()
+    assert len(watched.home.asked) == 1
+    watched.settings["check_every_minutes"] = 2
+    watched.check(120)
+    assert len(watched.home.asked) == 2
+
+
+def test_a_change_of_four_minutes_says_nothing_and_moves_nothing(watching):
+    # Twenty-four minutes for a drive of twenty: four minutes earlier, and five is the change which is said.
+    watched = watching(drive_of(24))
+    watched.check()
+    assert watched.said == [] and watched.rings == LEAVE_BY - 300
+    assert watched.watch["leave_by"] == LEAVE_BY
+
+
+def test_a_change_of_the_whole_five_minutes_is_said(watching):
+    watched = watching(drive_of(25))
+    watched.check()
+    assert watched.said == [("kitchen", "Traffic to Work is heavier now. Leave by 7:55 AM, not 8:00 AM.")]
+
+
+def test_heavier_traffic_moves_the_reminder_and_is_said_on_the_satellite_that_asked(watching):
+    watched = watching(drive_of(28))
+    watched.check()
+    # Eight minutes earlier, and the reminder is five before that.
+    assert watched.said == [("kitchen", "Traffic to Work is heavier now. Leave by 7:52 AM, not 8:00 AM.")]
+    assert watched.rings == LEAVE_BY - 480 - 300
+    assert watched.watch["leave_by"] == LEAVE_BY - 480
+    # The drive's rounded up to a minute and nothing else is asked for.
+    assert len(watched.home.asked) == 1
+
+
+def test_eased_traffic_moves_the_reminder_later_and_is_said(watching):
+    watched = watching(drive_of(12))
+    watched.check()
+    assert watched.said == [("kitchen", "Traffic to Work has eased. Leave by 8:08 AM, not 8:00 AM.")]
+    assert watched.rings == LEAVE_BY + 480 - 300
+    assert watched.watch["leave_by"] == LEAVE_BY + 480
+
+
+def test_a_part_minute_of_drive_is_rounded_up(watching):
+    watched = watching({"seconds": 28 * 60 - 59, "clear_seconds": None, "metres": 10300})
+    watched.check()
+    assert watched.said[0][1].endswith("Leave by 7:52 AM, not 8:00 AM.")
+
+
+def test_a_watch_without_a_satellite_is_said_on_the_default_one(watching):
+    watched = watching(drive_of(28), satellite=None)
+    watched.check()
+    assert [satellite for satellite, _ in watched.said] == [None]
+
+
+def test_the_change_is_saved_before_it_is_said(watching):
+    watched = watching(drive_of(28))
+    seen = []
+    watched.watcher._say = lambda satellite, message: seen.append((watched.watch["leave_by"], watched.rings))
+    watched.check()
+    assert seen == [(LEAVE_BY - 480, LEAVE_BY - 480 - 300)]
+
+
+def test_the_reminder_minutes_and_buffer_are_read_at_each_use(watching):
+    watched = watching(drive_of(28), settings={"reminder_minutes": 10, "buffer_minutes": 15})
+    watched.check()
+    # Thirteen minutes earlier than the eight o'clock, with a reminder ten before.
+    assert watched.watch["leave_by"] == LEAVE_BY - 780
+    assert watched.said[0][1].endswith("Leave by 7:47 AM, not 8:00 AM.")
+    assert watched.rings == LEAVE_BY - 780 - 600
+
+
+def test_a_reminder_is_never_moved_to_before_a_minute_from_now(watching):
+    # Leave by 7:34, so the reminder would be for 7:29, which has gone.
+    watched = watching(drive_of(46))
+    watched.check()
+    assert watched.said == [("kitchen", "Traffic to Work is heavier now. Leave by 7:34 AM, not 8:00 AM.")]
+    assert watched.rings == MORNING + 60
+
+
+@pytest.mark.parametrize("minutes", [49, 60, 90])
+def test_a_time_to_leave_under_two_minutes_off_or_past_says_to_leave_now_and_ends_the_watch(watching, minutes):
+    watched = watching(drive_of(minutes))
+    watched.check()
+    assert watched.said == [("kitchen", "Traffic to Work is heavier now. You need to leave now.")]
+    assert watched.rings is None and watched.watch is None
+
+
+def test_a_reminder_which_cant_be_moved_is_forgotten_and_nothing_is_said(watching, monkeypatch):
+    watched = watching(drive_of(28))
+    # It rang, or was cancelled, between the clock being asked and the move.
+    monkeypatch.setattr(watched.clock, "move_timer", lambda timer_id, due_at: False)
+    watched.check()
+    assert watched.said == [] and watched.watch is None
+
+
+@pytest.mark.parametrize("answer", [
+    None, requests.ConnectionError("down"), requests.Timeout("slow"), NoJourneys(), NotAllowed("no"), ValueError("odd")])
+def test_a_look_which_fails_leaves_the_reminder_and_says_nothing(watching, answer, caplog):
+    watched = watching(answer)
+    with caplog.at_level(logging.WARNING, logger="voice_assistant.journeys"):
+        watched.check()
+        watched.check(300)
+        watched.check(600)
+    assert watched.said == [] and watched.rings == LEAVE_BY - 300
+    assert watched.watch["leave_by"] == LEAVE_BY and len(watched.home.asked) == 3
+    # Once for the watch, by the kind of failure, and never the place.
+    failed = [record for record in caplog.records if "Couldn't look at the traffic" in record.message]
+    assert len(failed) == 1 and "Work" not in failed[0].message and "zone" not in failed[0].message
+
+
+def test_a_look_which_fails_is_not_tried_again_until_check_every_minutes_on(watching):
+    watched = watching(requests.ConnectionError("down"))
+    watched.check()
+    watched.check(60)
+    assert len(watched.home.asked) == 1
+
+
+def test_a_look_which_works_after_one_which_failed_is_acted_on_and_a_new_failure_logged_again(watching, caplog):
+    watched = watching([requests.ConnectionError("down"), drive_of(28), requests.ConnectionError("down")])
+    with caplog.at_level(logging.WARNING, logger="voice_assistant.journeys"):
+        watched.check()
+        watched.check(300)
+        assert len(watched.said) == 1
+        watched.check(600)
+    assert len([r for r in caplog.records if "Couldn't look at the traffic" in r.message]) == 2
+
+
+def test_at_the_cap_nothing_is_asked_and_the_reminder_stays(watching):
+    watched = watching(settings={"monthly_requests": 0})
+    watched.check()
+    assert watched.home.asked == [] and watched.said == [] and watched.rings == LEAVE_BY - 300
+
+
+def test_each_look_is_counted_against_the_month(watching, store):
+    watched = watching()
+    watched.check()
+    watched.check(300)
+    assert store.get("requests") == 2
+
+
+def test_a_restart_carries_on_and_doesnt_say_a_change_again(watching, store, tmp_path, make_config, clock_hands):
+    watched = watching(drive_of(28))
+    watched.check()
+    assert len(watched.said) == 1
+    # A new brain on the same files.
+    clock = Clock(on_timer_finished=lambda *args, **kwargs: None, config=make_config(timers={"announcements": 1}),
+                  start=False)
+    again = ChoiceStore(str(tmp_path / "journeys.json"), JOURNEY_DEFAULTS)
+    journey = Journeys(watched.home, None, clock, again, lambda: watched.settings)
+    restarted = watched.make_watcher(journey)
+    assert again.get("watches")[str(watched.id)]["leave_by"] == LEAVE_BY - 480
+    # Not looked at yet, as it was a moment ago...
+    clock_hands.now = MORNING + 60
+    restarted.check(clock_hands.now)
+    assert len(watched.home.asked) == 1
+    # ...and when it is, the same traffic is the time to leave already said.
+    clock_hands.now = MORNING + 300
+    restarted.check(clock_hands.now)
+    assert len(watched.home.asked) == 2 and len(watched.said) == 1
+    assert clock.timer_due(watched.id) == LEAVE_BY - 480 - 300
+
+
+def test_a_watch_which_fails_doesnt_stop_the_others_or_the_pass(watching, caplog):
+    watched = watching(drive_of(28))
+    first = watched.id
+    watched.journey.remind("Uni", "zone.uni", "zone.home", "driving", ARRIVE, LEAVE_BY, True, satellite="bedroom",
+                           now=datetime.fromtimestamp(MORNING).astimezone())
+    real_due = watched.clock.timer_due
+
+    def due(timer_id):
+        if timer_id == first:
+            raise RuntimeError("broken")
+        return real_due(timer_id)
+
+    watched.clock.timer_due = due
+    with caplog.at_level(logging.ERROR, logger="voice_assistant.journeys"):
+        watched.check()
+    assert "Watching a reminder to leave failed" in caplog.text
+    assert [satellite for satellite, _ in watched.said] == ["bedroom"]
+
+
+def test_a_pass_which_fails_is_logged_and_never_raised(store, real_clock, caplog):
+    watcher = JourneyWatcher(Journeys(FakeHome(), None, real_clock, store, lambda: SETTINGS),
+                             lambda satellite, message: None, lambda: True, lambda: SETTINGS)
+
+    def fails(now):
+        raise RuntimeError("broken")
+
+    watcher.check = fails
+    with caplog.at_level(logging.ERROR, logger="voice_assistant.journeys"):
+        watcher._pass()
+    assert "Watching reminders to leave failed" in caplog.text
+
+
+def test_nothing_is_watched_with_no_clock(store):
+    watcher = JourneyWatcher(Journeys(FakeHome(), None, None, store, lambda: SETTINGS),
+                             lambda satellite, message: None, lambda: True, lambda: SETTINGS)
+    watcher.check(MORNING)
+
+
+def test_the_thread_runs_the_passes_and_stops(store, real_clock, monkeypatch):
+    monkeypatch.setattr(journeys, "PASS_EVERY", 0.01)
+    watcher = JourneyWatcher(Journeys(FakeHome(), None, real_clock, store, lambda: SETTINGS),
+                             lambda satellite, message: None, lambda: True, lambda: SETTINGS)
+    passes = threading.Event()
+    watcher.check = lambda now: passes.set()
+    watcher.start()
+    try:
+        assert passes.wait(5)
+        assert any(thread.name == "journeys" and thread.is_alive() for thread in threading.enumerate())
+    finally:
+        watcher.stop()
+    assert not any(thread.name == "journeys" for thread in threading.enumerate())

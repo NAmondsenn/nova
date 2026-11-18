@@ -197,6 +197,27 @@ def test_a_reminder_that_is_gone_or_a_time_gone_by_is_not_moved(make_clock):
     assert clock.move_timer(timer_id, now + 60) is False
 
 
+def test_a_reminder_which_has_rung_is_not_moved(make_clock):
+    clock = make_clock()
+    timer_id = clock.set_timer(600, label="Leave for Work")["id"]
+    due = clock.timer_due(timer_id)
+    clock._tick(due + 1)
+    assert clock.is_ringing()
+    assert clock.timer_due(timer_id) is None
+    assert clock.move_timer(timer_id, time.time() + 600) is False
+
+
+def test_moving_a_reminder_is_logged_by_its_id_and_time_never_its_label(make_clock, caplog):
+    clock = make_clock()
+    timer_id = clock.set_timer(600, label="Leave for Work")["id"]
+    due = time.time() + 1200
+    with caplog.at_level(logging.INFO, logger="voice_assistant.clock"):
+        assert clock.move_timer(timer_id, due) is True
+        assert clock.move_timer(999, due) is False
+    assert f"Moved timer {timer_id} to {time.strftime('%H:%M', time.localtime(due))}" in caplog.text
+    assert "Work" not in caplog.text and "999" not in caplog.text
+
+
 def test_reminder_without_a_name_is_asked_for(make_clock):
     clock = make_clock()
     result = clock.set_timer(1200, is_reminder=True)
