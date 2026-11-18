@@ -41,6 +41,7 @@ from voice_assistant.downloads import Downloads
 from voice_assistant.football import CANT_GET, NOT_SET_UP, FootballUnavailable, Reading, Team
 from voice_assistant.football_watch import FootballChoices
 from voice_assistant.ha_registry import Entry, Snapshot
+from voice_assistant.journeys import JOURNEY_DEFAULTS, Journeys
 from voice_assistant.lists import Lists
 from voice_assistant.ntfy import Ntfy
 from voice_assistant.page_password import Logins, PagePassword
@@ -248,7 +249,7 @@ class FakeBrain:
         self.clock, self.memory = FakeClock(), FakeMemory()
         self.ntfy = self.stt = self.routines = self.batteries = self.config = self.calendar = None
         self.home = self.lists = self.weather = self.pc = None
-        self.football = self.football_watcher = self.wrapped_store = None
+        self.football = self.football_watcher = self.wrapped_store = self.journeys = None
         self.displays, self.display_server = NoDisplays(), None
         self._night = Ntfy("")
         self.ran = []
@@ -1490,6 +1491,9 @@ def test_the_pages_script_and_style_are_served_with_its_safety_headers(served, p
         assert b'"/api/undo"' in body and b'getElementById("undos")' in body
         assert b'"/api/satellites/add"' in body and b'"/api/satellites/password"' in body
         assert b'"/api/satellites/remove"' in body and b'"/api/satellites/default"' in body
+        # The switch for a satellite which travels with the user, with its words and what it means.
+        assert b'"/api/satellites/travels"' in body and b'"Travels with me"' in body
+        assert b'"Journeys are worked out from where your phone is."' in body
         # The speaker a satellite says it plays Spotify on is put on the page only as text.
         assert b'element("span", `Spotify plays on ${satellite.spotify_speaker}`, "detail")' in body
         # No longer than the name rule lets a name be.
@@ -2133,11 +2137,11 @@ def test_the_page_lists_each_satellite(files):
 
     assert state["satellites"] == [
         {"name": "bedroom", "connected": True, "activity": "speaking", "muted": False, "default": True,
-         "spotify_speaker": "Voice-Assistant"},
+         "spotify_speaker": "Voice-Assistant", "travels": False},
         {"name": "kitchen", "connected": True, "activity": "idle", "muted": True, "default": False,
-         "spotify_speaker": "Voice-Assistant"},
+         "spotify_speaker": "Voice-Assistant", "travels": False},
         {"name": "garage", "connected": False, "activity": "idle", "muted": False, "default": False,
-         "spotify_speaker": None}]
+         "spotify_speaker": None, "travels": False}]
     # What's shown below is the default's, unless another is asked for.
     assert state["muted"] is False and page.state("kitchen")["muted"] is True
 
@@ -2227,7 +2231,7 @@ def test_alarms_and_routines_work_with_no_satellite(files):
     assert state["volumes"] == {} and state["muted"] is False
     assert state["satellites"] == [
         {"name": "bedroom", "connected": False, "activity": "idle", "muted": False, "default": True,
-         "spotify_speaker": None}]
+         "spotify_speaker": None, "travels": False}]
     # Without any satellite added at all, too.
     assert _page(sessions={}, known=[]).state()["satellites"] == []
 
@@ -2367,6 +2371,72 @@ def test_a_satellite_is_removed_or_made_the_default_on_the_page(served):
                     {"success": False, "message": "There's no satellite called ghost."},
                     {"success": False, "message": "There's no satellite called ghost."}]
     assert served.brain.known == ["hall", "bedroom"]
+
+
+def _journeys(tmp_path):
+    """The real Journeys over a store of its own - the page only ever asks it who travels."""
+    return Journeys(None, None, None, ChoiceStore(str(tmp_path / "journeys.json"), JOURNEY_DEFAULTS), lambda: {})
+
+
+def test_a_satellite_is_marked_as_travelling_with_the_user_and_logged(files, tmp_path, caplog):
+    journeys = _journeys(tmp_path)
+    page = _page(sessions={"bedroom": FakeSession(), "car": FakeSession()}, journeys=journeys)
+    assert [s["travels"] for s in page.state()["satellites"]] == [False, False]
+
+    with caplog.at_level(logging.INFO):
+        assert page.set_travels("car", True, LOGIN) == {"success": True, "message": "car travels with you now."}
+    assert LOGIN in caplog.text and "car" in caplog.text
+    assert journeys.travels("car") and not journeys.travels("bedroom")
+    assert {s["name"]: s["travels"] for s in page.state()["satellites"]} == {"bedroom": False, "car": True}
+
+    assert page.set_travels("car", False, LOGIN) == {"success": True, "message": "car stays at home now."}
+    assert not journeys.travels("car")
+    assert [s["travels"] for s in page.state()["satellites"]] == [False, False]
+
+
+def test_a_travels_change_which_cant_be_made_is_refused(files, tmp_path, monkeypatch, caplog):
+    journeys = _journeys(tmp_path)
+    page = _page(journeys=journeys)
+    nonsense = {"success": False, "message": "That didn't make sense."}
+    # In Python bool("false") is True, so nothing is coerced.
+    assert page.set_travels("bedroom", "false", LOGIN) == nonsense
+    assert page.set_travels("bedroom", 1, LOGIN) == nonsense
+    assert page.set_travels("bedroom", None, LOGIN) == nonsense
+    assert page.set_travels(["bedroom"], True, LOGIN) == nonsense
+    assert page.set_travels(None, True, LOGIN) == nonsense
+    assert page.set_travels("ghost", True, LOGIN) == {"success": False, "message": "There's no satellite called ghost."}
+    assert journeys.store.get("travelling") == []
+
+    def broken():
+        raise json.JSONDecodeError("Expecting value", "", 0)
+
+    page.brain.satellites = broken
+    assert page.set_travels("bedroom", True, LOGIN) == {"success": False, "message": page_module.SATELLITES_UNREADABLE}
+    del page.brain.satellites
+
+    def full(change):
+        raise OSError("No space left on device")
+
+    with monkeypatch.context() as full_disk, caplog.at_level(logging.ERROR):
+        full_disk.setattr(journeys.store, "change", full)
+        assert page.set_travels("bedroom", True, LOGIN) == {"success": False, "message": "That couldn't be saved."}
+    assert "couldn't save" in caplog.text
+    assert not journeys.travels("bedroom")
+
+
+def test_without_journeys_no_satellite_travels_and_none_can_be_made_to(files):
+    page = _page()
+    assert [s["travels"] for s in page.state()["satellites"]] == [False]
+    assert page.set_travels("bedroom", True, LOGIN) == {"success": False, "message": "Journeys need Home Assistant."}
+
+
+def test_the_travels_route_needs_the_pages_own_header(served, tmp_path):
+    served.brain.journeys = _journeys(tmp_path)
+    assert _ask(served, "/api/satellites/travels", {"name": "bedroom", "on": True})[0] == 403
+    assert not served.brain.journeys.travels("bedroom")
+    said = json.loads(_ask(served, "/api/satellites/travels", {"name": "bedroom", "on": True}, X_Nova="page")[2])
+    assert said == {"success": True, "message": "bedroom travels with you now."}
+    assert served.brain.journeys.travels("bedroom")
 
 
 def test_a_broken_satellites_file_is_said_so_not_taken_for_no_satellite(files, caplog):

@@ -612,14 +612,15 @@ class SettingsPage:
     def _satellites(self, names: List[str]) -> List[Dict]:
         """
         Each satellite the brain lets in, whether it's the default, and whether it's
-        connected - with what it's doing, its mute and, if Spotify is the player, the
-        speaker it plays on. Never its password.
+        connected - with what it's doing, its mute, whether it travels with the user and,
+        if Spotify is the player, the speaker it plays on. Never its password.
 
         Args:
             names: The satellites, as the brain has them - the first is the default.
         """
         found = []
         default = names[0] if names else None
+        journeys = self.brain.journeys
         # With Navidrome as the player, Spotify plays nowhere, so none is said. Spotify
         # is the player when none is chosen, as with no config at all.
         spotify = self.brain.config is None or _chosen(self.brain.config) == "spotify"
@@ -631,7 +632,9 @@ class SettingsPage:
             found.append({"name": name, "connected": session is not None,
                           "activity": session.activity if session is not None else "idle",
                           "muted": session is not None and session.muted, "default": name == default,
-                          "spotify_speaker": speaker})
+                          "spotify_speaker": speaker,
+                          # Never true without journeys, which is what keeps it.
+                          "travels": journeys is not None and journeys.travels(name)})
         return found
 
     def state(self, satellite: Optional[str] = None) -> Dict:
@@ -2042,6 +2045,41 @@ class SettingsPage:
         logger.info(f"Settings page: {who} made the {name} satellite the default")
         return {"success": True, "message": f"{name} is the default now."}
 
+    def set_travels(self, name, on, who: str) -> Dict:
+        """
+        Marks a satellite as one which travels with the user, so its journeys start from
+        where the user's phone is, or as one which stays at home. See Journeys.set_travels.
+        The types are checked here, as bool("false") would be True. Journeys keeps its own
+        file under its own lock, so _saving isn't held.
+
+        Args:
+            name: The satellite, as the page sent it.
+            on: Whether it travels.
+            who: The Tailscale login asking, for the log.
+
+        Returns:
+            Dict with 'success' and a 'message'.
+        """
+        if not (isinstance(name, str) and isinstance(on, bool)):
+            return {"success": False, "message": "That didn't make sense."}
+        journeys = self.brain.journeys
+        if journeys is None:
+            return {"success": False, "message": "Journeys need Home Assistant."}
+        names = self._satellite_names()
+        if names is None:
+            return {"success": False, "message": SATELLITES_UNREADABLE}
+        if name not in names:
+            return {"success": False, "message": f"There's no satellite called {name}."}
+        try:
+            journeys.set_travels(name, on)
+        except OSError as e:
+            logger.error(f"Settings page: couldn't save that {name} travels with the user: {e}")
+            return {"success": False, "message": "That couldn't be saved."}
+        logger.info(f"Settings page: {who} {'made' if on else 'stopped making'} the {name} satellite "
+                    f"travel with the user")
+        return {"success": True,
+                "message": f"{name} travels with you now." if on else f"{name} stays at home now."}
+
     # The clock displays. Their file keeps its own lock, as the satellites' passwords
     # do, so none of these holds _saving either. See docs/decisions/0013.
 
@@ -2341,6 +2379,7 @@ ACTIONS: Dict[str, Callable[[SettingsPage, Dict, str], Dict]] = {
     "/api/satellites/password": lambda page, body, who: page.new_password(body["name"], who),
     "/api/satellites/remove": lambda page, body, who: page.remove_satellite(body["name"], who),
     "/api/satellites/default": lambda page, body, who: page.make_default(body["name"], who),
+    "/api/satellites/travels": lambda page, body, who: page.set_travels(body["name"], body["on"], who),
     # A new clock's fields are sent as one, as the page adds the satellite it's looking
     # after to every change it sends, which would otherwise be taken for the clock's.
     # Its satellite is always sent - null for the default's.
