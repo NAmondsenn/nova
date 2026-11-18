@@ -280,15 +280,136 @@ def test_a_match_with_no_score_says_so_rather_than_one(london):
         "Crystal Palace v Liverpool, Premier League, no score listed, on Sunday the 8th of November.")
 
 
-@pytest.mark.parametrize("state", ["pre", "post"])
-def test_a_match_which_is_off(london, state):
+# South Shields' match of 13 November 2026, 19:45, as Home Assistant keeps a called-off match: its phase "off" and
+# its clock the source's word for it.
+SHIELDS_OFF = {"id": "bbc:7", "kickoff": "2026-11-13T19:45:00+00:00", "state": "pre", "phase": "off", "clock": "Postponed",
+               "home": "South Shields", "home_id": "18312", "away": "Harborough Town", "away_id": "bbc:harborough",
+               "league": "National League North"}
+SHIELDS_POSTPONED_TONIGHT = "South Shields v Harborough Town, National League North, tonight at 7:45 PM, is postponed."
+
+
+@pytest.mark.parametrize("state", ["pre", "in", "post"])
+def test_a_match_which_is_off_is_said_in_plain_words(london, state):
     AT = datetime(2026, 11, 13, 12, 0).astimezone()
+    assert said_match(_m(**{**SHIELDS_OFF, "state": state}), AT) == SHIELDS_POSTPONED_TONIGHT
     match = _m(state=state, phase="off", clock="Postponed", home="Notts County", away="Stevenage", league="EFL League One",
-               kickoff="2026-11-21T15:00:00+00:00", odds={"home": 55, "draw": 23, "away": 22, "source": "DraftKings"})
-    # Neither its odds nor a time for it are said: it isn't being played.
-    assert said_match(match, AT) == "Notts County v Stevenage, EFL League One, on Saturday the 21st of November: off (Postponed)."
+               kickoff="2026-11-21T15:00:00+00:00", odds={"home": 55, "draw": 23, "away": 22, "source": "DraftKings"},
+               venue={"name": "Meadow Lane", "city": "Nottingham"})
+    # Neither its odds nor its ground are said: it isn't being played. Its time is, as the day it was to be played.
+    assert said_match(match, AT) == (
+        "Notts County v Stevenage, EFL League One, on Saturday the 21st of November at 3:00 PM, is postponed.")
     assert said_match(_m(state=state, phase="off", kickoff="2026-11-14T15:00:00+00:00"), AT) == (
-        "Liverpool v Arsenal, Premier League, tomorrow: off.")
+        "Liverpool v Arsenal, Premier League, tomorrow at 3:00 PM, is off.")
+
+
+@pytest.mark.parametrize("kickoff, said", [
+    ("2026-11-13T12:00:00+00:00", "today at noon"), ("2026-11-13T16:59:00+00:00", "today at 4:59 PM"),
+    ("2026-11-13T17:00:00+00:00", "tonight at 5:00 PM"), ("2026-11-13T19:45:00+00:00", "tonight at 7:45 PM"),
+    # Only today is tonight: tomorrow's, at any hour, is tomorrow's.
+    ("2026-11-14T19:45:00+00:00", "tomorrow at 7:45 PM"), ("2026-11-14T11:00:00+00:00", "tomorrow at 11:00 AM")])
+def test_a_match_off_today_is_tonight_from_five_in_the_evening(london, kickoff, said):
+    AT = datetime(2026, 11, 13, 9, 0).astimezone()
+    assert said_match(_m(**{**SHIELDS_OFF, "kickoff": kickoff}), AT) == f"South Shields v Harborough Town, National League North, {said}, is postponed."
+
+
+@pytest.mark.parametrize("clock, said", [
+    ("Postponed", "is postponed"), ("postponed", "is postponed"), ("Cancelled", "is cancelled"), ("Canceled", "is cancelled"),
+    ("Abandoned", "was abandoned"), ("Suspended", "is off"), ("Walkover", "is off"), ("", "is off")])
+def test_each_word_for_a_match_which_is_off_is_said_in_its_own_plain_words(london, clock, said):
+    AT = datetime(2026, 11, 13, 12, 0).astimezone()
+    assert said_match(_m(**{**SHIELDS_OFF, "clock": clock}), AT) == (
+        f"South Shields v Harborough Town, National League North, tonight at 7:45 PM, {said}.")
+
+
+def test_a_match_which_is_off_is_never_said_as_the_source_does_or_as_no_play(london):
+    AT = datetime(2026, 11, 13, 12, 0).astimezone()
+    for clock in ("Postponed", "Cancelled", "Abandoned", "Suspended", ""):
+        said = said_match(_m(**{**SHIELDS_OFF, "clock": clock}), AT)
+        assert "off (" not in said and "playing" not in said and "no fixtures" not in said.lower()
+
+
+def test_the_overview_says_a_followed_teams_match_which_is_off_today(london):
+    AT = datetime(2026, 11, 13, 12, 0).astimezone()
+    later = _found_match(id="bbc:8", kickoff="2026-11-21T15:00:00+00:00", home="Chorley", home_id="bbc:chorley",
+                         away="South Shields", away_id="18312", league="National League North")
+    reading = _reading(_team("18312", "South Shields", now=SHIELDS_OFF, next=[later]), _team("395", "Stevenage"))
+    lines = said_followed(reading, AT).split("\n")
+    assert lines[0] == (f"South Shields: Today: {SHIELDS_POSTPONED_TONIGHT} "
+                        "Next: Chorley v South Shields, National League North, on Saturday the 21st of November at 3:00 PM.")
+    assert lines[1] == "Stevenage: no fixtures listed."
+    # A match which is off isn't in play: there is no warning of a score a little behind.
+    assert len(lines) == 2
+
+
+def test_the_overview_says_a_match_off_tomorrow_from_the_head_of_next_as_its_own_part(london):
+    AT = datetime(2026, 11, 13, 12, 0).astimezone()
+    off = {**SHIELDS_OFF, "kickoff": "2026-11-14T19:45:00+00:00"}
+    said = said_followed(_reading(_team("18312", "South Shields", next=[off])), AT)
+    assert said == ("South Shields: Tomorrow: South Shields v Harborough Town, National League North, tomorrow at 7:45 PM, "
+                    "is postponed.")
+    # It doesn't take the one "Next:" place, which is the next match which is on.
+    later = _found_match(id="bbc:8", kickoff="2026-11-21T15:00:00+00:00", home="Chorley", home_id="bbc:chorley",
+                         away="South Shields", away_id="18312", league="National League North")
+    said = said_followed(_reading(_team("18312", "South Shields", next=[off, later])), AT)
+    assert said == ("South Shields: Tomorrow: South Shields v Harborough Town, National League North, tomorrow at 7:45 PM, "
+                    "is postponed. Next: Chorley v South Shields, National League North, on Saturday the 21st of November at 3:00 PM.")
+    # With today's off as well, the three go in the order they come, and the team isn't said to have no fixtures.
+    said = said_followed(_reading(_team("18312", "South Shields", now=SHIELDS_OFF, next=[
+        {**off, "id": "bbc:9"}, later])), AT)
+    assert said == (f"South Shields: Today: {SHIELDS_POSTPONED_TONIGHT} "
+                    "Tomorrow: South Shields v Harborough Town, National League North, tomorrow at 7:45 PM, is postponed. "
+                    "Next: Chorley v South Shields, National League North, on Saturday the 21st of November at 3:00 PM.")
+
+
+def test_the_overview_says_a_called_off_match_alone_has_fixtures_to_say(london):
+    AT = datetime(2026, 11, 13, 12, 0).astimezone()
+    said = said_followed(_reading(_team("18312", "South Shields", now=SHIELDS_OFF)), AT)
+    # Its match is today's, and said: the team isn't said to have no fixtures, nor not to be playing.
+    assert said == "South Shields: Today: " + SHIELDS_POSTPONED_TONIGHT
+    assert "no fixtures" not in said and "playing" not in said
+
+
+def test_a_teams_answer_says_its_match_which_is_off_today(london):
+    AT = datetime(2026, 11, 13, 12, 0).astimezone()
+    answer = _team_answer(team={"id": "18312", "name": "South Shields", "full_name": "South Shields", "followed": True},
+                          now=SHIELDS_OFF)
+    lines = said_team(answer, AT).split("\n")
+    assert lines[0] == "South Shields:"
+    assert lines[1] == "Today: " + SHIELDS_POSTPONED_TONIGHT
+    # It has a match today, so it isn't said to have no fixtures, and no odds or line-ups are looked for it.
+    assert "No fixtures listed." not in lines
+    assert not any("odds" in line or "off (" in line or "playing" in line for line in lines)
+
+
+def test_a_teams_answer_says_a_match_off_tomorrow_as_its_next(london):
+    AT = datetime(2026, 11, 13, 12, 0).astimezone()
+    off = {**SHIELDS_OFF, "kickoff": "2026-11-14T19:45:00+00:00", "no_odds": True}
+    answer = _team_answer(team={"id": "18312", "name": "South Shields", "followed": True}, next=[off])
+    lines = said_team(answer, AT).split("\n")
+    assert lines[1] == "Next: South Shields v Harborough Town, National League North, tomorrow at 7:45 PM, is postponed."
+    assert "No fixtures listed." not in lines and not any("odds" in line for line in lines)
+
+
+def test_a_match_off_in_summer_is_tonight_by_the_clock_of_the_day_not_of_utc(london):
+    AT = datetime(2026, 6, 13, 12, 0).astimezone()
+    # 16:30 UTC in June is 17:30 British Summer Time, which is evening; in winter the same UTC time is 16:30 and not.
+    assert said_match(_m(**{**SHIELDS_OFF, "kickoff": "2026-06-13T16:30:00+00:00"}), AT) == (
+        "South Shields v Harborough Town, National League North, tonight at 5:30 PM, is postponed.")
+    assert said_match(_m(**{**SHIELDS_OFF, "kickoff": "2026-06-13T15:59:00+00:00"}), AT) == (
+        "South Shields v Harborough Town, National League North, today at 4:59 PM, is postponed.")
+    winter = datetime(2026, 11, 13, 12, 0).astimezone()
+    assert said_match(_m(**{**SHIELDS_OFF, "kickoff": "2026-11-13T16:30:00+00:00"}), winter) == (
+        "South Shields v Harborough Town, National League North, today at 4:30 PM, is postponed.")
+
+
+def test_a_match_which_is_off_is_said_with_no_digits_joined_by_a_dash(london):
+    AT = datetime(2026, 11, 13, 12, 0).astimezone()
+    for clock in ("Postponed", "Cancelled", "Abandoned", "Suspended", ""):
+        found = {**SHIELDS_OFF, "clock": clock, "home_score": 1, "away_score": 0}
+        said = [said_match(_m(**found), AT), said_followed(_reading(_team("18312", "South Shields", now=found)), AT),
+                said_team(_team_answer(team={"id": "18312", "name": "South Shields"}, now=found), AT),
+                said_competition(_competition_answer([_found_match(**found)]), AT)]
+        assert not any(re.search(r"\d\s*[-\u2010-\u2015\u2212]\s*\d", words) for words in said)
 
 
 def test_odds_which_dont_add_up_to_percentages_are_refused(london):
@@ -2197,6 +2318,40 @@ def test_lineups_with_no_team_and_nobody_playing(london, teams):
     home = FakeHome(teams)
     assert _said(home, about="lineups") == {"success": True, "message": NO_LINEUP_TEAM}
     assert home.asked == []
+
+
+def test_lineups_with_no_team_where_the_only_match_today_is_off_say_so_and_ask_nothing(london):
+    home = FakeHome([_team("18312", "South Shields", now=SHIELDS_OFF), _team("395", "Stevenage")])
+    assert _said(home, about="lineups") == {"success": True, "message": SHIELDS_POSTPONED_TONIGHT + " No line-ups are listed for it."}
+    assert home.asked == []
+    # Two followed teams in one match which is off say it once, and two matches off say each.
+    both = FakeHome([_team("18312", "South Shields", now=SHIELDS_OFF), _team("bbc:harborough", "Harborough Town", now=SHIELDS_OFF)])
+    assert _said(both, about="lineups")["message"] == SHIELDS_POSTPONED_TONIGHT + " No line-ups are listed for it."
+    other = _found_match(id="9", kickoff="2026-11-13T15:00:00+00:00", state="post", phase="off", clock="Cancelled",
+                         home="Liverpool", away="Arsenal")
+    two = FakeHome([_team("18312", "South Shields", now=SHIELDS_OFF), _team("364", "Liverpool", now=other)])
+    assert _said(two, about="lineups")["message"].split("\n") == [
+        SHIELDS_POSTPONED_TONIGHT + " No line-ups are listed for it.",
+        "Liverpool v Arsenal, Premier League, today at 3:00 PM, is cancelled. No line-ups are listed for it."]
+
+
+def test_lineups_of_a_named_team_whose_match_today_is_off_say_it_is_off(london):
+    # Home Assistant answers a named team's line-ups on the day of its match called off with that match.
+    answer = {"team": {"id": "18312", "name": "South Shields", "followed": True}, "stale": False, "match": SHIELDS_OFF}
+    assert said_lineups(answer, AT.astimezone()).split("\n") == [SHIELDS_POSTPONED_TONIGHT, "No line-ups are listed for it."]
+    home = FakeHome([_team("18312", "South Shields", now=SHIELDS_OFF)], answer=answer)
+    assert _said(home, team="South Shields", about="lineups") == {"success": True, "message": SHIELDS_POSTPONED_TONIGHT + "\nNo line-ups are listed for it."}
+    assert home.asked == [("lineups", "South Shields", "", 1)]
+
+
+def test_lineups_with_no_team_are_not_for_a_match_which_is_off_over_another_teams_match(london):
+    # Liverpool's, off, was at 12:30; Stevenage's was over at 15:00: the earlier kick-off must not win.
+    off = _found_match(id="9", kickoff="2026-11-13T12:30:00+00:00", state="pre", phase="off", clock="Postponed")
+    over = _found_match(id="10", kickoff="2026-11-13T15:00:00+00:00", state="post", phase="full_time", clock="FT",
+                        home="Stevenage", away="Wigan", home_score=1, away_score=0, winner="home")
+    home = FakeHome([_team("364", "Liverpool", now=off), _team("395", "Stevenage", now=over)], answer=_lineups_answer(match=over))
+    assert _said(home, now=datetime(2026, 11, 13, 18, 0).astimezone(), about="lineups")["success"]
+    assert home.asked == [("lineups", "Stevenage", "", 1)]
 
 
 def test_lineups_with_no_team_and_no_team_followed_say_so_as_the_overview_does(london):
