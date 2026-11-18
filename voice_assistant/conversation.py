@@ -130,7 +130,7 @@ class Conversation:
         """Whether a success is confirmed with the chime, as it is set now."""
         return self._chime_enabled() if callable(self._chime_enabled) else self._chime_enabled
 
-    def start(self, ringing: Optional[Dict] = None, talked_over: bool = False):
+    def start(self, ringing: Optional[Dict] = None, talked_over: bool = False, pressed: bool = False):
         """
         Starts a new conversation, as the wake word is heard.
 
@@ -140,9 +140,12 @@ class Conversation:
                 what the user could hear when they started talking.
             talked_over: True when the wake word was said over the assistant's last
                 reply, which was stopped there and then.
+            pressed: True when it began on a press of a key, which is deliberate - so
+                nothing said in it is taken for speech from what's playing.
         """
         self.ringing = ringing or dict(NOTHING_RINGING)
         self.talked_over = talked_over
+        self.pressed = pressed
         # Counted per conversation, not per question, so a long back and forth still
         # ends after the cap is reached.
         self.follow_ups = 0
@@ -394,7 +397,8 @@ class Conversation:
         self.llm.read_tools = set(self.actions.read_tools())
         # Read once, as the request is built, so what Claude is told plays is what decides
         # whether its not_for_me counts - a film which stops while it thinks changes neither.
-        playing = [] if in_routine or self.playing is None else list(self.playing())
+        # Nothing for a press, which no film can make, so it's never dropped as one.
+        playing = [] if in_routine or self.pressed or self.playing is None else list(self.playing())
         # What Claude reads, such as home_status, goes back to it to answer from.
         result = self.llm.process_query(text, context=timers, lights=lights, playing=playing,
                                         read=lambda action: self.actions.execute(action).say)

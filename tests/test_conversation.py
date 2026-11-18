@@ -601,6 +601,23 @@ def test_something_ringing_carries_on_when_speech_from_whats_playing_is_ignored(
     assert clock.silenced == [] and clock.dismissed == 0
 
 
+def test_a_pressed_conversation_is_never_taken_for_speech_from_whats_playing():
+    # A press is deliberate, so Claude is told nothing plays, for the whole conversation -
+    # follow-ups too - and a not_for_me all the same is not caught, never ignored.
+    llm = FakeLLM(_answer("Which room?"), NOT_FOR_ME, NOT_FOR_ME)
+    playing = FakePlaying(["Bedroom TV"])
+    conversation = _conversation(llm=llm, playing=playing)
+    conversation.start(pressed=True)
+    assert conversation.handle("turn the lights off").listen_again
+    assert conversation.handle("the bedroom", follow_up=True).say == "Sorry, I didn't catch that."
+    assert llm.playing == [[], []] and playing.asked == 0
+
+    # The next conversation, begun by the wake word, is as before.
+    conversation.start()
+    assert conversation.handle("I'll never let go, Jack.") == Reply()
+    assert llm.playing[-1] == ["Bedroom TV"]
+
+
 def test_not_for_me_with_nothing_playing_is_taken_as_not_caught():
     llm = FakeLLM(NOT_FOR_ME)
     actions = FakeActions()

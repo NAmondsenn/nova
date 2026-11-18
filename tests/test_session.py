@@ -217,7 +217,7 @@ class ScriptedConversation:
         self.started = []
         self.heard = []
 
-    def start(self, ringing=None, talked_over=False):
+    def start(self, ringing=None, talked_over=False, pressed=False):
         self.started.append(talked_over)
 
     def handle(self, text, follow_up=False, timeline=None):
@@ -2317,6 +2317,18 @@ def test_a_pressed_wake_is_handed_to_the_interaction(make_session, monkeypatch):
     session._answer({"feed": AudioFeed(), "pressed": True})
     session._answer({"feed": AudioFeed()})
     assert seen == [True, False]
+
+
+def test_a_pressed_wake_starts_a_pressed_conversation(make_session, monkeypatch):
+    # So what's said at a press is never dropped as speech from the TV - see Conversation.start.
+    session = make_session()
+    started = []
+    session.conversation = SimpleNamespace(
+        start=lambda ringing=None, talked_over=False, pressed=False: started.append(pressed))
+    monkeypatch.setattr(session, "_handle_interaction", lambda feed, **kwargs: None)
+    session._answer({"feed": AudioFeed(), "pressed": True})
+    session._answer({"feed": AudioFeed()})
+    assert started == [True, False]
 
 
 def test_the_listening_blip_is_switched_off_straight_away(brain, connect, make_session):

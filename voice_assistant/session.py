@@ -651,7 +651,7 @@ class Session:
         self.speaker.silence("announcement")
         try:
             with self._conversation_lock:
-                self.conversation.start(ringing, talked_over=talked_over)
+                self.conversation.start(ringing, talked_over=talked_over, pressed=wake.get("pressed", False))
             return self._handle_interaction(wake["feed"], timeline=timeline, pre_roll=wake.get("pre_roll"),
                                             pressed=wake.get("pressed", False))
         except Exception as e:
