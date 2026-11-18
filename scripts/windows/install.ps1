@@ -99,7 +99,9 @@ else {
 # the launcher runs the satellite and starts it again whenever it exits. One copy
 # only, no time limit, and at normal priority (5) rather than the below-normal 7 a task
 # is given, so a game doesn't break up its sound.
-$user = "$env:USERDOMAIN\$env:USERNAME"
+# The account as Windows knows it. Over ssh USERDOMAIN reads WORKGROUP, which names no
+# account, so it's taken from the process's own identity rather than the environment.
+$user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $action = New-ScheduledTaskAction -Execute $venvPythonw -Argument ('"' + $launcher + '"') -WorkingDirectory $app
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
