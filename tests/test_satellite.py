@@ -24,6 +24,7 @@ np = pytest.importorskip("numpy")
 import satellite
 from voice_assistant import fallback, paths, protocol, satellite_link, wake_clips
 from voice_assistant.fallback import AlarmCopy, Phrase, StateCopy
+from voice_assistant.press import PressListener
 from voice_assistant.wake_clips import WakeClips
 
 PASSWORD = "the-bedroom-satellites-password"
@@ -280,6 +281,22 @@ class FakeSpeaker:
         self.closed = True
 
 
+class FakePress:
+    """Stands in for the press listener, which would take a real port of this machine."""
+
+    def __init__(self, port, on_press):
+        self.port = port
+        self.on_press = on_press
+        self.started = False
+        self.closed = False
+
+    def start(self):
+        self.started = True
+
+    def close(self):
+        self.closed = True
+
+
 @pytest.fixture(autouse=True)
 def quick(monkeypatch):
     monkeypatch.setattr(satellite_link, "SOCKET_TIMEOUT", 0.05)
@@ -305,6 +322,7 @@ def make(tmp_path, monkeypatch, make_config):
     monkeypatch.setattr(satellite, "Microphone", FakeMicrophone)
     monkeypatch.setattr(satellite, "Speaker", FakeSpeaker)
     monkeypatch.setattr(satellite, "WakeWordDetector", FakeWake)
+    monkeypatch.setattr(satellite, "PressListener", FakePress)
     monkeypatch.setattr(satellite, "make_echo_canceller", lambda config, rate: None)
     monkeypatch.setattr(satellite, "AlarmCopy", partial(AlarmCopy, str(tmp_path / "alarm_copy.json")))
     monkeypatch.setattr(satellite, "StateCopy", partial(StateCopy, str(tmp_path / "state.json")))
@@ -1758,6 +1776,208 @@ def test_a_push_to_talk_satellite_sends_the_follow_up_the_brain_asks_for(brain, 
     brain.say("listen", recording="listen-1")
     assert wait_for(lambda: len(brain.recordings()) >= 2)
     brain.say("stop_listening", recording="listen-1")
+
+
+def pressable(brain, make, **sections):
+    """A push-to-talk satellite which has reached the brain."""
+    made = make(satellite={"trigger": "push_to_talk"}, **sections)
+    assert made.wake is None
+    assert wait_for(lambda: connected(made))
+    return made
+
+
+def test_a_press_starts_a_recording(brain, make):
+    made = pressable(brain, make)
+    brain.say("state", volumes={"general": 0.5}, muted=False)
+    assert wait_for(lambda: made.state.volume("general") == 0.5)
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    brain.say("stop_listening")
+
+    # Nothing from before the press, and saying it was one.
+    assert brain.messages("wake") == [{"type": "wake", "talked_over": False, "pre_roll": 0, "recording": "wake-1",
+                                       "pressed": True}]
+    assert brain.kinds().index("wake") < brain.kinds().index("audio")
+    # The press's own sound, at once and from here, at the general volume.
+    assert made.speaker.files() == [os.path.join(made.sounds_folder, "listening.wav")]
+    assert made.speaker.playing[0].volume == 0.5
+    # Not the short piece of audio before a wake word's recording.
+    assert all(len(piece) == 1600 for piece in brain.recordings()[:2])
+
+
+def test_a_press_makes_a_recording_each_time(brain, make):
+    made = pressable(brain, make)
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 1)
+    brain.say("stop_listening", recording="wake-1")
+    assert wait_for(lambda: made._recording is None)
+    made._pressed()
+    assert wait_for(lambda: len(brain.messages("wake")) == 2)
+    assert [message["recording"] for message in brain.messages("wake")] == ["wake-1", "wake-2"]
+    assert all(message["pressed"] is True for message in brain.messages("wake"))
+    brain.say("stop_listening", recording="wake-2")
+
+
+def test_a_second_press_ends_the_recording(brain, make):
+    made = pressable(brain, make)
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    made._pressed()
+
+    assert wait_for(lambda: brain.messages("audio_end"))
+    assert brain.messages("audio_end") == [{"type": "audio_end", "reason": "pressed"}]
+    # Told after every piece of audio, and no more comes.
+    assert brain.kinds()[-1] == "audio_end"
+    time.sleep(0.1)
+    assert brain.kinds()[-1] == "audio_end"
+    assert brain.messages("wake") != [] and len(brain.messages("wake")) == 1
+    # The brain can't be waiting on audio which isn't coming: it's over until the next press.
+    assert wait_for(lambda: made._recording is None)
+    made._pressed()
+    assert wait_for(lambda: len(brain.messages("wake")) == 2)
+    brain.say("stop_listening")
+
+
+def test_a_press_ends_the_answer_to_a_question_too(brain, make):
+    made = pressable(brain, make)
+    brain.say("listen", recording="listen-1")
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    made._pressed()
+
+    assert wait_for(lambda: brain.messages("audio_end"))
+    assert brain.messages("audio_end") == [{"type": "audio_end", "reason": "pressed"}]
+    # Not a recording of its own.
+    assert brain.messages("wake") == []
+
+
+def test_a_press_over_a_reply_stops_it_and_listens(brain, make):
+    made = pressable(brain, make)
+    brain.say("play_stream", id="music-1", rate=44100, channels=2, volume=0.5, kind="music", paused=False)
+    brain.say("play_stream", id="reply-1", rate=22050, channels=1, volume=0.8, kind="reply", paused=False)
+    brain.say("stream_audio", np.array([1, 2, 3], np.int16).tobytes(), id="reply-1")
+    assert wait_for(lambda: len(made.speaker.streams()) == 2 and made.speaker.streams()[1].pieces)
+    music, reply = made.speaker.streams()
+    made._pressed()
+
+    assert wait_for(lambda: brain.messages("played"))
+    assert reply.stopped
+    assert music.paused and not music.done
+    assert brain.messages("wake") == [{"type": "wake", "talked_over": True, "pre_roll": 0, "recording": "wake-1",
+                                       "pressed": True}]
+    # Told of the press before the end of the reply it stopped, as for the wake word.
+    assert brain.kinds().index("wake") < brain.kinds().index("played")
+    # Heard to be listening, though the reply was stopped: the sound isn't stopped with it.
+    listening = os.path.join(made.sounds_folder, "listening.wav")
+    assert made.speaker.files() == [listening]
+    assert not made.speaker.playing[-1].stopped
+    brain.say("stop_listening")
+
+
+def test_a_press_while_muted_still_listens(brain, make):
+    made = pressable(brain, make)
+    brain.say("state", volumes={}, muted=True)
+    assert wait_for(lambda: made.state.muted is True)
+    made._pressed()
+
+    assert wait_for(lambda: len(brain.recordings()) >= 1)
+    assert brain.messages("wake")[0]["pressed"] is True
+    brain.say("stop_listening")
+
+
+def test_a_press_with_no_brain_gets_the_phrase(brain, make):
+    brain.up = False
+    made = make(satellite={"trigger": "push_to_talk"})
+    made._pressed()
+
+    assert wait_for(lambda: PHRASE in made.speaker.files())
+    # Only the phrase: no sound for a recording which wasn't made.
+    assert made.speaker.files() == [PHRASE]
+    # Not stuck: it's waiting for the next press, which gets the phrase again.
+    assert wait_for(lambda: made._recording is None and not made._press_pending)
+    made.speaker.playing.clear()
+    made._pressed()
+    assert wait_for(lambda: PHRASE in made.speaker.files())
+
+
+def test_losing_the_brain_during_a_pressed_recording_says_the_phrase(brain, make):
+    made = pressable(brain, make)
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    brain.drop()
+
+    assert wait_for(lambda: PHRASE in made.speaker.files())
+    assert wait_for(lambda: made._recording is None)
+
+
+def test_a_press_while_the_fallback_rings_dismisses_it(brain, make, tmp_path):
+    brain.up = False
+    AlarmCopy(str(tmp_path / "alarm_copy.json")).replace([entry(time.time() - 1)])
+    made = make(satellite={"trigger": "push_to_talk"})
+    alarm = os.path.join(paths.SOUNDS_DIR, "alarm_sound.wav")
+    assert wait_for(lambda: alarm in made.speaker.files())
+    assert made.ringer.ringing
+    made._pressed()
+
+    assert wait_for(lambda: not made.ringer.ringing)
+    assert made.alarms.away_report() == {"rang": ["alarm-1@1729587600"], "dismissed": ["alarm-1@1729587600"]}
+    # Dismissing is all it does, as for the wake word: no recording, no sound, no phrase.
+    assert wait_for(lambda: "announcement" not in made.speaker.silenced)
+    assert made.speaker.files() == [alarm]
+    assert PHRASE not in made.speaker.files()
+
+
+def test_a_push_to_talk_satellite_tells_the_watchdog_while_it_waits(brain, make, monkeypatch):
+    # Its microphone is closed while it waits, so nothing else would - and systemd
+    # restarts a satellite which hasn't for 150 seconds.
+    monkeypatch.setattr(satellite, "PRESS_WAIT", 0.02)
+    beats = []
+    monkeypatch.setattr(satellite.watchdog, "beat", lambda at=None: beats.append(at))
+    pressable(brain, make)
+    assert wait_for(lambda: len(beats) >= 5)
+
+
+def test_a_press_wakes_the_wait_at_once(brain, make, monkeypatch):
+    # Not left until the next look, a second on.
+    monkeypatch.setattr(satellite, "PRESS_WAIT", 30)
+    made = pressable(brain, make)
+    time.sleep(0.1)
+    made._pressed()
+    assert wait_for(lambda: brain.messages("wake"), seconds=2)
+    brain.say("stop_listening")
+
+
+def test_the_listener_is_made_only_for_a_push_to_talk_satellite_and_closed_with_it(brain, make):
+    made = pressable(brain, make)
+    assert wait_for(lambda: made.press_listener is not None and made.press_listener.started)
+    assert made.press_listener.port == 10401
+    assert made.press_listener.on_press == made._pressed
+    listener = made.press_listener
+    made.stop()
+    assert wait_for(lambda: made.exited)
+    assert listener.closed
+
+    wake_word = make()
+    assert wait_for(lambda: connected(wake_word))
+    assert wake_word.press_listener is None
+
+
+def test_a_press_through_the_real_listener_starts_a_recording(brain, make, monkeypatch):
+    # Port 0, as the setting can't be, so the test takes whichever port is free.
+    monkeypatch.setattr(satellite, "PressListener", lambda port, on_press: PressListener(0, on_press))
+    made = pressable(brain, make)
+    assert wait_for(lambda: made.press_listener is not None and made.press_listener.port)
+    port = made.press_listener.port
+    # A plain socket, as the fake brain stands in for socket.create_connection.
+    with socket.socket() as sock:
+        sock.settimeout(5)
+        sock.connect(("127.0.0.1", port))
+        sock.sendall(f"POST /press HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Nova-Press: 1\r\n"
+                     f"Content-Length: 0\r\n\r\n".encode())
+        assert sock.recv(100).startswith(b"HTTP/1.0 204")
+
+    assert wait_for(lambda: len(brain.recordings()) >= 1)
+    assert brain.messages("wake")[0]["pressed"] is True
+    brain.say("stop_listening")
 
 
 def test_a_push_to_talk_satellite_stops_when_asked(brain, make):

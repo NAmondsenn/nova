@@ -31,6 +31,7 @@ from voice_assistant.echo import make_echo_canceller
 from voice_assistant.fallback import AlarmCopy, FallbackRinger, Phrase, StateCopy
 from voice_assistant.logging_setup import setup_logging
 from voice_assistant.microphone import RATE, Microphone
+from voice_assistant.press import PressListener
 from voice_assistant.satellite_link import SILENT_FOR, SatelliteLink
 from voice_assistant.speaker import BLOCK_SECONDS, Playback, Speaker
 from voice_assistant.timeline import Timeline
@@ -62,9 +63,15 @@ MOST_SECONDS = 30
 FALLBACK_CHECK = 1.0
 PROGRESS_EVERY = 1.0
 
-# How often a push-to-talk satellite looks for a follow-up the brain has asked for, or a
-# stop, while it waits for a press, in seconds.
-PRESS_POLL = 0.05
+# The longest a push-to-talk satellite waits for a press, a follow-up the brain asks for
+# or a stop before looking again, in seconds. A press, a follow-up and a stop each wake it
+# at once, so this is only how often it tells the watchdog it's still working while
+# nothing happens - the microphone is closed then, and is no other sign of it.
+PRESS_WAIT = 1.0
+
+# The sound a press plays, from the satellite itself and straight away, whatever the
+# brain's setting for its own listening sound.
+PRESS_SOUND = "listening.wav"
 
 # How far past an unmute a clip has to start, in seconds. Sound heard while muted can
 # still be on its way to the microphone's buffer when the unmute is noted: up to about
@@ -133,8 +140,10 @@ class _Recording(threading.Event):
         """
         super().__init__()
         # Every number the brain may stop it by. A listen which comes while it's being
-        # sent adds its own, as this recording is that answer - see Satellite._woken.
+        # sent adds its own, as this recording is that answer - see Satellite._begin.
         self.ids = set() if recording_id is None else {recording_id}
+        # Whether it was a press, rather than the brain, which said the user has stopped.
+        self.pressed = False
 
 
 def _pieces(waiting: queue.Queue) -> Iterator[np.ndarray]:
@@ -198,6 +207,8 @@ class Satellite:
         # brain is told how much with each wake, so this is the only setting for it.
         self.pre_roll = audio_config.get("pre_roll", 0.3)
         self.sounds_folder = paths.SOUNDS_DIR
+        # Where a push-to-talk satellite is pressed from, on this machine - see press.py.
+        self.press_port = config.section("satellite").get("press_port", 10401)
         self.latency_file = os.path.join(paths.LOGS_DIR, "latency.jsonl")
 
         # The one speaker and the one microphone, with what's played taken back out of
@@ -241,6 +252,8 @@ class Satellite:
 
         # Made in run(), once it's known whether the last run stopped properly.
         self.link: Optional[SatelliteLink] = None
+        # Made there too, if this satellite is pressed.
+        self.press_listener: Optional[PressListener] = None
         # Guards what the link's thread and the main loop share, below. Also held while
         # the brain is told of a wake.
         self._lock = threading.Lock()
@@ -270,6 +283,13 @@ class Satellite:
         # ringing, as they were sent on connecting - until the brain says it has them,
         # or is lost. See _on_connected.
         self._handing_over: Optional[Dict[str, List[str]]] = None
+
+        # A press waiting for the main loop, which owns the microphone and so starts the
+        # recording - set, with the lock held, by a press while nothing is recording.
+        self._press_pending = False
+        # Set to wake the main loop from waiting for a press: by a press, by the brain
+        # asking to hear a follow-up, and by stop().
+        self._nudged = threading.Event()
 
         # What to exit with, once the main loop has been asked to stop - see stop().
         self._exit_code: Optional[int] = None
@@ -312,6 +332,10 @@ class Satellite:
                                       self._note_start(), self._on_message, self._on_connected,
                                       speaker=self.spotify_speaker, push_to_talk=self.push_to_talk)
             self.link.start()
+            if self.push_to_talk:
+                # After the link, so a press as it starts has a brain to be told of it.
+                self.press_listener = PressListener(self.press_port, self._pressed)
+                self.press_listener.start()
             threading.Thread(target=self._ring_when_due, daemon=True, name="fallback").start()
             logger.info(f"Satellite '{self.name}' ready, for its brain at {self.address}")
             self._listen_forever()
@@ -327,6 +351,7 @@ class Satellite:
                 voice-assistant.service.
         """
         self._exit_code = code
+        self._nudged.set()
 
     def shutdown(self, *args):
         """
@@ -361,13 +386,23 @@ class Satellite:
                 # Home Assistant, is needed most.
                 self._exit_if_asked()
                 if self.wake is None:
-                    heard = self._wait_for_presses()
-                else:
-                    heard = self.wake.listen_once(until=self._interrupted)
+                    pressed = self._wait_for_presses()
+                    self._exit_if_asked()
+                    if pressed:
+                        # From where the microphone has got to now, as there's no wake
+                        # word a moment before it, and nothing is kept from before.
+                        position = self.microphone.position
+                        self._begin(position, position, pressed=True)
+                    else:
+                        self._send_follow_up()
+                    continue
+                heard = self.wake.listen_once(until=self._interrupted)
                 self._exit_if_asked()
                 if heard is not None:
                     self._keep_clip(heard)
-                    self._woken()
+                    heard_at = self.wake.heard_at
+                    # The recording starts a moment before the wake word was heard - see pre_roll.
+                    self._begin(heard_at, max(0, heard_at - round(self.pre_roll * RATE)))
                 else:
                     self._send_follow_up()
             # One thing going wrong mustn't stop the satellite for good - but it waits a
@@ -376,18 +411,48 @@ class Satellite:
                 logger.error(f"Error: {e}", exc_info=True)
                 time.sleep(1)
 
-    def _wait_for_presses(self) -> Optional[float]:
+    def _wait_for_presses(self) -> bool:
         """
-        What a push-to-talk satellite does in the wake word's place: waits until the
-        brain asks to hear a follow-up, or the satellite is to stop. It starts no
-        recording itself yet.
+        What a push-to-talk satellite does in the wake word's place: waits until it's
+        pressed, the brain asks to hear a follow-up, or the satellite is to stop. Tells
+        the watchdog it's still working as it waits, which nothing else does while the
+        microphone is closed.
 
         Returns:
-            None, as the wake word does when it's interrupted.
+            True for a press, which the caller starts a recording for - False when
+            interrupted, as the wake word's listening returns None.
         """
-        while not self._interrupted():
-            time.sleep(PRESS_POLL)
-        return None
+        while True:
+            watchdog.beat()
+            with self._lock:
+                interrupted = self._interrupted()
+                pressed, self._press_pending = self._press_pending and not interrupted, False
+            if interrupted or pressed:
+                # A press which came as the brain asked to hear an answer is that answer
+                # starting, which the follow-up is sent for - not a recording of its own.
+                return pressed
+            self._nudged.wait(PRESS_WAIT)
+            # Before looking again, so a nudge during that look isn't lost.
+            self._nudged.clear()
+
+    def _pressed(self):
+        """
+        Acts on a press of the key, from the press listener's thread. While a recording is
+        being sent it ends it, as the brain's saying the user has stopped does, and the
+        recording loop tells the brain. Otherwise it hands the press to the main loop,
+        which owns the microphone and starts the recording - see _begin. Mute makes no
+        difference: a press is deliberate.
+        """
+        with self._lock:
+            recording = self._recording
+            if recording is not None and not recording.is_set():
+                recording.pressed = True
+                recording.set()
+                # As _stop_listening does, so losing the brain now says it can't be reached.
+                self._turn_open = True
+                return
+            self._press_pending = True
+        self._nudged.set()
 
     def _keep_clip(self, score: float):
         """
@@ -439,14 +504,18 @@ class Satellite:
         muted = self.wake.muted if self.wake is not None else self.state.muted
         return muted or position < self._unmuted_at
 
-    def _woken(self):
+    def _begin(self, heard_at: int, start: int, pressed: bool = False):
         """
-        Acts on the wake word at once - stopping, pausing and dismissing, as Nova always
-        has - then tells the brain, and sends it what the user says.
+        Acts on the wake word, or a press, at once - stopping, pausing and dismissing, as
+        Nova always has - then tells the brain, and sends it what the user says.
+
+        Args:
+            heard_at: The microphone position it was heard or pressed at.
+            start: Where the recording starts, a moment earlier for the wake word - see
+                pre_roll - and the same for a press.
+            pressed: Whether it was a press, which also plays the satellite's own sound
+                for it, and says so to the brain.
         """
-        heard_at = self.wake.heard_at
-        # The recording starts a moment before the wake word was heard - see pre_roll.
-        start = max(0, heard_at - round(self.pre_roll * RATE))
         recording = None
         with self._waking:
             # Without waiting for the lock, which is held while the brain is sent to - up
@@ -473,14 +542,25 @@ class Satellite:
                     recording_id = f"wake-{next(self._wake_ids)}"
                     recording = self._recording = _Recording(recording_id)
                     self._turn_open = False
+                    # Any press which came while this was being set up is this one's, so
+                    # it doesn't go on to end the recording just begun, or start another.
+                    self._press_pending = False
                     # Saying how much of the recording is from before the wake word, so the
-                    # brain knows without a setting of its own, which could differ.
+                    # brain knows without a setting of its own, which could differ. Saying
+                    # it was a press only when it was, so a wake word's message is as it was.
+                    fields = {"pressed": True} if pressed else {}
                     if not self.link.send("wake", talked_over=talked_over, pre_roll=heard_at - start,
-                                          recording=recording_id):
+                                          recording=recording_id, **fields):
                         recording = self._recording = None
         if dismissing:
             self.speaker.allow("announcement")
             return
+        if pressed and recording is not None:
+            # After the reply was stopped, which would have stopped this with it, as it's
+            # the same kind of sound. Not when the brain can't be reached, which is told
+            # the phrase and nothing else.
+            self.speaker.play_file(os.path.join(self.sounds_folder, PRESS_SOUND),
+                                   volume=self.state.volume("general"))
         ended = "dropped" if recording is None else self._send_recording(start, heard_at - start, recording)
         with self._lock:
             # The brain asked to hear an answer while this was being sent, having
@@ -515,8 +595,8 @@ class Satellite:
             stopped: Set once the brain says the user has stopped.
 
         Returns:
-            Why it ended: "stopped" by the brain, at the "limit", or "dropped" with the
-            connection.
+            Why it ended: "stopped" by the brain, "pressed" by the key, at the "limit", or
+            "dropped" with the connection.
         """
         reader = self.microphone.listen(start=start)
         limit = round(self.longest_request * RATE)
@@ -527,7 +607,11 @@ class Satellite:
                 audio = reader.read(min(size, limit - sent))
                 self._exit_if_asked()
                 if stopped.is_set():
-                    return "stopped"
+                    if not stopped.pressed:
+                        return "stopped"
+                    # Told from here, with the pieces, so no piece reaches the brain after it.
+                    self.link.send("audio_end", reason="pressed")
+                    return "pressed"
                 if not self.link.send("audio", audio.tobytes()):
                     logger.warning("Lost the brain part way through a recording")
                     return "dropped"
@@ -594,8 +678,9 @@ class Satellite:
         with self._lock:
             self._listen_from = self.microphone.position
             self._listen_recording = recording
+            self._nudged.set()
             # A recording being sent now is the answer, rather than one after it - see
-            # _woken - so the brain may stop it as that.
+            # _begin - so the brain may stop it as that.
             if self._recording is not None and recording is not None:
                 self._recording.ids.add(recording)
 
@@ -893,6 +978,9 @@ class Satellite:
         """
         self._stopping = True
         self._finished.set()
+        if self.press_listener is not None:
+            # First, so no press arrives to start a recording of a satellite shutting down.
+            self.press_listener.close()
         if self.link is not None:
             self.link.stop()
         self.ringer.quiet()
