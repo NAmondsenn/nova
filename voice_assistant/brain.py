@@ -769,6 +769,28 @@ class Brain:
         """
         return self.rooms.room_of(name, self.satellites())
 
+    def ring_on(self, name: str) -> str:
+        """
+        Where a timer or alarm set at a satellite should ring. One which records on a press
+        of a key is often off, or its key isn't in reach, so what's set there rings on an
+        always-on satellite instead.
+
+        Args:
+            name: The satellite it was set at.
+
+        Returns:
+            name, if it listens for a wake word. Otherwise the always-on satellite in its
+            room, or if there isn't one the default satellite, or if that's name itself
+            (or there is none) name.
+        """
+        if not self.rooms.push_to_talk(name):
+            return name
+        in_room = self.rooms.always_on_in_room(name, self.satellites())
+        if in_room is not None:
+            return in_room
+        default = self.default_satellite()
+        return default if default is not None and default != name else name
+
     def room_sessions(self, name: str) -> List[Session]:
         """
         Args:

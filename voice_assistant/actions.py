@@ -284,7 +284,9 @@ class ActionExecutor:
 
     def __init__(self, music=None, clock=None, volume=None, weather=None, home=None, memory=None, ntfy=None,
                  satellite: Optional[str] = None, batteries=None, lists=None, pc=None, calendar=None,
-                 downloads=None, football=None, listening=None, wrapped=None, config=None, new_music=None):
+                 downloads=None, football=None, listening=None, wrapped=None, config=None, new_music=None,
+                 ring_on: Callable[[str], str] = lambda name: name,
+                 room_of: Callable[[str], List[str]] = lambda name: [name]):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -317,6 +319,11 @@ class ActionExecutor:
                 at each call - new_music.playlist.
             new_music: NewMusicPlaylist, which knows the id of the playlist Nova made, or None
                 if there isn't one - find_new_music plays that one by its id when it has it.
+            ring_on: Given the satellite the user is talking to, the one a timer or alarm set
+                there rings on - itself, unless it's a push-to-talk satellite, which hands
+                them to an always-on one.
+            room_of: Given a satellite, every one in its room, itself first - so a timer
+                handed to another room is said to be.
         """
         self.music = music
         self.clock = clock
@@ -336,9 +343,32 @@ class ActionExecutor:
         self.wrapped = wrapped
         self.config = config
         self.new_music = new_music
+        self.ring_on = ring_on
+        self.room_of = room_of
         # What was last asked, and what the assistant said - or the last alert, and
         # all of it - for "send that to my phone". Kept up to date by the Conversation.
         self.last_answer: Optional[Tuple[str, str]] = None
+
+    def _ring_on_satellite(self) -> Optional[str]:
+        """Returns the satellite a timer or alarm set now rings on - None if the user isn't at one in particular."""
+        return self.ring_on(self.satellite) if self.satellite else None
+
+    def _say_where_it_rings(self, result: Dict, ring: Optional[str]) -> Dict:
+        """
+        Adds where it will ring to what was said of a timer or alarm just set, if that's
+        another room than the user is in - they can't hear it there, so they're told.
+
+        Args:
+            result: What the clock returned.
+            ring: The satellite it was set to ring on.
+
+        Returns:
+            result, with " It'll ring on the {ring}." on its message if it was set and rings
+            on a satellite which isn't in the room of the one asked.
+        """
+        if not result.get("success") or ring is None or ring in self.room_of(self.satellite):
+            return result
+        return {**result, "message": f"{result['message']} It'll ring on the {ring}."}
 
     @classmethod
     def tools(cls) -> Dict[str, Callable]:
@@ -759,7 +789,9 @@ class ActionExecutor:
     )
     def set_timer(self, duration_seconds: Optional[int] = None, at: Optional[str] = None,
                   label: Optional[str] = None, is_reminder: bool = False):
-        return self.clock.set_timer(duration_seconds, label or None, bool(is_reminder), at=at, satellite=self.satellite)
+        ring = self._ring_on_satellite()
+        return self._say_where_it_rings(
+            self.clock.set_timer(duration_seconds, label or None, bool(is_reminder), at=at, satellite=ring), ring)
 
     @tool(
         "Give a name to the reminder which was just asked about, right after the "
@@ -858,7 +890,8 @@ class ActionExecutor:
             # The days themselves. Left as "custom" if none were given, which the
             # clock can't read, so it asks which days rather than guessing.
             repeat = days or "custom"
-        return self.clock.set_alarm(hour, minute, repeat or None, satellite=self.satellite)
+        ring = self._ring_on_satellite()
+        return self._say_where_it_rings(self.clock.set_alarm(hour, minute, repeat or None, satellite=ring), ring)
 
     @tool("Report which alarms are set, for 'what alarms do I have' or 'list my alarms'.", needs="clock")
     def list_alarms(self):

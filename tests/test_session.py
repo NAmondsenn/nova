@@ -252,8 +252,11 @@ def brain(tmp_path, monkeypatch, make_config):
     # No music, unless a test gives some.
     monkeypatch.setattr(session_module, "make_player", lambda config, speaker, volume, spotify_speaker=None: None)
     config = make_config(assistant={"name": "Nova", "wake_word": "Hey Nova"})
+    # A satellite rings where it was set, and is in a room of its own, as the Brain's are until
+    # Home Assistant says otherwise.
     return SimpleNamespace(config=config, clock=Clock(config=config, start=False), memory=None,
                            rooms=SatelliteRooms(str(tmp_path / "satellite_rooms.json")),
+                           ring_on=lambda name: name, room_of=lambda name: [name],
                            routines=Routines(path=str(tmp_path / "routines.json")), ntfy=None, weather=None,
                            batteries=None, lists=None, pc=None, registry=None, calendar=None, media=None,
                            downloads=None, football=None, listening=None, wrapped_store=None, usage=None, new_music_playlist=None,

@@ -168,6 +168,68 @@ def test_timers_and_alarms_ring_on_the_satellite_they_were_set_from():
     assert clock.set == [("timer", "bedroom"), ("alarm", "bedroom")]
 
 
+class RecordingClock:
+    """A clock which says what it was asked to set and where."""
+
+    def __init__(self):
+        self.set = []
+
+    def set_timer(self, duration_seconds, label, is_reminder, at=None, satellite=None):
+        self.set.append(("timer", satellite))
+        return {"success": True, "message": "Timer set for 10 minutes."}
+
+    def set_alarm(self, hour, minute, repeat, satellite=None):
+        self.set.append(("alarm", satellite))
+        return {"success": True, "message": "7:00 AM."}
+
+
+def test_a_timer_set_at_the_pc_rings_on_the_pi():
+    clock = RecordingClock()
+    actions = ActionExecutor(clock=clock, satellite="pc", ring_on=lambda name: "bedroom",
+                             room_of=lambda name: [name, "bedroom"])
+    result = actions.execute(Action("set_timer", {"duration_seconds": 600}))
+    assert clock.set == [("timer", "bedroom")]
+    # In the room the user is in, so there's nothing to tell them.
+    assert result.say == "Timer set for 10 minutes."
+
+
+def test_a_timer_handed_to_another_room_says_so():
+    clock = RecordingClock()
+    actions = ActionExecutor(clock=clock, satellite="pc", ring_on=lambda name: "kitchen",
+                             room_of=lambda name: [name])
+    result = actions.execute(Action("set_timer", {"duration_seconds": 600}))
+    assert clock.set == [("timer", "kitchen")]
+    assert result.say == "Timer set for 10 minutes. It'll ring on the kitchen."
+
+
+def test_an_alarm_set_at_the_pc_rings_on_the_pi():
+    clock = RecordingClock()
+    actions = ActionExecutor(clock=clock, satellite="pc", ring_on=lambda name: "bedroom",
+                             room_of=lambda name: [name, "bedroom"])
+    result = actions.execute(Action("set_alarm", {"hour": 7, "minute": 0}))
+    assert clock.set == [("alarm", "bedroom")]
+    assert result.say == "7:00 AM."
+
+    other = ActionExecutor(clock=clock, satellite="pc", ring_on=lambda name: "kitchen",
+                           room_of=lambda name: [name])
+    assert other.execute(Action("set_alarm", {"hour": 7, "minute": 0})).say == "7:00 AM. It'll ring on the kitchen."
+
+
+def test_nothing_is_added_when_a_timer_wasnt_set_or_rings_where_asked():
+    class AskingClock(RecordingClock):
+        def set_timer(self, duration_seconds, label, is_reminder, at=None, satellite=None):
+            return {"success": False, "message": "What would you like to name this reminder?"}
+
+    actions = ActionExecutor(clock=AskingClock(), satellite="pc", ring_on=lambda name: "kitchen",
+                             room_of=lambda name: [name])
+    assert actions.execute(Action("set_timer", {"duration_seconds": 600, "is_reminder": True})
+                           ).say == "What would you like to name this reminder?"
+    # Ringing where it was asked, even if its room isn't known.
+    same = ActionExecutor(clock=RecordingClock(), satellite="kitchen", ring_on=lambda name: name,
+                          room_of=lambda name: [name])
+    assert same.execute(Action("set_timer", {"duration_seconds": 600})).say == "Timer set for 10 minutes."
+
+
 def test_only_what_rings_on_the_satellite_asked_is_dismissed():
     # "Okay, thanks" in the kitchen dismissed the bedroom's timer too, which nobody
     # there could hear.

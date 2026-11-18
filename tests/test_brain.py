@@ -432,6 +432,31 @@ def test_a_connecting_satellite_is_remembered_as_push_to_talk(brain, connect):
     assert SatelliteRooms(os.path.join(paths.DATA_DIR, "satellite_rooms.json")).push_to_talk("bedroom") is True
 
 
+def test_ring_on(brain, passwords):
+    passwords.add("pc", "the-pcs-password")
+    brain.rooms.seen("pc", True)
+    brain.rooms.seen("bedroom", False)
+    brain.rooms.seen("kitchen", False)
+
+    # One which listens for a wake word is always on, so it rings where it was set.
+    assert brain.ring_on("kitchen") == "kitchen"
+
+    # The PC rings on the always-on satellite in its room, not the default, though it isn't connected.
+    brain.rooms.set_area("pc", "Study")
+    brain.rooms.set_area("kitchen", "Study")
+    brain.rooms.set_area("bedroom", "Bedroom")
+    assert brain.ring_on("pc") == "kitchen"
+
+    # Alone in its room, it rings on the default satellite.
+    brain.rooms.set_area("kitchen", "Kitchen")
+    assert brain.ring_on("pc") == "bedroom"
+
+    # With nothing else to ring on, on itself.
+    passwords.remove("bedroom")
+    passwords.remove("kitchen")
+    assert brain.satellites() == ["pc"] and brain.ring_on("pc") == "pc"
+
+
 def test_the_brain_lists_the_satellites_of_a_room_own_first(brain, connect):
     serving(brain)
     connect(brain, "bedroom", BEDROOM)
