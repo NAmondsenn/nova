@@ -1491,7 +1491,7 @@ def test_the_page_comes_with_its_safety_headers(served):
     assert headers["Cache-Control"] == "no-store" and headers["X-Content-Type-Options"] == "nosniff"
 
 
-@pytest.mark.parametrize("path", ["/settings.js", "/settings.css"])
+@pytest.mark.parametrize("path", ["/settings.js", "/settings_list.js", "/settings.css"])
 def test_the_pages_script_and_style_are_served_with_its_safety_headers(served, path):
     # There's no JavaScript engine to check the script with, so this is what stands in.
     status, headers, body = _ask(served, path)
@@ -1556,6 +1556,15 @@ def test_the_pages_script_and_style_are_served_with_its_safety_headers(served, p
         assert b'if (path !== "/api/football") setTimeout(loadFootball, FOOTBALL_SETTLES);' in body
         # Its form, list and icon are on the page.
         assert b'id="football"' in html and b'id="follow-team"' in html and b'id="i-football"' in html
+
+
+def test_the_lists_rules_are_served_and_loaded_before_the_pages_script(served):
+    body = _ask(served, "/settings_list.js")[2]
+    assert b"globalThis.NovaList" in body
+    page = _ask(served, "/")[2]
+    assert page.count(b'<script src="settings_list.js" defer></script>') == 1
+    assert page.index(b'src="settings_list.js"') < page.index(b'src="settings.js"')
+    assert "settings_list.js" in page_module.PAGE_FILES
 
 
 def test_the_page_has_a_login_form_and_log_out_buttons(served):
@@ -3596,7 +3605,7 @@ def test_the_right_password_logs_in_for_thirty_days(npm, caplog):
 
 
 def test_the_page_files_are_served_before_a_login(npm):
-    for path in ("/", "/settings.js", "/settings.css", "/icon.svg"):
+    for path in ("/", "/settings.js", "/settings_list.js", "/settings.css", "/icon.svg"):
         status, headers, _ = _through_npm(npm, path)
         assert status == 200 and headers["Content-Type"] == page_module.FILES[path][1]
         assert headers["Content-Security-Policy"] == page_module.SAFETY_HEADERS["Content-Security-Policy"]
@@ -3742,7 +3751,7 @@ def test_the_version_changes_with_any_of_the_pages_files_and_only_then(files, mo
     monkeypatch.setattr(page_module, "WEB_FOLDER", str(web))
     first = _page()
     assert _page().page_version == first.page_version
-    for name in ("settings.html", "settings.js", "settings.css"):
+    for name in ("settings.html", "settings_list.js", "settings.js", "settings.css"):
         before = (web / name).read_bytes()
         (web / name).write_bytes(before + b"\n")
         assert _page().page_version != first.page_version, name

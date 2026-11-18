@@ -70,6 +70,8 @@ logger = logging.getLogger(__name__)
 WEB_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 FILES = {"/": ("settings.html", "text/html; charset=utf-8"),
          "/settings.js": ("settings.js", "text/javascript; charset=utf-8"),
+         # The list's rules, which never touch the page - loaded before settings.js.
+         "/settings_list.js": ("settings_list.js", "text/javascript; charset=utf-8"),
          "/settings.css": ("settings.css", "text/css; charset=utf-8"),
          "/icon.svg": ("icon.svg", "image/svg+xml"),
          # The Wrapped's story page - see wrapped.py - which asks /api/wrapped for what it shows.
@@ -84,7 +86,7 @@ FILES = {"/": ("settings.html", "text/html; charset=utf-8"),
 # update that it's out of date - see page_version. Not the Wrapped's: it is read once, as
 # it's opened, and asks for nothing after, so a change to it would only reload a settings
 # page for nothing.
-PAGE_FILES = ("settings.html", "settings.js", "settings.css")
+PAGE_FILES = ("settings.html", "settings_list.js", "settings.js", "settings.css")
 
 # Sent with every answer: nothing but the page's own files may run in it, no other
 # site may show it in a frame, and nothing is kept in a cache.
