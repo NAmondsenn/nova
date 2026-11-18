@@ -1,5 +1,5 @@
-# Exact versions of the six packages Nova's satellite needs on the Windows PC, which has
-# no wake word (see docs/decisions/0024): the versions in requirements.lock, plus cffi
+# Exact versions of the packages Nova's satellite needs on the Windows PC, which has
+# no wake word (see docs/decisions/0026): the versions in requirements.lock, plus cffi
 # and pycparser, which soundfile and sounddevice need. The wheels for Windows bundle
 # PortAudio and libsndfile. scripts/windows/install.ps1 installs it without dependency
 # resolution, since everything is listed:
