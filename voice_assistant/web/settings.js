@@ -870,10 +870,12 @@ function showSatellites(state) {
     const row = element("li");
     const what = element("span", undefined, "what");
     what.append(satellite.name);
+    if (satellite.push_to_talk) what.append(element("span", "push-to-talk", "badge"));
     // What belongs to no satellite - ntfy's alerts, say - goes to this one.
     if (satellite.default) what.append(element("span", "Default", "badge"));
     what.append(element("span",
-      satellite.connected ? (DOING[satellite.activity] || (satellite.muted ? "Microphone muted" : "Listening for its wake word"))
+      satellite.connected ? (DOING[satellite.activity] || (satellite.muted ? "Microphone muted"
+        : satellite.push_to_talk ? "Waiting for a key press" : "Listening for its wake word"))
         : "Not connected", "detail"));
     if (satellite.spotify_speaker) what.append(element("span", `Spotify plays on ${satellite.spotify_speaker}`, "detail"));
     const actions = element("span", undefined, "actions");

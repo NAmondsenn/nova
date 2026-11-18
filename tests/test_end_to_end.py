@@ -53,7 +53,7 @@ def wait_for(condition, seconds=10):
 class Microphone:
     """Hears silence but for the user talking, when the test says - SPEED times faster than real time."""
 
-    def __init__(self, sample_rate=48000, echo=None):
+    def __init__(self, sample_rate=48000, echo=None, always_open=True):
         self.started = time.monotonic()
         self.lock = threading.Lock()
         # Where the user talked, as (start, end) positions.
@@ -80,6 +80,12 @@ class Microphone:
 
     def listen(self, start=None):
         return Reader(self, self.position if start is None else start)
+
+    def hold(self):
+        pass
+
+    def release(self):
+        pass
 
     def close(self):
         pass
@@ -167,7 +173,7 @@ class Playback:
 class Speaker:
     """Plays each of the satellite's own sounds for SOUND_SECONDS, and each stream until the last of it arrives."""
 
-    def __init__(self, sample_rate=48000, echo_reference=None):
+    def __init__(self, sample_rate=48000, echo_reference=None, always_open=True):
         self.sample_rate = sample_rate
         self.lock = threading.Lock()
         self.playing = []

@@ -10,9 +10,12 @@ After the handshake, what a satellite sends the brain:
     ping
     wake  {"talked_over": ..., "pre_roll": ..., "recording": ...}  (pre_roll: how many of
         the samples sent next are from before the wake word; recording: what the
-        satellite calls the recording, e.g. "wake-3" - both optional)
+        satellite calls the recording, e.g. "wake-3" - both optional; pressed: true
+        when a push-to-talk satellite started it on a press, with no wake word and so
+        no pre_roll to send - left out otherwise)
     audio  (payload: 16-bit samples at 16kHz)
-    audio_end  {"reason": "limit"|"cancelled"}
+    audio_end  {"reason": "limit"|"cancelled"|"pressed"}  (pressed: a push-to-talk
+        satellite's recording ended on another press)
     played  {"id": ..., "stopped": ..., "position": ...}
     progress  {"id": ..., "position": ...}
     away  {"rang": [ids], "dismissed": [ids], "ringing": [ids]}
@@ -41,7 +44,7 @@ and what the brain sends a satellite:
 The handshake comes first, and proves the satellite's password to the brain and the
 brain's to the satellite, without the password itself ever being sent:
 
-    hello  {name, hostname, sample_rate, unclean, nonce, speaker?}    (satellite)
+    hello  {name, hostname, sample_rate, unclean, nonce, speaker?, push_to_talk?}    (satellite)
     challenge  {nonce, proof}    (brain; or refused, and the connection is closed)
     proof  {proof}    (satellite, once the brain's proof is right)
     ready, or refused    (brain)
@@ -161,7 +164,7 @@ def _expect(stream: BinaryIO, kind: str, *fields: str) -> Dict:
 
 
 def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate: int, unclean: bool,
-          speaker: Optional[str] = None):
+          speaker: Optional[str] = None, push_to_talk: bool = False):
     """
     The satellite's side of the handshake.
 
@@ -174,6 +177,8 @@ def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate
         unclean: Whether it restarted without being asked to.
         speaker: The Spotify Connect speaker it plays Spotify on, e.g. "Bedroom Pi" -
             left out of the hello if None.
+        push_to_talk: Whether this satellite records on a press of a key, not on a wake
+            word - left out of the hello if False.
 
     Raises:
         Refused: The brain refused it, or couldn't prove it knows the password - in
@@ -183,6 +188,9 @@ def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate
     nonce = secrets.token_hex(16)
     # Only when there is one, so the hello is just what it was before speakers were said.
     extra = {"speaker": speaker} if speaker is not None else {}
+    # Likewise, so the hello of a satellite which listens for a wake word is unchanged.
+    if push_to_talk:
+        extra["push_to_talk"] = True
     send(stream, "hello", name=name, hostname=hostname, sample_rate=sample_rate,
          unclean=unclean, nonce=nonce, **extra)
     challenge = _expect(stream, "challenge", "nonce", "proof")
@@ -202,8 +210,9 @@ def admit(stream: BinaryIO, password_for: Callable[[str], Optional[str]]) -> Dic
         password_for: Looks a satellite's password up by name - None if unknown.
 
     Returns:
-        The hello's name, hostname, sample_rate and unclean, and its speaker - None if
-        it doesn't say one, as a satellite from before speakers were said doesn't.
+        The hello's name, hostname, sample_rate and unclean, its speaker - None if
+        it doesn't say one, as a satellite from before speakers were said doesn't - and
+        whether it is push-to-talk, False if it doesn't say.
 
     Raises:
         Refused: The satellite is unknown or got the password wrong. It has been told so.
@@ -215,9 +224,11 @@ def admit(stream: BinaryIO, password_for: Callable[[str], Optional[str]]) -> Dic
     hostname = hello.get("hostname")
     sample_rate = hello.get("sample_rate")
     unclean = hello.get("unclean")
+    push_to_talk = hello.get("push_to_talk", False)
     if (hello["type"] != "hello" or not isinstance(name, str) or not isinstance(hostname, str)
             or isinstance(sample_rate, bool) or not isinstance(sample_rate, int)
-            or not isinstance(unclean, bool) or not isinstance(nonce, str) or not NONCE.fullmatch(nonce)):
+            or not isinstance(unclean, bool) or not isinstance(push_to_talk, bool)
+            or not isinstance(nonce, str) or not NONCE.fullmatch(nonce)):
         raise ProtocolError("Expected a hello")
     password = password_for(name)
     if password is None:
@@ -236,7 +247,7 @@ def admit(stream: BinaryIO, password_for: Callable[[str], Optional[str]]) -> Dic
         logger.warning(f"{name} said a Spotify speaker which can't be one, so plays on the brain's "
                        f"own speaker name: {ascii(hello['speaker'])[:80]}")
     return {"name": name, "hostname": hostname, "sample_rate": sample_rate, "unclean": unclean,
-            "speaker": speaker}
+            "speaker": speaker, "push_to_talk": push_to_talk}
 
 
 def _speaker(said) -> Optional[str]:

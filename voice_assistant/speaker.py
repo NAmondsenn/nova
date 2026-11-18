@@ -11,6 +11,10 @@ its 34 second sound had finished, and while it played the microphone heard it as
 the user talking. The clock's thread and the main loop could also open streams at
 the same moment, which PortAudio doesn't promise to cope with. Now every sound is
 a Playback which can be stopped, and only PortAudio's own thread ever writes.
+
+On the PC, a push-to-talk satellite, the stream is opened only when there's something
+to play instead, and closed once there's been nothing for IDLE_CLOSE_SECONDS: an open
+stream keeps Windows from going to sleep.
 """
 
 import logging
@@ -49,6 +53,10 @@ OUTPUT_LATENCY = 0.1
 # Seconds without the stream asking for audio before it's taken to have died.
 STALL_SECONDS = 2.0
 
+# Seconds with nothing to play, or only paused sounds, before a stream which isn't
+# always open is closed - see Speaker.
+IDLE_CLOSE_SECONDS = 5
+
 # Played in stereo, since music is. The assistant's own sounds are mono, and go to
 # both sides.
 CHANNELS = 2
@@ -73,8 +81,10 @@ class Playback:
         self.kind = kind
         self.sample_rate = sample_rate
         self.streaming = streaming
-        # Paused, it keeps its place and the speaker plays nothing of it.
-        self.paused = False
+        self._paused = False
+        # Called as it's unpaused, by a speaker which closes its stream while nothing
+        # plays, to open it again - see Speaker.
+        self._on_unpause = None
         self.stopped = False
         # Kept as the pieces it arrived in, each dropped once played, rather than
         # joined into one array: a song is too long to copy every time a piece of
@@ -87,6 +97,18 @@ class Playback:
         self._finished = threading.Event()
         # When the last of it will have actually left the speaker - see _finish.
         self._heard_by = 0.0
+
+    @property
+    def paused(self) -> bool:
+        """Paused, it keeps its place and the speaker plays nothing of it."""
+        return self._paused
+
+    @paused.setter
+    def paused(self, paused: bool):
+        unpausing = self._paused and not paused
+        self._paused = paused
+        if unpausing and self._on_unpause is not None and not self.done:
+            self._on_unpause()
 
     @property
     def duration(self) -> float:
@@ -179,12 +201,17 @@ class Playback:
 
 
 class Speaker:
-    """The one always-open output stream, mixing whatever is playing."""
+    """
+    The one output stream, mixing whatever is playing - always open, or open only
+    while there's something to play.
+    """
 
-    def __init__(self, sample_rate: int = 48000, device: Optional[str] = None, echo_reference=None):
+    def __init__(self, sample_rate: int = 48000, device: Optional[str] = None, echo_reference=None,
+                 always_open: bool = True):
         """
-        Opens the stream. A missing speaker isn't fatal - opening it is tried again
-        the next time something is played.
+        Opens the stream - unless it's only to be open while there's something to
+        play. A missing speaker isn't fatal - opening it is tried again the next time
+        something is played.
 
         Args:
             sample_rate: Rate to play at. The Pi's shared output (see setup.sh)
@@ -192,8 +219,13 @@ class Speaker:
             device: Output device name, or None for the system default.
             echo_reference: Given a copy of everything played, and when, so the
                 microphone can take it back out of what it hears - see echo.py.
+            always_open: Keep the stream open throughout, as the Pi does. False
+                opens it when something is played or unpaused, and closes it once
+                nothing unpaused and unfinished has been left to play for
+                IDLE_CLOSE_SECONDS.
         """
         self.sample_rate = sample_rate
+        self.always_open = always_open
         self.device = device
         self.echo_reference = echo_reference
 
@@ -212,7 +244,15 @@ class Speaker:
         # will have left the speaker - see sounded_within.
         self._sounding_until = -math.inf
         self.ran_dry = Dropouts("The speaker ran dry, which crackles")
-        self._open()
+        # For a stream which isn't always open: when there was last something
+        # unpaused to play, the lock it's opened and closed under, so it isn't closed
+        # just as a sound is handed to it, and a count bumped as each opens or closes,
+        # so a closed one takes nothing - see _open and _close_if_quiet.
+        self._quiet_since = time.monotonic()
+        self._opening = threading.Lock()
+        self._generation = 0
+        if always_open:
+            self._open()
 
     def _open(self) -> bool:
         """
@@ -222,10 +262,23 @@ class Speaker:
             True if it opened.
         """
         self._discard_stream()
+        callback = self._fill
+        if not self.always_open:
+            # A stream closed for being quiet can still ask for audio once or twice as
+            # it closes, which mustn't take any from the stream opened after it.
+            self._generation += 1
+            generation = self._generation
+
+            def callback(outdata, frames, time_info, status):
+                if generation != self._generation:
+                    outdata.fill(0)
+                    return
+                self._fill(outdata, frames, time_info, status)
+
         try:
             stream = sd.OutputStream(samplerate=self.sample_rate, channels=CHANNELS, dtype="float32",
                                      blocksize=int(self.sample_rate * BLOCK_SECONDS),
-                                     latency=OUTPUT_LATENCY, device=self.device, callback=self._fill)
+                                     latency=OUTPUT_LATENCY, device=self.device, callback=callback)
             stream.start()
         except Exception as e:
             logger.error(f"Could not open the speaker: {e}")
@@ -277,6 +330,8 @@ class Speaker:
             mix = np.zeros((frames, CHANNELS), dtype=np.float32)
             finished = []
             sounded = False
+            # Whether anything unpaused is still to play.
+            busy = False
             for playback in playing:
                 if playback.stopped:
                     finished.append(playback)
@@ -293,6 +348,8 @@ class Speaker:
                 # just goes quiet until the next piece does.
                 if playback.position >= playback._total and not playback.streaming:
                     finished.append(playback)
+                else:
+                    busy = True
 
             if sounded:
                 self._sounding_until = time.monotonic() + self._latency + frames / self.sample_rate
@@ -307,9 +364,64 @@ class Speaker:
                     self._playing = [p for p in self._playing if p not in finished]
                 for playback in finished:
                     playback._finish(heard_by)
+
+            if not self.always_open:
+                self._close_if_quiet(busy)
         except Exception as e:
             outdata.fill(0)
             logger.error(f"Speaker audio dropped: {e}")
+
+    def _close_if_quiet(self, busy: bool):
+        """
+        Closes a stream which isn't always open once nothing unpaused has been left
+        to play for IDLE_CLOSE_SECONDS. Called from the stream's own thread.
+
+        Args:
+            busy: Whether anything unpaused was still to play just now.
+        """
+        now = time.monotonic()
+        if busy:
+            self._quiet_since = now
+            return
+        if now - self._quiet_since < IDLE_CLOSE_SECONDS:
+            return
+        # Not waited for, so the audio thread is never held up: whatever holds it is
+        # handing over a sound, and it's looked at again in a moment.
+        if not self._opening.acquire(blocking=False):
+            return
+        try:
+            # Looked at again under the lock, in case a sound arrived since.
+            with self._lock:
+                waiting = any(not playback.paused and not playback.done for playback in self._playing)
+            if waiting or self._stream is None:
+                return
+            # So it takes nothing more from what's playing as it closes.
+            self._generation += 1
+            self._discard_stream()
+            logger.info("Speaker closed, with nothing to play")
+        finally:
+            self._opening.release()
+
+    def _open_if_closed(self) -> bool:
+        """
+        Opens a stream which isn't always open, if it's closed or has died. Called with
+        _opening held.
+
+        Returns:
+            True if it's open.
+        """
+        if self._stream is None:
+            return self._open()
+        if time.monotonic() - self._last_callback > STALL_SECONDS:
+            logger.warning("The speaker stopped taking audio, reopening it")
+            return self._open()
+        return True
+
+    def _unpaused(self):
+        """Opens a stream which isn't always open again, for a sound being unpaused."""
+        with self._opening:
+            self._quiet_since = time.monotonic()
+            self._open_if_closed()
 
     def sounded_within(self, seconds: float) -> bool:
         """
@@ -351,6 +463,8 @@ class Speaker:
             audio = soxr.resample(audio, sample_rate, self.sample_rate)
 
         playback = Playback(audio, max(0.0, min(1.0, float(volume))), kind, self.sample_rate, streaming)
+        if not self.always_open:
+            return self._hand_over(playback)
 
         # A stream which has stopped asking for audio has died - usually because
         # the speaker was unplugged - so it's reopened before anything is lost to it.
@@ -365,6 +479,24 @@ class Speaker:
                 playback._finish(time.monotonic())
                 return playback
             self._playing.append(playback)
+        return playback
+
+    def _hand_over(self, playback: Playback) -> Playback:
+        """
+        Starts playing a sound on a stream which isn't always open, opening it first
+        if it's closed - see play.
+        """
+        with self._opening:
+            if not self._open_if_closed():
+                playback._finish(time.monotonic())
+                return playback
+            with self._lock:
+                if playback.kind in self._silenced:
+                    playback._finish(time.monotonic())
+                    return playback
+                playback._on_unpause = self._unpaused
+                self._playing.append(playback)
+            self._quiet_since = time.monotonic()
         return playback
 
     def play_stream(self, pieces: Iterable[np.ndarray], sample_rate: Optional[int] = None,

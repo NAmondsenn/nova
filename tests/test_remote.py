@@ -235,6 +235,21 @@ def test_a_wake_brings_a_feed_of_the_recording(pair):
     assert ends_at_once(wake["feed"])
 
 
+def test_a_recording_the_satellite_ended_on_a_press_says_so(pair):
+    satellite, fake, serving = pair
+    feed = satellite.listen()
+    fake.say("audio_end", reason="pressed")
+    assert wait_for(lambda: feed.ended) and feed.pressed
+
+    # Not at its limit, nor when the brain stops it.
+    feed = satellite.listen()
+    fake.say("audio_end", reason="limit")
+    assert wait_for(lambda: feed.ended) and not feed.pressed
+    feed = satellite.listen()
+    satellite.stop_listening(feed)
+    assert feed.ended and not feed.pressed
+
+
 def test_a_wake_says_how_much_of_its_recording_is_from_before_it(pair):
     # In samples - or nothing, from a satellite which doesn't say, when the session
     # goes by its own setting.
@@ -244,6 +259,31 @@ def test_a_wake_says_how_much_of_its_recording_is_from_before_it(pair):
     fake.say("wake", talked_over=False, pre_roll=-1)
     fake.say("wake", talked_over=False, pre_roll=True)
     assert [satellite.wakes.get(timeout=2)["pre_roll"] for _ in range(4)] == [4800, None, None, None]
+
+
+def test_a_pressed_wake_is_marked(pair):
+    # A push-to-talk satellite says a recording started on a press, not on a wake word,
+    # and has no pre-roll to send. An ordinary wake says nothing of it.
+    satellite, fake, serving = pair
+    fake.say("wake", talked_over=False, pressed=True, pre_roll=0)
+    fake.say("wake", talked_over=False, pre_roll=4800)
+    fake.say("wake", talked_over=False, pressed=False)
+    fake.say("wake", talked_over=False, pressed="yes")
+    pressed, ordinary, unpressed, odd = (satellite.wakes.get(timeout=2) for _ in range(4))
+    assert pressed["pressed"] is True
+    assert pressed["pre_roll"] == 0
+    for wake in (ordinary, unpressed, odd):
+        assert "pressed" not in wake
+
+
+def test_the_satellite_says_it_is_push_to_talk():
+    ours, theirs = socket.socketpair()
+    try:
+        assert RemoteSatellite(satellite_link.Stream(ours), dict(HELLO, push_to_talk=True)).push_to_talk is True
+        assert RemoteSatellite(satellite_link.Stream(ours), dict(HELLO)).push_to_talk is False
+    finally:
+        ours.close()
+        theirs.close()
 
 
 def test_a_follow_up_is_heard_until_the_brain_stops_listening(pair):

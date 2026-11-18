@@ -12,6 +12,11 @@ recording stream had opened, after the listening sound - so "Hey Nova what time 
 it", said in one breath, reached Whisper as "It's time to...". With one stream
 nothing is missed, and a recording can even start a moment before the wake word
 was detected.
+
+On the PC, a push-to-talk satellite, the stream is opened only while a recording
+holds it instead (see hold): an open stream keeps Windows from going to sleep, and
+its microphone light on, and with no wake word there's nothing to listen for between
+presses.
 """
 
 import logging
@@ -50,18 +55,21 @@ MAX_RETRY_SECONDS = 30.0
 
 class Microphone:
     """
-    The one always-open microphone stream, and the last few seconds of what it heard.
+    The one microphone stream - always open, or open only while held - and the last
+    few seconds of what it heard.
 
     Positions are counted in samples at 16kHz since the assistant started, and only
     ever go up, so anything reading from it can keep its own place - see listen().
     """
 
     def __init__(self, sample_rate: int = 48000, device: Optional[str] = None,
-                 buffer_seconds: float = 10.0, stall_timeout: float = 2.0, echo=None):
+                 buffer_seconds: float = 10.0, stall_timeout: float = 2.0, echo=None,
+                 always_open: bool = True):
         """
-        Opens the stream. A missing microphone isn't fatal here - opening it is
-        retried whenever something is waiting for audio, so the assistant still
-        starts, and picks the microphone up once it's plugged in.
+        Opens the stream - unless it's only to be open while held. A missing
+        microphone isn't fatal here - opening it is retried whenever something is
+        waiting for audio, so the assistant still starts, and picks the microphone up
+        once it's plugged in.
 
         Args:
             sample_rate: Rate to capture at, before conversion to 16kHz. The Pi's
@@ -72,8 +80,11 @@ class Microphone:
                 have died, and is reopened.
             echo: The EchoCanceller, which takes what the assistant played back out
                 of what's heard, before anything listens to it - see echo.py.
+            always_open: Keep the stream open throughout, as the Pi does. False
+                opens it only while held - see hold.
         """
         self.capture_rate = sample_rate
+        self.always_open = always_open
         self.echo = echo
         self.device = device
         self.stall_timeout = stall_timeout
@@ -95,7 +106,12 @@ class Microphone:
         # Bumped every time the stream is reopened, so a late block from a stream
         # which has since been replaced is thrown away rather than mixed in.
         self._generation = 0
-        self._open()
+        # How many are holding a stream which is only open while held, and the lock
+        # it's opened and closed under - see hold.
+        self._holds = 0
+        self._holding = threading.Lock()
+        if always_open:
+            self._open()
 
     def _open(self) -> bool:
         """
@@ -143,6 +159,45 @@ class Microphone:
         self._stream = stream
         logger.info(f"Microphone open: capturing at {self.capture_rate}Hz, kept at {RATE}Hz")
         return True
+
+    def hold(self):
+        """
+        Opens a stream which is only open while held, for a recording, if nothing
+        else holds it already - a fresh one each time, on whichever device is the
+        default as it opens. Nothing for one always open.
+
+        Positions carry on from where the last stream left off, with nothing for the
+        time it was closed, so a reader started now reads only what's heard from now.
+        Each hold is ended with release().
+        """
+        if self.always_open:
+            return
+        with self._holding:
+            self._holds += 1
+            if self._holds > 1:
+                return
+            with self._condition:
+                # Now is where the last stream left off, and the time it was closed
+                # isn't the new one going quiet.
+                self._newest_at = self._last_activity = time.monotonic()
+                self._retry_delay = self.stall_timeout
+            self._open()
+
+    def release(self):
+        """Ends a hold, closing the stream once nothing holds it - see hold."""
+        if self.always_open:
+            return
+        with self._holding:
+            if not self._holds:
+                logger.warning("The microphone was released more times than it was held")
+                return
+            self._holds -= 1
+            if self._holds:
+                return
+            # So a late block from the stream being closed is thrown away.
+            self._generation += 1
+            self._discard_stream()
+        logger.info("Microphone closed until the next recording")
 
     def _discard_stream(self) -> Optional[threading.Thread]:
         """
@@ -264,11 +319,14 @@ class Microphone:
         Reopens a stream which has stopped delivering audio - usually because the
         microphone was unplugged. Each attempt which doesn't bring audio back waits
         twice as long before the next, up to MAX_RETRY_SECONDS, so a microphone left
-        unplugged doesn't fill the log.
+        unplugged doesn't fill the log. Never one closed because nothing holds it.
         """
-        logger.warning(f"No audio from the microphone for {self._retry_delay:.0f}s, reopening it")
-        self._recovering = True
-        self._open()
+        with self._holding:
+            if not self.always_open and not self._holds:
+                return
+            logger.warning(f"No audio from the microphone for {self._retry_delay:.0f}s, reopening it")
+            self._recovering = True
+            self._open()
         with self._condition:
             self._last_activity = time.monotonic()
             self._retry_delay = min(self._retry_delay * 2, MAX_RETRY_SECONDS)
