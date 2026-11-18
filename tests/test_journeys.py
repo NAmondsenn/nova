@@ -870,6 +870,30 @@ def test_a_new_month_starts_the_count_again(store, monkeypatch):
     assert store.get("requests") == 1 and store.get("month") == "2026-12"
 
 
+def test_the_months_asks_and_the_cap_are_given(store, monkeypatch):
+    monkeypatch.setattr(journeys, "_month", lambda: "2026-11")
+    journey = make(store)
+    assert journey.used() == {"requests": 0, "cap": 3000}
+    journey.look("a", "b", "driving")
+    journey.look("a", "b", "driving")
+    assert journey.used() == {"requests": 2, "cap": 3000}
+    # Reading the count changes nothing, so it can be read as often as the page is.
+    assert store.get("requests") == 2 and store.get("month") == "2026-11"
+
+    # Last month's asks aren't this month's, and nothing is written to say so.
+    store.change(lambda new: new.update(month="2026-10", requests=7))
+    assert journey.used()["requests"] == 0
+    assert store.get("requests") == 7 and store.get("month") == "2026-10"
+
+    assert make(store, settings={"monthly_requests": 50}).used()["cap"] == 50
+
+
+def test_a_count_which_cant_be_one_is_given_as_none_asked(store, monkeypatch):
+    monkeypatch.setattr(journeys, "_month", lambda: "2026-11")
+    store.change(lambda new: new.update(month="2026-11", requests=-50))
+    assert make(store).used()["requests"] == 0
+
+
 def test_the_cap_is_read_at_each_use_and_refuses_without_asking(store, monkeypatch):
     monkeypatch.setattr(journeys, "_month", lambda: "2026-11")
     home = FakeHome()

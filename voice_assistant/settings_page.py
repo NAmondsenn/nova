@@ -692,6 +692,8 @@ class SettingsPage:
                 "displays": {"list": self.brain.displays.listed(),
                              "port": server.port if server is not None and server.serving else 0},
                 "keys": keys,
+                # How many journeys Nova has asked Google for this month, or None without journeys.
+                "journeys": self.brain.journeys.used() if self.brain.journeys is not None else None,
                 "settings": settings,
                 "settings_problem": problem,
                 "restart_needed": self._restart_needed(saved),

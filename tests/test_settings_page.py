@@ -41,6 +41,7 @@ from voice_assistant.downloads import Downloads
 from voice_assistant.football import CANT_GET, NOT_SET_UP, FootballUnavailable, Reading, Team
 from voice_assistant.football_watch import FootballChoices
 from voice_assistant.ha_registry import Entry, Snapshot
+from voice_assistant import journeys as journeys_module
 from voice_assistant.journeys import JOURNEY_DEFAULTS, Journeys
 from voice_assistant.lists import Lists
 from voice_assistant.ntfy import Ntfy
@@ -2397,6 +2398,17 @@ def test_a_satellite_is_removed_or_made_the_default_on_the_page(served):
 def _journeys(tmp_path):
     """The real Journeys over a store of its own - the page only ever asks it who travels."""
     return Journeys(None, None, None, ChoiceStore(str(tmp_path / "journeys.json"), JOURNEY_DEFAULTS), lambda: {})
+
+
+def test_the_state_has_how_many_journeys_were_asked(files, tmp_path, monkeypatch):
+    monkeypatch.setattr(journeys_module, "_month", lambda: "2026-11")
+    journeys = _journeys(tmp_path)
+    page = _page(journeys=journeys)
+    assert page.state()["journeys"] == {"requests": 0, "cap": 3000}
+    journeys.store.change(lambda new: new.update(month="2026-11", requests=4))
+    assert page.state()["journeys"] == {"requests": 4, "cap": 3000}
+    # Without journeys the brain has nothing to count.
+    assert _page().state()["journeys"] is None
 
 
 def test_a_satellite_is_marked_as_travelling_with_the_user_and_logged(files, tmp_path, caplog):
