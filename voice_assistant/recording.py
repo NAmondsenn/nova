@@ -206,6 +206,7 @@ class AudioFeed:
         # The position each piece fed ends at, and when it arrived, for time_at.
         self._arrivals: List[Tuple[int, float]] = []
         self._ended = False
+        self._pressed = False
         self._condition = threading.Condition()
 
     def feed(self, samples: np.ndarray):
@@ -234,12 +235,17 @@ class AudioFeed:
             self._arrivals.append((len(self._samples), time.monotonic()))
             self._condition.notify_all()
 
-    def end(self):
+    def end(self, pressed: bool = False):
         """
         Says nothing more is coming. A reader which is waiting gets what's left, and
         so the recording stops.
+
+        Args:
+            pressed: True when the satellite ended it on a press of its key.
         """
         with self._condition:
+            if not self._ended:
+                self._pressed = pressed
             self._ended = True
             self._condition.notify_all()
 
@@ -248,6 +254,12 @@ class AudioFeed:
         """Whether nothing more is coming - by end(), or a reader finding it stalled."""
         with self._condition:
             return self._ended
+
+    @property
+    def pressed(self) -> bool:
+        """Whether it was ended on a press of the satellite's key - see end()."""
+        with self._condition:
+            return self._pressed
 
     @property
     def position(self) -> int:

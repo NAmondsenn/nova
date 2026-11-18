@@ -26,6 +26,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from voice_assistant import paths, storage
 from voice_assistant.actions import ActionExecutor
+from voice_assistant.clock_ringing import heard_in
 from voice_assistant.conversation import NOT_CAUGHT, Conversation
 from voice_assistant.ha_device import DeviceControls, NovaDevice
 from voice_assistant.home_assistant import HomeAssistant
@@ -165,6 +166,9 @@ class Session:
         # recording - see listen_now. Forgotten once let go, or once its conversation is over.
         self._held: Optional[AudioFeed] = None
         self._held_lock = threading.Lock()
+        # The sessions of the user's room, this one first, whose music a conversation
+        # here holds - just this one outside a conversation. See _converse.
+        self._room_held: List["Session"] = [self]
         # What's been typed in Home Assistant's Ask Nova box, waiting its turn - a queue of
         # its own, as one put with the satellite's wakes would be taken for a wake word said
         # over the reply before it, and stop it. Each is kept with when it arrived, by
@@ -250,14 +254,16 @@ class Session:
         # Everything the assistant can do for the user - see actions.py. The lights are
         # only there once Home Assistant is set up, and the calendar once Google is, and
         # timers and alarms ring on the satellite they were set from, as a download is
-        # said there.
+        # said there - or on its room's always-on one, if it's a push-to-talk satellite.
         self.actions = ActionExecutor(music=self.music_player, clock=brain.clock, volume=self.volume,
                                       weather=brain.weather, home=self.home, memory=brain.memory,
                                       ntfy=brain.ntfy, satellite=satellite.name, batteries=brain.batteries,
                                       lists=brain.lists, pc=brain.pc, calendar=brain.calendar,
                                       downloads=brain.downloads, football=brain.football,
                                       listening=brain.listening, wrapped=brain.wrapped_store, config=config,
-                                      new_music=brain.new_music_playlist, journeys=brain.journeys)
+                                      new_music=brain.new_music_playlist, journeys=brain.journeys,
+                                      ring_on=brain.ring_on, room_of=brain.room_of,
+                                      room_players=self._room_players)
 
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.
@@ -287,7 +293,8 @@ class Session:
                                          chime_enabled=lambda: self.chime_enabled,
                                          max_follow_ups=self.thresholds.get("max_follow_ups", 3),
                                          routines=brain.routines, satellite=satellite.name,
-                                         playing=self.playing_here, progress=self._moved)
+                                         playing=self.playing_here, progress=self._moved,
+                                         room=lambda: brain.room_of(satellite.name))
 
     @property
     def thresholds(self) -> Dict:
@@ -766,6 +773,10 @@ class Session:
             wake: The wake word, as the satellite's wakes have it - or something typed in
                 Home Assistant, as _next_typed gives it.
         """
+        # Every satellite's music in the room is held, as the room acts as one - and the
+        # same ones are let go of after, however the room changes meanwhile. Looked up
+        # before the assistant is marked busy, so a failure here can't leave it so.
+        self._room_held = self._room_now()
         # Marks the assistant as busy, so a timer going off waits its turn rather than interrupting.
         self._idle.clear()
         # Anything but the answer to a typed question starts afresh, so that question's over.
@@ -777,7 +788,9 @@ class Session:
         # The pause goes through Spotify's servers, so it runs alongside the
         # recording rather than holding it up - see MusicHold. Held across every
         # request, so it doesn't come back for a moment when a reply is talked over.
-        self.music.hold()
+        # Holds are counted, so one here and the satellite's own from its own wake both stand.
+        for session in self._room_held:
+            session.music.hold()
         try:
             # Not talked over, even if the satellite says it was - over a chime, say. Only
             # a wake word said over a reply is that - see _say.
@@ -802,7 +815,35 @@ class Session:
             self._close_answer(keep=True)
             self.activity = "idle"
             self._idle.set()
-            self.music.release()
+            room, self._room_held = self._room_held, [self]
+            for session in room:
+                session.music.release()
+
+    def _room_now(self) -> List["Session"]:
+        """
+        Returns:
+            The connected sessions of this satellite's room, this one first - or just
+            this one if they can't be looked up, so what it's doing goes ahead alone.
+        """
+        try:
+            return [self] + [session for session in self.brain.room_sessions(self.satellite.name)
+                             if session is not self]
+        except Exception as e:
+            logger.error(f"Couldn't look up the room, so acting alone: {e}")
+            return [self]
+
+    def _room_players(self) -> List:
+        """
+        The music players of the user's room - see ActionExecutor - once the pause of
+        each of the others has landed, as Conversation._run waits for this one's.
+
+        Returns:
+            Those of the sessions whose music this conversation holds, this one's first.
+        """
+        room = list(self._room_held)
+        for session in room[1:]:
+            session.music.wait()
+        return [session.music_player for session in room]
 
     def _answer(self, wake: Dict, talked_over: bool = False) -> Optional[Dict]:
         """
@@ -830,9 +871,10 @@ class Session:
         # What was audibly going off at the moment the wake word fired,
         # read before the interaction quietens anything, since what
         # matters is what the user could hear when they started talking -
-        # which is only ever what rings on this satellite. Not for the answer to a
-        # typed question, which carries on its conversation - see below.
-        ringing = None if follow_up else self.brain.clock.ringing_state(satellite=self.satellite.name)
+        # which is only ever what rings on this satellite, or in its room. Not for the
+        # answer to a typed question, which carries on its conversation - see below.
+        ringing = None if follow_up else self.brain.clock.ringing_state(
+            satellite=heard_in(self.brain.room_of(self.satellite.name)))
 
         # Anything going off stops the moment the wake word is heard, rather than
         # playing on over the user - and into the microphone - until its sound
@@ -853,10 +895,11 @@ class Session:
                 # found it, which matters only to a "stop" said over something ringing.
                 return self._handle_typed(typed, follow_up=True, timeline=timeline)
             with self._conversation_lock:
-                self.conversation.start(ringing, talked_over=talked_over)
+                self.conversation.start(ringing, talked_over=talked_over, pressed=wake.get("pressed", False))
             if typed is not None:
                 return self._handle_typed(typed, timeline=timeline)
-            return self._handle_interaction(wake["feed"], timeline=timeline, pre_roll=wake.get("pre_roll"))
+            return self._handle_interaction(wake["feed"], timeline=timeline, pre_roll=wake.get("pre_roll"),
+                                            pressed=wake.get("pressed", False))
         except Exception as e:
             # Said out loud, rather than only logged, so it isn't taken for the
             # assistant not having heard. Only for something which went wrong
@@ -868,7 +911,7 @@ class Session:
             timeline.save(self.latency_file)
 
     def _handle_interaction(self, feed, follow_up: bool = False, timeline: Optional[Timeline] = None,
-                            pre_roll: Optional[int] = None) -> Optional[Dict]:
+                            pre_roll: Optional[int] = None, pressed: bool = False) -> Optional[Dict]:
         """
         Handles one full interaction after the wake word: records the query from what
         the satellite sends, transcribes it, has the conversation work out the reply
@@ -883,6 +926,11 @@ class Session:
             pre_roll: How many samples at the start of the feed are from before the
                 wake word, as the satellite said - or None, when audio.pre_roll's
                 worth are taken to be. Never any for a follow-up.
+            pressed: True when the recording began on a press of a key, which the
+                satellite has already answered with a sound of its own - so the brain
+                plays neither the listening sound nor the falling one for a recording with
+                no speech in it. One the satellite ended on a press plays no falling one
+                either - see AudioFeed.pressed.
 
         Returns:
             The wake word heard over the reply, which the next request starts from - see
@@ -906,7 +954,7 @@ class Session:
         # way to tell the wake word was heard, or when to start talking. The satellite
         # is already sending what its microphone hears, so nothing said while the sound
         # plays goes missing, and it's far too short to count as the user starting to speak.
-        if self.listening_sound_enabled:
+        if self.listening_sound_enabled and not pressed:
             self._play_sound("listening.wav")
 
         # Speech-to-text is given the recording as it's made, so it can work out the
@@ -939,6 +987,9 @@ class Session:
         finally:
             # The user has stopped, or isn't going to start - so the satellite stops sending.
             self.satellite.stop_listening(feed)
+        # An answer the user ended with a press, having said nothing, is their changing
+        # their mind, as one begun on a press is.
+        pressed = pressed or feed.pressed
 
         # Anything typed from now on is a fresh request - and an answer typed while this
         # was listening, which ended it, is used instead of what was heard. (Should the
@@ -960,7 +1011,7 @@ class Session:
         if audio_data is None or len(audio_data) == 0:
             listening.cancel()
             timeline.note(outcome="no_speech")
-            self._not_heard()
+            self._not_heard(pressed)
             return None
 
         # The words, once speech-to-text has caught up with the end of the recording,
@@ -980,8 +1031,9 @@ class Session:
             timeline.note(outcome="nothing_transcribed")
             if (transcription or {}).get("imagined"):
                 # Words imagined in noise - a cough heard as "Thank you." - are most
-                # likely a false wake word, so aren't apologised for.
-                self._not_heard()
+                # likely a false wake word, so aren't apologised for. A press has no
+                # false wake word, so is told nothing.
+                self._not_heard(pressed)
             elif "error" in (transcription or {}):
                 # Nemotron failed, as it was made and heard again whole - not the user
                 # not being caught.
@@ -1240,13 +1292,17 @@ class Session:
         if not self.brain.stt.hung:
             self.moved_at = time.monotonic()
 
-    def _not_heard(self):
+    def _not_heard(self, pressed: bool = False):
         """
         Plays the listening sound backwards - a short falling blip - when nothing was
         heard or understood. Giving up used to be silent, which was easy to take for
         the assistant still listening, or still thinking.
+
+        Args:
+            pressed: True for a recording begun on a press of a key, where nothing said
+                is the user changing their mind - so it stays quiet.
         """
-        if self.listening_sound_enabled:
+        if self.listening_sound_enabled and not pressed:
             self._play_sound("not_heard.wav")
 
     def _apologise(self):
@@ -1301,8 +1357,12 @@ class Session:
             instead when it wasn't.
         """
         # The music is held from now, before waiting for any conversation to finish,
-        # so it doesn't come back in the gap between the two.
-        self.music.hold()
+        # so it doesn't come back in the gap between the two. Every satellite's in the
+        # room, as a conversation holds them, so a timer on the Pi isn't lost under music
+        # on the PC beside it - and the same ones are let go of, however the room changes.
+        room = self._room_now()
+        for session in room:
+            session.music.hold()
         if not ringing and not self.reminder_sound_enabled:
             sound = None
         try:
@@ -1311,7 +1371,8 @@ class Session:
         finally:
             # Let back a few seconds later rather than straight away, since a timer's
             # next round comes three seconds after this one.
-            self.music.release(after=5)
+            for session in room:
+                session.music.release(after=5)
 
     def _announce_in_turn(self, message, sound, boost, still_wanted, start, length, level, ringing):
         """The body of announce, run once any other announcement has finished. Returns what it does."""
@@ -1654,6 +1715,9 @@ class Session:
             except Exception as e:
                 logger.error(f"Couldn't look for the {self.satellite.name} satellite's device in Home Assistant: {e}")
                 found = False
+            # Kept, so the brain knows which satellites share a room - and still does
+            # once this one has gone, or after a restart.
+            self.brain.rooms.set_area(self.satellite.name, self.home.area)
             if self._room() != before:
                 # What's playing here depends on the room, and nothing else would tell the satellite: a film
                 # already on when the brain restarts doesn't change what's playing, only the room found after.

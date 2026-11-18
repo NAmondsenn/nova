@@ -29,20 +29,29 @@ class FakeClock:
     looks_like_dismissal = staticmethod(Clock.looks_like_dismissal)
     answer_to_offer = staticmethod(Clock.answer_to_offer)
 
-    def __init__(self, ringing=False, timers=()):
+    def __init__(self, ringing=False, timers=(), on=None):
         self.ringing = ringing
         self.timers = list(timers)
         self.dismissed = 0
         self.silenced = []
+        # The satellite it rings on - or None, for wherever it's asked about.
+        self.on = on
+
+    def _heard(self, satellite):
+        """Whether what rings is heard on satellite - a name, a room of them, or None for anywhere."""
+        if self.on is None or satellite is None:
+            return True
+        return self.on in satellite if isinstance(satellite, list) else self.on == satellite
 
     def is_ringing(self, satellite=None):
         self.asked_about = satellite
-        return self.ringing
+        return self.ringing and self._heard(satellite)
 
     def dismiss(self, satellite=None):
         self.dismissed += 1
         self.dismissed_on = satellite
-        self.ringing = False
+        if self._heard(satellite):
+            self.ringing = False
         return {"success": True, "message": "Okay, stopped."}
 
     def silence_insistent(self, entries):
@@ -448,6 +457,15 @@ def test_only_whats_ringing_where_the_user_is_talking_is_stopped():
     assert clock.asked_about == "kitchen" and clock.dismissed_on == "kitchen"
 
 
+def test_stop_at_the_pc_stops_the_pi_ringing():
+    # A timer set at the PC rings on the Pi in the same room, and "stop" said at the
+    # PC has to reach it.
+    clock = FakeClock(ringing=True, on="bedroom")
+    _conversation(clock=clock, satellite="pc", room=lambda: ["pc", "bedroom"]).handle("Stop.")
+    assert clock.dismissed == 1 and clock.ringing is False
+    assert clock.dismissed_on == ["pc", "bedroom"]
+
+
 def test_without_the_chime_a_dismissal_is_shown_not_said():
     reply = _conversation(clock=FakeClock(ringing=True), chime_enabled=False).handle("Stop.")
     assert (reply.sounds, reply.shown, reply.say) == ([], "Okay, stopped.", "")
@@ -594,6 +612,23 @@ def test_something_ringing_carries_on_when_speech_from_whats_playing_is_ignored(
                                  ringing=ringing)
     assert conversation.handle("Fire!") == Reply()
     assert clock.silenced == [] and clock.dismissed == 0
+
+
+def test_a_pressed_conversation_is_never_taken_for_speech_from_whats_playing():
+    # A press is deliberate, so Claude is told nothing plays, for the whole conversation -
+    # follow-ups too - and a not_for_me all the same is not caught, never ignored.
+    llm = FakeLLM(_answer("Which room?"), NOT_FOR_ME, NOT_FOR_ME)
+    playing = FakePlaying(["Bedroom TV"])
+    conversation = _conversation(llm=llm, playing=playing)
+    conversation.start(pressed=True)
+    assert conversation.handle("turn the lights off").listen_again
+    assert conversation.handle("the bedroom", follow_up=True).say == "Sorry, I didn't catch that."
+    assert llm.playing == [[], []] and playing.asked == 0
+
+    # The next conversation, begun by the wake word, is as before.
+    conversation.start()
+    assert conversation.handle("I'll never let go, Jack.") == Reply()
+    assert llm.playing[-1] == ["Bedroom TV"]
 
 
 def test_not_for_me_with_nothing_playing_is_taken_as_not_caught():

@@ -36,6 +36,7 @@ from voice_assistant.navidrome import NavidromePlayer
 from voice_assistant.recording import RATE, AudioFeed
 from voice_assistant.remote import RemoteSatellite
 from voice_assistant.routines import Routines
+from voice_assistant.satellite_rooms import SatelliteRooms
 from voice_assistant.vad import LoudnessDetector
 
 
@@ -118,9 +119,9 @@ class Pi:
         with self.lock:
             protocol.send(self.stream, kind, payload, **fields)
 
-    def wake(self, audio, talked_over=False):
+    def wake(self, audio, talked_over=False, pressed=False):
         """Hears the wake word, and sends what's said after it - the moment before it first."""
-        self.say("wake", talked_over=talked_over)
+        self.say("wake", talked_over=talked_over, **({"pressed": True} if pressed else {}))
         self.send_audio(audio)
 
     def send_audio(self, audio):
@@ -216,7 +217,7 @@ class ScriptedConversation:
         self.started = []
         self.heard = []
 
-    def start(self, ringing=None, talked_over=False):
+    def start(self, ringing=None, talked_over=False, pressed=False):
         self.started.append(talked_over)
 
     def handle(self, text, follow_up=False, timeline=None):
@@ -251,7 +252,11 @@ def brain(tmp_path, monkeypatch, make_config):
     # No music, unless a test gives some.
     monkeypatch.setattr(session_module, "make_player", lambda config, speaker, volume, spotify_speaker=None: None)
     config = make_config(assistant={"name": "Nova", "wake_word": "Hey Nova"})
+    # A satellite rings where it was set, and is in a room of its own, as the Brain's are until
+    # Home Assistant says otherwise.
     return SimpleNamespace(config=config, clock=Clock(config=config, start=False), memory=None,
+                           rooms=SatelliteRooms(str(tmp_path / "satellite_rooms.json")),
+                           ring_on=lambda name: name, room_of=lambda name: [name], room_sessions=lambda name: [],
                            routines=Routines(path=str(tmp_path / "routines.json")), ntfy=None, weather=None,
                            batteries=None, lists=None, pc=None, registry=None, calendar=None, media=None,
                            downloads=None, football=None, listening=None, wrapped_store=None, usage=None, new_music_playlist=None,
@@ -504,6 +509,21 @@ def test_words_imagined_in_noise_arent_apologised_for(brain, connect, make_sessi
     assert brain.tts.said == []
     assert timeline.notes["outcome"] == "nothing_transcribed"
     assert [message["name"] for message in pi.messages("play_sound")] == ["listening.wav", "not_heard.wav"]
+
+
+def test_a_pressed_recording_of_words_imagined_in_noise_says_nothing(brain, connect, make_session):
+    # A press has no false wake word to blame, and noise heard as words is nothing said.
+    satellite, pi = connect()
+    session = make_session(satellite)
+    brain.stt = SimpleNamespace(listen=lambda: FakeTranscription("", imagined=True))
+    timeline = FakeTimeline()
+    feed = AudioFeed()
+    feed.feed(said())
+    feed.end()
+
+    assert session._handle_interaction(feed, timeline=timeline, pressed=True) is None
+    assert pi.messages("play_sound") == [] and brain.tts.said == []
+    assert timeline.notes["outcome"] == "nothing_transcribed"
 
 
 def test_speech_to_text_is_given_the_recording_as_its_made(brain, make_session):
@@ -765,7 +785,7 @@ def test_talking_over_a_reply_starts_the_next_request_with_the_music_still_held(
     session.music = SimpleNamespace(hold=lambda: held.append("hold"), release=lambda: held.append("release"))
     session.conversation = ScriptedConversation()
     heard_over = [{"talked_over": True, "feed": AudioFeed()}, None]
-    session._handle_interaction = lambda feed, timeline, pre_roll=None: heard_over.pop(0)
+    session._handle_interaction = lambda feed, timeline, pre_roll=None, pressed=False: heard_over.pop(0)
 
     # Woken over a chime, which isn't talking over a reply.
     session._converse({"talked_over": True, "feed": AudioFeed()})
@@ -774,6 +794,86 @@ def test_talking_over_a_reply_starts_the_next_request_with_the_music_still_held(
     # The music stays paused between the two, rather than coming back for a moment.
     assert held == ["hold", "release"]
     assert session._idle.is_set() and session.activity == "idle"
+
+
+def _noting_holds(held, *named):
+    """Gives each (name, session) music which notes, in held, each hold and release of it."""
+    for name, session in named:
+        session.music = SimpleNamespace(hold=lambda name=name: held.append(("hold", name)),
+                                        release=lambda name=name: held.append(("release", name)))
+
+
+def test_a_wake_holds_the_music_on_the_whole_room(make_session, brain):
+    # Spoken to at the PC, the Pi beside it is quiet too while he's heard.
+    pc, pi = make_session(), make_session()
+    held = []
+    _noting_holds(held, ("pc", pc), ("pi", pi))
+    brain.room_sessions = lambda name: [pc, pi]
+    pc.conversation = ScriptedConversation()
+
+    def answer(feed, timeline, pre_roll=None, pressed=False):
+        # The room changing part way through doesn't change what's let go of.
+        brain.room_sessions = lambda name: [pc]
+        return None
+
+    pc._handle_interaction = answer
+    pc._converse({"talked_over": False, "feed": AudioFeed()})
+    assert held == [("hold", "pc"), ("hold", "pi"), ("release", "pc"), ("release", "pi")]
+
+
+@pytest.mark.parametrize("ringing", [True, False])
+def test_what_goes_off_holds_the_music_on_the_whole_room(make_session, brain, ringing):
+    # A timer ringing on the Pi isn't lost under music playing on the PC beside it.
+    pi, pc = make_session(), make_session()
+    held = []
+    for name, session in (("pi", pi), ("pc", pc)):
+        session.music = SimpleNamespace(hold=lambda name=name: held.append(("hold", name)),
+                                        release=lambda after=0.0, name=name: held.append(("release", name, after)))
+    brain.room_sessions = lambda name: [pi, pc]
+
+    def ring(*args):
+        # The room changing part way through doesn't change what's let go of.
+        brain.room_sessions = lambda name: [pi]
+        return True
+
+    pi._announce_in_turn = ring
+    assert pi.announce("Your timer is done.", ringing=ringing) is True
+    assert held == [("hold", "pi"), ("hold", "pc"), ("release", "pi", 5), ("release", "pc", 5)]
+
+    # Alone in its room, only its own, as before.
+    held.clear()
+    pi.announce("Your timer is done.", ringing=ringing)
+    assert held == [("hold", "pi"), ("release", "pi", 5)]
+
+
+def test_a_room_which_cant_be_looked_up_still_has_the_wake_answered_and_let_go(make_session, brain):
+    # Held and let go alone, rather than the session being left busy for good.
+    pi = make_session()
+    held = []
+    _noting_holds(held, ("pi", pi))
+
+    def unreadable(name):
+        raise OSError("disk gone")
+
+    brain.room_sessions = unreadable
+    pi.conversation = ScriptedConversation()
+    answered = []
+    pi._handle_interaction = lambda feed, timeline, pre_roll=None, pressed=False: answered.append(feed)
+    pi._converse({"talked_over": False, "feed": AudioFeed()})
+    assert len(answered) == 1
+    assert held == [("hold", "pi"), ("release", "pi")]
+    assert pi._idle.is_set() and pi.activity == "idle"
+
+
+def test_a_satellite_alone_holds_only_its_own(make_session, brain):
+    pi, kitchen = make_session(), make_session()
+    held = []
+    _noting_holds(held, ("pi", pi), ("kitchen", kitchen))
+    brain.room_sessions = lambda name: [pi]
+    pi.conversation = ScriptedConversation()
+    pi._handle_interaction = lambda feed, timeline, pre_roll=None, pressed=False: None
+    pi._converse({"talked_over": False, "feed": AudioFeed()})
+    assert held == [("hold", "pi"), ("release", "pi")]
 
 
 def test_closing_lets_go_of_the_device_the_music_and_the_satellites_sounds_once_in_order(make_session):
@@ -1098,7 +1198,7 @@ def test_a_hold_taken_up_part_way_through_a_conversation_is_over_with_it(make_se
     held = session.satellite.wakes.get_nowait()
     after = [dict(held, talked_over=True), None]
 
-    def handle(feed, timeline, pre_roll=None):
+    def handle(feed, timeline, pre_roll=None, pressed=False):
         # As the end of each recording does - see Session._handle_interaction.
         session.satellite.stop_listening(feed)
         return after.pop(0)
@@ -1855,13 +1955,22 @@ def test_the_device_is_looked_up_until_found_then_now_and_then(make_session):
             pass
 
     session = make_session()
-    session.home = SimpleNamespace(find_device=lambda identifier: asked.append(identifier) or found.pop(0))
+    session.home = SimpleNamespace(find_device=lambda identifier: asked.append(identifier) or found.pop(0), area=None)
     session.device = SimpleNamespace(identifier="nova_home_assistant", stop=lambda: None)
     session._stop_looking_up = Stopping()
     session._look_up_device()
 
     assert asked == ["nova_home_assistant"] * 4
     assert waited == [30, 30, 300, 300]
+
+
+def test_the_room_found_in_home_assistant_is_kept(brain, make_session):
+    # So the brain knows which satellites share a room, and still does after a restart.
+    session = make_session()
+    _looked_up(session, ("Study", "devbedroom"), (None, None))
+
+    assert brain.rooms.area("bedroom") == "Study"
+    assert SatelliteRooms(str(brain.rooms.path)).area("bedroom") == "Study"
 
 
 def test_a_session_closed_before_it_runs_never_starts_its_device(connect, make_session):
@@ -1872,7 +1981,7 @@ def test_a_session_closed_before_it_runs_never_starts_its_device(connect, make_s
     session = make_session(satellite)
     happened = []
     session.device = Device(happened)
-    session.home = SimpleNamespace(find_device=lambda identifier: True)
+    session.home = SimpleNamespace(find_device=lambda identifier: True, area=None)
     session.close()
     session.run()
 
@@ -2250,7 +2359,7 @@ def test_closing_a_session_ends_every_thread_it_started(connect, make_session, m
     before = set(threading.enumerate())
     session = make_session(satellite)
     session.device = Device([])
-    session.home = SimpleNamespace(find_device=lambda identifier: True)
+    session.home = SimpleNamespace(find_device=lambda identifier: True, area=None)
     running(session)
     assert wait_for(lambda: any(lookup.name.startswith("ha-device-lookup") for lookup in threading.enumerate()))
     started = [started for started in threading.enumerate() if started not in before]
@@ -2273,7 +2382,7 @@ def test_the_satellite_is_in_home_assistant_only_while_its_session_runs(connect,
         return True
 
     session.device = Device(happened)
-    session.home = SimpleNamespace(find_device=find_device)
+    session.home = SimpleNamespace(find_device=find_device, area=None)
     thread = running(session)
     assert looked_up.wait(2)
     pi.go()
@@ -2634,6 +2743,71 @@ def test_a_warning_over_a_long_conversation_the_satellite_took_counts_as_said(co
 
 
 # Settings saved while a session is already running
+
+def test_a_pressed_wake_plays_no_listening_sound(brain, connect, make_session):
+    # The satellite chimes on the press itself, at once - not after the round trip here.
+    satellite, pi = connect()
+    session = make_session(satellite)
+    brain.stt.texts = ["What time is it?"]
+    thread = running(session)
+
+    pi.wake(said(), pressed=True)
+    assert wait_for(lambda: brain.tts.said)
+    assert pi.messages("play_sound") == []
+    session.close()
+    thread.join(3)
+
+
+def test_a_pressed_wake_with_nothing_said_says_nothing(brain, connect, make_session):
+    # Pressed and let go with nothing said is the user changing their mind, not a false wake word.
+    satellite, pi = connect()
+    session = make_session(satellite)
+    feed = satellite.listen()
+    feed.feed(np.zeros(4 * RATE, np.int16))
+
+    assert session._handle_interaction(feed, timeline=FakeTimeline(), pressed=True) is None
+    assert pi.messages("play_sound") == [] and brain.tts.said == []
+    assert brain.stt.made[0].cancelled
+
+
+def test_an_answer_ended_on_a_press_with_nothing_said_says_nothing(brain, connect, make_session):
+    # The user changing their mind, as with a press which began a recording.
+    satellite, pi = connect()
+    session = make_session(satellite)
+    feed = satellite.listen()
+    feed.feed(np.zeros(RATE // 2, np.int16))
+    pi.say("audio_end", reason="pressed")
+    assert wait_for(lambda: feed.ended)
+
+    assert session._handle_interaction(feed, follow_up=True, timeline=FakeTimeline()) is None
+    assert [message["name"] for message in pi.messages("play_sound")] == ["listening.wav"]
+    assert brain.tts.said == []
+
+
+def test_a_pressed_wake_is_handed_to_the_interaction(make_session, monkeypatch):
+    session = make_session()
+    seen = []
+
+    def interaction(feed, follow_up=False, timeline=None, pre_roll=None, pressed=False):
+        seen.append(pressed)
+
+    monkeypatch.setattr(session, "_handle_interaction", interaction)
+    session._answer({"feed": AudioFeed(), "pressed": True})
+    session._answer({"feed": AudioFeed()})
+    assert seen == [True, False]
+
+
+def test_a_pressed_wake_starts_a_pressed_conversation(make_session, monkeypatch):
+    # So what's said at a press is never dropped as speech from the TV - see Conversation.start.
+    session = make_session()
+    started = []
+    session.conversation = SimpleNamespace(
+        start=lambda ringing=None, talked_over=False, pressed=False: started.append(pressed))
+    monkeypatch.setattr(session, "_handle_interaction", lambda feed, **kwargs: None)
+    session._answer({"feed": AudioFeed(), "pressed": True})
+    session._answer({"feed": AudioFeed()})
+    assert started == [True, False]
+
 
 def test_the_listening_blip_is_switched_off_straight_away(brain, connect, make_session):
     # Made before the save, as every satellite's session is when the settings page is used.

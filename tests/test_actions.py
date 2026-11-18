@@ -46,6 +46,23 @@ class FakeSpotify:
         return {"success": True, "message": f"Volume {self.level} percent."}
 
 
+class FakePlayer(FakeSpotify):
+    """A satellite's music player in the room, which may have music paused on it."""
+
+    def __init__(self, playing=False, paused=False, level=50):
+        super().__init__(playing, level)
+        self.paused = paused
+
+    def now_playing(self):
+        if not (self.playing or self.paused):
+            return None
+        return {"track": "Gooba", "playing": self.playing}
+
+    def play(self, query=None, search_type=None):
+        self.calls.append("play")
+        return {"success": True, "message": "Resumed playback", "silent": True}
+
+
 @pytest.fixture
 def make_executor(tmp_path, monkeypatch):
     monkeypatch.setattr(volume_module, "VOLUMES_FILE", str(tmp_path / "volumes.json"))
@@ -130,6 +147,52 @@ def test_an_explicit_pause_keeps_the_music_paused_afterwards(make_executor):
     assert result.confirm == "chime" and spotify.resume_cancelled
 
 
+# The room acts as one
+
+def test_pause_at_the_pc_pauses_the_pis_music(make_executor):
+    pc, pi = FakePlayer(), FakePlayer(playing=True)
+    result = make_executor(pc, room_players=lambda: [pc, pi]).execute(Action("control_playback", {"action": "pause"}))
+    assert result.confirm == "chime"
+    assert pi.calls == ["pause"] and pi.resume_cancelled
+    assert pc.calls == [] and not pc.resume_cancelled
+
+    # With nothing playing in the room, its own is paused, as before rooms.
+    pc, pi = FakePlayer(), FakePlayer()
+    make_executor(pc, room_players=lambda: [pc, pi]).execute(Action("control_playback", {"action": "pause"}))
+    assert pc.calls == ["pause"] and pi.calls == []
+
+
+def test_turn_it_up_turns_up_both_when_both_play(make_executor):
+    pc, pi = FakePlayer(playing=True, level=50), FakePlayer(playing=True, level=30)
+    result = make_executor(pc, room_players=lambda: [pc, pi]).execute(Action("set_volume", {"direction": "up"}))
+    assert result.ok and (pc.level, pi.level) == (60, 40)
+
+    # Only what's playing is turned up, even when the music is named.
+    pc, pi = FakePlayer(level=50), FakePlayer(playing=True, level=30)
+    executor = make_executor(pc, room_players=lambda: [pc, pi])
+    executor.execute(Action("set_volume", {"category": "music", "direction": "down"}))
+    assert (pc.level, pi.level) == (50, 20)
+    # Music playing anywhere in the room is what "turn it down" means.
+    executor.execute(Action("set_volume", {"direction": "down"}))
+    assert (pc.level, pi.level) == (50, 10) and executor.volume.percent("general") == 70
+
+
+def test_resume_prefers_its_own_paused_music(make_executor):
+    pc, pi = FakePlayer(paused=True), FakePlayer(paused=True)
+    make_executor(pc, room_players=lambda: [pc, pi]).execute(Action("play_music", {}))
+    assert pc.calls == ["play"] and pi.calls == []
+
+    # Else the room's, if its own has nothing paused.
+    pc, pi = FakePlayer(), FakePlayer(paused=True)
+    make_executor(pc, room_players=lambda: [pc, pi]).execute(Action("play_music", {}))
+    assert pc.calls == [] and pi.calls == ["play"]
+
+    # Else its own, as before rooms.
+    pc, pi = FakePlayer(), FakePlayer(playing=True)
+    make_executor(pc, room_players=lambda: [pc, pi]).execute(Action("play_music", {}))
+    assert pc.calls == ["play"] and pi.calls == []
+
+
 @pytest.mark.parametrize("params, repeat", [
     ({"hour": 7, "minute": 0}, None),
     ({"hour": 7, "minute": 0, "repeat": "weekdays"}, "weekdays"),
@@ -168,6 +231,68 @@ def test_timers_and_alarms_ring_on_the_satellite_they_were_set_from():
     assert clock.set == [("timer", "bedroom"), ("alarm", "bedroom")]
 
 
+class RecordingClock:
+    """A clock which says what it was asked to set and where."""
+
+    def __init__(self):
+        self.set = []
+
+    def set_timer(self, duration_seconds, label, is_reminder, at=None, satellite=None):
+        self.set.append(("timer", satellite))
+        return {"success": True, "message": "Timer set for 10 minutes."}
+
+    def set_alarm(self, hour, minute, repeat, satellite=None):
+        self.set.append(("alarm", satellite))
+        return {"success": True, "message": "7:00 AM."}
+
+
+def test_a_timer_set_at_the_pc_rings_on_the_pi():
+    clock = RecordingClock()
+    actions = ActionExecutor(clock=clock, satellite="pc", ring_on=lambda name: "bedroom",
+                             room_of=lambda name: [name, "bedroom"])
+    result = actions.execute(Action("set_timer", {"duration_seconds": 600}))
+    assert clock.set == [("timer", "bedroom")]
+    # In the room the user is in, so there's nothing to tell them.
+    assert result.say == "Timer set for 10 minutes."
+
+
+def test_a_timer_handed_to_another_room_says_so():
+    clock = RecordingClock()
+    actions = ActionExecutor(clock=clock, satellite="pc", ring_on=lambda name: "kitchen",
+                             room_of=lambda name: [name])
+    result = actions.execute(Action("set_timer", {"duration_seconds": 600}))
+    assert clock.set == [("timer", "kitchen")]
+    assert result.say == "Timer set for 10 minutes. It'll ring on the kitchen."
+
+
+def test_an_alarm_set_at_the_pc_rings_on_the_pi():
+    clock = RecordingClock()
+    actions = ActionExecutor(clock=clock, satellite="pc", ring_on=lambda name: "bedroom",
+                             room_of=lambda name: [name, "bedroom"])
+    result = actions.execute(Action("set_alarm", {"hour": 7, "minute": 0}))
+    assert clock.set == [("alarm", "bedroom")]
+    assert result.say == "7:00 AM."
+
+    other = ActionExecutor(clock=clock, satellite="pc", ring_on=lambda name: "kitchen",
+                           room_of=lambda name: [name])
+    assert other.execute(Action("set_alarm", {"hour": 7, "minute": 0})).say == "7:00 AM. It'll ring on the kitchen."
+
+
+def test_nothing_is_added_when_a_timer_wasnt_set_or_rings_where_asked():
+    class AskingClock(RecordingClock):
+        def set_timer(self, duration_seconds, label, is_reminder, at=None, satellite=None):
+            return {"success": False, "message": "What would you like to name this reminder?"}
+
+    actions = ActionExecutor(clock=AskingClock(), satellite="pc", ring_on=lambda name: "kitchen",
+                             room_of=lambda name: [name])
+    assert actions.execute(Action("set_timer", {"duration_seconds": 600, "is_reminder": True})
+                           ).say == "What would you like to name this reminder?"
+    # Ringing where it was asked, even if its room isn't known.
+    same = ActionExecutor(clock=RecordingClock(), satellite="kitchen", ring_on=lambda name: name,
+                          room_of=lambda name: [name])
+    assert same.execute(Action("set_timer", {"duration_seconds": 600})).say == "Timer set for 10 minutes."
+
+
 def test_only_what_rings_on_the_satellite_asked_is_dismissed():
     # "Okay, thanks" in the kitchen dismissed the bedroom's timer too, which nobody
     # there could hear.
@@ -179,6 +304,11 @@ def test_only_what_rings_on_the_satellite_asked_is_dismissed():
     clock = FakeClock()
     ActionExecutor(clock=clock, satellite="kitchen").execute(Action("dismiss_timer", {}))
     assert clock.dismissed == "kitchen"
+
+    # Its room, though, is all heard - a timer set at the PC rings on the Pi beside it.
+    ActionExecutor(clock=clock, satellite="pc",
+                   room_of=lambda name: [name, "bedroom"]).execute(Action("dismiss_timer", {}))
+    assert clock.dismissed == ["pc", "bedroom"]
 
 
 # Confirming what was done
@@ -2039,6 +2169,21 @@ def test_claude_is_never_offered_the_leave_reminder():
     result = executor.execute(Action("set_leave_reminder", params))
     assert result.ok and result.say == "I'll remind you at 8:15 AM."
     assert journeys.reminded == [("Work", "zone.work", "zone.home", "driving", 1000.5, 900.5, True, "kitchen")]
+
+
+def test_a_leave_reminder_set_at_the_pc_rings_where_its_timers_do():
+    journeys = FakeJourneys()
+    executor = ActionExecutor(journeys=journeys, satellite="pc", ring_on=lambda name: "kitchen",
+                              room_of=lambda name: [name])
+    params = {"place": "Work", "destination": "zone.work", "origin": "zone.home", "mode": "driving",
+              "arrive": 1000.5, "leave_by": 900.5, "watch": True}
+    result = executor.execute(Action("set_leave_reminder", params))
+    assert journeys.reminded[0][7] == "kitchen"
+    assert result.say == "I'll remind you at 8:15 AM. It'll ring on the kitchen."
+    # Handed to the Pi in the same room, there's nothing more to say.
+    executor.ring_on, executor.room_of = (lambda name: "bedroom"), (lambda name: [name, "bedroom"])
+    assert executor.execute(Action("set_leave_reminder", params)).say == "I'll remind you at 8:15 AM."
+    assert journeys.reminded[1][7] == "bedroom"
 
 
 def test_without_home_assistant_journeys_say_so():

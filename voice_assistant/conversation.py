@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from voice_assistant.actions import Action, ActionExecutor, ActionResult, confirm
+from voice_assistant.clock_ringing import Where, heard_in
 from voice_assistant.devices import told_claude
 from voice_assistant.journeys import told_claude as journey_told_claude
 from voice_assistant.logging_setup import TRANSCRIPT
@@ -77,7 +78,8 @@ class Conversation:
 
     def __init__(self, clock, intents, llm, actions, music, chime_enabled: Union[bool, Callable[[], bool]] = True,
                  max_follow_ups: int = 3, routines=None, satellite: Optional[str] = None,
-                 playing: Optional[Callable[[], List[str]]] = None, progress: Optional[Callable[[], None]] = None):
+                 playing: Optional[Callable[[], List[str]]] = None, progress: Optional[Callable[[], None]] = None,
+                 room: Optional[Callable[[], List[str]]] = None):
         """
         Args:
             clock: The Clock, for what's ringing and for dismissing it.
@@ -93,14 +95,18 @@ class Conversation:
                 and listen for the answer without the wake word, so it can't hold
                 the microphone indefinitely.
             routines: The user's Routines, or None, for the words which start one.
-            satellite: The satellite the user is talking to, whose ringing alone they
-                can hear, and so stop - or None for anything ringing anywhere.
+            satellite: The satellite the user is talking to, whose ringing - and its
+                room's - alone they can hear, and so stop - or None for anything
+                ringing anywhere.
             playing: Gives the names of what's playing in the user's room - see
                 Session.playing_here - or None for nothing ever playing.
             progress: Called with nothing as a turn gets on - once for each of Claude's
                 replies, and each step of a routine - so a routine of several slow steps
                 isn't taken for one which is stuck (see Session.moved_at). Never while
                 waiting on anything, so one which is stuck still stops calling it.
+            room: Gives every satellite in the user's room, theirs first - see
+                Brain.room_of - or None for a room of its own. What rings on any of
+                them is heard, and stopped, from here.
         """
         self.clock = clock
         self.intents = intents
@@ -113,14 +119,19 @@ class Conversation:
         self.satellite = satellite
         self.playing = playing
         self.progress = progress or (lambda: None)
+        self.room = room
         self.start()
+
+    def _heard_here(self) -> Where:
+        """What rings where the user can hear it, to ask the clock about: their satellite's room."""
+        return heard_in(self.room() if self.room is not None else [self.satellite])
 
     @property
     def chime_enabled(self) -> bool:
         """Whether a success is confirmed with the chime, as it is set now."""
         return self._chime_enabled() if callable(self._chime_enabled) else self._chime_enabled
 
-    def start(self, ringing: Optional[Dict] = None, talked_over: bool = False):
+    def start(self, ringing: Optional[Dict] = None, talked_over: bool = False, pressed: bool = False):
         """
         Starts a new conversation, as the wake word is heard.
 
@@ -130,9 +141,12 @@ class Conversation:
                 what the user could hear when they started talking.
             talked_over: True when the wake word was said over the assistant's last
                 reply, which was stopped there and then.
+            pressed: True when it began on a press of a key, which is deliberate - so
+                nothing said in it is taken for speech from what's playing.
         """
         self.ringing = ringing or dict(NOTHING_RINGING)
         self.talked_over = talked_over
+        self.pressed = pressed
         # Counted per conversation, not per question, so a long back and forth still
         # ends after the cap is reached.
         self.follow_ups = 0
@@ -199,7 +213,7 @@ class Conversation:
                 logger.info("Reminder left running at the user's request")
                 return Reply(say="Okay, I'll leave it.")
             if answer:
-                self.clock.dismiss(satellite=self.satellite)
+                self.clock.dismiss(satellite=self._heard_here())
                 logger.info("Reminder dismissed after being offered")
                 return self._chime("Okay.")
             # Anything else is a fresh request, so it falls through and is handled
@@ -208,8 +222,9 @@ class Conversation:
         # Anything short said while a timer is going off means "make it stop", so it's
         # handled here rather than going to the model, making it quicker and easier
         # to silence.
-        if self.clock.is_ringing(satellite=self.satellite) and self.clock.looks_like_dismissal(text):
-            result = self.clock.dismiss(satellite=self.satellite)
+        here = self._heard_here()
+        if self.clock.is_ringing(satellite=here) and self.clock.looks_like_dismissal(text):
+            result = self.clock.dismiss(satellite=here)
             timeline.note(outcome="dismissed_locally")
             logger.info("Dismissed by voice without asking the model")
             return self._chime(result["message"])
@@ -308,7 +323,7 @@ class Conversation:
         # Nor in a routine, whose next step would be taken for the answer.
         reminder = self.ringing.get("reminder")
         if (reminder and not in_routine and not self.ringing.get("reminder_sounding") and not self.reminder_offered
-                and self.clock.is_ringing(satellite=self.satellite) and not response_text.rstrip().endswith("?")):
+                and self.clock.is_ringing(satellite=self._heard_here()) and not response_text.rstrip().endswith("?")):
             self.reminder_offered = True
             self.reminder_answer_pending = True
             response_text = f"{response_text} Also, your {reminder} reminder is still going. Shall I turn it off?".strip()
@@ -383,7 +398,8 @@ class Conversation:
         self.llm.read_tools = set(self.actions.read_tools())
         # Read once, as the request is built, so what Claude is told plays is what decides
         # whether its not_for_me counts - a film which stops while it thinks changes neither.
-        playing = [] if in_routine or self.playing is None else list(self.playing())
+        # Nothing for a press, which no film can make, so it's never dropped as one.
+        playing = [] if in_routine or self.pressed or self.playing is None else list(self.playing())
         # What Claude reads, such as home_status, goes back to it to answer from.
         result = self.llm.process_query(text, context=timers, lights=lights, playing=playing,
                                         read=lambda action: self.actions.execute(action).say)

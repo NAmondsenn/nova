@@ -26,6 +26,7 @@ import requests
 
 from voice_assistant import network
 from voice_assistant.batteries import HOME_FAILURES, find, said
+from voice_assistant.clock_ringing import heard_in
 from voice_assistant.devices import AppDevice, ring_call, said_as, where
 from voice_assistant.football import NO_TEAM
 from voice_assistant.football_words import describe as describe_football
@@ -286,7 +287,9 @@ class ActionExecutor:
     def __init__(self, music=None, clock=None, volume=None, weather=None, home=None, memory=None, ntfy=None,
                  satellite: Optional[str] = None, batteries=None, lists=None, pc=None, calendar=None,
                  downloads=None, football=None, listening=None, wrapped=None, config=None, new_music=None,
-                 journeys=None):
+                 journeys=None, ring_on: Callable[[str], str] = lambda name: name,
+                 room_of: Callable[[str], List[str]] = lambda name: [name],
+                 room_players: Optional[Callable[[], List]] = None):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -321,6 +324,15 @@ class ActionExecutor:
                 if there isn't one - find_new_music plays that one by its id when it has it.
             journeys: Journeys, for how long a journey takes and when to leave for it, or None if
                 Home Assistant isn't set up.
+            ring_on: Given the satellite the user is talking to, the one a timer or alarm set
+                there rings on - itself, unless it's a push-to-talk satellite, which hands
+                them to an always-on one.
+            room_of: Given a satellite, every one in its room, itself first - so a timer
+                handed to another room is said to be, and what rings anywhere in the
+                room is dismissed.
+            room_players: Gives the music players of the satellites in the user's room
+                which are connected, this one's first - or None for this one's alone.
+                Pausing, resuming and the music's volume act on the room's music.
         """
         self.music = music
         self.clock = clock
@@ -341,9 +353,33 @@ class ActionExecutor:
         self.config = config
         self.new_music = new_music
         self.journeys = journeys
+        self.ring_on = ring_on
+        self.room_of = room_of
+        self.room_players = room_players or (lambda: [self.music])
         # What was last asked, and what the assistant said - or the last alert, and
         # all of it - for "send that to my phone". Kept up to date by the Conversation.
         self.last_answer: Optional[Tuple[str, str]] = None
+
+    def _ring_on_satellite(self) -> Optional[str]:
+        """Returns the satellite a timer or alarm set now rings on - None if the user isn't at one in particular."""
+        return self.ring_on(self.satellite) if self.satellite else None
+
+    def _say_where_it_rings(self, result: Dict, ring: Optional[str]) -> Dict:
+        """
+        Adds where it will ring to what was said of a timer or alarm just set, if that's
+        another room than the user is in - they can't hear it there, so they're told.
+
+        Args:
+            result: What the clock returned.
+            ring: The satellite it was set to ring on.
+
+        Returns:
+            result, with " It'll ring on the {ring}." on its message if it was set and rings
+            on a satellite which isn't in the room of the one asked.
+        """
+        if not result.get("success") or ring is None or ring in self.room_of(self.satellite):
+            return result
+        return {**result, "message": f"{result['message']} It'll ring on the {ring}."}
 
     @classmethod
     def tools(cls) -> Dict[str, Callable]:
@@ -460,6 +496,46 @@ class ActionExecutor:
             return {"success": False, "message": f"{name} needs the internet, and I can't reach it right now."}
         return None
 
+    def _others_in_room(self) -> List:
+        """The music players of the rest of the user's room - none, for a satellite in a room of its own."""
+        return [player for player in self.room_players() if player and player is not self.music]
+
+    def _playing_in_room(self) -> List:
+        """
+        The music players to pause, or turn up or down: every one in the user's room
+        playing now, this one's first - or, with none playing, this one alone, as
+        before there were rooms. The room's music is held while the user is heard, so
+        what's playing is what was playing as they spoke - see Session._converse.
+        """
+        others = self._others_in_room()
+        if not others:
+            return [self.music]
+        playing = [player for player in [self.music] + others if player and player.was_playing()]
+        return playing or [self.music]
+
+    def _resumes(self):
+        """
+        The music player a bare "play" or "resume" carries on: this one, if it has music
+        paused - else the first in the user's room which has - else this one, as before
+        there were rooms.
+        """
+        others = self._others_in_room()
+        if not others or self._has_paused_music(self.music):
+            return self.music
+        return next((player for player in others if self._has_paused_music(player)), self.music)
+
+    @staticmethod
+    def _has_paused_music(player) -> bool:
+        """
+        Whether a music player has music paused to carry on with - not music only held
+        while the user is heard, which carries on by itself.
+        """
+        if player.was_playing():
+            return False
+        now = player.now_playing()
+        # Spotify says what the account plays anywhere, so only its own speaker's counts.
+        return bool(now) and not now.get("playing") and now.get("here", True)
+
     @tool(
         "Play music. Correct any obvious mis-transcriptions of artist or song names "
         "before calling, since the user's speech may have been misheard. Use this for "
@@ -490,6 +566,9 @@ class ActionExecutor:
         },
     )
     def play_music(self, query: Optional[str] = None, search_type: Optional[str] = None):
+        if not query:
+            # Carries on whatever is paused in the user's room - see _resumes.
+            return self._music_offline() or self._resumes().play(None, search_type=search_type)
         reply = self.play_without_offer(query, search_type)
         # Navidrome hasn't got it - not merely couldn't be asked - so it's offered for
         # download instead, if it can be.
@@ -682,12 +761,16 @@ class ActionExecutor:
         if offline:
             return offline
         if action == "pause":
-            result = self.music.pause()
-            # Asked for outright, so the music isn't brought back once the
-            # assistant has finished talking - see MusicHold.
-            if result.get("success"):
-                self.music.cancel_resume()
-            return result
+            # Whatever is playing in the user's room - see _playing_in_room.
+            results = []
+            for player in self._playing_in_room():
+                result = player.pause()
+                # Asked for outright, so the music isn't brought back once the
+                # assistant has finished talking - see MusicHold.
+                if result.get("success"):
+                    player.cancel_resume()
+                results.append(result)
+            return results[0]
         if action == "skip":
             return self.music.skip()
         if action == "previous":
@@ -764,7 +847,9 @@ class ActionExecutor:
     )
     def set_timer(self, duration_seconds: Optional[int] = None, at: Optional[str] = None,
                   label: Optional[str] = None, is_reminder: bool = False):
-        return self.clock.set_timer(duration_seconds, label or None, bool(is_reminder), at=at, satellite=self.satellite)
+        ring = self._ring_on_satellite()
+        return self._say_where_it_rings(
+            self.clock.set_timer(duration_seconds, label or None, bool(is_reminder), at=at, satellite=ring), ring)
 
     @tool(
         "Give a name to the reminder which was just asked about, right after the "
@@ -793,8 +878,8 @@ class ActionExecutor:
         needs="clock",
     )
     def dismiss_timer(self):
-        # Only what rings where the user is talking, which is all they can hear.
-        return self.clock.dismiss(satellite=self.satellite)
+        # Only what rings in the room the user is talking in, which is all they can hear.
+        return self.clock.dismiss(satellite=heard_in(self.room_of(self.satellite) if self.satellite else [None]))
 
     @tool(
         "Report timers and reminders which went off without being acknowledged, for "
@@ -863,7 +948,8 @@ class ActionExecutor:
             # The days themselves. Left as "custom" if none were given, which the
             # clock can't read, so it asks which days rather than guessing.
             repeat = days or "custom"
-        return self.clock.set_alarm(hour, minute, repeat or None, satellite=self.satellite)
+        ring = self._ring_on_satellite()
+        return self._say_where_it_rings(self.clock.set_alarm(hour, minute, repeat or None, satellite=ring), ring)
 
     @tool("Report which alarms are set, for 'what alarms do I have' or 'list my alarms'.", needs="clock")
     def list_alarms(self):
@@ -988,12 +1074,12 @@ class ActionExecutor:
         """
         Which volume a request like "turn it down" means when it doesn't say.
 
-        The music, if it was playing when the user spoke - that's what they'll have
-        been listening to - and the assistant's own voice otherwise. Before this the
-        model always chose the assistant's voice, so "turn it down" with music on
-        changed nothing the user could actually hear.
+        The music, if any in the user's room was playing when they spoke - that's what
+        they'll have been listening to - and the assistant's own voice otherwise. Before
+        this the model always chose the assistant's voice, so "turn it down" with music
+        on changed nothing the user could actually hear.
         """
-        if self.music and self.music.was_playing():
+        if self.music and any(player.was_playing() for player in [self.music] + self._others_in_room()):
             return "music"
         return "general"
 
@@ -1003,7 +1089,9 @@ class ActionExecutor:
 
         Kept apart from the assistant's volumes because the music player holds this
         level itself - Spotify's applies to every device playing - rather than it
-        being something only this assistant's audio uses.
+        being something only this assistant's audio uses. Every player in the user's
+        room which is playing is changed - see _playing_in_room - and what's said is
+        the first's.
 
         Args:
             level: An exact percentage, or None.
@@ -1018,8 +1106,13 @@ class ActionExecutor:
         offline = self._music_offline()
         if offline:
             return offline
+        results = [self._change_volume_of(player, level, direction, amount) for player in self._playing_in_room()]
+        return results[0]
 
-        current = self.music.get_volume()
+    def _change_volume_of(self, player, level: Optional[int], direction: Optional[str],
+                          amount: Optional[int]) -> Dict:
+        """Changes one music player's volume, as _change_music_volume asks."""
+        current = player.get_volume()
 
         if level is not None:
             target = level
@@ -1035,7 +1128,7 @@ class ActionExecutor:
         # assistant's own level rather than the music's, since it comes out of the
         # assistant and not through the music player - the music itself demonstrates
         # the new level well enough.
-        return self._with_beep("general", self.music.set_volume(target))
+        return self._with_beep("general", player.set_volume(target))
 
     # Weather
 
@@ -1754,8 +1847,12 @@ class ActionExecutor:
     )
     def set_leave_reminder(self, place=None, destination=None, origin=None, mode=None, arrive=None, leave_by=None,
                            watch=None):
-        return self.journeys.remind(place or "", destination or "", origin or "zone.home", mode or "driving",
-                                    float(arrive or 0), float(leave_by or 0), bool(watch), satellite=self.satellite)
+        # A reminder like any other, so one set at a push-to-talk satellite rings, and the traffic's changes are
+        # said, on the always-on one it's handed to.
+        ring = self._ring_on_satellite()
+        return self._say_where_it_rings(
+            self.journeys.remind(place or "", destination or "", origin or "zone.home", mode or "driving",
+                                 float(arrive or 0), float(leave_by or 0), bool(watch), satellite=ring), ring)
 
     # Notifications
 

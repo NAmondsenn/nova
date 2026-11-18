@@ -30,7 +30,11 @@ logger = logging.getLogger(__name__)
 # Settings which only make sense within a range, or as one of a few words - checked
 # beyond being the right kind.
 BETWEEN_0_AND_1 = {("thresholds", "vad_threshold"), ("thresholds", "silence_threshold"), ("llm", "temperature")}
-CHOICES = {("music", "player"): ("navidrome", "spotify"), ("journeys", "distance_unit"): ("miles", "km")}
+CHOICES = {
+    ("music", "player"): ("navidrome", "spotify"),
+    ("satellite", "trigger"): ("wake_word", "push_to_talk"),
+    ("journeys", "distance_unit"): ("miles", "km"),
+}
 # Battery marks are percentages, and how many each kind of device has - the settings page
 # allows no other number. The battery watcher can't check every 0 seconds or call a
 # reading old after -5, nor can the football watcher, or say a match is starting 0 minutes
@@ -105,6 +109,8 @@ LIMITS: Dict[Tuple[str, str], Limit] = {
     ("journeys", "monthly_requests"): Limit("number", 0, 5000, True),
     ("mqtt", "host"): Limit("host"),
     ("mqtt", "port"): Limit("number", 1, 65535, True),
+    # Not a port below 1024, which a user's own program can't listen on.
+    ("satellite", "press_port"): Limit("number", 1024, 65535, True),
     ("voice", "speed"): Limit("number", 0.75, 1.5),
     # 0 is NPM's listener switched off.
     ("settings_page", "proxy_port"): Limit("number", 0, 65535, True),

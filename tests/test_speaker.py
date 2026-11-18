@@ -299,6 +299,65 @@ def test_it_says_whether_its_own_sound_has_been_heard_lately(streams):
     assert speaker.sounded_within(5)
 
 
+def wait_for(condition, timeout=2.0):
+    """Waits for something another thread is doing to happen."""
+    give_up_at = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < give_up_at, "timed out waiting"
+        time.sleep(0.005)
+
+
+def test_an_on_demand_speaker_closes_when_quiet(streams):
+    # The PC's: an open stream keeps Windows from going to sleep.
+    speaker = Speaker(sample_rate=RATE, always_open=False)
+    assert streams == []
+
+    playback = speaker.play(np.full(480, 0.5))
+    assert len(streams) == 1
+    assert np.allclose(streams[0].pull(), 0.5)
+    assert playback.wait(timeout=1)
+    streams[0].pull()
+    assert speaker._stream is streams[0]
+
+    # The clock moved on, as if IDLE_CLOSE_SECONDS had passed with nothing to play.
+    speaker._quiet_since -= speaker_module.IDLE_CLOSE_SECONDS
+    streams[0].pull()
+    wait_for(lambda: streams[0].closed)
+
+    speaker.play(np.full(480, 0.25))
+    assert len(streams) == 2
+    assert np.allclose(streams[1].pull(), 0.25)
+
+
+def test_the_pis_speaker_stays_open_when_quiet(streams):
+    speaker = Speaker(sample_rate=RATE)
+    speaker._quiet_since -= 3600
+    streams[0].pull()
+    assert speaker._stream is streams[0] and not streams[0].closed
+
+
+def test_paused_music_lets_the_speaker_close(streams):
+    # Music he paused at the PC mustn't keep it awake.
+    speaker = Speaker(sample_rate=RATE, always_open=False)
+    music = speaker.play_stream(iter([np.arange(960, dtype=np.float32) / 1000]), kind="music")
+    wait_for(lambda: not music.streaming)
+    first = streams[0].pull()
+    music.paused = True
+    streams[0].pull()
+    assert speaker._stream is streams[0]
+
+    speaker._quiet_since -= speaker_module.IDLE_CLOSE_SECONDS
+    streams[0].pull()
+    wait_for(lambda: streams[0].closed)
+    assert not music.done
+
+    music.paused = False
+    assert len(streams) == 2
+    assert np.allclose(streams[1].pull(), np.arange(480, 960) / 1000)
+    assert np.allclose(first, np.arange(480) / 1000)
+    assert music.wait(timeout=1)
+
+
 def test_a_paused_sound_isnt_heard(streams):
     speaker = Speaker(sample_rate=RATE)
     playback = speaker.play(np.full(960, 0.5))

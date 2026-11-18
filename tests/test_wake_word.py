@@ -137,6 +137,16 @@ def save_check(models, score, model="hey_nova", frames=voice_check_module.DEFAUL
     }, str(models.parent / "voice_check.json"))
 
 
+def test_without_openwakeword_the_detector_says_why_it_couldnt_be_imported(monkeypatch, make_config):
+    # Not always that it isn't installed - one of its own libraries may be what's missing.
+    missing = ImportError("No module named 'tflite_runtime'")
+    monkeypatch.setattr(wake_word_module, "Model", None)
+    monkeypatch.setattr(wake_word_module, "IMPORT_ERROR", missing)
+    with pytest.raises(RuntimeError, match="tflite_runtime") as raised:
+        WakeWordDetector(config=make_config())
+    assert raised.value.__cause__ is missing
+
+
 def test_the_wake_word_is_heard_through_the_shared_microphone(monkeypatch, make_config, models):
     streams = []
     monkeypatch.setattr(microphone_module.sd, "InputStream",
