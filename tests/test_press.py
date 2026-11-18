@@ -6,11 +6,13 @@ on a free port of this machine's loopback address.
 """
 
 import http.client
+import socket
 import threading
 import time
 
 import pytest
 
+from voice_assistant import press
 from voice_assistant.press import PRESS_DEBOUNCE, PressListener
 
 
@@ -143,3 +145,49 @@ def test_the_press_runs_on_the_listeners_thread(listener):
     ask(listener)
     assert seen == [True]
 
+
+
+class _SpySocket:
+    """Takes the options a server sets before it binds, and binds nothing."""
+
+    def __init__(self):
+        self.options = []
+        self.bound = None
+
+    def setsockopt(self, level, name, value):
+        self.options.append((level, name, value))
+
+    def bind(self, address):
+        self.bound = address
+
+    def getsockname(self):
+        return self.bound
+
+
+def _bound(monkeypatch, windows):
+    """The options a listener's server sets, as on Windows or not - whichever this machine is."""
+    monkeypatch.setattr(press, "_on_windows", lambda: windows)
+    # Windows only has it, so it's made up here.
+    monkeypatch.setattr(socket, "SO_EXCLUSIVEADDRUSE", -5, raising=False)
+    server = press._Server((press.ADDRESS, 0), press._Handler, bind_and_activate=False)
+    server.socket.close()
+    server.socket = _SpySocket()
+    server.server_bind()
+    return server.socket.options
+
+
+def test_on_windows_the_port_cant_be_shared(monkeypatch):
+    # SO_REUSEADDR there lets a second socket bind a port which is in use, so presses
+    # would go to whichever of them Windows picks. Linux can't be tested for this, but
+    # the options which are set can be.
+    options = _bound(monkeypatch, windows=True)
+    assert (socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1) in options
+    assert all(name != socket.SO_REUSEADDR for level, name, value in options)
+
+
+def test_elsewhere_the_port_can_be_had_again_at_once_after_a_restart(monkeypatch):
+    # Where reusing the address only gets past connections still closing, which is all
+    # a restart needs.
+    options = _bound(monkeypatch, windows=False)
+    assert (socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) in options
+    assert all(name != socket.SO_EXCLUSIVEADDRUSE for level, name, value in options)

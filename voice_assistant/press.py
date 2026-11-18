@@ -11,6 +11,8 @@ it was sent to must be this address, which a page reaching it through a name of 
 """
 
 import logging
+import os
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,6 +35,26 @@ PRESS_DEBOUNCE = 0.4
 # How long a connection may stay silent before it's dropped, in seconds, so one which
 # says nothing can't hold a thread for good.
 CLIENT_TIMEOUT = 5
+
+
+def _on_windows() -> bool:
+    """Whether this is Windows, where the PC's push-to-talk satellite runs."""
+    return os.name == "nt"
+
+
+class _Server(ThreadingHTTPServer):
+    """A server which keeps its port to itself, which Windows needs to be asked for."""
+
+    def server_bind(self):
+        if _on_windows():
+            # Where SO_REUSEADDR, which the standard server sets, lets a second socket
+            # bind a port which is in use - a second satellite, or another program on
+            # this machine - and presses then go to whichever of them Windows picks.
+            # Left on elsewhere, where it only gets past connections still closing, so a
+            # restarted satellite can bind again at once.
+            self.allow_reuse_address = False
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -84,7 +106,7 @@ class PressListener:
         """
         self._port = port
         self._on_press = on_press
-        self._server: Optional[ThreadingHTTPServer] = None
+        self._server: Optional[_Server] = None
         self._thread: Optional[threading.Thread] = None
         # Guards the time of the last press, as each request has a thread of its own.
         self._lock = threading.Lock()
@@ -102,7 +124,7 @@ class PressListener:
         Raises:
             OSError: The port is already taken.
         """
-        server = ThreadingHTTPServer((ADDRESS, self._port), _Handler)
+        server = _Server((ADDRESS, self._port), _Handler)
         server.listener = self
         self._server = server
         # What it was given if that was a port, and the one found if it was 0.
