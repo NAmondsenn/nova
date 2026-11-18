@@ -41,9 +41,12 @@ foreach ($folder in @($app, $config, $data)) {
 }
 
 # The code. /MIR drops files which are gone from the source, but not the venv, which
-# isn't in it. Exit codes below 8 are robocopy's ways of saying it worked.
+# isn't in it - left out by its path and by its name, as robocopy matches either. A file
+# it can't copy is tried twice, two seconds apart, rather than a million times, 30 s
+# apart, which would hang the deploy. Exit codes below 8 are robocopy's ways of saying
+# it worked.
 Write-Host "Copying the code to $app"
-robocopy $Source $app /MIR /XD $venv /NFL /NDL /NJH /NJS /NP | Out-Null
+robocopy $Source $app /MIR /XD $venv venv /R:2 /W:2 /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed (exit code $LASTEXITCODE)" }
 
 # The environment, made once.
@@ -94,13 +97,14 @@ else {
 
 # Started at his logon, in his own session, so it has his microphone and speakers;
 # the launcher runs the satellite and starts it again whenever it exits. One copy
-# only, and no time limit.
+# only, no time limit, and at normal priority (5) rather than the below-normal 7 a task
+# is given, so a game doesn't break up its sound.
 $user = "$env:USERDOMAIN\$env:USERNAME"
 $action = New-ScheduledTaskAction -Execute $venvPythonw -Argument ('"' + $launcher + '"') -WorkingDirectory $app
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
 $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-    -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero)
+    -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -Priority 5
 Write-Host "Registering the task '$taskName' for $user"
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal `
     -Settings $taskSettings -Description "Nova's satellite, started at logon" -Force | Out-Null
