@@ -138,6 +138,28 @@ and to take a satellite off the Pi, asking before removing anything which can't 
 bash uninstall.sh
 ```
 
+### The PC
+
+A Windows PC can be a satellite too, in the same room as a Pi: it listens only when a key is pressed (Numpad 3, from the user's AutoHotkey script), plays replies and music on its own speakers, and hands the timers and alarms set at it to the Pi, which is always on. It has no wake word, so it needs no model, and its microphone and speaker are open only while it's in use. See [docs/decisions/0024](docs/decisions/0024-the-pc-as-a-push-to-talk-satellite.md).
+
+It's installed from a machine which can `ssh pc` to the PC and `ssh nova` to the brain (CT 109, here), with this repository checked out:
+
+1. On the brain, `add-satellite pc` gives its password. Put it on the PC in `%LOCALAPPDATA%\nova\config\.env` as `NOVA_BACKEND_TOKEN=<the password>`; the install never writes that file.
+2. `bash scripts/deploy_pc.sh` sends the commit the brain is running (never anything newer) and installs it: the code, a Python environment from the `py` launcher, the six packages in `requirements-pc.txt`, a settings file if there is none (the brain at `nova:10400`, the name `pc`, `satellite.trigger: push_to_talk`, `audio.echo_cancellation: false`) and a Task Scheduler task, `Nova satellite`, which starts the launcher when the user logs on. The launcher runs the satellite with no window, and starts it again if it stops. Run it again to update: it installs packages only when `requirements-pc.txt` changed, ends the running satellite, and the launcher starts the new one.
+3. In Home Assistant, give the PC's Nova device (`nova_` and the machine's name) the area of the room it's in, which is how Nova knows which Pi it shares a room with.
+4. The key's script posts to the satellite, which listens on this machine only: `POST http://127.0.0.1:10401/press` (`satellite.press_port`) with the header `X-Nova-Press: 1`. It must be that address, not `localhost`, and with that header, or the satellite refuses it. In AutoHotkey 1.1, as for any other webhook:
+
+```ahk
+request := ComObjCreate("WinHttp.WinHttpRequest.5.1")
+request.Open("POST", "http://127.0.0.1:10401/press", false)
+request.SetRequestHeader("X-Nova-Press", "1")
+request.Send()
+```
+
+A press starts listening; a press while listening stops it and sends what was said; a press over a reply stops it and listens. Mute doesn't block a press.
+
+Everything is under `%LOCALAPPDATA%\nova`: `app` (the code and its `venv`), `config` (`config.yaml` and `.env`) and `data`, whose `logs` folder has `smart_assistant.log` and the launcher's `launcher.log`. To restart the satellite, end its `pythonw.exe` (the one running `satellite.py`) and the launcher starts it again; to stop it for good, end the task with `Stop-ScheduledTask 'Nova satellite'`. A deploy replaces `launcher.pyw` but doesn't restart the launcher, so a change to it takes effect after the task is stopped and started, or after the next logon. Windows never tells a program it's shutting down, so after logging off, or a deploy, the satellite counts its last stop as unclean. To remove it: `Unregister-ScheduledTask 'Nova satellite' -Confirm:$false`, then delete the folder.
+
 ### Music
 
 Navidrome or Spotify - `music.player` in `config.yaml` says which, and it's Spotify unless you change it. Both are set up on the brain, which plays the music through each satellite's speaker.

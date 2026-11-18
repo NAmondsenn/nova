@@ -1,0 +1,15 @@
+# Exact versions of the six packages Nova's satellite needs on the Windows PC, which has
+# no wake word (see docs/decisions/0024): the versions in requirements.lock, plus cffi
+# and pycparser, which soundfile and sounddevice need. The wheels for Windows bundle
+# PortAudio and libsndfile. scripts/windows/install.ps1 installs it without dependency
+# resolution, since everything is listed:
+#   venv\Scripts\python.exe -m pip install --no-deps -r requirements-pc.txt
+# Keep it in step with requirements.lock by hand when a version there changes.
+cffi==2.1.0
+numpy==2.4.6
+pycparser==3.0
+python-dotenv==1.2.2
+PyYAML==6.0.3
+sounddevice==0.5.5
+soundfile==0.14.0
+soxr==1.1.0
