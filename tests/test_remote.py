@@ -246,6 +246,31 @@ def test_a_wake_says_how_much_of_its_recording_is_from_before_it(pair):
     assert [satellite.wakes.get(timeout=2)["pre_roll"] for _ in range(4)] == [4800, None, None, None]
 
 
+def test_a_pressed_wake_is_marked(pair):
+    # A push-to-talk satellite says a recording started on a press, not on a wake word,
+    # and has no pre-roll to send. An ordinary wake says nothing of it.
+    satellite, fake, serving = pair
+    fake.say("wake", talked_over=False, pressed=True, pre_roll=0)
+    fake.say("wake", talked_over=False, pre_roll=4800)
+    fake.say("wake", talked_over=False, pressed=False)
+    fake.say("wake", talked_over=False, pressed="yes")
+    pressed, ordinary, unpressed, odd = (satellite.wakes.get(timeout=2) for _ in range(4))
+    assert pressed["pressed"] is True
+    assert pressed["pre_roll"] == 0
+    for wake in (ordinary, unpressed, odd):
+        assert "pressed" not in wake
+
+
+def test_the_satellite_says_it_is_push_to_talk():
+    ours, theirs = socket.socketpair()
+    try:
+        assert RemoteSatellite(satellite_link.Stream(ours), dict(HELLO, push_to_talk=True)).push_to_talk is True
+        assert RemoteSatellite(satellite_link.Stream(ours), dict(HELLO)).push_to_talk is False
+    finally:
+        ours.close()
+        theirs.close()
+
+
 def test_a_follow_up_is_heard_until_the_brain_stops_listening(pair):
     satellite, fake, serving = pair
     answer = np.arange(1600, dtype=np.int16)

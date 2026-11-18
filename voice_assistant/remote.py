@@ -461,8 +461,8 @@ class RemoteSatellite:
                 satellite_link's Stream makes of a socket with a timeout. Its reads
                 wake at each timeout, for serve() to notice a satellite gone quiet, and
                 no send blocks for longer.
-            hello: What admit returned - the satellite's name, hostname, sample_rate and
-                speaker.
+            hello: What admit returned - the satellite's name, hostname, sample_rate,
+                speaker and whether it is push-to-talk.
         """
         self.name = hello["name"]
         self.hostname = hello["hostname"]
@@ -470,11 +470,14 @@ class RemoteSatellite:
         # The Spotify speaker it plays on, e.g. "Bedroom Pi" - None from a satellite
         # which doesn't say, so plays on the brain's spotify.device_name.
         self.speaker_name: Optional[str] = hello.get("speaker")
+        # Whether it records on a press of a key, not on a wake word - False from a
+        # satellite which doesn't say.
+        self.push_to_talk: bool = bool(hello.get("push_to_talk", False))
         self.speaker = RemoteSpeaker(self.send, self.sample_rate)
         # Each wake word heard, in order: {"talked_over": whether a reply was playing,
         # "pre_roll": how many samples of the feed are from before the wake word - or
-        # None, from a satellite which doesn't say - and "feed": an AudioFeed of what
-        # the user says next}.
+        # None, from a satellite which doesn't say - "pressed": True, only if it was
+        # a press, not a wake word, and "feed": an AudioFeed of what the user says next}.
         self.wakes: "queue.Queue[Dict]" = queue.Queue()
         # What rang and what was dismissed on the satellite while it couldn't reach
         # the brain, and what was still ringing as it did, as {"rang": [ids],
@@ -718,8 +721,12 @@ class RemoteSatellite:
         if isinstance(pre_roll, bool) or not isinstance(pre_roll, int) or not 0 <= pre_roll <= protocol.MAX_AUDIO // 2:
             pre_roll = None
         recording = message.get("recording")
-        self.wakes.put({"talked_over": bool(message.get("talked_over")), "pre_roll": pre_roll,
-                        "feed": self._new_feed(recording if isinstance(recording, str) else None)})
+        wake = {"talked_over": bool(message.get("talked_over")), "pre_roll": pre_roll,
+                "feed": self._new_feed(recording if isinstance(recording, str) else None)}
+        # Only when it was, so a wake word's is as it was before presses were said.
+        if message.get("pressed") is True:
+            wake["pressed"] = True
+        self.wakes.put(wake)
 
     def _audio(self, message: Dict, payload: bytes):
         with self._feed_lock:

@@ -110,7 +110,8 @@ def test_the_handshake_admits_a_satellite_which_knows_its_password():
     outcome, sent = _handshake(PASSWORD, {"bedroom": PASSWORD})
 
     assert outcome["brain"] == {"name": "bedroom", "hostname": "home-assistant",
-                                "sample_rate": 48000, "unclean": False, "speaker": None}
+                                "sample_rate": 48000, "unclean": False, "speaker": None,
+                                "push_to_talk": False}
     assert outcome["satellite"] is None
     assert sent == ["challenge", "ready"]
 
@@ -147,6 +148,57 @@ def _admitted(**fields):
     return outcome["brain"]
 
 
+def _hello_sent(**fields):
+    """The hello greet sends, which nothing answers, so greet goes on to fail when its socket closes."""
+    near, far = socket.socketpair()
+    near.settimeout(5)
+    far.settimeout(5)
+    satellite_stream, brain_stream = near.makefile("rwb"), far.makefile("rwb")
+
+    def satellite():
+        try:
+            protocol.greet(satellite_stream, "pc", "desktop", PASSWORD, 48000, False, **fields)
+        except (OSError, protocol.ProtocolError):
+            pass
+
+    thread = threading.Thread(target=satellite)
+    thread.start()
+    try:
+        return protocol.receive(brain_stream)[0]
+    finally:
+        near.shutdown(socket.SHUT_RDWR)
+        thread.join(5)
+        for closing in (brain_stream, satellite_stream, near, far):
+            closing.close()
+
+
+def test_hello_says_push_to_talk_only_when_it_is():
+    assert _hello_sent(push_to_talk=True)["push_to_talk"] is True
+    assert "push_to_talk" not in _hello_sent()
+    assert "push_to_talk" not in _hello_sent(push_to_talk=False)
+
+
+def test_admit_reads_push_to_talk():
+    assert _admitted(push_to_talk=True)["push_to_talk"] is True
+    assert _admitted()["push_to_talk"] is False
+    assert _admitted(push_to_talk=False)["push_to_talk"] is False
+
+
+@pytest.mark.parametrize("said", ["yes", 1, 0, None, ["x"]], ids=["text", "one", "zero", "null", "list"])
+def test_a_hello_whose_push_to_talk_isnt_true_or_false_is_refused(said):
+    near, far = socket.socketpair()
+    far.settimeout(1)
+    satellite_stream, brain_stream = near.makefile("rwb"), far.makefile("rwb")
+    try:
+        protocol.send(satellite_stream, "hello", name="bedroom", hostname="h", sample_rate=48000,
+                      unclean=False, nonce="0" * 32, push_to_talk=said)
+        with pytest.raises(protocol.ProtocolError):
+            protocol.admit(brain_stream, {"bedroom": PASSWORD}.get)
+    finally:
+        for closing in (brain_stream, satellite_stream, near, far):
+            closing.close()
+
+
 @pytest.mark.parametrize("nonce", ["z" * 32, "0" * 31 + "g", " " * 32, "0x" + "0" * 30, "\u0660" * 32, "0" * 31, "0" * 33],
                          ids=["letters", "one letter", "spaces", "0x", "arabic-indic digits", "short", "long"])
 def test_a_hello_whose_nonce_isnt_32_hex_digits_is_refused(nonce):
@@ -177,7 +229,7 @@ def test_a_hello_without_a_speaker_still_connects():
     assert _admitted()["speaker"] is None
     for speaker in ("x" * 200, 7, "", None, True, ["Bedroom Pi"], "Bedroom\nPi", "Bedroom\x00Pi"):
         assert _admitted(speaker=speaker) == {"name": "bedroom", "hostname": "h", "sample_rate": 48000,
-                                              "unclean": False, "speaker": None}
+                                              "unclean": False, "speaker": None, "push_to_talk": False}
     # Up to 64 characters, of any language.
     assert _admitted(speaker="x" * 64)["speaker"] == "x" * 64
     assert _admitted(speaker="Cuisine de Zoë")["speaker"] == "Cuisine de Zoë"
