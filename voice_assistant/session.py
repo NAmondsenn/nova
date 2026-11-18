@@ -167,9 +167,10 @@ class Session:
         self._held_lock = threading.Lock()
         # What's been typed in Home Assistant's Ask Nova box, waiting its turn - a queue of
         # its own, as one put with the satellite's wakes would be taken for a wake word said
-        # over the reply before it, and stop it. See ask.
-        self._typed: "queue.Queue[str]" = queue.Queue()
-        # While Nova waits for the answer to a question it's just asked - from the moment
+        # over the reply before it, and stop it. Each is kept with when it arrived, by
+        # time.monotonic(), so it can be told whether it answers a typed question. See ask.
+        self._typed: "queue.Queue[Tuple[str, float]]" = queue.Queue()
+        # While a turn waits for the answer to a question it's just asked - from the moment
         # it knows it's asking, until the answer is heard or given up on - the first thing
         # typed is that answer rather than a fresh request, with the spoken listen for it,
         # if there is one, to end. All three are kept under the one lock, so the answer
@@ -178,6 +179,11 @@ class Session:
         self._answer_open = False
         self._typed_answer: Optional[str] = None
         self._answer_feed: Optional[AudioFeed] = None
+        # A question asked in reply to something typed, whose answer can still be typed,
+        # once its turn has ended - as (since, until), by time.monotonic(): what's typed
+        # between the two is its answer. None without one. Under the same lock. See
+        # _await_typed_answer.
+        self._typed_question: Optional[Tuple[float, float]] = None
         # The last volume beep the settings page played, stopped as the next starts,
         # so dragging a slider doesn't pile them up - see boop.
         self._last_boop = None
@@ -515,10 +521,11 @@ class Session:
         the reply is said out loud on the satellite, never sent back. Muted or not makes
         no difference, as typing uses no microphone.
 
-        While Nova waits for the answer to a question it's asked, it's that answer -
+        While a turn waits for the answer to a question it's asked, it's that answer -
         ending the listen for it, if there is one, so what was typed is used rather than
-        whatever the microphone caught. Otherwise it's a fresh request, answered once
-        any conversation going on has finished, as Speak waits.
+        whatever the microphone caught. Otherwise it waits its turn, as Speak does, once
+        any conversation going on has finished: as the answer to a typed question still
+        open (see _await_typed_answer), or else as a fresh request.
 
         Called on the device's thread for Home Assistant's commands, which has already
         logged what was typed as heard text is logged. So this returns at once, and never
@@ -534,8 +541,8 @@ class Session:
                 return
             with self._typed_lock:
                 if not self._answer_open or self._typed_answer is not None:
-                    # Anything typed after the answer is a fresh request again.
-                    self._typed.put(text)
+                    # Anything typed after the answer waits its turn again.
+                    self._typed.put((text, time.monotonic()))
                     return
                 self._typed_answer = text
                 feed = self._answer_feed
@@ -549,7 +556,7 @@ class Session:
         """
         Notes that Nova has asked the user something, so what's typed from now on is the
         answer - even while the question is still being said, as a long one can be typed
-        back before it's finished. Ended by _close_answer.
+        back before it's finished. Ended by _close_answer or _await_typed_answer.
         """
         with self._typed_lock:
             self._answer_open = True
@@ -578,8 +585,8 @@ class Session:
 
     def _close_answer(self, keep: bool = False) -> Optional[str]:
         """
-        Stops taking what's typed as the answer to Nova's question - from now on it's a
-        fresh request again.
+        Stops taking what's typed as the answer to Nova's question - from now on it waits
+        its turn again.
 
         Args:
             keep: True when the question is being left unanswered - talked over, say -
@@ -594,48 +601,72 @@ class Session:
             self._typed_answer = None
             self._answer_feed = None
         if keep and answer is not None:
-            self._typed.put(answer)
+            # As arriving before any typed question, so it's never taken for an answer.
+            self._typed.put((answer, -math.inf))
             return None
         return answer
 
-    def _wait_for_typed_answer(self) -> Tuple[Optional[str], Optional[Dict]]:
+    def _await_typed_answer(self) -> Optional[str]:
         """
-        Waits up to TYPED_ANSWER_WAIT seconds for the answer to a question Nova asked in
-        reply to something typed, with the microphone shut. Nothing is said or listened
-        for meanwhile, so Nova shows as idle - but the conversation is still going, so
-        what goes off waits for it, as it would for a spoken answer.
+        For a question asked in reply to something typed, with the microphone shut: the
+        answer if it was typed while the question was said, or else leaves the question
+        open for TYPED_ANSWER_WAIT seconds, so the turn can end there.
 
-        A wake word ends the wait at once, rather than being left until it's over with
-        the satellite sending what the user says: the user has chosen to talk instead.
+        The turn ends rather than waiting, so that what goes off by itself - a timer, an
+        alarm, Speak - isn't held back for up to a minute while nobody types: Nova is
+        idle meanwhile, as it is between turns. What's typed in that time is answered in
+        a turn of its own as the answer, within the same conversation (see run). A wake
+        word, a hold, a routine or anything typed later starts afresh and drops it - see
+        _drop_typed_question.
 
         Returns:
-            (the answer typed, or None) and (the wake word said instead, or None). Both
-            None when nothing came in time, or the satellite went.
+            The answer already typed, or None once the question is left open.
         """
-        self.activity = "idle"
-        deadline = time.monotonic() + TYPED_ANSWER_WAIT
-        woken = None
-        while self.satellite.connected and not self._closed.is_set():
-            if self._typed_answer_given() or time.monotonic() >= deadline:
-                break
-            # Waiting for the user is never being stuck, as between wake words.
-            self._moved()
-            try:
-                woken = self.satellite.wakes.get(timeout=TALKED_OVER_CHECK)
-                break
-            except queue.Empty:
-                pass
-        if woken is not None:
-            # A wake word always goes first: anything typed as well is kept for after it.
-            self._close_answer(keep=True)
-            logger.info("Woken while waiting for a typed answer, so that's answered instead")
-            # Not talked over - the question had been said.
-            return None, dict(woken, talked_over=False)
-        answer = self._close_answer()
-        if answer is None or not self.satellite.connected:
-            logger.info("No typed answer, so the question's left")
-            return None, None
-        return answer, None
+        with self._typed_lock:
+            answer = self._typed_answer
+            self._answer_open = False
+            self._typed_answer = None
+            self._answer_feed = None
+            if answer is None:
+                # From now: anything typed before is a request of its own, already waiting.
+                now = time.monotonic()
+                self._typed_question = (now, now + TYPED_ANSWER_WAIT)
+        if answer is None:
+            logger.info("Question asked, its answer can be typed for a while")
+        return answer
+
+    def _drop_typed_question(self):
+        """Gives up on a typed question still open, as something else starts a turn."""
+        with self._typed_lock:
+            self._typed_question = None
+
+    def _next_typed(self) -> Optional[Dict]:
+        """
+        The next thing typed, as run answers it, and whether it answers the typed
+        question left open - so it's that only if it was typed while the question was
+        open. Either way the question is over with it. With nothing typed, a question
+        whose time is up is given up on.
+
+        Returns:
+            {"typed": text, "follow_up": whether it answers the question, "talked_over":
+            False, "feed": None} - or None, with nothing typed.
+        """
+        try:
+            text, arrived = self._typed.get_nowait()
+        except queue.Empty:
+            with self._typed_lock:
+                question = self._typed_question
+                if question is not None and time.monotonic() > question[1]:
+                    self._typed_question = None
+                else:
+                    question = None
+            if question is not None:
+                logger.info("No typed answer in time, so the question's left")
+            return None
+        with self._typed_lock:
+            question, self._typed_question = self._typed_question, None
+        follow_up = question is not None and question[0] <= arrived <= question[1]
+        return {"typed": text, "follow_up": follow_up, "talked_over": False, "feed": None}
 
     # Running
 
@@ -666,9 +697,8 @@ class Session:
                     # Something typed in Home Assistant is answered only once no wake word
                     # is waiting: one said is always answered first, as the satellite is
                     # already sending what the user says after it.
-                    try:
-                        wake = {"typed": self._typed.get_nowait(), "talked_over": False, "feed": None}
-                    except queue.Empty:
+                    wake = self._next_typed()
+                    if wake is None:
                         continue
                 try:
                     self._converse(wake)
@@ -708,10 +738,13 @@ class Session:
 
         Args:
             wake: The wake word, as the satellite's wakes have it - or something typed in
-                Home Assistant, as {"typed": text, "talked_over": False, "feed": None}.
+                Home Assistant, as _next_typed gives it.
         """
         # Marks the assistant as busy, so a timer going off waits its turn rather than interrupting.
         self._idle.clear()
+        # Anything but the answer to a typed question starts afresh, so that question's over.
+        if not wake.get("follow_up"):
+            self._drop_typed_question()
         # Something typed is already words, so there's nothing to listen to.
         self.activity = "thinking" if "typed" in wake else "listening"
         # Pauses the music for the whole interaction (speaking and playback) to avoid audio conflicts.
@@ -751,7 +784,8 @@ class Session:
 
         Args:
             wake: The wake word, with the feed of what the user said after it - or what
-                was typed in Home Assistant, as its "typed".
+                was typed in Home Assistant, as its "typed", with "follow_up" True when
+                it answers a typed question left open - see _await_typed_answer.
             talked_over: True when the wake word was said over the last reply - see
                 Conversation.start.
 
@@ -759,10 +793,11 @@ class Session:
             The wake word heard over this reply too, so the next request has already
             begun - or None.
         """
-        # Times the interaction from this moment on - see Timeline.
-        timeline = Timeline(follow_up=False)
-        timeline.mark("wake")
         typed = wake.get("typed")
+        follow_up = typed is not None and bool(wake.get("follow_up"))
+        # Times the interaction from this moment on - see Timeline.
+        timeline = Timeline(follow_up=follow_up)
+        timeline.mark("wake")
         if typed is None:
             print("Listening...")
 
@@ -779,6 +814,17 @@ class Session:
         # what was ringing as it was sent, as a spoken one does.
         self.speaker.silence("announcement")
         try:
+            if follow_up:
+                # The answer to a typed question carries on the conversation which asked
+                # it, rather than starting another - start would drop what a yes to it
+                # would do (Conversation.asked_first), and the count of questions asked.
+                # A timer, an alarm, an alert or Speak said in between doesn't change
+                # that: none of them goes through the conversation, and the user answers
+                # the question they were asked, which still stands. A routine does go
+                # through it, starting a conversation of its own, so it drops the question
+                # (see run_routine). What was ringing is still as the question's turn
+                # found it, which matters only to a "stop" said over something ringing.
+                return self._handle_typed(typed, follow_up=True, timeline=timeline)
             with self._conversation_lock:
                 self.conversation.start(ringing, talked_over=talked_over)
             if typed is not None:
@@ -946,7 +992,7 @@ class Session:
         Answers something typed in Home Assistant's Ask Nova box, as _handle_interaction
         answers what's said once speech-to-text has the words: with no listening sound,
         and without the satellite being asked to listen, muted or not. A question asked
-        back is answered by typing too - see _wait_for_typed_answer.
+        back is answered by typing too - see _await_typed_answer.
 
         What was typed was logged by the device as heard text is, and is shown here only
         as heard text is, so the transcripts setting decides whether it's kept.
@@ -957,8 +1003,8 @@ class Session:
             timeline: The Timeline to mark each stage on. The caller saves it.
 
         Returns:
-            The wake word heard over the reply, or said instead of a typed answer, which
-            the next request starts from. None otherwise.
+            The wake word heard over the reply, which the next request starts from. None
+            otherwise.
         """
         timeline = timeline or Timeline()
         timeline.note(typed=True)
@@ -969,11 +1015,12 @@ class Session:
         if heard_over is not None or not asked:
             return heard_over
 
-        # The microphone stays shut, as the user chose to type - and it may be muted.
-        logger.info("Question asked, waiting for a typed reply")
-        answer, woken = self._wait_for_typed_answer()
+        # The microphone stays shut, as the user chose to type - and it may be muted. An
+        # answer typed back while the question was said is answered now; otherwise the
+        # turn ends, with the question left open for one to be typed.
+        answer = self._await_typed_answer()
         if answer is None:
-            return woken
+            return None
         follow_up_timeline = Timeline(follow_up=True)
         try:
             return self._handle_typed(answer, follow_up=True, timeline=follow_up_timeline)
@@ -1398,6 +1445,9 @@ class Session:
                 if not self._wait_for_turn():
                     return
                 self.activity = "thinking"
+                # A conversation of its own, which drops what a typed question left open
+                # would do - so what's typed next is a fresh request, not its answer.
+                self._drop_typed_question()
                 with self._conversation_lock:
                     self.conversation.start()
                     reply = self.conversation.run_routine(routine)
