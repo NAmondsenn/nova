@@ -2,15 +2,17 @@
 Launcher Test
 Checks the PC's launcher waits longer each time the satellite fails quickly, goes back
 to the shortest wait after a run which lasted, forgets the last logon's running mark,
-keeps what the satellite writes to stderr (rotating it when large), and that the settings install.ps1 writes for
+keeps what the satellite writes to stderr, to about 2 MB, and that the settings install.ps1 writes for
 the PC are ones Nova accepts.
 """
 
 import importlib.machinery
 import importlib.util
+import io
 import logging
 import os
 import re
+import subprocess
 
 import pytest
 
@@ -70,10 +72,14 @@ def launched(tmp_path, monkeypatch):
 
     class Satellite:
         def __init__(self, command, cwd, env, stdin, stdout, stderr, creationflags):
-            starts.append({"marked": (data / "running").exists(), "stderr": getattr(stderr, "name", stderr),
-                           "mode": getattr(stderr, "mode", None)})
-            if hasattr(stderr, "write"):
-                stderr.write(f"start {len(starts)}\n".encode())
+            starts.append({"marked": (data / "running").exists(), "stderr": stderr})
+            self.stderr = io.BytesIO(f"start {len(starts)}\n".encode())
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.stderr.close()
 
         def wait(self):
             (data / "running").write_text("{}")
@@ -94,9 +100,10 @@ def launched(tmp_path, monkeypatch):
         return starts
 
     yield run, data
-    for handler in list(logging.getLogger("launcher").handlers):
-        logging.getLogger("launcher").removeHandler(handler)
-        handler.close()
+    for name in ("launcher", "satellite-stderr"):
+        for handler in list(logging.getLogger(name).handlers):
+            logging.getLogger(name).removeHandler(handler)
+            handler.close()
 
 
 def test_a_fresh_launcher_forgets_the_last_logons_running_mark_but_not_a_crash(launched):
@@ -116,31 +123,46 @@ def test_the_satellites_stderr_is_added_to_a_log_of_its_own(launched):
     log.parent.mkdir(parents=True)
     log.write_bytes(b"earlier\n")
     starts = run()
-    assert [(start["stderr"], start["mode"]) for start in starts] == [(str(log), "ab")] * 2
+    assert [start["stderr"] for start in starts] == [subprocess.PIPE] * 2
     assert log.read_bytes() == b"earlier\nstart 1\nstart 2\n"
+    # And not to the launcher's own.
+    assert "start 1" not in (data / "logs" / "launcher.log").read_text()
 
 
-def test_a_stderr_log_over_the_limit_replaces_the_old_copy(tmp_path):
-    log = tmp_path / "satellite-stderr.log"
-    old = tmp_path / "satellite-stderr.log.1"
-    old.write_bytes(b"older")
-    log.write_bytes(b"x" * 11)
-    load_launcher().rotate_if_large(str(log), most=10)
-    assert not log.exists()
-    assert old.read_bytes() == b"x" * 11
+@pytest.fixture
+def stderr_log(tmp_path):
+    """A stderr log of the launcher's kind, with a small limit, and the folder holding it."""
+    launcher = load_launcher()
+    yield launcher, launcher.open_stderr_log(str(tmp_path / "satellite-stderr.log"), most=1000), tmp_path
+    for handler in list(logging.getLogger("satellite-stderr").handlers):
+        logging.getLogger("satellite-stderr").removeHandler(handler)
+        handler.close()
 
 
-def test_a_stderr_log_at_or_under_the_limit_is_left_alone(tmp_path):
-    log = tmp_path / "satellite-stderr.log"
-    log.write_bytes(b"x" * 10)
-    load_launcher().rotate_if_large(str(log), most=10)
-    assert log.read_bytes() == b"x" * 10
-    assert not (tmp_path / "satellite-stderr.log.1").exists()
+def test_a_satellite_which_keeps_writing_leaves_about_twice_the_limit_at_most(stderr_log):
+    launcher, log, folder = stderr_log
+    lines = b"".join(f"line {number:05d} {'x' * 40}\n".encode() for number in range(2000))
+    launcher.copy_lines(io.BytesIO(lines), log)
+    sizes = {path.name: path.stat().st_size for path in folder.iterdir()}
+    assert sorted(sizes) == ["satellite-stderr.log", "satellite-stderr.log.1"]
+    assert all(size <= 1000 for size in sizes.values())
+    # The newest lines are the ones kept, whole.
+    kept = (folder / "satellite-stderr.log").read_text().splitlines()
+    assert kept[-1] == f"line 01999 {'x' * 40}"
+    assert all(line.startswith("line ") for line in kept)
 
 
-def test_a_missing_stderr_log_does_nothing(tmp_path):
-    load_launcher().rotate_if_large(str(tmp_path / "satellite-stderr.log"))
-    assert list(tmp_path.iterdir()) == []
+def test_a_satellite_which_never_writes_leaves_the_log_empty(stderr_log):
+    launcher, log, folder = stderr_log
+    launcher.copy_lines(io.BytesIO(b""), log)
+    assert (folder / "satellite-stderr.log").read_bytes() == b""
+    assert not (folder / "satellite-stderr.log.1").exists()
+
+
+def test_bytes_which_arent_text_and_windows_line_ends_are_copied_without_failing(stderr_log):
+    launcher, log, folder = stderr_log
+    launcher.copy_lines(io.BytesIO(b"bad \xff byte\r\nlast, no end"), log)
+    assert (folder / "satellite-stderr.log").read_text(encoding="utf-8") == "bad \ufffd byte\nlast, no end\n"
 
 
 def test_the_settings_install_writes_are_ones_nova_accepts(tmp_path):

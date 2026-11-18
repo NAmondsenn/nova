@@ -29,8 +29,8 @@ FIRST_WAIT = 2
 # The longest wait, so a satellite which can't start (no password yet, the brain
 # unreachable) is tried again every five minutes at most.
 LONGEST_WAIT = 300
-# The satellite's stderr log is moved aside before a start when it is larger than this, so
-# it and its one earlier copy hold about twice as much at most.
+# The satellite's stderr log is moved aside when it reaches this size, so it and its one
+# earlier copy hold about twice as much at most, however long the satellite runs.
 STDERR_LOG_MOST = 1_000_000
 
 
@@ -57,22 +57,41 @@ class Backoff:
         return wait
 
 
-def rotate_if_large(path: str, most: int = STDERR_LOG_MOST) -> None:
+def open_stderr_log(path: str, most: int = STDERR_LOG_MOST) -> logging.Logger:
     """
-    Moves a log which has grown past a size to `<path>.1`, replacing the one there, so the
-    next start writes a fresh file. A missing file is left alone, and a failure is logged.
+    Args:
+        path: The satellite's stderr log.
+        most: The size in bytes at which it is moved to `<path>.1`, replacing that.
+
+    Returns:
+        A logger of its own which writes bare lines to the file, and not to the launcher's.
+    """
+    log = logging.getLogger("satellite-stderr")
+    for old in list(log.handlers):
+        log.removeHandler(old)
+        old.close()
+    handler = RotatingFileHandler(path, maxBytes=most, backupCount=1, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+    log.propagate = False
+    return log
+
+
+def copy_lines(stream, log: logging.Logger) -> None:
+    """
+    Writes each line the satellite puts on its stderr to a log, until it closes it. Reading
+    to the end also keeps the pipe from filling and holding the satellite up.
 
     Args:
-        path: The log file.
-        most: The size in bytes above which it is moved.
+        stream: The satellite's stderr, opened in binary.
+        log: Where each line goes.
     """
     try:
-        if os.path.getsize(path) > most:
-            os.replace(path, path + ".1")
-    except FileNotFoundError:
-        pass
+        for line in iter(stream.readline, b""):
+            log.info(line.decode("utf-8", errors="replace").rstrip("\r\n"))
     except OSError as error:
-        logger.warning(f"Couldn't rotate {path}: {error}")
+        logger.warning(f"Couldn't read the satellite's stderr: {error}")
 
 
 def main():
@@ -94,6 +113,7 @@ def main():
     # paths.py reads these two to find the install's settings, keys and saved data.
     environment = dict(os.environ, NOVA_CONFIG=os.path.join(base, "config"), NOVA_DATA=data)
     command = [os.path.join(app, "venv", "Scripts", "pythonw.exe"), os.path.join(app, "satellite.py")]
+    stderr_log = open_stderr_log(os.path.join(logs, "satellite-stderr.log"))
     backoff = Backoff()
     logger.info("Launcher started")
     # The satellite's RUNNING_MARK, left by the last logon's satellite or the one a deploy
@@ -109,14 +129,13 @@ def main():
         try:
             # pythonw has no console to write to, so the satellite's own log is the record -
             # and what it writes to stderr, a failure before that log is set up included, is
-            # added to a log of its own. That holds a copy of the satellite's log too, so
-            # it is rotated when large: about 2 MB is kept, the last crash's traceback in it.
-            stderr_log = os.path.join(logs, "satellite-stderr.log")
-            rotate_if_large(stderr_log)
-            with open(stderr_log, "ab") as errors:
-                code = subprocess.Popen(command, cwd=app, env=environment, stdin=subprocess.DEVNULL,
-                                        stdout=subprocess.DEVNULL, stderr=errors,
-                                        creationflags=subprocess.CREATE_NO_WINDOW).wait()
+            # copied to a log of its own. That holds a copy of the satellite's log too, so it
+            # is kept to about 2 MB, however long the satellite runs.
+            with subprocess.Popen(command, cwd=app, env=environment, stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                  creationflags=subprocess.CREATE_NO_WINDOW) as satellite:
+                copy_lines(satellite.stderr, stderr_log)
+                code = satellite.wait()
         except OSError as error:
             logger.error(f"Couldn't start the satellite: {error}")
             code = None
