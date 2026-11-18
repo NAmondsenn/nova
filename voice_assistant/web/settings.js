@@ -918,6 +918,10 @@ function showSatellites(state) {
     ? "The satellites' file can't be read, so they can't be shown or changed - see the brain's log."
     : "No satellites have been added.";
   drawIfChanged("satellites", [satellites, none], () => {
+    // Not while a switch or button is held down: the row drawn again under the pointer
+    // loses the click, if it's slow enough to land just after a satellite's state changed.
+    // Nothing is marked as drawn then, so the next look tries again.
+    if (document.getElementById("satellites").querySelector(":active")) return false;
     document.getElementById("satellites").replaceChildren(...(rows.length ? rows : [emptyRow(none)]));
     renewButtons = buttons;
   });

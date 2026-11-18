@@ -2009,6 +2009,14 @@ class SettingsPage:
         with self._playlists_lock:
             self._playlists.pop(name, None)
         logger.info(f"Settings page: {who} removed the {name} satellite")
+        # Added again with the same name, it shouldn't come back travelling with the user.
+        # Failing to save that doesn't undo the removal, which has been made.
+        if self.brain.journeys is not None:
+            try:
+                self.brain.journeys.set_travels(name, False)
+            except OSError as e:
+                logger.error(f"Settings page: couldn't save that the removed {name} satellite no longer "
+                             f"travels with the user: {e}")
         if not emptied:
             # Said whatever the question said, which was asked from what the page
             # last heard - connected then, it may have gone since.

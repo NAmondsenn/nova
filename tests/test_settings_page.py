@@ -2385,13 +2385,38 @@ def test_a_satellite_is_marked_as_travelling_with_the_user_and_logged(files, tmp
 
     with caplog.at_level(logging.INFO):
         assert page.set_travels("car", True, LOGIN) == {"success": True, "message": "car travels with you now."}
-    assert LOGIN in caplog.text and "car" in caplog.text
+    assert f"Settings page: {LOGIN} made the car satellite travel with the user" in caplog.text
     assert journeys.travels("car") and not journeys.travels("bedroom")
     assert {s["name"]: s["travels"] for s in page.state()["satellites"]} == {"bedroom": False, "car": True}
 
     assert page.set_travels("car", False, LOGIN) == {"success": True, "message": "car stays at home now."}
     assert not journeys.travels("car")
     assert [s["travels"] for s in page.state()["satellites"]] == [False, False]
+
+
+def test_a_removed_satellite_doesnt_come_back_travelling(files, tmp_path, monkeypatch, caplog):
+    journeys = _journeys(tmp_path)
+    page = _page(sessions={"bedroom": FakeSession(), "car": FakeSession()}, journeys=journeys)
+    assert page.set_travels("car", True, LOGIN)["success"]
+    assert page.remove_satellite("car", LOGIN)["success"]
+    assert not journeys.travels("car")
+    # Added again under the same name, it is a satellite which stays at home.
+    page.brain.known.append("car")
+    assert {s["name"]: s["travels"] for s in page.state()["satellites"]} == {"bedroom": False, "car": False}
+
+    # A save which fails is logged and leaves the removal made.
+    assert page.set_travels("car", True, LOGIN)["success"]
+
+    def full(change):
+        raise OSError("No space left on device")
+
+    with monkeypatch.context() as full_disk, caplog.at_level(logging.ERROR):
+        full_disk.setattr(journeys.store, "change", full)
+        assert page.remove_satellite("car", LOGIN)["success"]
+    assert "couldn't save that the removed car satellite" in caplog.text
+    assert "car" not in page.brain.known
+    # Without journeys there is nothing to clear.
+    assert _page(sessions={"bedroom": FakeSession(), "car": FakeSession()}).remove_satellite("car", LOGIN)["success"]
 
 
 def test_a_travels_change_which_cant_be_made_is_refused(files, tmp_path, monkeypatch, caplog):
