@@ -1732,17 +1732,23 @@ def test_push_to_talk_makes_no_wake_word_or_clips(brain, make, monkeypatch):
     assert brain.hellos[0]["push_to_talk"] is True
 
 
-def test_push_to_talk_takes_state_without_a_wake_word(brain, make):
+def test_push_to_talk_takes_state_without_a_wake_word(brain, make, caplog):
     made = make(satellite={"trigger": "push_to_talk"})
     assert made.wake is None
     assert wait_for(lambda: connected(made))
-    brain.say("state", volumes={"general": 0.5}, muted=True, wake_confidence=0.75, voice_check=0.6)
-    assert wait_for(lambda: made.state.muted is True)
-    assert made.state.volume("general") == 0.5
-    # Unmuted again, which a satellite with a wake word notes the position of.
-    brain.say("state", volumes={"general": 0.25}, muted=False, wake_confidence=0.75, voice_check=0.6)
-    assert wait_for(lambda: made.state.volume("general") == 0.25)
-    assert made.state.muted is False
+    with caplog.at_level("ERROR"):
+        brain.say("state", volumes={"general": 0.5}, muted=True, wake_confidence=0.75, voice_check=0.6)
+        assert wait_for(lambda: made.state.muted is True)
+        assert made.state.volume("general") == 0.5
+        # Unmuted again, which a satellite with a wake word notes the position of.
+        brain.say("state", volumes={"general": 0.25}, muted=False, wake_confidence=0.75, voice_check=0.6)
+        assert wait_for(lambda: made.state.volume("general") == 0.25)
+        assert made.state.muted is False
+        # The link logs a handler which fails and carries on, with the state already stored
+        # - so one more state, handled after both of those, shows they went through whole.
+        brain.say("state", volumes={"general": 0.75}, muted=False)
+        assert wait_for(lambda: made.state.volume("general") == 0.75)
+    assert not [record.getMessage() for record in caplog.records if "failed" in record.getMessage()]
 
 
 def test_a_push_to_talk_satellite_sends_the_follow_up_the_brain_asks_for(brain, make):
