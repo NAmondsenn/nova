@@ -730,8 +730,9 @@ class Session:
             timeline.note(outcome="nothing_transcribed")
             if (transcription or {}).get("imagined"):
                 # Words imagined in noise - a cough heard as "Thank you." - are most
-                # likely a false wake word, so aren't apologised for.
-                self._not_heard()
+                # likely a false wake word, so aren't apologised for. A press has no
+                # false wake word, so is told nothing.
+                self._not_heard(pressed)
             elif "error" in (transcription or {}):
                 # Nemotron failed, as it was made and heard again whole - not the user
                 # not being caught.

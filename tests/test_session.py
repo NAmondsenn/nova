@@ -507,6 +507,21 @@ def test_words_imagined_in_noise_arent_apologised_for(brain, connect, make_sessi
     assert [message["name"] for message in pi.messages("play_sound")] == ["listening.wav", "not_heard.wav"]
 
 
+def test_a_pressed_recording_of_words_imagined_in_noise_says_nothing(brain, connect, make_session):
+    # A press has no false wake word to blame, and noise heard as words is nothing said.
+    satellite, pi = connect()
+    session = make_session(satellite)
+    brain.stt = SimpleNamespace(listen=lambda: FakeTranscription("", imagined=True))
+    timeline = FakeTimeline()
+    feed = AudioFeed()
+    feed.feed(said())
+    feed.end()
+
+    assert session._handle_interaction(feed, timeline=timeline, pressed=True) is None
+    assert pi.messages("play_sound") == [] and brain.tts.said == []
+    assert timeline.notes["outcome"] == "nothing_transcribed"
+
+
 def test_speech_to_text_is_given_the_recording_as_its_made(brain, make_session):
     # It used to be given the whole recording once it was over, and on the Pi
     # Moonshine then took 0.83s to work out the words.
