@@ -46,7 +46,8 @@ class ClockRequests:
             satellite: The satellite it was set from, which it rings on.
 
         Returns:
-            Dict with 'success' and a spoken 'message'.
+            Dict with 'success' and a spoken 'message' - and once set, the timer's 'id',
+            which move_timer and timer_due take.
         """
         # A clock time is turned into a duration here, rather than by the model. Left
         # to the model, "remind me at 4pm" meant clock arithmetic in seconds from a
@@ -103,8 +104,8 @@ class ClockRequests:
         logger.info(f"Timer set for {spoken_duration}" + (f" ({label})" if label else ""), extra=TRANSCRIPT)
 
         if label:
-            return {"success": True, "message": f"I'll remind you in {spoken_duration}."}
-        return {"success": True, "message": f"Timer set for {spoken_duration}."}
+            return {"success": True, "message": f"I'll remind you in {spoken_duration}.", "id": timer_id}
+        return {"success": True, "message": f"Timer set for {spoken_duration}.", "id": timer_id}
 
     def _timer_clash(self, label: Optional[str], due_at: float) -> Optional[str]:
         """
@@ -457,6 +458,46 @@ class ClockRequests:
         name = self._describe_alarm(item) if kind == "alarm" else self._describe(item)
         logger.info(f"Removed on the settings page: {name}", extra=TRANSCRIPT)
         return {"success": True, "message": f"Removed the {name}.", "removed": copy.deepcopy(item)}
+
+    def move_timer(self, timer_id: int, due_at: float) -> bool:
+        """
+        Moves a waiting timer or reminder to a new time - for a reminder which follows
+        something that changes, such as when to leave.
+
+        Args:
+            timer_id: Its id, from set_timer's reply or overview().
+            due_at: When it should now go off, in epoch seconds.
+
+        Returns:
+            True once moved. False, changing nothing, if no timer is waiting with that
+            id (it has rung, or been cancelled or removed) or due_at isn't in the future.
+        """
+        with self._changing():
+            timer = self._timers.get(timer_id)
+            now = time.time()
+            if timer is None or due_at <= now:
+                return False
+            timer["due_at"] = due_at
+            # Kept as whole seconds from now, as when set (and as a restart reads it
+            # back), so what's said about its length agrees with the new time.
+            timer["duration"] = max(1, round(due_at - now))
+            self._save()
+        return True
+
+    def timer_due(self, timer_id: int) -> Optional[float]:
+        """
+        When a waiting timer or reminder goes off.
+
+        Args:
+            timer_id: Its id, from set_timer's reply or overview().
+
+        Returns:
+            Its due time in epoch seconds, or None once it has rung, been cancelled
+            or been removed.
+        """
+        with self._lock:
+            timer = self._timers.get(timer_id)
+            return None if timer is None else timer["due_at"]
 
     def put_back(self, kind: str, item: Dict, now: Optional[float] = None) -> Dict:
         """

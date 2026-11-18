@@ -154,6 +154,49 @@ def test_set_and_list_timer(make_clock):
     assert clock.list_timers()["message"].startswith("One timer: 10 minute timer for ")
 
 
+def test_setting_a_reminder_gives_its_id(make_clock):
+    clock = make_clock()
+    first = clock.set_timer(600, label="pizza")
+    second = clock.set_timer(1200, label="washing")
+
+    assert first["id"] != second["id"]
+    assert sorted([first["id"], second["id"]]) == sorted(t["id"] for t in clock.overview()["timers"])
+
+
+def test_a_reminder_is_moved_and_stays_moved_after_a_restart(make_clock):
+    told = []
+    clock = make_clock(on_change=lambda: told.append(True))
+    timer_id = clock.set_timer(600, label="Leave for Work")["id"]
+    told.clear()
+    now = time.time()
+
+    assert clock.move_timer(timer_id, now + 1200) is True
+    assert abs(clock.timer_due(timer_id) - (now + 1200)) < 2
+    assert abs(clock._timers[timer_id]["duration"] - 1200) < 2
+    assert told
+
+    restarted = make_clock()
+    assert restarted.timer_due(timer_id) == clock.timer_due(timer_id)
+
+
+def test_a_reminder_that_is_gone_or_a_time_gone_by_is_not_moved(make_clock):
+    told = []
+    clock = make_clock(on_change=lambda: told.append(True))
+    timer_id = clock.set_timer(600, label="Leave for Work")["id"]
+    due = clock.timer_due(timer_id)
+    told.clear()
+    now = time.time()
+
+    assert clock.move_timer(999, now + 60) is False
+    assert clock.move_timer(timer_id, now - 1) is False
+    assert clock.timer_due(timer_id) == due
+    assert not told
+
+    clock.cancel_timer(label="Leave for Work")
+    assert clock.timer_due(timer_id) is None
+    assert clock.move_timer(timer_id, now + 60) is False
+
+
 def test_reminder_without_a_name_is_asked_for(make_clock):
     clock = make_clock()
     result = clock.set_timer(1200, is_reminder=True)
