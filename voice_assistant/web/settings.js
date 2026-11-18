@@ -640,6 +640,8 @@ function unlock() {
   if (!locked) return;
   locked = false;
   document.body.classList.remove("locked");
+  // The section the address names, which couldn't be opened while locked.
+  showAddress("load");
   for (const run of runners) run();
 }
 
@@ -2794,6 +2796,133 @@ function seeded(seed) {
   };
 }
 
+// The list of sections, and the one open from it
+//
+// The page is a list of sections with one of them open at a time. Every section is always in
+// the page, hidden by CSS unless open, so each keeps what it has drawn and what has been typed
+// in it, and each is drawn by the same code whether it is shown or not - opening and closing
+// change nothing but which is shown. The open one's id is in the body's data-open, and absent
+// while the list shows; settings_list.js says which sections there are.
+
+// Where the page was scrolled to when a section was opened from the list, to put back as it
+// is closed.
+let listScroll = 0;
+
+// Each section's row in the list, by the section's id, for the focus to go back to.
+const rowButtons = new Map();
+
+// The id of the section which is open, or null while the list shows.
+function openSectionId() {
+  return document.body.dataset.open || null;
+}
+
+// A section's row: its icon, its name with, under it, a line on how it is, and a chevron.
+function sectionRow(section) {
+  const row = element("button", undefined, "row");
+  row.type = "button";
+  row.dataset.open = section.id;
+  const line = element("span", undefined, "line");
+  line.id = `line-${section.id}`;
+  const chevron = icon("i-chevron");
+  chevron.setAttribute("class", "icon chevron");
+  row.append(icon(section.icon), element("span", section.name, "name"), line, chevron);
+  row.addEventListener("click", () => openSection(section.id));
+  rowButtons.set(section.id, row);
+  return row;
+}
+
+// Draws the rows, once, under their groups' names, and makes the list and the back button
+// work: the browser's Back too, which closes the open section.
+function setUpList() {
+  const groups = NovaList.GROUPS.map((group) => {
+    const title = element("h3", group.name, "subheading");
+    title.id = `rows-${group.id}`;
+    const rows = element("div", undefined, "list");
+    rows.append(...NovaList.SECTIONS.filter((section) => section.group === group.id).map(sectionRow));
+    const made = element("div", undefined, "row-group");
+    made.setAttribute("role", "group");
+    made.setAttribute("aria-labelledby", title.id);
+    made.append(title, rows);
+    return made;
+  });
+  document.getElementById("rows").replaceChildren(...groups);
+  document.getElementById("back").addEventListener("click", closeSection);
+  window.addEventListener("popstate", () => showAddress("back"));
+  markRows();
+}
+
+// Which sections and which row are shown as open. Status is the one showing on a wide
+// screen while none is open, though the body then has no data-open.
+function showOnly(id) {
+  if (id) document.body.dataset.open = id;
+  else delete document.body.dataset.open;
+  for (const section of NovaList.SECTIONS) {
+    document.getElementById(`section-${section.id}`).classList.toggle("open", section.id === id);
+  }
+  markRows();
+  // Measured as they're drawn, and a hidden section has no size to measure: so the problems
+  // are measured again as Status comes into view, for "Show all" to be right.
+  if (!id || id === "status") showProblems();
+}
+
+function markRows() {
+  const open = openSectionId();
+  for (const [id, row] of rowButtons) {
+    row.classList.toggle("showing", id === (open || "status"));
+    if (id === open) row.setAttribute("aria-current", "true");
+    else row.removeAttribute("aria-current");
+  }
+}
+
+// Opens a section from the top, with the focus on its heading. `how` is "tap" for a row
+// tapped, which is a step in the history of its own, or "back" - the browser's Back, Forward
+// or a typed address - or "load" - the address the page was opened at - which already are.
+// While the page is locked nothing opens: the address is looked at again once it's let in.
+function openSection(id, how = "tap") {
+  const section = document.getElementById(`section-${id}`);
+  if (locked || !section || !NovaList.SECTIONS.some((one) => one.id === id) || openSectionId() === id) return;
+  if (!openSectionId()) listScroll = window.scrollY;
+  // Marked as the page's own, so closing knows going back reaches the list, not another site.
+  if (how === "tap") history.pushState({ nova: true }, "", `#${id}`);
+  showOnly(id);
+  window.scrollTo(0, 0);
+  const heading = document.getElementById(`${id}-title`);
+  if (heading) heading.focus({ preventScroll: true });
+}
+
+// Shows the list again, as it was scrolled to, with the focus on the row of the section
+// which was open.
+function showList(was) {
+  showOnly(null);
+  window.scrollTo(0, listScroll);
+  const row = rowButtons.get(was);
+  if (row) row.focus({ preventScroll: true });
+}
+
+// Closes the open section. Going back in the history, if the section was pushed there, shows
+// the list as the browser's Back does, through popstate; one opened from a link or a reload
+// has nothing of the page's before it, so going back would leave the page, and the address is
+// made the bare page instead.
+function closeSection() {
+  const was = openSectionId();
+  if (!was) return;
+  if (history.state && history.state.nova) {
+    history.back();
+    return;
+  }
+  history.replaceState(null, "", location.pathname + location.search);
+  showList(was);
+}
+
+// Opens or closes to match the address: the section it names, or the list for any other.
+function showAddress(how) {
+  if (locked) return;
+  const id = NovaList.fromHash(location.hash);
+  const was = openSectionId();
+  if (id) openSection(id, how);
+  else if (was) showList(was);
+}
+
 // Keeps the toasts, and a field tabbed to, clear of the save bar, as tall as it's drawn -
 // a long save error, or an iPhone's home bar under it, makes it taller. Its height goes to
 // --save-bar through the CSSOM, which the page's CSP lets through where a style attribute
@@ -2821,6 +2950,7 @@ function followSaveBar() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  setUpList();
   drawSky();
   followSaveBar();
   setUpClean();

@@ -280,7 +280,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin: -12px 0 36px;
+  margin: 0 0 16px;
   padding: 12px 12px 12px 20px;
   border: 1px solid rgba(243, 214, 160, 0.3);
   border-radius: var(--panel-round);
@@ -296,19 +296,142 @@ body {
   min-height: 44px;
 }
 
-/* The sections - four across on a laptop, two on a tablet and one on a phone, with
-   the bigger ones the whole way across */
+/* The list of sections and the one open from it. Every section is always in the page, so
+   each keeps what it draws and what has been typed in it; CSS shows one. settings.js puts
+   the open section's id in the body's data-open and an "open" class on that section, and
+   neither is there while the list is showing.
 
-.board {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  align-items: start;
-  gap: 44px 28px;
+   Under the wide breakpoint (1,180px) the list and the open section take turns: the list
+   alone without data-open, the open section alone, with its back button, with it. From
+   1,180px up they sit side by side, the list a column of its own down the left which scrolls
+   by itself if it must, and the open section beside it - Status while none is open, with the
+   Status row marked as the one showing. The back button goes, as the list is always there. */
+
+.shell { display: block; }
+
+.board > section:not(.open) { display: none; }
+
+body:not([data-open]) .board > #section-status { display: block; }
+
+/* The most a section is stretched to, so a line of it stays easy to read. */
+.board > section { max-width: 760px; }
+
+#back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  margin-bottom: 20px;
+  padding-left: 14px;
 }
 
-.wide { grid-column: 1 / -1; }
+/* The chevron points down, for a menu: turned to point back. */
+#back .icon { transform: rotate(90deg); }
 
-.double { grid-column: span 2; }
+#list { min-width: 0; }
+
+#find { margin-bottom: 24px; }
+
+#attention:empty { display: none; }
+
+.row-group { margin: 0 0 24px; }
+
+.row-group .subheading { margin: 0 0 10px 4px; }
+
+/* One row for a section: its icon, its name with the line on how it is under it, and a
+   chevron. A button, so the keyboard and a screen reader have it as one. */
+.row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "icon name chevron" "icon line chevron";
+  align-items: center;
+  column-gap: 14px;
+  width: 100%;
+  min-height: 56px;
+  padding: 10px 14px 10px 16px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.row + .row { border-top: 1px solid var(--hairline); }
+
+.row:hover { background: rgba(255, 255, 255, 0.05); }
+
+.row .icon {
+  grid-area: icon;
+  color: var(--starlight);
+}
+
+.row .name {
+  grid-area: name;
+  overflow-wrap: anywhere;
+}
+
+.row .line {
+  grid-area: line;
+  color: var(--dusk);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.row .line:empty { display: none; }
+
+.row .chevron {
+  grid-area: chevron;
+  color: var(--dusk);
+  /* The chevron points down, for a menu: turned to point on in. */
+  transform: rotate(-90deg);
+}
+
+/* The rows go round the group's glass, so its corners are the rows' own - and so the focus
+   ring is drawn inside them, where it isn't cut off. */
+.row-group .list { overflow: hidden; }
+
+.row:focus-visible { outline-offset: -2px; }
+
+/* Below the wide breakpoint, the list or the open section, never both. Centred, as a
+   page of only one of them is, on a tablet. */
+@media (max-width: 1179px) {
+  .shell > #list,
+  .shell > .board {
+    max-width: 760px;
+    margin-inline: auto;
+  }
+
+  body:not([data-open]) .board,
+  body[data-open] #list { display: none; }
+}
+
+/* From 1,180px: the list down the left, 340px wide, kept in view as the section beside it
+   scrolls, and scrolling by itself if it is taller than the screen. */
+@media (min-width: 1180px) {
+  .shell {
+    display: grid;
+    grid-template-columns: 340px minmax(0, 1fr);
+    gap: 44px;
+    align-items: start;
+  }
+
+  #list {
+    position: sticky;
+    top: max(16px, env(safe-area-inset-top));
+    max-height: calc(100vh - 32px);
+    max-height: calc(100dvh - 32px);
+    overflow-y: auto;
+    /* Room for the focus ring and the glass's edge, which the scrolling would cut. */
+    padding: 4px;
+    margin: -4px;
+  }
+
+  #back { display: none; }
+
+  .row.showing { background: rgba(255, 255, 255, 0.08); }
+  .row.showing .name { color: var(--starlight); }
+}
 
 .heading {
   display: flex;
@@ -1721,8 +1844,7 @@ input[type="range"].warmth::-moz-range-progress { background: transparent; }
 /* Logging in through NPM. Until settings.js knows the page may be shown, nothing
    which needs a login is - so a device without one sees only the login form, not an
    empty page behind it. */
-.locked .board,
-.locked #restart,
+.locked .shell,
 .locked #stop,
 .locked .doing,
 .locked #undos { display: none !important; }
@@ -1785,10 +1907,6 @@ p.login { color: var(--moon); }
 
 .account .button { min-height: 44px; }
 
-@media (max-width: 1179px) {
-  .board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-
 @media (max-width: 719px) {
   .page { padding: max(20px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 56px max(16px, env(safe-area-inset-left)); }
 
@@ -1824,17 +1942,7 @@ p.login { color: var(--moon); }
   .date .long { display: none; }
   .date .short { display: inline; }
 
-  .notice {
-    flex-wrap: wrap;
-    margin: -8px 0 28px;
-  }
-
-  .board {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 36px;
-  }
-
-  .double { grid-column: auto; }
+  .notice { flex-wrap: wrap; }
 
   .group {
     grid-template-columns: minmax(0, 1fr);
