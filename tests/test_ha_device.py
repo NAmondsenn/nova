@@ -524,6 +524,8 @@ def test_music_is_announced_only_with_a_player(started, with_player):
     assert controls["playing"]["json_attributes_topic"] == f"{BASE}/playing/attributes"
     assert controls["next_track"]["command_topic"] == f"{BASE}/playing/next"
     assert controls["playlist"]["command_topic"] == f"{BASE}/playlist/set"
+    assert controls["playlist"]["state_topic"] == f"{BASE}/playlist"
+    assert "optimistic" not in controls["playlist"]
     assert len({control["unique_id"] for control in controls.values()}) == len(controls)
 
 
@@ -596,6 +598,31 @@ def test_nothing_playing_is_idle(with_player):
     assert client.latest()[f"{BASE}/playing/cover"] == b""
 
 
+def test_music_elsewhere_is_idle(with_player):
+    # Spotify's now_playing is the account's playback wherever it is; Navidrome's has no "here".
+    device, client = with_player
+    client.connects()
+    device.controls.now_playing = lambda: {**SONG, "here": False}
+    device.publish_music()
+    assert client.latest()[f"{BASE}/playing"] == "idle"
+    assert json.loads(client.latest()[f"{BASE}/playing/attributes"]) == {}
+    assert client.latest()[f"{BASE}/playing/cover"] == b""
+
+    device.controls.now_playing = lambda: {**SONG, "here": True}
+    device.publish_music()
+    assert client.latest()[f"{BASE}/playing"] == "playing"
+    device.controls.now_playing = lambda: {**SONG, "here": False}
+    device.publish_music()
+    assert client.latest()[f"{BASE}/playing"] == "idle"
+
+
+def test_the_playlist_select_is_always_told_it_has_no_option(with_player):
+    # So the same playlist can be chosen twice in a row: the select never keeps the last one.
+    device, client = with_player
+    client.connects()
+    assert client.sent(f"{BASE}/playlist") == [(f"{BASE}/playlist", "None", 1, True)]
+
+
 def test_the_cover_is_fetched_once_per_song(with_player, player):
     device, client = with_player
     client.connects()
@@ -658,6 +685,29 @@ def test_a_failing_player_is_logged_once(with_player, player, caplog):
     with caplog.at_level(logging.ERROR, logger=ha_device.__name__):
         device.publish_music()
         device.publish_music()
+    assert len(_complaints(caplog)) == 1
+
+
+def test_a_failing_round_does_not_end_the_music_thread(nova, player, monkeypatch, caplog):
+    monkeypatch.setattr(ha_device, "MUSIC_EVERY", 0.02)
+    made = []
+    device = NovaDevice("broker.local", 1883, "nova", "secret", player.controls(nova), node_id="nova_test",
+                        client_factory=lambda client_id: made.append(FakeClient(client_id)) or made[-1])
+    rounds = []
+
+    def broken():
+        rounds.append(1)
+        raise RuntimeError("the broker's gone")
+
+    device._announce_if_stale = broken
+    with caplog.at_level(logging.ERROR, logger=ha_device.__name__):
+        device.start()
+        try:
+            made[0].connects()
+            assert _eventually(lambda: len(rounds) >= 4)
+            assert any(thread.name == "ha-device-music" and thread.is_alive() for thread in threading.enumerate())
+        finally:
+            device.stop()
     assert len(_complaints(caplog)) == 1
 
 
@@ -786,6 +836,8 @@ def test_ask_is_announced_only_when_nova_can_be_asked(started, asking):
     assert ask["name"] == "Ask Nova"
     assert ask["command_topic"] == f"{BASE}/ask/set"
     assert ask["state_topic"] == f"{BASE}/ask"
+    # Whatever the state topic says, the box's state is empty.
+    assert ask["value_template"] == "{{ '' }}"
     assert ask["max"] == 255
     assert ask["icon"] == "mdi:keyboard-outline"
     assert ask["default_entity_id"] == "text.nova_ask"
@@ -800,10 +852,11 @@ def test_what_is_typed_reaches_nova_and_is_never_sent_back(asking, asked):
     client.delivers(f"{BASE}/ask/set", TYPED)
     assert _eventually(lambda: asked == [TYPED])
 
-    # Home Assistant's box is told it's empty, so it never shows, nor keeps, what was typed.
+    # Home Assistant's box is only ever sent the placeholder, which its template turns
+    # into empty, so it never shows, nor keeps, what was typed. Not "": the broker takes
+    # an empty retained message as forgetting it, and Home Assistant would never get it.
     device.publish_state()
-    assert client.sent(f"{BASE}/ask")
-    assert all(payload == "" for _, payload, _, _ in client.sent(f"{BASE}/ask"))
+    assert client.sent(f"{BASE}/ask") == [(f"{BASE}/ask", "-", 1, True)]
     assert not any("Fashion Killa" in topic or "Fashion Killa" in str(payload)
                    for topic, payload, _, _ in client.published)
 

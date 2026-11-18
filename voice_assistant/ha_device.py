@@ -3,7 +3,7 @@ Home Assistant Device Module.
 
 Nova as a device of its own in Home Assistant, the way the Windows PC already is
 through HASS.Agent: announced to Home Assistant's MQTT broker - the Mosquitto add-on -
-through MQTT discovery, with eleven controls. What Nova's doing, its three volumes,
+through MQTT discovery, with eleven controls: what Nova's doing, its three volumes,
 the next alarm, the timers running, Stop, Restart, Speak for automations ("the
 washing's done"), whether it's reaching its backend, and a microphone mute. A device
 which has a player also shows its music, and one which can be asked things has an Ask
@@ -12,8 +12,10 @@ docs/decisions/0005.
 
 Home Assistant is told how Nova is set and what it's doing, and nothing else - never
 anything said to it, nor its answers. What's typed into Ask Nova comes in on its command
-topic only: its state topic is always empty, and the text is logged only as heard text is. The whole device shows as unavailable while
-Nova isn't running: the broker says "offline" for it if its connection drops.
+topic only: the box's state topic only ever says a fixed placeholder, which its
+discovery turns into an empty state, and the text is logged only as heard text is. The
+whole device shows as unavailable while Nova isn't running: the broker says "offline"
+for it if its connection drops.
 
 It logs in as a Home Assistant user of its own, with MQTT_PASSWORD from
 ~/.config/nova/.env. paho-mqtt does the talking, and is only imported once it's
@@ -47,6 +49,12 @@ HA_STATUS = "homeassistant/status"
 ONLINE, OFFLINE = "online", "offline"
 ON, OFF = "ON", "OFF"
 UNKNOWN = "None"
+
+# What the Ask Nova box's state topic says, always. A retained message with no payload
+# is how the broker is told to forget one, so an empty state could never be kept for
+# Home Assistant to read after a restart; this is, and the box's value template turns
+# it into the empty state it shows.
+ASK_PLACEHOLDER = "-"
 
 # What Nova can be doing, as each satellite's session has it - see session.py.
 STATUSES = ("idle", "listening", "thinking", "speaking")
@@ -200,6 +208,7 @@ class NovaDevice:
         self._playing_attributes = f"{base}/playing/attributes"
         self._playing_cover = f"{base}/playing/cover"
         self._playback = {action: f"{base}/playing/{action}" for action in ("play_pause", "next", "previous")}
+        self._playlist = f"{base}/playlist"
         self._playlist_set = f"{base}/playlist/set"
         self._ask = f"{base}/ask"
         self._ask_set = f"{base}/ask/set"
@@ -234,6 +243,7 @@ class NovaDevice:
         # first read them if the broker answered first - so it's announced again once read.
         self._announced_playlists: List[str] = []
         self._music_failing = False
+        self._music_loop_failing = False
         self._playlists_failing = False
 
     @classmethod
@@ -299,10 +309,12 @@ class NovaDevice:
         if self._has_music():
             controls.update(self._music_discovery())
         if self._has_ask():
-            # A box to type into. Its state topic is only ever published as "", so what
-            # was typed is neither shown nor kept by Home Assistant - see _state.
+            # A box to type into. Its state topic only ever says ASK_PLACEHOLDER, which
+            # the value template turns into "": the box is always empty, so what was typed
+            # is neither shown nor kept by Home Assistant - see _state.
             controls["ask"] = {"p": "text", "name": "Ask Nova", "command_topic": self._ask_set,
-                               "state_topic": self._ask, "max": 255, "icon": "mdi:keyboard-outline",
+                               "state_topic": self._ask, "value_template": "{{ '' }}", "max": 255,
+                               "icon": "mdi:keyboard-outline",
                                "default_entity_id": f"text.{_slug(self.name)}_ask"}
         for control, settings in controls.items():
             settings["unique_id"] = f"{self.node_id}_{control}"
@@ -347,10 +359,12 @@ class NovaDevice:
                                "default_entity_id": f"button.{slug}_previous_track"},
         }
         if playlists:
-            # Optimistic, with no state topic: which playlist was last chosen says nothing
-            # of what's playing, so it's a way to pick one and no more.
+            # Always "None" on its state topic, which Home Assistant takes as no option
+            # chosen: which playlist was last chosen says nothing of what's playing, so the
+            # select is a way to pick one and no more - and the same one can be picked twice
+            # in a row, as the frontend ignores choosing the option a select already has.
             controls["playlist"] = {"p": "select", "name": "Playlist", "command_topic": self._playlist_set,
-                                    "options": playlists, "optimistic": True,
+                                    "state_topic": self._playlist, "options": playlists,
                                     "icon": "mdi:playlist-music", "default_entity_id": f"select.{slug}_playlist"}
         self._announced_cover_type = cover_type
         self._announced_playlists = playlists
@@ -512,9 +526,14 @@ class NovaDevice:
         state[self._backend] = UNKNOWN if backend is None else (ON if backend else OFF)
         state[self._muted] = ON if controls.muted() else OFF
         if self._has_ask():
-            # Always empty: the box is only for sending, and what was typed on it - which
-            # is what the user said - is never sent back to be shown or kept.
-            state[self._ask] = ""
+            # Always the placeholder, which the box shows as empty: the box is only for
+            # sending, and what was typed on it - which is what the user said - is never
+            # sent back to be shown or kept. Not "", which the broker would take as
+            # forgetting the message, leaving the box "unknown" after Home Assistant restarts.
+            state[self._ask] = ASK_PLACEHOLDER
+        if self._has_music():
+            # Always "None": see the playlist select in _music_discovery.
+            state[self._playlist] = UNKNOWN
         return state
 
     def publish_state(self):
@@ -598,6 +617,11 @@ class NovaDevice:
         with self._music_lock:
             try:
                 playing = self.controls.now_playing()
+                # Spotify's reports the account's playback wherever it is, with "here" saying
+                # whether it's on this satellite; the player's own, like Navidrome's, has no
+                # such key and is always here. Music elsewhere is as good as none.
+                if playing and not playing.get("here", True):
+                    playing = None
                 if playing:
                     state = "playing" if playing.get("playing") else "paused"
                     attributes = {"track": playing.get("track"), "artist": playing.get("artist"),
@@ -634,9 +658,11 @@ class NovaDevice:
 
     def _keep_music(self):
         """Keeps what Nova's playing and the playlists up to date, on a thread of their own, until stopped."""
-        self.refresh_playlists()
+        self._music_step(self.refresh_playlists)
         playlists_due = time.monotonic() + PLAYLISTS_EVERY
-        while not self._stopping.wait(MUSIC_EVERY):
+
+        def round_():
+            nonlocal playlists_due
             if time.monotonic() >= playlists_due:
                 self.refresh_playlists()
                 playlists_due = time.monotonic() + PLAYLISTS_EVERY
@@ -644,6 +670,24 @@ class NovaDevice:
             # Also when publishing failed or there was nothing to send: the playlists may
             # have been read after the announcement went out with the old ones.
             self._announce_if_stale()
+
+        while not self._stopping.wait(MUSIC_EVERY):
+            self._music_step(round_)
+
+    def _music_step(self, step: Callable[[], None]):
+        """
+        Does one step of the music thread, so that nothing going wrong in it ends the
+        thread - which would leave the music silently never updated again. A failure is
+        logged once, until a step goes right.
+        """
+        try:
+            step()
+        except Exception as e:
+            if not self._music_loop_failing:
+                logger.error(f"Couldn't keep Home Assistant's music up to date: {e}")
+            self._music_loop_failing = True
+        else:
+            self._music_loop_failing = False
 
     # Home Assistant's commands, to Nova
 
