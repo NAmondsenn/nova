@@ -468,6 +468,10 @@ class Brain:
         # and shared by every session - or None until Google's keys are set. See
         # google_calendar.py.
         self.calendar: Optional[GoogleCalendar] = GoogleCalendar.from_env(config)
+        # Home Assistant reads Google's calendars only every 15 minutes, so each change Nova makes
+        # has it read them again - or "cancel the dentist" would leave the dentist on its dashboards.
+        if self.home and self.calendar:
+            self.calendar.after_change = self.home.refresh_calendars
 
         # Every satellite's timers and alarms, rung on the satellite each was set from.
         # Started in run(), once what rings on no satellite has gone to the default.

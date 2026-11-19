@@ -507,6 +507,11 @@ class GoogleCalendar:
         # before's access token - can't keep its list once the new account's is read.
         self._generation = 0
         self._reading = threading.Lock()
+        # Called, on a thread of its own, after each write Google says it did. The brain has it
+        # ask Home Assistant to read its calendars again: Home Assistant reads Google only every
+        # 15 minutes, so without it "cancel the dentist" would leave its dashboards showing the
+        # dentist for up to a quarter of an hour.
+        self.after_change: Optional[Callable[[], None]] = None
 
     @classmethod
     def from_env(cls, config) -> Optional["GoogleCalendar"]:
@@ -1619,7 +1624,9 @@ class GoogleCalendar:
         Sends one write to Google - an event added, changed or deleted - once. It's the only
         way Nova writes to Google, so every write tells nobody (sendUpdates=none - no guest is
         emailed about it) and none is sent twice. Only a 401 is sent again, with a fresh access
-        token: Google turned it down unread, so changed nothing.
+        token: Google turned it down unread, so changed nothing. Once Google has said it was
+        done, after_change is called - and for that alone, not for a refusal, an error or an
+        answer which doesn't say.
 
         Args:
             method: "POST", "PATCH" or "DELETE".
@@ -1667,6 +1674,7 @@ class GoogleCalendar:
             raise _NotSure(TROUBLE, f"a {response.status_code}")
         response.raise_for_status()
         if response.status_code == 204:
+            self._tell_of_change()
             return None
         try:
             answer = response.json()
@@ -1675,7 +1683,24 @@ class GoogleCalendar:
         # Anything but Google's own answer - a page from a Wi-Fi sign-in, say - doesn't say it was done.
         if not isinstance(answer, dict):
             raise _NotSure("Google's answer didn't say", f"a {response.status_code} without an answer")
+        self._tell_of_change()
         return answer
+
+    def _tell_of_change(self):
+        """Calls after_change, if there is one, on a daemon thread - so the reply never waits on it."""
+        after_change = self.after_change
+        if after_change is None:
+            return
+
+        def call():
+            # Whatever it does, the event is already on Google's calendar, so a failure is only logged -
+            # and as the kind of error alone, as an error's words could name the event.
+            try:
+                after_change()
+            except Exception as e:
+                logger.warning(f"Couldn't tell the rest of Nova the calendar changed: {type(e).__name__}")
+
+        threading.Thread(target=call, daemon=True, name="calendar-changed").start()
 
 
 class _NotSure(Exception):

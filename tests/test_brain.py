@@ -3118,6 +3118,21 @@ def test_the_brain_reads_the_calendar_from_google_once_its_keys_are_set(make_bra
     assert make_brain(home_assistant=HOME_ASSISTANT).calendar is None
 
 
+def test_a_calendar_change_has_home_assistant_read_its_calendars_again(make_brain, home_assistant_token, monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "made-up-client.apps.example.com")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "made-up-client-secret")
+    brain = make_brain(home_assistant=HOME_ASSISTANT)
+    # Bound methods are made afresh at each look, so they're equal, not the same.
+    assert brain.calendar.after_change == brain.home.refresh_calendars
+
+    # With only one of them there's nobody to tell, or nothing to tell of.
+    monkeypatch.delenv("HA_TOKEN")
+    assert make_brain(home_assistant=HOME_ASSISTANT).calendar.after_change is None
+    monkeypatch.setenv("HA_TOKEN", "a-token")
+    monkeypatch.delenv("GOOGLE_CLIENT_SECRET")
+    assert make_brain(home_assistant=HOME_ASSISTANT).calendar is None
+
+
 @pytest.mark.parametrize("fails", [False, True])
 def test_the_calendars_are_read_once_as_the_brain_starts(make_brain, monkeypatch, caplog, fails):
     # So their names - the activities, "when's gym tomorrow?" - are known before anything's asked.

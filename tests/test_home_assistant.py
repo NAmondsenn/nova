@@ -949,6 +949,8 @@ GOOD_JOURNEY = {"config_entry_id": "e", "origin": "zone.home", "destination": "z
     ("lock", "unlock", {"entity_id": "lock.front_door"}),
     ("cover", "open_cover", {"entity_id": "cover.garage"}),
     ("homeassistant", "turn_on", {"entity_id": "lock.front_door"}),
+    # The refresh of the calendars is Nova's own, never something Assist or Claude may ask for.
+    ("homeassistant", "update_entity", {"entity_id": ["calendar.personal"]}),
     ("light", "turn_on", {"entity_id": "lock.front_door"}),
     ("light", "turn_on", {"entity_id": ["light.lamp", "lock.front_door"]}),
     ("light", "turn_on", {"device_id": "da94"}),
@@ -977,8 +979,10 @@ def test_only_the_services_nova_calls_are_ever_called(make_home, domain, service
 
 
 def test_every_service_call_goes_through_the_one_allowlist():
-    # So nothing calls a service which hasn't been checked.
-    assert inspect.getsource(home_assistant).count("/api/services/") == 1
+    # So nothing calls a service which hasn't been checked - but Nova's own fixed request to refresh the calendars.
+    refresh = inspect.getsource(HomeAssistant.refresh_calendars)
+    assert '"/api/services/homeassistant/update_entity"' in refresh and refresh.count("/api/services/") == 1
+    assert inspect.getsource(home_assistant).count("/api/services/") - 1 == 1
 
 
 # The weather, as live check 3 found Met's through Home Assistant.
@@ -4068,3 +4072,50 @@ def test_status_with_home_assistant_down_says_so(make_home):
     assert home.status("navidrome") == {"success": False, "message": "I can't reach Home Assistant right now."}
     result = ActionExecutor(home=home).execute(Action("home_status", {"about": "navidrome"}, from_model=True))
     assert result.say == "I can't reach Home Assistant right now."
+
+
+# Asking Home Assistant to read the calendars again - see HomeAssistant.refresh_calendars
+
+def test_the_calendars_are_asked_to_read_again_by_every_calendar_found(make_home):
+    # Found at run time, so a calendar added later is covered, and nothing but calendars is asked.
+    home = make_home({"/api/states": [_thing("calendar.personal", "Personal"), _thing("light.lamp", "Lamp"),
+                                      _thing("calendar.uni_timetable", "Uni timetable"),
+                                      _thing("sensor.calendar_count", "Calendar count")],
+                      "/api/services/homeassistant/update_entity": []})
+    assert home.refresh_calendars() is None
+    assert home._session.requests == [
+        ("GET", "/api/states", {}),
+        ("POST", "/api/services/homeassistant/update_entity",
+         {"json": {"entity_id": ["calendar.personal", "calendar.uni_timetable"]}})]
+    assert home._session.timeouts == [REQUEST_TIMEOUT, REQUEST_TIMEOUT]
+
+
+def test_with_no_calendars_nothing_is_asked_to_read_again(make_home):
+    home = make_home({"/api/states": [_thing("light.lamp", "Lamp")]})
+    home.refresh_calendars()
+    assert _paths(home) == ["/api/states"]
+
+
+@pytest.mark.parametrize("failure, kind", [
+    (requests.ConnectionError("refused http://homeassistant.local:8123"), "ConnectionError"),
+    (requests.ReadTimeout("slow"), "ReadTimeout"), (home_assistant.NoNetwork("off"), "NoNetwork"),
+    (FakeResponse("", status=500), "HTTPError"), (FakeResponse({}, status=401), "HTTPError")])
+def test_a_calendar_refresh_home_assistant_cant_do_is_logged_and_never_raised(make_home, caplog, failure, kind):
+    # Its states or its update failing: a reply must never wait on it or hear of it.
+    for failing in ("/api/states", "/api/services/homeassistant/update_entity"):
+        home = make_home({"/api/states": [_thing("calendar.personal", "Personal")],
+                          "/api/services/homeassistant/update_entity": [], failing: failure})
+        caplog.clear()
+        with caplog.at_level("INFO", logger="voice_assistant.home_assistant"):
+            assert home.refresh_calendars() is None
+        [record] = caplog.records
+        # Only the kind of failure - never the token or the address.
+        assert record.levelname == "WARNING" and kind in record.getMessage()
+        assert "token" not in record.getMessage() and "homeassistant.local" not in record.getMessage()
+
+
+def test_a_states_answer_of_the_wrong_shape_is_no_reason_to_refresh_calendars(make_home, caplog):
+    home = make_home({"/api/states": {"message": "not a list"}})
+    with caplog.at_level("INFO", logger="voice_assistant.home_assistant"):
+        assert home.refresh_calendars() is None
+    assert _paths(home) == ["/api/states"] and [record.levelname for record in caplog.records] == ["WARNING"]
