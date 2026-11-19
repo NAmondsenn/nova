@@ -145,6 +145,21 @@ def _month() -> str:
     return datetime.now().strftime("%Y-%m")
 
 
+def _asked(state: Dict, month: str) -> int:
+    """
+    How many journeys the store says were asked in a month.
+
+    Args:
+        state: The store's state, whose "month" and "requests" are read.
+        month: The month, e.g. "2026-11".
+
+    Returns:
+        The count for that month, or 0 for a month which isn't the stored one. A count below 0 reads as 0,
+        so a hand-edited file can only raise the count it reads, never lower what was spent.
+    """
+    return max(0, state["requests"]) if state["month"] == month else 0
+
+
 def _tidy(words: str) -> str:
     """
     Words as a place or an activity is matched: as a request is tidied, with a leading "my " or
@@ -300,6 +315,19 @@ class Journeys:
             state["travelling"] = names + [satellite] if on else names
         self.store.change(change)
 
+    def used(self) -> Dict[str, int]:
+        """
+        How many journeys have been asked of Google this month, and how many may be.
+
+        Reads the count the way look counts by it, and changes nothing.
+
+        Returns:
+            Dict with 'requests', the asks this month, and 'cap', the monthly_requests setting as it is now.
+        """
+        month, cap = _month(), self._setting("monthly_requests")
+        with self.store.lock:
+            return {"requests": _asked(self.store.state, month), "cap": cap}
+
     def look(self, origin: str, destination: str, mode: str, departure: Optional[str] = None) -> Optional[Dict]:
         """
         Asks Home Assistant for a journey, which asks Google, and counts it.
@@ -320,9 +348,7 @@ class Journeys:
         month, cap = _month(), self._setting("monthly_requests")
         with self.store.lock:
             state = self.store.state
-            # A month which isn't this one starts again at 0, and so does a count which can't be one: whatever
-            # a hand-edited file holds, it can only make the count more than 0, never less than what was asked.
-            count = max(0, state["requests"]) if state["month"] == month else 0
+            count = _asked(state, month)
             if count >= cap:
                 raise OverCap()
             # Counted before it's asked, so an ask which fails or is never answered is still counted.

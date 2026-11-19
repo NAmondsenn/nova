@@ -870,6 +870,30 @@ def test_a_new_month_starts_the_count_again(store, monkeypatch):
     assert store.get("requests") == 1 and store.get("month") == "2026-12"
 
 
+def test_the_months_asks_and_the_cap_are_given(store, monkeypatch):
+    monkeypatch.setattr(journeys, "_month", lambda: "2026-11")
+    journey = make(store)
+    assert journey.used() == {"requests": 0, "cap": 3000}
+    journey.look("a", "b", "driving")
+    journey.look("a", "b", "driving")
+    assert journey.used() == {"requests": 2, "cap": 3000}
+    # Reading the count changes nothing, so it can be read as often as the page is.
+    assert store.get("requests") == 2 and store.get("month") == "2026-11"
+
+    # Last month's asks aren't this month's, and nothing is written to say so.
+    store.change(lambda new: new.update(month="2026-10", requests=7))
+    assert journey.used()["requests"] == 0
+    assert store.get("requests") == 7 and store.get("month") == "2026-10"
+
+    assert make(store, settings={"monthly_requests": 50}).used()["cap"] == 50
+
+
+def test_a_count_which_cant_be_one_is_given_as_none_asked(store, monkeypatch):
+    monkeypatch.setattr(journeys, "_month", lambda: "2026-11")
+    store.change(lambda new: new.update(month="2026-11", requests=-50))
+    assert make(store).used()["requests"] == 0
+
+
 def test_the_cap_is_read_at_each_use_and_refuses_without_asking(store, monkeypatch):
     monkeypatch.setattr(journeys, "_month", lambda: "2026-11")
     home = FakeHome()
@@ -1093,14 +1117,18 @@ def test_a_satellite_which_has_gone_is_told_so_and_nothing_is_kept(store, real_c
 
 def test_the_reminder_is_said_and_set_in_the_minute_asked_for_however_the_second_falls(store, real_clock, monkeypatch):
     # A time to leave is always on a whole minute, and now is not: 0.7 of a second past one made it ring a
-    # moment before the minute, which was then said as the minute before.
-    leave_by = (datetime.now().astimezone() + timedelta(minutes=30)).replace(second=0, microsecond=0)
+    # moment before the minute, which was then said as the minute before. At noon today, so nothing crosses
+    # midnight, which would make it said with "tomorrow" whenever the test is run late in the evening. Both
+    # remind and the clock read now as this, through its argument and time.time.
+    leave_by = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0)
     now = leave_by - timedelta(minutes=30) + timedelta(seconds=0.7)
     monkeypatch.setattr(time, "time", lambda: now.timestamp())
     journey = Journeys(FakeHome(), None, real_clock, store, lambda: SETTINGS)
     answer = journey.remind("Work", "zone.work", "zone.home", "driving", leave_by.timestamp() + 1800,
                             leave_by.timestamp(), True, satellite="kitchen", now=now)
-    rings = leave_by - timedelta(minutes=5)
+    # As the local clock reads it, as remind says it: on the day the clocks change, noon in the offset of the
+    # moment the test runs may be another hour there.
+    rings = (leave_by - timedelta(minutes=5)).astimezone()
     assert answer == {"success": True, "message": f"I'll remind you at {spoken_clock_time(rings.hour, rings.minute)}."}
     [timer] = real_clock.overview()["timers"]
     due = real_clock.timer_due(timer["id"])

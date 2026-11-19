@@ -69,6 +69,14 @@ PROGRESS_EVERY = 1.0
 # nothing happens - the microphone is closed then, and is no other sign of it.
 PRESS_WAIT = 1.0
 
+# While Nova speaks on another satellite, this one ignores the wake word - see
+# docs/decisions/0029. Never for longer than QUIET_MOST seconds without being told again,
+# so a brain which goes before saying it has stopped can't leave it deaf, and for
+# QUIET_AFTER seconds after it's told the other has stopped, for the last words still
+# leaving that satellite's speakers.
+QUIET_MOST = 60
+QUIET_AFTER = 0.5
+
 # The sound a press plays, from the satellite itself and straight away, whatever the
 # brain's setting for its own listening sound.
 PRESS_SOUND = "listening.wav"
@@ -144,6 +152,8 @@ class _Recording(threading.Event):
         self.ids = set() if recording_id is None else {recording_id}
         # Whether it was a press, rather than the brain, which said the user has stopped.
         self.pressed = False
+        # Whether a press started it, rather than the wake word or the brain's listen.
+        self.from_press = False
 
 
 def _pieces(waiting: queue.Queue) -> Iterator[np.ndarray]:
@@ -291,6 +301,8 @@ class Satellite:
         # A press waiting for the main loop, which owns the microphone and so starts the
         # recording - set, with the lock held, by a press while nothing is recording.
         self._press_pending = False
+        # Until when, by time.monotonic(), the wake word is ignored - 0 for not at all.
+        self._quiet_until = 0.0
         # Set to wake the main loop from waiting for a press: by a press, by the brain
         # asking to hear a follow-up, and by stop().
         self._nudged = threading.Event()
@@ -313,6 +325,7 @@ class Satellite:
             "silence": lambda message, payload: self.speaker.silence(message["kind"]),
             "allow": self._allow,
             "state": self._take_state,
+            "quiet": self._take_quiet,
             "alarms": lambda message, payload: self.alarms.replace(message["entries"]),
             "phrase": lambda message, payload: self.phrase.replace(payload, message["rate"]),
             "away_settled": self._away_settled,
@@ -403,6 +416,10 @@ class Satellite:
                     continue
                 heard = self.wake.listen_once(until=self._interrupted)
                 self._exit_if_asked()
+                if heard is not None and time.monotonic() < self._quiet_until:
+                    # Most likely Nova's own voice, from another satellite's speakers.
+                    logger.info("Heard the wake word while Nova speaks on another satellite, so it's ignored")
+                    continue
                 if heard is not None:
                     self._keep_clip(heard)
                     heard_at = self.wake.heard_at
@@ -455,8 +472,10 @@ class Satellite:
                 recording.set()
                 # As _stop_listening does, so losing the brain now says it can't be reached.
                 self._turn_open = True
+                logger.info("Pressed: the recording ends")
                 return
             self._press_pending = True
+        logger.info("Pressed: listening")
         self._nudged.set()
 
     def _keep_clip(self, score: float):
@@ -546,6 +565,7 @@ class Satellite:
                     # stop_listening straight away.
                     recording_id = f"wake-{next(self._wake_ids)}"
                     recording = self._recording = _Recording(recording_id)
+                    recording.from_press = pressed
                     self._turn_open = False
                     # Any press which came while this was being set up is this one's, so
                     # it doesn't go on to end the recording just begun, or start another.
@@ -732,6 +752,7 @@ class Satellite:
             self.link.send("played", id=message["id"], stopped=False, position=0)
             return
         self._follow(message["id"], _FromBrain(playback, kind))
+        self._stop_if_listening(playback, kind)
 
     def _play_stream(self, message: Dict, payload: bytes):
         kind = message.get("kind", "reply")
@@ -740,6 +761,32 @@ class Satellite:
                                             volume=message.get("volume", 1.0), kind=kind,
                                             paused=bool(message.get("paused", False)))
         self._follow(message["id"], _FromBrain(playback, kind, message.get("channels", 1), waiting))
+        self._stop_if_listening(playback, kind)
+
+    def _stop_if_listening(self, playback: Playback, kind: str):
+        """
+        Stops a reply which starts while a press's recording is open - pressed while the
+        brain was still working on the last request, say. It would play into the open
+        microphone, which has no echo cancelling here, and come back as the user's next
+        request. So it goes as one a press over it would have, and the brain is told it was
+        stopped. Only a press's recording: the brain's own listen, for the answer to a
+        question, keeps the chime it plays. The Pi cancels its own echo, so its replies
+        play as they always have.
+
+        Args:
+            playback: The reply, just started.
+            kind: What the brain says it is.
+        """
+        if not self.push_to_talk or kind != "reply":
+            return
+        # _waking too, so a press still setting its recording up is waited for rather than
+        # missed - in the same order _begin takes them.
+        with self._waking, self._lock:
+            recording = self._recording
+            listening = recording is not None and recording.from_press and not recording.is_set()
+        if listening:
+            logger.info("A reply came while listening after a press, so it isn't played")
+            playback.stop()
 
     def _stream_audio(self, message: Dict, payload: bytes):
         with self._lock:
@@ -924,12 +971,26 @@ class Satellite:
                 self._handing_over = report
                 self.link.expect("away_settled", SETTLE_WAIT)
 
+    def _take_quiet(self, message: Dict, payload: bytes):
+        """
+        The brain says Nova has started, or stopped, speaking on another satellite, so
+        this one ignores the wake word meanwhile - see QUIET_MOST and QUIET_AFTER. A press
+        is deliberate, so it still works.
+        """
+        now = time.monotonic()
+        if message.get("on") is True:
+            self._quiet_until = now + QUIET_MOST
+        else:
+            self._quiet_until = min(self._quiet_until, now + QUIET_AFTER)
+
     def _forget_the_brain(self):
         """
         Stops what the brain was playing, which nothing will now come to finish or
         stop - and says the brain can't be reached, if it went with the user waiting
         for its answer.
         """
+        # Nothing is left to say the other satellite has stopped speaking.
+        self._quiet_until = 0.0
         with self._lock:
             playing, self._playing = list(self._playing.values()), {}
             # Nobody is left to hear a follow-up.

@@ -8,6 +8,7 @@
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="preload" href="Outfit.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="settings.css">
+  <script src="settings_list.js" defer></script>
   <script src="settings.js" defer></script>
 </head>
 <!-- Locked until settings.js knows the page may be shown - through NPM, not before a login. -->
@@ -57,357 +58,406 @@
     </form>
     <p class="panel note login" id="login-first" hidden>Set a page password at the page's Tailscale address first.</p>
 
-    <div class="notice" id="restart" hidden>
-      <p>Saved changes are used once Nova restarts.</p>
-      <button type="button" class="button" id="restart-button">Restart Nova</button>
-    </div>
+    <!-- The list of Nova's sections, and the one section opened from it: on a phone one or the
+         other, on a wide screen side by side. settings.js draws the rows and says which
+         section is open, in the body's data-open. -->
+    <div class="shell">
+      <nav id="list" aria-label="Nova's sections">
+        <!-- What needs attention, a row each, drawn by settings.js: empty, and so hidden, when nothing does. -->
+        <div id="attention" class="list"></div>
+        <input type="search" id="find" placeholder="Search Nova's page" aria-label="Search Nova's page"
+               autocomplete="off" autocapitalize="none" spellcheck="false">
+        <!-- What a search found, said to a screen reader as the results change: kept in the page, as
+             a place to be read out from has to be there before what it says. -->
+        <p class="visually-hidden" id="find-said" aria-live="polite"></p>
+        <div id="rows"></div>
+      </nav>
 
-    <main class="board">
-      <section aria-labelledby="status-title">
-        <h2 class="heading" id="status-title"><svg class="icon" aria-hidden="true"><use href="#i-pulse"></use></svg>Status</h2>
-        <div class="tiles" id="status"></div>
-        <!-- Each satellite, and a choice of which to look after when there's more than one. -->
-        <h3 class="subheading" id="satellites-title" tabindex="-1">Satellites</h3>
-        <ul class="list satellites" id="satellites"></ul>
-        <div class="chips" id="satellite-choice" role="group" aria-label="Look after" hidden></div>
-        <!-- A satellite's password, just made: put straight into the text here and
-             nowhere else, and gone from the page once the panel's closed. -->
-        <div class="panel password" id="password-panel" hidden>
-          <p class="about" id="password-about"></p>
-          <div class="entry">
-            <code class="secret" id="password-text"></code>
-            <button type="button" class="button" id="password-copy">Copy</button>
-          </div>
-          <p class="how" id="password-how"></p>
-          <button type="button" class="button quiet" id="password-close">Done</button>
-        </div>
-        <!-- Asked before a satellite is given a new password, as it's let go until its setup
-             has the new one: the button waits for the satellite's name to be typed. -->
-        <form class="panel renew" id="renew-panel" hidden>
-          <p class="about" id="renew-about"></p>
-          <label for="renew-name" id="renew-label"></label>
-          <input type="text" id="renew-name" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="63">
-          <div class="entry">
-            <button type="submit" class="button danger" id="renew-go" disabled>Give it a new password</button>
-            <button type="button" class="button quiet" id="renew-cancel">Cancel</button>
-          </div>
-        </form>
-        <form class="panel ask" id="add-satellite">
-          <label class="visually-hidden" for="satellite-name">The new satellite's machine name</label>
-          <input type="text" id="satellite-name" placeholder="Its Pi's machine name, e.g. bedroom" autocomplete="off"
-                 autocapitalize="none" spellcheck="false" maxlength="63">
-          <button type="submit" class="button quiet">Add a satellite</button>
-        </form>
-        <!-- The microphone's mute, which Home Assistant can change too. -->
-        <ul class="list microphone">
-          <li id="microphone">
-            <svg class="icon" aria-hidden="true"><use href="#i-microphone"></use></svg>
-            <span class="what"><label for="mute">Mute the microphone</label><span class="detail" id="mute-detail"></span></span>
-            <input type="checkbox" role="switch" id="mute" aria-describedby="mute-detail">
-          </li>
-        </ul>
-        <h3 class="subheading">Recent problems</h3>
-        <ul class="list problems" id="problems"></ul>
-        <button type="button" class="button quiet" id="problems-all" aria-controls="problems" aria-expanded="false"
-                hidden>Show all</button>
-      </section>
+      <main class="board">
+        <button type="button" class="button quiet" id="back">
+          <svg class="icon" aria-hidden="true"><use href="#i-chevron"></use></svg>All of Nova
+        </button>
 
-      <section aria-labelledby="music-title">
-        <h2 class="heading" id="music-title"><svg class="icon" aria-hidden="true"><use href="#i-music"></use></svg>Music</h2>
-        <div id="music">
-          <div class="panel player">
-            <div class="track">
-              <div class="cover">
-                <svg class="icon" aria-hidden="true"><use href="#i-music"></use></svg>
-                <img id="cover" alt="" hidden>
+        <section id="section-status" data-section="status" aria-labelledby="status-title">
+          <h2 class="heading" id="status-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-pulse"></use></svg>Status</h2>
+          <div class="notice" id="restart" hidden>
+            <p>Saved changes are used once Nova restarts.</p>
+            <button type="button" class="button" id="restart-button">Restart Nova</button>
+          </div>
+          <div class="tiles" id="status"></div>
+          <h3 class="subheading">Recent problems</h3>
+          <ul class="list problems" id="problems"></ul>
+          <button type="button" class="button quiet" id="problems-all" aria-controls="problems" aria-expanded="false"
+                  hidden>Show all</button>
+        </section>
+
+        <section id="section-music" data-section="music" aria-labelledby="music-title">
+          <h2 class="heading" id="music-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-music"></use></svg>Music</h2>
+          <div id="music">
+            <div class="panel player">
+              <div class="track">
+                <div class="cover">
+                  <svg class="icon" aria-hidden="true"><use href="#i-music"></use></svg>
+                  <img id="cover" alt="" hidden>
+                </div>
+                <div class="about">
+                  <p class="title" id="track">Nothing playing</p>
+                  <p class="artist" id="artist"></p>
+                  <p class="album" id="album"></p>
+                </div>
               </div>
-              <div class="about">
-                <p class="title" id="track">Nothing playing</p>
-                <p class="artist" id="artist"></p>
-                <p class="album" id="album"></p>
+              <div class="progress" id="progress" hidden>
+                <div class="bar"><span id="progress-fill"></span></div>
+                <p class="times"><span id="elapsed"></span><span id="length"></span></p>
+              </div>
+              <div class="controls">
+                <button type="button" class="round" id="previous" aria-label="Previous song"><svg class="icon" aria-hidden="true"><use href="#i-previous"></use></svg></button>
+                <button type="button" class="round main" id="play-pause" aria-label="Play"><svg class="icon" aria-hidden="true"><use href="#i-play"></use></svg></button>
+                <button type="button" class="round" id="next" aria-label="Next song"><svg class="icon" aria-hidden="true"><use href="#i-next"></use></svg></button>
               </div>
             </div>
-            <div class="progress" id="progress" hidden>
-              <div class="bar"><span id="progress-fill"></span></div>
-              <p class="times"><span id="elapsed"></span><span id="length"></span></p>
-            </div>
-            <div class="controls">
-              <button type="button" class="round" id="previous" aria-label="Previous song"><svg class="icon" aria-hidden="true"><use href="#i-previous"></use></svg></button>
-              <button type="button" class="round main" id="play-pause" aria-label="Play"><svg class="icon" aria-hidden="true"><use href="#i-play"></use></svg></button>
-              <button type="button" class="round" id="next" aria-label="Next song"><svg class="icon" aria-hidden="true"><use href="#i-next"></use></svg></button>
-            </div>
+            <form class="panel ask" id="play-something">
+              <label class="visually-hidden" for="play-query">What to play</label>
+              <input type="text" id="play-query" name="query" placeholder="Song, artist or album" autocomplete="off" spellcheck="false">
+              <button type="submit" class="button quiet">Play</button>
+            </form>
+            <h3 class="subheading">Playlists</h3>
+            <div class="chips" id="playlists"></div>
           </div>
-          <form class="panel ask" id="play-something">
-            <label class="visually-hidden" for="play-query">What to play</label>
-            <input type="text" id="play-query" name="query" placeholder="Song, artist or album" autocomplete="off" spellcheck="false">
-            <button type="submit" class="button quiet">Play</button>
-          </form>
-          <h3 class="subheading">Playlists</h3>
-          <div class="chips" id="playlists"></div>
-        </div>
-        <p class="panel note" id="music-missing" hidden>Nova has no music player set up. Choose one in Settings, under Music.</p>
-        <!-- Signing Nova in to Spotify, for every satellite: Spotify's page opens in a tab of
-             its own, and the address it ends on is pasted back here. -->
-        <div class="panel sign-in" id="spotify" hidden>
-          <div class="entry">
-            <p class="about" id="spotify-said" hidden>Signed in to Spotify</p>
-            <button type="button" class="button quiet" id="spotify-start">Sign in to Spotify</button>
-          </div>
-          <p class="how" id="spotify-link-note" hidden>Your browser didn't open Spotify's page.
-            <a id="spotify-link" target="_blank" rel="noopener noreferrer">Open it here</a>.</p>
-          <form class="finish" id="spotify-finish" hidden>
-            <label class="how" for="spotify-address">Spotify sends you to an address that doesn't load. Paste that address here.</label>
+          <p class="panel note" id="music-missing" hidden>Nova has no music player set up. Choose one in Settings, under Music.</p>
+          <!-- Signing Nova in to Spotify, for every satellite: Spotify's page opens in a tab of
+               its own, and the address it ends on is pasted back here. -->
+          <div class="panel sign-in" id="spotify" hidden>
             <div class="entry">
-              <input type="text" inputmode="url" id="spotify-address" name="address" autocomplete="off"
-                     autocapitalize="none" spellcheck="false">
-              <button type="submit" class="button">Sign in</button>
+              <p class="about" id="spotify-said" hidden>Signed in to Spotify</p>
+              <button type="button" class="button quiet" id="spotify-start">Sign in to Spotify</button>
             </div>
-          </form>
-        </div>
-        <!-- Clean songs, found by ear (docs/decisions/0022): the library check, how far it's got
-             or when it last finished, the songs held aside, then each list with a song in it.
-             Hidden until Nova has said how the check is. -->
-        <h3 class="subheading" id="clean-title" hidden>Clean songs</h3>
-        <div class="panel clean" id="clean" hidden>
-          <div class="entry">
-            <p class="about" id="clean-progress"></p>
-            <button type="button" class="button quiet" id="clean-start">Check library</button>
-            <button type="button" class="button quiet" id="clean-stop" hidden>Stop</button>
+            <p class="how" id="spotify-link-note" hidden>Your browser didn't open Spotify's page.
+              <a id="spotify-link" target="_blank" rel="noopener noreferrer">Open it here</a>.</p>
+            <form class="finish" id="spotify-finish" hidden>
+              <label class="how" for="spotify-address">Spotify sends you to an address that doesn't load. Paste that address here.</label>
+              <div class="entry">
+                <input type="text" inputmode="url" id="spotify-address" name="address" autocomplete="off"
+                       autocapitalize="none" spellcheck="false">
+                <button type="submit" class="button">Sign in</button>
+              </div>
+            </form>
           </div>
-          <p class="how" id="clean-error" hidden></p>
-          <p class="how" id="clean-held" hidden></p>
-        </div>
-        <div id="clean-lists"></div>
-      </section>
-
-      <section aria-labelledby="devices-title">
-        <h2 class="heading" id="devices-title"><svg class="icon" aria-hidden="true"><use href="#i-bulb"></use></svg><span class="title">Devices<span class="whose" hidden></span></span></h2>
-        <ul class="list lights" id="lights"></ul>
-      </section>
-
-      <section aria-labelledby="batteries-title">
-        <h2 class="heading" id="batteries-title"><svg class="icon" aria-hidden="true"><use href="#i-battery"></use></svg>Batteries</h2>
-        <div class="panel field switch also-send" id="also-send" hidden>
-          <label for="also-send-box">Also send to my phone when Nova says it</label>
-          <input type="checkbox" id="also-send-box" role="switch">
-        </div>
-        <ul class="list batteries" id="batteries"></ul>
-      </section>
-
-      <!-- The teams Home Assistant is following, each with what Nova says of its matches, and a
-           box to follow another. The box is hidden while football can't be read. -->
-      <section aria-labelledby="football-title">
-        <h2 class="heading" id="football-title"><svg class="icon" aria-hidden="true"><use href="#i-football"></use></svg>Football</h2>
-        <ul class="list batteries football" id="football"></ul>
-        <form class="panel ask" id="follow-team" hidden>
-          <label class="visually-hidden" for="follow-name">A team to follow</label>
-          <input type="text" id="follow-name" name="name" placeholder="A team to follow, e.g. Liverpool" autocomplete="off"
-                 spellcheck="false">
-          <button type="submit" class="button quiet">Follow</button>
-        </form>
-      </section>
-
-      <section aria-labelledby="calendars-title">
-        <h2 class="heading" id="calendars-title"><svg class="icon" aria-hidden="true"><use href="#i-calendar"></use></svg>Calendars and lists</h2>
-        <p class="panel note" id="calendars-missing" hidden></p>
-        <!-- Signing Nova in to Google, for the calendar: as Spotify's, Google's page opens in
-             a tab of its own, and the address it ends on is pasted back here. -->
-        <div class="panel sign-in first" id="google" hidden>
-          <div class="entry">
-            <p class="about" id="google-said" hidden>Signed in to Google</p>
-            <button type="button" class="button quiet" id="google-start">Sign in to Google</button>
-          </div>
-          <p class="how" id="google-link-note" hidden>Your browser didn't open Google's page.
-            <a id="google-link" target="_blank" rel="noopener noreferrer">Open it here</a>.</p>
-          <form class="finish" id="google-finish" hidden>
-            <label class="how" for="google-address">Google sends you to an address that doesn't load. Paste that address here.</label>
+          <!-- Clean songs, found by ear (docs/decisions/0022): the library check, how far it's got
+               or when it last finished, the songs held aside, then each list with a song in it.
+               Hidden until Nova has said how the check is. -->
+          <h3 class="subheading" id="clean-title" hidden>Clean songs</h3>
+          <div class="panel clean" id="clean" hidden>
             <div class="entry">
-              <input type="text" inputmode="url" id="google-address" name="address" autocomplete="off"
-                     autocapitalize="none" spellcheck="false">
-              <button type="submit" class="button">Sign in</button>
+              <p class="about" id="clean-progress"></p>
+              <button type="button" class="button quiet" id="clean-start">Check library</button>
+              <button type="button" class="button quiet" id="clean-stop" hidden>Stop</button>
             </div>
-          </form>
-        </div>
-        <!-- Once signed in, each calendar by Google's own name, with whether it's in what's
-             on and whether it's an activity, and the one new events go to. -->
-        <ul class="list batteries calendars" id="calendars" hidden></ul>
-        <div class="panel field new-events" id="new-events" hidden>
-          <label for="new-events-calendar">New events go to</label>
-          <span class="select">
-            <select id="new-events-calendar"></select>
-            <svg class="icon" aria-hidden="true"><use href="#i-chevron"></use></svg>
-          </span>
-        </div>
-        <!-- What Home Assistant has, read when the page is drawn: its to-do lists, with the
-             main one marked, how each device is sent to, and a choice of weather or of which
-             button wakes which PC only when there is one to make. -->
-        <p class="panel note" id="home-choices-missing" hidden></p>
-        <h3 class="subheading" id="lists-title" hidden>To-do lists</h3>
-        <ul class="list batteries lists" id="lists" hidden></ul>
-        <h3 class="subheading" id="sending-title" hidden>Sending to</h3>
-        <ul class="list batteries sending" id="sending" hidden></ul>
-        <div class="panel field home-choice" id="weather-choice" hidden>
-          <label for="weather-entity">Weather from</label>
-          <span class="select">
-            <select id="weather-entity"></select>
-            <svg class="icon" aria-hidden="true"><use href="#i-chevron"></use></svg>
-          </span>
-        </div>
-        <div class="panel home-choice pcs" id="pcs-choice" hidden></div>
-      </section>
+            <p class="how" id="clean-error" hidden></p>
+            <p class="how" id="clean-held" hidden></p>
+          </div>
+          <div id="clean-lists"></div>
+          <div class="settings-of" data-settings="music" hidden></div>
+        </section>
 
-      <section aria-labelledby="routines-title">
-        <h2 class="heading" id="routines-title"><svg class="icon" aria-hidden="true"><use href="#i-routine"></use></svg>Routines</h2>
-        <ul class="list" id="own-routines"></ul>
-        <button type="button" class="button quiet add-routine" id="new-routine">New routine</button>
-        <form class="panel editor" id="routine-editor" hidden novalidate>
-          <h3 class="subheading first" id="editor-title">New routine</h3>
-          <div class="field">
-            <label for="routine-name">Name</label>
-            <input type="text" id="routine-name" autocomplete="off" placeholder="Good morning">
+        <section id="section-devices" data-section="devices" aria-labelledby="devices-title">
+          <h2 class="heading" id="devices-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-bulb"></use></svg><span class="title">Devices<span class="whose" hidden></span></span></h2>
+          <ul class="list lights" id="lights"></ul>
+        </section>
+
+        <section id="section-batteries" data-section="batteries" aria-labelledby="batteries-title">
+          <h2 class="heading" id="batteries-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-battery"></use></svg>Batteries</h2>
+          <div class="panel field switch also-send" id="also-send" hidden>
+            <label for="also-send-box">Also send to my phone when Nova says it</label>
+            <input type="checkbox" id="also-send-box" role="switch">
           </div>
-          <div class="field">
-            <label for="routine-phrases">Starts when you say</label>
-            <input type="text" id="routine-phrases" autocomplete="off" spellcheck="false" placeholder="good morning, morning">
+          <ul class="list batteries" id="batteries"></ul>
+        </section>
+
+        <section id="section-journeys" data-section="journeys" aria-labelledby="journeys-title">
+          <h2 class="heading" id="journeys-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-car"></use></svg>Journeys</h2>
+          <!-- How many journeys Nova has asked Google for this month, from /api/state: hidden without it. -->
+          <p class="panel note" id="journeys-used" hidden></p>
+          <div class="settings-of" data-settings="journeys" hidden></div>
+        </section>
+
+        <!-- The teams Home Assistant is following, each with what Nova says of its matches, and a
+             box to follow another. The box is hidden while football can't be read. -->
+        <section id="section-football" data-section="football" aria-labelledby="football-title">
+          <h2 class="heading" id="football-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-football"></use></svg>Football</h2>
+          <ul class="list batteries football" id="football"></ul>
+          <form class="panel ask" id="follow-team" hidden>
+            <label class="visually-hidden" for="follow-name">A team to follow</label>
+            <input type="text" id="follow-name" name="name" placeholder="A team to follow, e.g. Liverpool" autocomplete="off"
+                   spellcheck="false">
+            <button type="submit" class="button quiet">Follow</button>
+          </form>
+          <div class="settings-of" data-settings="football" hidden></div>
+        </section>
+
+        <section id="section-calendars" data-section="calendars" aria-labelledby="calendars-title">
+          <h2 class="heading" id="calendars-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-calendar"></use></svg>Calendars and lists</h2>
+          <p class="panel note" id="calendars-missing" hidden></p>
+          <!-- Signing Nova in to Google, for the calendar: as Spotify's, Google's page opens in
+               a tab of its own, and the address it ends on is pasted back here. -->
+          <div class="panel sign-in first" id="google" hidden>
+            <div class="entry">
+              <p class="about" id="google-said" hidden>Signed in to Google</p>
+              <button type="button" class="button quiet" id="google-start">Sign in to Google</button>
+            </div>
+            <p class="how" id="google-link-note" hidden>Your browser didn't open Google's page.
+              <a id="google-link" target="_blank" rel="noopener noreferrer">Open it here</a>.</p>
+            <form class="finish" id="google-finish" hidden>
+              <label class="how" for="google-address">Google sends you to an address that doesn't load. Paste that address here.</label>
+              <div class="entry">
+                <input type="text" inputmode="url" id="google-address" name="address" autocomplete="off"
+                       autocapitalize="none" spellcheck="false">
+                <button type="submit" class="button">Sign in</button>
+              </div>
+            </form>
           </div>
-          <div class="pair">
+          <!-- Once signed in, each calendar by Google's own name, with whether it's in what's
+               on and whether it's an activity, and the one new events go to. -->
+          <ul class="list batteries calendars" id="calendars" hidden></ul>
+          <div class="panel field new-events" id="new-events" hidden>
+            <label for="new-events-calendar">New events go to</label>
+            <span class="select">
+              <select id="new-events-calendar"></select>
+              <svg class="icon" aria-hidden="true"><use href="#i-chevron"></use></svg>
+            </span>
+          </div>
+          <!-- What Home Assistant has, read when the page is drawn: its to-do lists, with the
+               main one marked, how each device is sent to, and a choice of weather or of which
+               button wakes which PC only when there is one to make. -->
+          <p class="panel note" id="home-choices-missing" hidden></p>
+          <h3 class="subheading" id="lists-title" hidden>To-do lists</h3>
+          <ul class="list batteries lists" id="lists" hidden></ul>
+          <h3 class="subheading" id="sending-title" hidden>Sending to</h3>
+          <ul class="list batteries sending" id="sending" hidden></ul>
+          <div class="panel field home-choice" id="weather-choice" hidden>
+            <label for="weather-entity">Weather from</label>
+            <span class="select">
+              <select id="weather-entity"></select>
+              <svg class="icon" aria-hidden="true"><use href="#i-chevron"></use></svg>
+            </span>
+          </div>
+          <div class="panel home-choice pcs" id="pcs-choice" hidden></div>
+        </section>
+
+        <section id="section-routines" data-section="routines" aria-labelledby="routines-title">
+          <h2 class="heading" id="routines-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-routine"></use></svg>Routines</h2>
+          <ul class="list" id="own-routines"></ul>
+          <button type="button" class="button quiet add-routine" id="new-routine">New routine</button>
+          <form class="panel editor" id="routine-editor" hidden novalidate>
+            <h3 class="subheading first" id="editor-title">New routine</h3>
             <div class="field">
-              <label for="routine-at">Or by itself at</label>
-              <input type="time" id="routine-at">
+              <label for="routine-name">Name</label>
+              <input type="text" id="routine-name" autocomplete="off" placeholder="Good morning">
             </div>
             <div class="field">
-              <label for="routine-repeat">On</label>
+              <label for="routine-phrases">Starts when you say</label>
+              <input type="text" id="routine-phrases" autocomplete="off" spellcheck="false" placeholder="good morning, morning">
+            </div>
+            <div class="pair">
+              <div class="field">
+                <label for="routine-at">Or by itself at</label>
+                <input type="time" id="routine-at">
+              </div>
+              <div class="field">
+                <label for="routine-repeat">On</label>
+                <span class="select">
+                  <select id="routine-repeat">
+                    <option value="daily">Every day</option>
+                    <option value="weekdays">Weekdays</option>
+                    <option value="weekends">Weekends</option>
+                  </select>
+                  <svg class="icon" aria-hidden="true"><use href="#i-chevron"></use></svg>
+                </span>
+              </div>
+            </div>
+            <!-- Only with more than one satellite to choose from. -->
+            <div class="field" id="routine-satellite-field" hidden>
+              <label for="routine-satellite">Runs on</label>
               <span class="select">
-                <select id="routine-repeat">
+                <select id="routine-satellite"></select>
+                <svg class="icon" aria-hidden="true"><use href="#i-chevron"></use></svg>
+              </span>
+            </div>
+            <div class="field">
+              <label for="routine-steps">Steps, a line each, as you'd say them to Nova</label>
+              <textarea id="routine-steps" rows="5" spellcheck="false" placeholder="what's the weather&#10;what's on today&#10;turn on the kitchen lights"></textarea>
+            </div>
+            <div class="editor-buttons">
+              <button type="button" class="button quiet danger" id="delete-routine">Delete</button>
+              <button type="button" class="button quiet" id="cancel-routine">Cancel</button>
+              <button type="submit" class="button">Save routine</button>
+            </div>
+          </form>
+          <div id="home-routines" hidden>
+            <h3 class="subheading">From Home Assistant</h3>
+            <ul class="list" id="ha-routines"></ul>
+          </div>
+        </section>
+
+        <!-- Each satellite, and a choice of which to look after when there's more than one. -->
+        <section id="section-satellites" data-section="satellites" aria-labelledby="satellites-title">
+          <h2 class="heading" id="satellites-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-microphone"></use></svg>Satellites</h2>
+          <ul class="list satellites" id="satellites"></ul>
+          <!-- With more than one satellite: which the page's Devices, Sound and Timers are for. -->
+          <h3 class="subheading" id="satellite-choice-title" hidden>This page looks after</h3>
+          <div class="chips" id="satellite-choice" role="group" aria-labelledby="satellite-choice-title" hidden></div>
+          <!-- A satellite's password, just made: put straight into the text here and
+               nowhere else, and gone from the page once the panel's closed. -->
+          <div class="panel password" id="password-panel" hidden>
+            <p class="about" id="password-about"></p>
+            <div class="entry">
+              <code class="secret" id="password-text"></code>
+              <button type="button" class="button" id="password-copy">Copy</button>
+            </div>
+            <p class="how" id="password-how"></p>
+            <button type="button" class="button quiet" id="password-close">Done</button>
+          </div>
+          <!-- Asked before a satellite is given a new password, as it's let go until its setup
+               has the new one: the button waits for the satellite's name to be typed. -->
+          <form class="panel renew" id="renew-panel" hidden>
+            <p class="about" id="renew-about"></p>
+            <label for="renew-name" id="renew-label"></label>
+            <input type="text" id="renew-name" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="63">
+            <div class="entry">
+              <button type="submit" class="button danger" id="renew-go" disabled>Give it a new password</button>
+              <button type="button" class="button quiet" id="renew-cancel">Cancel</button>
+            </div>
+          </form>
+          <form class="panel ask" id="add-satellite">
+            <label class="visually-hidden" for="satellite-name">The new satellite's machine name</label>
+            <input type="text" id="satellite-name" placeholder="Its Pi's machine name, e.g. bedroom" autocomplete="off"
+                   autocapitalize="none" spellcheck="false" maxlength="63">
+            <button type="submit" class="button quiet">Add a satellite</button>
+          </form>
+          <!-- The microphone's mute, which Home Assistant can change too. -->
+          <ul class="list microphone">
+            <li id="microphone">
+              <svg class="icon" aria-hidden="true"><use href="#i-microphone"></use></svg>
+              <span class="what"><label for="mute">Mute the microphone</label><span class="detail" id="mute-detail"></span></span>
+              <input type="checkbox" role="switch" id="mute" aria-describedby="mute-detail">
+            </li>
+          </ul>
+        </section>
+
+        <section id="section-sound" data-section="sound" aria-labelledby="sound-title">
+          <h2 class="heading" id="sound-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-sound"></use></svg><span class="title">Sound and voice<span class="whose" hidden></span></span></h2>
+          <div class="tiles single" id="volumes"></div>
+          <p class="panel note" id="volumes-missing" hidden>This satellite isn't connected, so its volumes can't be changed.</p>
+          <p class="hint">As you drag, Nova beeps at the new level, so you can hear how loud it is.</p>
+          <div class="settings-of" data-settings="sound" hidden></div>
+        </section>
+
+        <section id="section-clock" data-section="clock" aria-labelledby="clock-title">
+          <h2 class="heading" id="clock-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-alarm"></use></svg><span class="title">Timers and alarms<span class="whose" hidden></span></span></h2>
+          <ul class="list" id="clock"></ul>
+          <form class="panel add" id="add-alarm">
+            <label class="field"><span>New alarm at</span>
+              <input type="time" name="time" required>
+            </label>
+            <label class="field"><span>Repeats</span>
+              <span class="select">
+                <select name="repeat">
+                  <option value="">Never</option>
                   <option value="daily">Every day</option>
                   <option value="weekdays">Weekdays</option>
                   <option value="weekends">Weekends</option>
                 </select>
                 <svg class="icon" aria-hidden="true"><use href="#i-chevron"></use></svg>
               </span>
+            </label>
+            <button type="submit" class="button quiet">Add alarm</button>
+          </form>
+        </section>
+
+        <section id="section-displays" data-section="displays" aria-labelledby="displays-title">
+          <h2 class="heading" id="displays-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-display"></use></svg>Clock displays</h2>
+          <ul class="list displays" id="displays"></ul>
+          <!-- A clock's key, just made: put straight into the text here and nowhere else,
+               and gone from the page once the panel's closed, as a satellite's password is. -->
+          <div class="panel password" id="display-key-panel" hidden>
+            <p class="about" id="display-key-about"></p>
+            <div class="entry">
+              <code class="secret" id="display-key-text"></code>
+              <button type="button" class="button" id="display-key-copy">Copy</button>
             </div>
+            <p class="how" id="display-key-how"></p>
+            <button type="button" class="button quiet" id="display-key-close">Done</button>
           </div>
-          <!-- Only with more than one satellite to choose from. -->
-          <div class="field" id="routine-satellite-field" hidden>
-            <label for="routine-satellite">Runs on</label>
-            <span class="select">
-              <select id="routine-satellite"></select>
-              <svg class="icon" aria-hidden="true"><use href="#i-chevron"></use></svg>
-            </span>
+          <form class="panel add" id="add-display">
+            <label class="field"><span>New clock</span>
+              <input type="text" id="add-display-name" required maxlength="30" placeholder="e.g. Desk" autocomplete="off">
+            </label>
+            <label class="field"><span>Hears through</span>
+              <span class="select">
+                <select id="add-display-satellite"></select>
+                <svg class="icon" aria-hidden="true"><use href="#i-chevron"></use></svg>
+              </span>
+            </label>
+            <button type="submit" class="button quiet">Add a clock</button>
+          </form>
+          <p class="hint">Holding a finger on a clock makes Nova listen through its satellite's microphone. A change here reaches the clock within a second.</p>
+          <div class="settings-of" data-settings="displays" hidden></div>
+        </section>
+
+        <section id="section-claude" data-section="claude" aria-labelledby="claude-title">
+          <h2 class="heading" id="claude-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-reply"></use></svg>Claude</h2>
+          <div class="settings-of" data-settings="claude" hidden></div>
+        </section>
+
+        <section id="section-notifications" data-section="notifications" aria-labelledby="notifications-title">
+          <h2 class="heading" id="notifications-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-bell"></use></svg>Notifications</h2>
+          <div class="settings-of" data-settings="notifications" hidden></div>
+        </section>
+
+        <section id="section-memory" data-section="memory" aria-labelledby="memory-title">
+          <h2 class="heading" id="memory-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-memory"></use></svg>Memory</h2>
+          <ul class="list" id="memories"></ul>
+        </section>
+
+        <section id="section-keys" data-section="keys" aria-labelledby="keys-title">
+          <h2 class="heading" id="keys-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-key"></use></svg>Keys</h2>
+          <div class="keys" id="keys"></div>
+          <p class="hint">Saved on Nova and never shown again. A new key is used once Nova restarts.</p>
+          <!-- The page's own password, for its NPM address: drawn by settings.js from
+               /api/login-state, and used straight away. -->
+          <div class="keys page-password" id="page-password"></div>
+          <div class="account">
+            <button type="button" class="button quiet" id="log-out" hidden>Log out</button>
+            <button type="button" class="button quiet" id="log-out-everywhere">Log out everywhere</button>
           </div>
-          <div class="field">
-            <label for="routine-steps">Steps, a line each, as you'd say them to Nova</label>
-            <textarea id="routine-steps" rows="5" spellcheck="false" placeholder="what's the weather&#10;what's on today&#10;turn on the kitchen lights"></textarea>
-          </div>
-          <div class="editor-buttons">
-            <button type="button" class="button quiet danger" id="delete-routine">Delete</button>
-            <button type="button" class="button quiet" id="cancel-routine">Cancel</button>
-            <button type="submit" class="button">Save routine</button>
-          </div>
-        </form>
-        <div id="home-routines" hidden>
-          <h3 class="subheading">From Home Assistant</h3>
-          <ul class="list" id="ha-routines"></ul>
-        </div>
-      </section>
+          <p class="hint">The page password lets you in at its NPM address, and a new one logs out every other device using it. Log out everywhere does that too - for a lost phone, say.</p>
+        </section>
 
-      <section aria-labelledby="sound-title">
-        <h2 class="heading" id="sound-title"><svg class="icon" aria-hidden="true"><use href="#i-sound"></use></svg><span class="title">Sound<span class="whose" hidden></span></span></h2>
-        <div class="tiles single" id="volumes"></div>
-        <p class="panel note" id="volumes-missing" hidden>This satellite isn't connected, so its volumes can't be changed.</p>
-        <p class="hint">As you drag, Nova beeps at the new level, so you can hear how loud it is.</p>
-      </section>
-
-      <section aria-labelledby="clock-title">
-        <h2 class="heading" id="clock-title"><svg class="icon" aria-hidden="true"><use href="#i-alarm"></use></svg><span class="title">Timers and alarms<span class="whose" hidden></span></span></h2>
-        <ul class="list" id="clock"></ul>
-        <form class="panel add" id="add-alarm">
-          <label class="field"><span>New alarm at</span>
-            <input type="time" name="time" required>
-          </label>
-          <label class="field"><span>Repeats</span>
-            <span class="select">
-              <select name="repeat">
-                <option value="">Never</option>
-                <option value="daily">Every day</option>
-                <option value="weekdays">Weekdays</option>
-                <option value="weekends">Weekends</option>
-              </select>
-              <svg class="icon" aria-hidden="true"><use href="#i-chevron"></use></svg>
-            </span>
-          </label>
-          <button type="submit" class="button quiet">Add alarm</button>
-        </form>
-      </section>
-
-      <section aria-labelledby="displays-title">
-        <h2 class="heading" id="displays-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-display"></use></svg>Clock displays</h2>
-        <ul class="list displays" id="displays"></ul>
-        <!-- A clock's key, just made: put straight into the text here and nowhere else,
-             and gone from the page once the panel's closed, as a satellite's password is. -->
-        <div class="panel password" id="display-key-panel" hidden>
-          <p class="about" id="display-key-about"></p>
-          <div class="entry">
-            <code class="secret" id="display-key-text"></code>
-            <button type="button" class="button" id="display-key-copy">Copy</button>
-          </div>
-          <p class="how" id="display-key-how"></p>
-          <button type="button" class="button quiet" id="display-key-close">Done</button>
-        </div>
-        <form class="panel add" id="add-display">
-          <label class="field"><span>New clock</span>
-            <input type="text" id="add-display-name" required maxlength="30" placeholder="e.g. Desk" autocomplete="off">
-          </label>
-          <label class="field"><span>Hears through</span>
-            <span class="select">
-              <select id="add-display-satellite"></select>
-              <svg class="icon" aria-hidden="true"><use href="#i-chevron"></use></svg>
-            </span>
-          </label>
-          <button type="submit" class="button quiet">Add a clock</button>
-        </form>
-        <p class="hint">Holding a finger on a clock makes Nova listen through its satellite's microphone. A change here reaches the clock within a second.</p>
-      </section>
-
-      <section class="double" aria-labelledby="memory-title">
-        <h2 class="heading" id="memory-title"><svg class="icon" aria-hidden="true"><use href="#i-memory"></use></svg>Memory</h2>
-        <ul class="list" id="memories"></ul>
-      </section>
-
-      <section class="wide" aria-labelledby="keys-title">
-        <h2 class="heading" id="keys-title"><svg class="icon" aria-hidden="true"><use href="#i-key"></use></svg>Keys</h2>
-        <div class="keys" id="keys"></div>
-        <p class="hint">Saved on Nova and never shown again. A new key is used once Nova restarts.</p>
-        <!-- The page's own password, for its NPM address: drawn by settings.js from
-             /api/login-state, and used straight away. -->
-        <div class="keys page-password" id="page-password"></div>
-        <div class="account">
-          <button type="button" class="button quiet" id="log-out" hidden>Log out</button>
-          <button type="button" class="button quiet" id="log-out-everywhere">Log out everywhere</button>
-        </div>
-        <p class="hint">The page password lets you in at its NPM address, and a new one logs out every other device using it. Log out everywhere does that too - for a lost phone, say.</p>
-      </section>
-
-      <section class="wide" aria-labelledby="settings-title">
-        <h2 class="heading" id="settings-title"><svg class="icon" aria-hidden="true"><use href="#i-settings"></use></svg>Settings</h2>
-        <p class="panel problem" id="settings-problem" hidden></p>
-        <form class="panel settings" id="settings" novalidate>
-          <div id="setting-groups"></div>
-          <div class="save-bar">
-            <p id="unsaved">Nothing's changed yet.</p>
-            <button type="submit" class="button" id="save-settings" disabled>Save settings</button>
-            <button type="button" class="button" id="restart-now" hidden>Restart now</button>
-          </div>
-        </form>
-      </section>
-    </main>
+        <section id="section-else" data-section="else" aria-labelledby="else-title">
+          <h2 class="heading" id="else-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-settings"></use></svg>Everything else</h2>
+          <div class="settings-of" data-settings="else" hidden></div>
+        </section>
+      </main>
+    </div>
   </div>
+
+  <!-- The one save bar, for the settings in every section: each setting's input is part of this form
+       by its form attribute, wherever settings.js draws it. Fixed to the bottom of the screen, and
+       shown by settings.js while anything is changed and unsaved or a restart is offered. -->
+  <form class="save-form" id="settings" novalidate hidden>
+    <div class="save-bar">
+      <p id="unsaved">Nothing's changed yet.</p>
+      <button type="submit" class="button" id="save-settings" disabled>Save settings</button>
+      <button type="button" class="button" id="restart-now" hidden>Restart now</button>
+    </div>
+  </form>
 
   <div class="undos" id="undos"></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
   <svg class="sprite" aria-hidden="true" focusable="false">
     <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 2.5l1.9 7.6 7.6 1.9-7.6 1.9-1.9 7.6-1.9-7.6L2.5 12l7.6-1.9z"/></symbol>
+    <symbol id="i-car" viewBox="0 0 24 24"><path d="M4.5 16.5V13l1.8-4.5h11.4L19.5 13v3.5z"/><path d="M4.5 13h15"/><path d="M7 16.5V19"/><path d="M17 16.5V19"/><path d="M7.5 15.2h1.5"/><path d="M15 15.2h1.5"/></symbol>
     <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l2.5-6 5 12 2.5-6H21"/></symbol>
     <symbol id="i-sound" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 0 1 0 6"/><path d="M18 6.5a7.5 7.5 0 0 1 0 11"/></symbol>
     <symbol id="i-microphone" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></symbol>

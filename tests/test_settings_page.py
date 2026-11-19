@@ -41,6 +41,7 @@ from voice_assistant.downloads import Downloads
 from voice_assistant.football import CANT_GET, NOT_SET_UP, FootballUnavailable, Reading, Team
 from voice_assistant.football_watch import FootballChoices
 from voice_assistant.ha_registry import Entry, Snapshot
+from voice_assistant import journeys as journeys_module
 from voice_assistant.journeys import JOURNEY_DEFAULTS, Journeys
 from voice_assistant.lists import Lists
 from voice_assistant.ntfy import Ntfy
@@ -1288,7 +1289,7 @@ def test_a_mixed_save_whose_straight_away_part_fails_says_it_waits(files):
     page.brain.ntfy.retopic = _unreachable
     result = page.save_settings({"ntfy.quiet_from": "22:00", "thresholds.silence_duration": 1.2}, LOGIN)
 
-    assert result["message"] == ("Saved. Night starts at is used once Nova restarts, and the rest "
+    assert result["message"] == ("Saved. Quiet hours start at is used once Nova restarts, and the rest "
                                  "straight away. Some of it couldn't be used straight away.")
     assert result["restart_needed"]
 
@@ -1379,7 +1380,7 @@ def test_each_setting_says_how_its_used_and_its_limits(files):
     assert silence["used"] == "Used straight away" and (silence["min"], silence["max"]) == (0.2, 3)
     assert night["used"] == "Used straight away" and night["form"] == "time"
     # A time picker, so no "as 23:00" for typing it - which a save's message would say too.
-    assert (night["label"], settings["ntfy.quiet_until"]["label"]) == ("Night starts at", "Night ends at")
+    assert (night["label"], settings["ntfy.quiet_until"]["label"]) == ("Quiet hours start at", "Quiet hours end at")
     assert settings["music.player"]["used"] == "Used once Nova restarts"
 
 
@@ -1490,7 +1491,7 @@ def test_the_page_comes_with_its_safety_headers(served):
     assert headers["Cache-Control"] == "no-store" and headers["X-Content-Type-Options"] == "nosniff"
 
 
-@pytest.mark.parametrize("path", ["/settings.js", "/settings.css"])
+@pytest.mark.parametrize("path", ["/settings.js", "/settings_list.js", "/settings.css"])
 def test_the_pages_script_and_style_are_served_with_its_safety_headers(served, path):
     # There's no JavaScript engine to check the script with, so this is what stands in.
     status, headers, body = _ask(served, path)
@@ -1557,6 +1558,27 @@ def test_the_pages_script_and_style_are_served_with_its_safety_headers(served, p
         assert b'id="football"' in html and b'id="follow-team"' in html and b'id="i-football"' in html
 
 
+@pytest.mark.parametrize("name, said", [
+    # The page's own words for what Nova would say, when it hasn't said: no player, no Home Assistant.
+    ("NO_PLAYER", page_module.NO_PLAYER),
+    ("NO_HOME", page_module.NO_HOME),
+    # What the page leaves unsaid under a setting, which has to be Nova's words for it to the letter.
+    ("USED_NOW", page_module.NOW),
+])
+def test_the_pages_script_has_novas_own_sentences_word_for_word(served, name, said):
+    script = _ask(served, "/settings.js")[2].decode()
+    assert re.findall(rf'^const {name} = "(.*)";$', script, re.MULTILINE) == [said]
+
+
+def test_the_lists_rules_are_served_and_loaded_before_the_pages_script(served):
+    body = _ask(served, "/settings_list.js")[2]
+    assert b"globalThis.NovaList" in body
+    page = _ask(served, "/")[2]
+    assert page.count(b'<script src="settings_list.js" defer></script>') == 1
+    assert page.index(b'src="settings_list.js"') < page.index(b'src="settings.js"')
+    assert "settings_list.js" in page_module.PAGE_FILES
+
+
 def test_the_page_has_a_login_form_and_log_out_buttons(served):
     html = _ask(served, "/")[2].decode()
     script = _ask(served, "/settings.js")[2].decode()
@@ -1571,8 +1593,8 @@ def test_the_page_has_a_login_form_and_log_out_buttons(served):
     assert 'send("/api/login", { password: field.value })' in script and 'fetchWithin("/api/login-state")' in script
     assert '"/api/logout"' in script and '"/api/logout-everywhere"' in script and '"/api/page-password"' in script
     assert 'field("page-password-new", "new-password"' in script and "response.status === 401" in script
-    # A Log out reloads the page, so none of what it showed is left in it.
-    assert "if (result.success) location.reload();" in script
+    # A Log out reloads the page, so none of what it showed is left in it - at once, with no leave question.
+    assert "askBeforeLeaving(false);\n  location.reload();" in script
 
 
 def test_a_change_has_to_come_from_the_page_itself(served):
@@ -2078,19 +2100,18 @@ def test_every_journeys_setting_is_on_the_page_and_used_straight_away(files):
 
 
 def test_every_setting_on_the_page_has_a_group_of_its_own(files):
-    # One under no group is shown under Other, as the spending alert and Claude's prices
-    # were, rather than with the settings it goes with.
-    with open(os.path.join(page_module.WEB_FOLDER, "settings.js")) as file:
+    # One under no section is shown under Everything else, as the spending alert and Claude's
+    # prices were under Other, rather than with the settings it goes with. Which section holds which keys is one table, in settings_list.js.
+    with open(os.path.join(page_module.WEB_FOLDER, "settings_list.js")) as file:
         script = file.read()
-    groups = re.search(r"const GROUPS = \[\n(.*?)\n\];", script, re.S).group(1)
-    starts = {name: re.findall(r'"([a-z_]+\.)"', line)
-              for name, line in re.findall(r'^\s*\["([^"]+)", (\[.*\])\],$', groups, re.M)}
-    assert "usage." in starts["Claude"]
-    assert starts["Football"] == ["football."]
-    assert starts["Journeys"] == ["journeys."]
+    starts = {name: re.findall(r'"([a-z_]+\.)"', keys)
+              for name, keys in re.findall(r'^\s*\{ id: "([a-z]+)", .* starts: (\[.*?\]) \},$', script, re.M)}
+    assert "usage." in starts["claude"]
+    assert starts["football"] == ["football."]
+    assert starts["journeys"] == ["journeys."]
     # The clean songs' settings go with the music they're about.
-    assert "clean_check." in starts["Music"]
-    assert "new_music." in starts["Music"]
+    assert "clean_check." in starts["music"]
+    assert "new_music." in starts["music"]
     for section, name, *_ in page_module.EDITABLE:
         key = f"{section}.{name}"
         assert any(key.startswith(start) for prefixes in starts.values() for start in prefixes), key
@@ -2397,6 +2418,17 @@ def test_a_satellite_is_removed_or_made_the_default_on_the_page(served):
 def _journeys(tmp_path):
     """The real Journeys over a store of its own - the page only ever asks it who travels."""
     return Journeys(None, None, None, ChoiceStore(str(tmp_path / "journeys.json"), JOURNEY_DEFAULTS), lambda: {})
+
+
+def test_the_state_has_how_many_journeys_were_asked(files, tmp_path, monkeypatch):
+    monkeypatch.setattr(journeys_module, "_month", lambda: "2026-11")
+    journeys = _journeys(tmp_path)
+    page = _page(journeys=journeys)
+    assert page.state()["journeys"] == {"requests": 0, "cap": 3000}
+    journeys.store.change(lambda new: new.update(month="2026-11", requests=4))
+    assert page.state()["journeys"] == {"requests": 4, "cap": 3000}
+    # Without journeys the brain has nothing to count.
+    assert _page().state()["journeys"] is None
 
 
 def test_a_satellite_is_marked_as_travelling_with_the_user_and_logged(files, tmp_path, caplog):
@@ -3395,7 +3427,7 @@ def test_a_choice_which_cant_be_saved_or_read_says_so(files, monkeypatch):
 
 def test_home_choices_without_home_assistant_say_so(files):
     page = _page()
-    said = "Nova isn't connected to Home Assistant. Add its address in Settings, and its token in Keys."
+    said = "Nova isn't connected to Home Assistant. Add its address under Everything else, and its token in Keys."
     assert page.home_choices_state() == {"available": False, "message": said}
     assert page.choose_main_list("todo.todo", LOGIN) == {"success": False, "message": "Nova isn't connected to Home Assistant."}
     assert page.choose_weather("weather.cabin", LOGIN)["success"] is False
@@ -3584,7 +3616,7 @@ def test_the_right_password_logs_in_for_thirty_days(npm, caplog):
 
 
 def test_the_page_files_are_served_before_a_login(npm):
-    for path in ("/", "/settings.js", "/settings.css", "/icon.svg"):
+    for path in ("/", "/settings.js", "/settings_list.js", "/settings.css", "/icon.svg"):
         status, headers, _ = _through_npm(npm, path)
         assert status == 200 and headers["Content-Type"] == page_module.FILES[path][1]
         assert headers["Content-Security-Policy"] == page_module.SAFETY_HEADERS["Content-Security-Policy"]
@@ -3730,7 +3762,7 @@ def test_the_version_changes_with_any_of_the_pages_files_and_only_then(files, mo
     monkeypatch.setattr(page_module, "WEB_FOLDER", str(web))
     first = _page()
     assert _page().page_version == first.page_version
-    for name in ("settings.html", "settings.js", "settings.css"):
+    for name in ("settings.html", "settings_list.js", "settings.js", "settings.css"):
         before = (web / name).read_bytes()
         (web / name).write_bytes(before + b"\n")
         assert _page().page_version != first.page_version, name

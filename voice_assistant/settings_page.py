@@ -70,6 +70,8 @@ logger = logging.getLogger(__name__)
 WEB_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 FILES = {"/": ("settings.html", "text/html; charset=utf-8"),
          "/settings.js": ("settings.js", "text/javascript; charset=utf-8"),
+         # The list's rules, which never touch the page - loaded before settings.js.
+         "/settings_list.js": ("settings_list.js", "text/javascript; charset=utf-8"),
          "/settings.css": ("settings.css", "text/css; charset=utf-8"),
          "/icon.svg": ("icon.svg", "image/svg+xml"),
          # The Wrapped's story page - see wrapped.py - which asks /api/wrapped for what it shows.
@@ -84,7 +86,7 @@ FILES = {"/": ("settings.html", "text/html; charset=utf-8"),
 # update that it's out of date - see page_version. Not the Wrapped's: it is read once, as
 # it's opened, and asks for nothing after, so a change to it would only reload a settings
 # page for nothing.
-PAGE_FILES = ("settings.html", "settings.js", "settings.css")
+PAGE_FILES = ("settings.html", "settings_list.js", "settings.js", "settings.css")
 
 # Sent with every answer: nothing but the page's own files may run in it, no other
 # site may show it in a frame, and nothing is kept in a cache.
@@ -134,8 +136,8 @@ EDITABLE = [
     ("ntfy", "phone", "Topic for sending things to your phone", "now"),
     ("ntfy", "reminders", "Topic for reminders nobody answered", "now"),
     ("ntfy", "restarts", "Topic for Nova restarting after a problem", "now"),
-    ("ntfy", "quiet_from", "Night starts at", "now"),
-    ("ntfy", "quiet_until", "Night ends at", "now"),
+    ("ntfy", "quiet_from", "Quiet hours start at", "now"),
+    ("ntfy", "quiet_until", "Quiet hours end at", "now"),
     ("thresholds", "silence_duration", "Seconds of quiet which end what you're saying", "now"),
     ("thresholds", "recording_timeout", "Longest request, in seconds", "now"),
     ("thresholds", "wake_word_confidence", "How sure Nova must be it heard its wake word", "now"),
@@ -188,8 +190,9 @@ NO_GOOGLE = "Google's client ID and secret go under Keys, then restart Nova."
 # Said of the music when Nova's config isn't known, so neither player can be blamed - the
 # page's own words for it, in settings.js.
 NO_PLAYER = "Nova has no music player set up. Choose one in Settings, under Music."
-# What the page says of the parts which need Home Assistant, before it is set up.
-NO_HOME = "Nova isn't connected to Home Assistant. Add its address in Settings, and its token in Keys."
+# What the page says of the parts which need Home Assistant, before it is set up - the page's own
+# words for it too, in settings.js.
+NO_HOME = "Nova isn't connected to Home Assistant. Add its address under Everything else, and its token in Keys."
 CANT_REACH_HOME = "Nova can't reach Home Assistant just now."
 # What the page says when Google no longer takes Nova's sign-in, or its client.
 SIGN_IN_AGAIN = "Nova needs signing in to Google again."
@@ -692,6 +695,8 @@ class SettingsPage:
                 "displays": {"list": self.brain.displays.listed(),
                              "port": server.port if server is not None and server.serving else 0},
                 "keys": keys,
+                # How many journeys Nova has asked Google for this month, or None without journeys.
+                "journeys": self.brain.journeys.used() if self.brain.journeys is not None else None,
                 "settings": settings,
                 "settings_problem": problem,
                 "restart_needed": self._restart_needed(saved),

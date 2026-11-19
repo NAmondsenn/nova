@@ -35,7 +35,7 @@
   --panel-round: 18px;
   --field-round: 10px;
   /* How far up the toasts sit: clear of an iPhone's home bar - and, while the save bar
-     is on screen, above it (see html.save-bar-shown below). */
+     is shown, above it (see body.save-bar-shown below). */
   --toasts-at: max(24px, env(safe-area-inset-bottom));
   color-scheme: dark;
 }
@@ -51,14 +51,16 @@
 html {
   min-height: 100%;
   background: var(--deep) linear-gradient(180deg, var(--night), var(--deep)) no-repeat;
-  /* So a field tabbed to isn't left under the save bar - --save-bar is its height as
-     drawn, set by followSaveBar in settings.js, and the guess is a line's worth until then. */
+  /* So a field tabbed to isn't left under the save bar, which is fixed to the screen's
+     bottom - --save-bar is its height as drawn, set by followSaveBar in settings.js, and the
+     guess is a line's worth until then. */
   scroll-padding-bottom: calc(var(--save-bar, 84px) + 12px);
 }
 
-/* The save bar is on screen, so the toasts go above it, however tall it is - a long
-   save error takes three lines on a phone. */
-html.save-bar-shown { --toasts-at: calc(var(--save-bar, 84px) + 12px); }
+/* The save bar is shown, so the toasts go above it, however tall it is - a long save error
+   takes three lines on a phone - and the page's end is kept clear of it. */
+body.save-bar-shown { --toasts-at: calc(var(--save-bar, 84px) + 12px); }
+body.save-bar-shown .page { padding-bottom: calc(var(--save-bar, 84px) + 24px); }
 
 body {
   margin: 0;
@@ -280,7 +282,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin: -12px 0 36px;
+  margin: 0 0 16px;
   padding: 12px 12px 12px 20px;
   border: 1px solid rgba(243, 214, 160, 0.3);
   border-radius: var(--panel-round);
@@ -296,19 +298,198 @@ body {
   min-height: 44px;
 }
 
-/* The sections - four across on a laptop, two on a tablet and one on a phone, with
-   the bigger ones the whole way across */
+/* The list of sections and the one open from it. Every section is always in the page, so
+   each keeps what it draws and what has been typed in it; CSS shows one. settings.js puts
+   the open section's id in the body's data-open and an "open" class on that section, and
+   neither is there while the list is showing.
 
-.board {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  align-items: start;
-  gap: 44px 28px;
+   Under the wide breakpoint (1,180px) the list and the open section take turns: the list
+   alone without data-open, the open section alone, with its back button, with it. From
+   1,180px up they sit side by side, the list a column of its own down the left which scrolls
+   by itself if it must, and the open section beside it - Status while none is open, with the
+   Status row marked as the one showing. The back button goes, as the list is always there. */
+
+.shell { display: block; }
+
+.board > section:not(.open) { display: none; }
+
+body:not([data-open]) .board > #section-status { display: block; }
+
+/* The most a section is stretched to, so a line of it stays easy to read. */
+.board > section { max-width: 760px; }
+
+#back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  margin-bottom: 20px;
+  padding-left: 14px;
 }
 
-.wide { grid-column: 1 / -1; }
+/* The chevron points down, for a menu: turned to point back. */
+#back .icon { transform: rotate(90deg); }
 
-.double { grid-column: span 2; }
+#list { min-width: 0; }
+
+/* As tall as a thumb needs, as every other control is. */
+#find {
+  min-height: 44px;
+  margin-bottom: 24px;
+}
+
+#attention:empty { display: none; }
+
+/* What needs attention: a block of glass of its own, rows as the list's with a ring of ember to
+   say these aren't just the sections. */
+#attention {
+  margin-bottom: 20px;
+  overflow: hidden;
+  border-color: rgba(255, 144, 119, 0.35);
+}
+
+/* An attention row's dot is where a section's icon would be, centred in the same width. */
+.row.attention .dot {
+  grid-area: icon;
+  margin: 0 5px;
+}
+
+.row-group { margin: 0 0 24px; }
+
+.row-group .subheading { margin: 0 0 10px 4px; }
+
+/* One row for a section: its icon, its name with the line on how it is under it, and a
+   chevron. A button, so the keyboard and a screen reader have it as one. */
+.row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "icon name chevron" "icon line chevron";
+  /* The two rows are only as tall as the name and the line, and are centred together, so a
+     row with no line has its name in the middle rather than at the top of the extra room. */
+  grid-template-rows: auto auto;
+  align-content: center;
+  align-items: center;
+  column-gap: 14px;
+  width: 100%;
+  min-height: 56px;
+  padding: 10px 14px 10px 16px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.row + .row { border-top: 1px solid var(--hairline); }
+
+.row:hover { background: rgba(255, 255, 255, 0.05); }
+
+.row .icon {
+  grid-area: icon;
+  color: var(--starlight);
+}
+
+.row .name {
+  grid-area: name;
+  overflow-wrap: anywhere;
+}
+
+.row .line {
+  grid-area: line;
+  color: var(--dusk);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.row .line:empty { display: none; }
+
+/* A line which says something is wrong - a battery under its mark, Google to sign in to. */
+.row .line.warn { color: var(--ember); }
+
+.row .chevron {
+  grid-area: chevron;
+  color: var(--dusk);
+  /* The chevron points down, for a menu: turned to point on in. */
+  transform: rotate(-90deg);
+}
+
+/* The rows go round the group's glass, so its corners are the rows' own - and so the focus
+   ring is drawn inside them, where it isn't cut off. */
+.row-group .list { overflow: hidden; }
+
+.row:focus-visible { outline-offset: -2px; }
+
+/* A setting or control a search found in a section: a smaller row under the section's own,
+   its words lined up under the section's name. */
+.row.hit {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "name";
+  min-height: 44px;
+  padding: 8px 14px 8px 48px;
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--dusk);
+  font-size: 14px;
+}
+
+/* What a search sent you to - the field or row it is in, or itself - marked for a moment: the
+   highlight fades over the time it is kept, or, with motion off, stays until it goes. Inset, so no
+   panel's edge cuts it off, and all of it shadow, laid over what is there: a field which is a panel
+   keeps its glass under it, rather than lose it for the two seconds. */
+.found {
+  border-radius: var(--field-round);
+  box-shadow: inset 0 0 0 1px rgba(243, 214, 160, 0.5), inset 0 0 0 100vmax rgba(243, 214, 160, 0.14);
+  animation: found 2s ease-out forwards;
+}
+
+@keyframes found {
+  from { box-shadow: inset 0 0 0 1px rgba(243, 214, 160, 0.8), inset 0 0 0 100vmax rgba(243, 214, 160, 0.28); }
+  to { box-shadow: inset 0 0 0 1px rgba(243, 214, 160, 0), inset 0 0 0 100vmax rgba(243, 214, 160, 0); }
+}
+
+/* A section's heading takes the focus as it opens, so reading starts there; it isn't a
+   control, and a ring round it across the page would say it was. */
+.board > section > .heading:focus-visible { outline: none; }
+
+/* Below the wide breakpoint, the list or the open section, never both. Centred, as a
+   page of only one of them is, on a tablet. */
+@media (max-width: 1179.98px) {
+  .shell > #list,
+  .shell > .board {
+    max-width: 760px;
+    margin-inline: auto;
+  }
+
+  body:not([data-open]) .board,
+  body[data-open] #list { display: none; }
+}
+
+/* From 1,180px: the list down the left, 340px wide, kept in view as the section beside it
+   scrolls, and scrolling by itself if it is taller than the screen. */
+@media (min-width: 1180px) {
+  .shell {
+    display: grid;
+    grid-template-columns: 340px minmax(0, 1fr);
+    gap: 44px;
+    align-items: start;
+  }
+
+  #list {
+    position: sticky;
+    top: max(16px, env(safe-area-inset-top));
+    max-height: calc(100vh - 32px);
+    max-height: calc(100dvh - 32px);
+    overflow-y: auto;
+    /* Room for the focus ring and the glass's edge, which the scrolling would cut. */
+    padding: 4px;
+    margin: -4px;
+  }
+
+  #back { display: none; }
+
+  .row.showing { background: rgba(255, 255, 255, 0.08); }
+  .row.showing .name { color: var(--starlight); }
+}
 
 .heading {
   display: flex;
@@ -873,6 +1054,17 @@ input[type="range"]:focus-visible::-moz-range-thumb {
 
 .group + .group { border-top: 1px solid var(--hairline); }
 
+/* A section's settings, as the last block of the section - the gap above it is the heading's
+   own where it is all the section has. */
+.settings-of { margin-top: 24px; }
+.heading + .settings-of { margin-top: 0; }
+
+/* The same with something hidden between them - Journeys' count of asks, while there is none. */
+.heading + [hidden] + .settings-of { margin-top: 0; }
+
+/* A section whose settings have no sub-heading: the fields have the whole width. */
+.group.bare { grid-template-columns: minmax(0, 1fr); }
+
 .group h3 {
   margin: 6px 0 0;
   font-weight: 400;
@@ -930,21 +1122,45 @@ input[type="range"]:focus-visible::-moz-range-thumb {
 /* A setting changed but not saved yet, marked with a little of Nova's light. */
 .field.changed label { color: var(--starlight); }
 
-/* Kept at the bottom of the screen while the settings are in view, so a change made
-   half-way down a phone's long page is saved, or Nova restarted, there and then. It's
-   solid - the glass, over the bottom of the sky - as the fields scroll by under it,
-   and clear of an iPhone's home bar. */
-.save-bar {
-  position: sticky;
+/* The one save bar, for the settings in every section: fixed to the bottom of the screen,
+   above an iPhone's home bar, while anything is changed and unsaved or a restart is offered
+   (settings.js hides the form otherwise). The form spans the screen without catching a tap,
+   so that from 1,180px the bar itself can sit under the open section's column alone, where
+   the list's column and the page's margins are on the form's padding. It's solid - the glass,
+   over the bottom of the sky - as the page scrolls by under it. */
+.save-form {
+  position: fixed;
+  right: 0;
   bottom: 0;
-  z-index: 1;
+  left: 0;
+  z-index: 5;
+  margin: 0;
+  pointer-events: none;
+}
+
+.save-bar {
   display: flex;
   align-items: center;
   gap: 16px;
-  padding: 14px 16px max(14px, env(safe-area-inset-bottom)) 20px;
-  border-top: 1px solid var(--hairline);
-  border-radius: 0 0 var(--panel-round) var(--panel-round);
+  padding: 14px max(16px, env(safe-area-inset-right)) max(14px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
+  border-top: 1px solid var(--glass-edge);
   background: var(--deep) linear-gradient(var(--glass), var(--glass));
+  pointer-events: auto;
+}
+
+@media (min-width: 1180px) {
+  .save-form {
+    padding-right: calc(max((100% - 1400px) / 2, 0px) + max(32px, env(safe-area-inset-right)));
+    padding-left: calc(max((100% - 1400px) / 2, 0px) + max(32px, env(safe-area-inset-left)) + 384px);
+  }
+
+  /* No wider than the open section, which stops at 760px, so the two line up at every width. */
+  .save-bar {
+    max-width: 760px;
+    border: 1px solid var(--glass-edge);
+    border-bottom: 0;
+    border-radius: var(--panel-round) var(--panel-round) 0 0;
+  }
 }
 
 .save-bar .button {
@@ -957,10 +1173,6 @@ input[type="range"]:focus-visible::-moz-range-thumb {
   color: var(--dusk);
   font-size: 14px;
 }
-
-/* Stuck to the screen's bottom, mid-form, its rounded corners would show the fields
-   scrolling by behind them - they're only for where it ends the form. */
-.save-bar.stuck { border-radius: 0; }
 
 /* Why a save didn't work, said here too as it stays in view. */
 .save-bar p.bad { color: var(--ember); }
@@ -1221,11 +1433,7 @@ input[type="range"]:focus-visible::-moz-range-thumb {
   gap: 8px;
 }
 
-/* Which satellite to look after, under the list of them. */
-#satellite-choice {
-  margin-top: 10px;
-}
-
+/* Which satellite to look after, under the list of them and its caption, which gives the gap above. */
 #satellite-choice .button { min-height: 44px; }
 
 /* Each satellite: its name, whether it's the default, what it's doing, and ways to
@@ -1271,6 +1479,24 @@ input[type="range"]:focus-visible::-moz-range-thumb {
 .satellites .button {
   min-width: 44px;
   min-height: 44px;
+}
+
+/* On a phone the actions take the row under the name: "Travels with me" with its switch
+   across the width, the words at the left and the switch at the right as other switches
+   are, then the buttons on a line of their own, as tall as each other and sharing it. */
+@media (max-width: 719px) {
+  .satellites .actions {
+    flex-basis: 100%;
+    justify-content: flex-start;
+    gap: 8px;
+  }
+
+  .satellites .choice {
+    flex: 1 1 100%;
+    justify-content: space-between;
+  }
+
+  .satellites .actions .button { flex: 1 1 auto; }
 }
 
 /* The new satellite's name has the row to itself, so its example isn't cut short, and
@@ -1721,8 +1947,8 @@ input[type="range"].warmth::-moz-range-progress { background: transparent; }
 /* Logging in through NPM. Until settings.js knows the page may be shown, nothing
    which needs a login is - so a device without one sees only the login form, not an
    empty page behind it. */
-.locked .board,
-.locked #restart,
+.locked .shell,
+.locked .save-form,
 .locked #stop,
 .locked .doing,
 .locked #undos { display: none !important; }
@@ -1785,10 +2011,6 @@ p.login { color: var(--moon); }
 
 .account .button { min-height: 44px; }
 
-@media (max-width: 1179px) {
-  .board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-
 @media (max-width: 719px) {
   .page { padding: max(20px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 56px max(16px, env(safe-area-inset-left)); }
 
@@ -1824,17 +2046,7 @@ p.login { color: var(--moon); }
   .date .long { display: none; }
   .date .short { display: inline; }
 
-  .notice {
-    flex-wrap: wrap;
-    margin: -8px 0 28px;
-  }
-
-  .board {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 36px;
-  }
-
-  .double { grid-column: auto; }
+  .notice { flex-wrap: wrap; }
 
   .group {
     grid-template-columns: minmax(0, 1fr);
@@ -1850,6 +2062,7 @@ p.login { color: var(--moon); }
   .star span::before,
   .star span::after,
   .toast,
+  .found,
   input[type="checkbox"],
   input[type="checkbox"]::before {
     animation: none !important;
