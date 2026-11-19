@@ -154,6 +154,8 @@ GOOGLES_OWN = "@group.v.calendar.google.com"
 SAME_AS = {"work": ("working", "shift", "shifts"), "uni": ("university", "lecture", "lectures", "class", "classes")}
 
 CANT_REACH_GOOGLE = "I can't reach Google's calendar right now."
+NO_SUCH_CALENDAR = "I haven't got a calendar called that."
+DAY_GONE = "That day's already gone - which day did you mean?"
 NO_ANSWER = "Google didn't answer in time"
 LOST = "I lost Google partway through"
 TROUBLE = "Google had trouble"
@@ -959,7 +961,7 @@ class GoogleCalendar:
         # Earlier today is fine - something just done, logged - but a day gone is most
         # likely the week or the year misheard.
         if _first_day(times[0]) < today:
-            return {"success": False, "message": "That day's already gone - which day did you mean?"}
+            return {"success": False, "message": DAY_GONE}
         try:
             found = self._calendar_to_add_to(calendar)
             if isinstance(found, str):
@@ -979,7 +981,7 @@ class GoogleCalendar:
                               f"Took {summary} back off your calendar.", f"I can't tell whether {summary} was taken off.")}
 
     def remove(self, search: str, day: Optional[date] = None, at: Optional[str] = None, following: bool = False,
-               today: Optional[date] = None) -> Dict:
+               calendar: Optional[str] = None, today: Optional[date] = None, now: Optional[datetime] = None) -> Dict:
         """
         Removes an event from one of the user's own calendars, for "cancel the dentist on
         Thursday" - straight away, and said back so a mistake is heard, and undone by "undo
@@ -992,14 +994,16 @@ class GoogleCalendar:
             day: The day it's on, if the user said - else it's looked for from today.
             at: The time it starts, "HH:MM", if the user said.
             following: Whether to remove it from this one on, for "all of them" or "every week".
+            calendar: The calendar it's on, if the user named one - "work" is Work.
             today: Today's date - only given by the tests.
+            now: The time now - only given by the tests.
 
         Returns:
             Dict with 'success' and what was removed, or why not, as the 'message' - and once
             it's removed, an 'undo', which puts it back.
         """
-        today = today or date.today()
-        found = self._to_change(search, day, at, following, today)
+        today, now = _today_and_now(today, now)
+        found = self._to_change(search, day, at, following, today, now, calendar)
         if isinstance(found, str):
             return {"success": False, "message": found}
         summary = found["summary"]
@@ -1083,11 +1087,16 @@ class GoogleCalendar:
             logger.info(f"Google wouldn't set an event back to confirmed ({e.response.status_code}), so it's copied")
             self._insert(calendar_id, copy)
 
-    def _to_change(self, search: str, day: Optional[date], at: Optional[str], following: bool,
-                   today: date) -> Union[Dict, str]:
+    def _to_change(self, search: str, day: Optional[date], at: Optional[str], following: bool, today: date,
+                   now: datetime, calendar: Optional[str] = None) -> Union[Dict, str]:
         """
         The one event a change is for: matched by its words, as find matches them, on the day
-        given or from today over SEARCH_DAYS - then at the time given, if one was.
+        given or from today over SEARCH_DAYS - then at the time given, and on the calendar
+        named, if they were.
+
+        A time a repeating event was on that has started is never one: earlier times are the
+        record of past shifts and lectures, so they stay as they were. A one-off is changed
+        whenever it was.
 
         Args:
             search: A word or two from its name, e.g. "dentist".
@@ -1096,6 +1105,8 @@ class GoogleCalendar:
             following: Whether it's from this one on - then of several times of one series,
                 it's the earliest.
             today: Today's date.
+            now: The time now.
+            calendar: The calendar it's on, as the user named it, or None.
 
         Returns:
             The event, as events gives it with whole - or what to say when there isn't the
@@ -1110,8 +1121,19 @@ class GoogleCalendar:
             clock = (int(match.group(1)), int(match.group(2))) if match else None
             if clock is None or clock[0] > 23 or clock[1] > 59:
                 return "I didn't catch the time."
+        # "Every week from last Tuesday" would change the times since then, which have already been.
+        if following and day is not None and day < today:
+            return DAY_GONE
+        first, days = (day, 1) if day else (today, SEARCH_DAYS)
         try:
-            events = self.events(day or today, 1 if day else SEARCH_DAYS, leave_out=self.left_out(), whole=True)
+            if isinstance(calendar, str) and calendar.strip():
+                named = self._calendars_named(calendar, self.calendars())
+                if not named:
+                    return NO_SUCH_CALENDAR
+                # A calendar named is read for itself, even one out of what's on - as an activity is.
+                events = self.events(first, days, calendar_ids=[each["id"] for each in named], whole=True)
+            else:
+                events = self.events(first, days, leave_out=self.left_out(), whole=True)
         except READ_FAILURES as e:
             return _failed(e)["message"]
         patterns = [_called([word]) for word in words]
@@ -1121,13 +1143,21 @@ class GoogleCalendar:
             timed = [event for event in found if not event["all_day"]]
             found = [event for event in timed if (event["start"].hour, event["start"].minute) == clock] or \
                 [event for event in timed if event["start"].hour == clock[0]]
+        to_come = [event for event in found if not (event["recurring_id"] and _started(event, now))]
+        if found and not to_come:
+            return DAY_GONE
+        found = to_come
         series = {(event["calendar_id"], event["recurring_id"]) for event in found}
         if following and len(series) == 1 and found[0]["recurring_id"]:
             found = found[:1]
         if not found:
             return f"I can't find the {' '.join(words)} on your calendar{f' {_on(day, today)}' if day else ''}."
         if len(found) > 1:
-            said = [_found_said(event, today) for event in found[:MOST_FOUND]]
+            # Named by their calendars too when they're on more than one - a lecture at 11 on
+            # Uni and on the user's own would otherwise be said twice the same.
+            several = len({event["calendar_id"] for event in found}) > 1
+            said = [_found_said(event, today) + (f", on {event['calendar']}" if several and event["calendar"] else "")
+                    for event in found[:MOST_FOUND]]
             if len(found) > MOST_FOUND:
                 said.append(f"{len(found) - MOST_FOUND} more")
             return f"I found {len(found)}: {'; '.join(said[:-1])}; and {said[-1]}. Which one?"
@@ -1156,6 +1186,27 @@ class GoogleCalendar:
         default = self.new_events_calendar(calendars) or {"id": "primary", "name": "", "primary": True, "writable": True}
         if not isinstance(named, str) or not named.strip():
             return default, default
+        matches = self._calendars_named(named, calendars)
+        if not matches:
+            return NO_SUCH_CALENDAR
+        writable = [each for each in matches if each["writable"]]
+        if not writable:
+            return f"I can't add to {spoken_name(matches[0])} - Google only lets me add to your own calendars."
+        return writable[0], default
+
+    def _calendars_named(self, named: str, calendars: List[Dict]) -> List[Dict]:
+        """
+        The calendars the user named, to add to or change an event on: by a calendar's own
+        name - "my work calendar" is Work - else an activity's word - "shifts" is Work too -
+        else, for "my calendar", the user's own.
+
+        Args:
+            named: The calendar as the user named it.
+            calendars: Google's list of the calendars, as calendars gives it.
+
+        Returns:
+            The calendars it names - none for a name no calendar has.
+        """
         said = _as_said(named)
         # "My work calendar" is Work, and "my calendar" the user's own.
         bare = re.sub(r"(?:^| )calendar$", "", re.sub(r"^(?:my|the) ", "", said)).strip()
@@ -1169,12 +1220,7 @@ class GoogleCalendar:
         if not matches and bare in OWN_CALENDAR:
             matches = [next((each for each in calendars if each["primary"]), None) or
                        {"id": "primary", "name": "", "primary": True, "writable": True}]
-        if not matches:
-            return "I haven't got a calendar called that."
-        writable = [each for each in matches if each["writable"]]
-        if not writable:
-            return f"I can't add to {spoken_name(matches[0])} - Google only lets me add to your own calendars."
-        return writable[0], default
+        return matches
 
     def new_events_calendar(self, calendars: List[Dict]) -> Optional[Dict]:
         """
@@ -1898,6 +1944,21 @@ def _found_said(event: Dict, today: date) -> str:
 def _day_of(event: Dict) -> date:
     """The day an event read starts on - its own, for one all day."""
     return event["start"] if event["all_day"] else event["start"].date()
+
+
+def _today_and_now(today: Optional[date], now: Optional[datetime]) -> Tuple[date, datetime]:
+    """
+    Today and the time now, for a change: the clock's - or as a test gives them, with the
+    start of the day for the time when only the day is given.
+    """
+    if now is None:
+        now = datetime.combine(today, day_time()).astimezone() if today else datetime.now().astimezone()
+    return today or now.date(), now
+
+
+def _started(event: Dict, now: datetime) -> bool:
+    """Whether an event read has started by now - one all day from the start of its day."""
+    return event["start"] <= now.date() if event["all_day"] else event["start"] <= now
 
 
 def _when_changed(event: Dict, today: date) -> str:
