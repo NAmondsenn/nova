@@ -262,8 +262,8 @@ class Session:
                                       downloads=brain.downloads, football=brain.football,
                                       listening=brain.listening, wrapped=brain.wrapped_store, config=config,
                                       new_music=brain.new_music_playlist, journeys=brain.journeys,
-                                      ring_on=brain.ring_on, room_of=brain.room_of,
-                                      room_players=self._room_players)
+                                      playlist_changes=brain.playlist_changes, ring_on=brain.ring_on,
+                                      room_of=brain.room_of, room_players=self._room_players)
 
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.

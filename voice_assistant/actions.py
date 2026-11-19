@@ -282,6 +282,17 @@ def tool(description: str, needs: Union[str, Tuple[str, ...], None] = None, requ
     return declare
 
 
+# Which song a playlist tool is about, the same for each of them.
+SONG_PARAMETER = {
+    "type": "string",
+    "enum": ["this", "last"],
+    "description": (
+        "'this' (the default) for the song playing, 'last' for the one before it - the song which "
+        "played just before, or has just ended. Only 'last' if the user says last, previous or before."
+    ),
+}
+
+
 def _things(items: Any) -> List[str]:
     """The things the model gave, if it gave a list of them, e.g. ["eggs", "milk"] - else none."""
     if not isinstance(items, list):
@@ -295,7 +306,7 @@ class ActionExecutor:
     def __init__(self, music=None, clock=None, volume=None, weather=None, home=None, memory=None, ntfy=None,
                  satellite: Optional[str] = None, batteries=None, lists=None, pc=None, calendar=None,
                  downloads=None, football=None, listening=None, wrapped=None, config=None, new_music=None,
-                 journeys=None, ring_on: Callable[[str], str] = lambda name: name,
+                 journeys=None, playlist_changes=None, ring_on: Callable[[str], str] = lambda name: name,
                  room_of: Callable[[str], List[str]] = lambda name: [name],
                  room_players: Optional[Callable[[], List]] = None):
         """
@@ -332,6 +343,9 @@ class ActionExecutor:
                 if there isn't one - find_new_music plays that one by its id when it has it.
             journeys: Journeys, for how long a journey takes and when to leave for it, or None if
                 Home Assistant isn't set up.
+            playlist_changes: PlaylistChanges, which adds the song playing to playlists, takes it off,
+                makes playlists and likes songs by its rules, or None if there isn't one - the brain
+                always has one, so each playlist tool says it isn't set up only without it.
             ring_on: Given the satellite the user is talking to, the one a timer or alarm set
                 there rings on - itself, unless it's a push-to-talk satellite, which hands
                 them to an always-on one.
@@ -361,6 +375,7 @@ class ActionExecutor:
         self.config = config
         self.new_music = new_music
         self.journeys = journeys
+        self.playlist_changes = playlist_changes
         self.ring_on = ring_on
         self.room_of = room_of
         self.room_players = room_players or (lambda: [self.music])
@@ -846,6 +861,123 @@ class ActionExecutor:
     )
     def shuffle(self, enabled: bool = True):
         return self._music_offline() or self.music.shuffle(bool(enabled))
+
+    # Playlists and liked songs - see playlist_changes.py
+
+    def _song_to_change(self, which: Optional[str],
+                        needs_song: bool = True) -> Tuple[Any, Optional[Dict], Optional[Dict]]:
+        """
+        The music player a playlist change is about, and the song on it - or why there isn't one to change.
+
+        The player is the first of the room's playing, as pausing is, so what's changed is the song which is
+        heard - and Navidrome is checked on it, not on this satellite's own player, which in a room may be
+        another. Only Navidrome has playlists Nova can change.
+
+        Args:
+            which: "this" for the song playing, "last" for the one before it; anything else is "this".
+            needs_song: False when no song is wanted, as for making an empty playlist.
+
+        Returns:
+            The player, the song (None unless one is wanted) and None - or None, None and what to say instead.
+        """
+        if self.playlist_changes is None:
+            return None, None, {"success": False, "message": "Changing playlists isn't set up."}
+        offline = self._music_offline()
+        if offline:
+            return None, None, offline
+        player = self._playing_in_room()[0]
+        if getattr(player, "name", None) != "Navidrome":
+            return None, None, {"success": False, "message": "Changing playlists only works with Navidrome."}
+        if not needs_song:
+            return player, None, None
+        last = which == "last"
+        song = player.song_at("last" if last else "this")
+        if song is None:
+            nothing = "There isn't a last song." if last else "Nothing's playing."
+            return None, None, {"success": False, "message": nothing}
+        return player, song, None
+
+    @tool(
+        "Put the song playing on one or more of the user's playlists, for 'add this to Gym', 'put this on my car "
+        "playlist and chill' or 'add the last song to Gym'. Pass each playlist name roughly as the user said it: it's "
+        "matched loosely. 'liked songs' may be passed as a name, for 'add this to my liked songs'. Never make a "
+        "playlist unless the user says new or make: if they haven't got the one they named, this offers to make it "
+        "itself, so never call make_playlist for 'add this to X'. What was done is said for you, so just reply "
+        "'Okay.'",
+        needs="music",
+        playlists={
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "The playlists, each as the user said it, e.g. ['gym', 'car'] - or 'liked songs'.",
+        },
+        song=SONG_PARAMETER,
+    )
+    def add_to_playlists(self, playlists: Optional[List[str]] = None, song: Optional[str] = None):
+        player, found, refusal = self._song_to_change(song)
+        return refusal or self.playlist_changes.add(player, found, _things(playlists))
+
+    @tool(
+        "Take the song playing off one or more of the user's playlists, for 'take this off Gym', 'remove this from "
+        "my car playlist' or 'take the last song off chill'. Pass each playlist name roughly as the user said it: it's "
+        "matched loosely. 'liked songs' may be passed as a name, which unlikes the song. What was done is said for "
+        "you, so just reply 'Okay.'",
+        needs="music",
+        playlists={
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "The playlists, each as the user said it, e.g. ['gym', 'car'] - or 'liked songs'.",
+        },
+        song=SONG_PARAMETER,
+    )
+    def take_off_playlists(self, playlists: Optional[List[str]] = None, song: Optional[str] = None):
+        player, found, refusal = self._song_to_change(song)
+        return refusal or self.playlist_changes.remove(player, found, _things(playlists))
+
+    @tool(
+        "Make a new playlist, only for 'make a playlist called X' or 'add this to a new playlist called X' - for "
+        "that, with_song is true. For 'add this to X' with no 'new' or 'make', use add_to_playlists, which offers to "
+        "make X if there isn't one. What was done is said for you, so just reply 'Okay.'",
+        needs="music",
+        name={"type": "string", "description": "The playlist's name, as the user said it."},
+        with_song={
+            "type": "boolean",
+            "description": "True to put the song playing on it, for 'add this to a new playlist'. Leave out for an "
+                           "empty one.",
+        },
+        song=SONG_PARAMETER,
+    )
+    def make_playlist(self, name: Optional[str] = None, with_song: Optional[bool] = None,
+                      song: Optional[str] = None):
+        player, found, refusal = self._song_to_change(song, needs_song=bool(with_song))
+        return refusal or self.playlist_changes.make(player, name or "", found)
+
+    @tool(
+        "Like the song playing, or unlike it, for 'like this', 'like the last song' or 'unlike this'. What was done "
+        "is said for you, so just reply 'Okay.'",
+        needs="music",
+        like={"type": "boolean", "description": "True (the default) to like it, False to unlike it."},
+        song=SONG_PARAMETER,
+    )
+    def like_song(self, like: Optional[bool] = None, song: Optional[str] = None):
+        player, found, refusal = self._song_to_change(song)
+        return refusal or self.playlist_changes.like(player, found, True if like is None else bool(like))
+
+    # Only ever run by the conversation, on the user's yes to add_to_playlists' "Want me to make it?" - so Claude,
+    # which isn't offered it, can't make a playlist the user didn't say new or make for. It makes it with the song
+    # which was asked about, carried in the offer, and never the one playing by the time of the yes.
+    @tool(
+        "Make the playlist which was offered, once the user has said yes.",
+        needs="music",
+        for_model=False,
+        name={"type": "string", "description": "The playlist to make, as the user said it."},
+        song={"type": "object", "description": "The song to put on it - its id, title and artist."},
+    )
+    def make_offered_playlist(self, name: Optional[str] = None, song: Optional[Dict] = None):
+        player, _, refusal = self._song_to_change(None, needs_song=False)
+        if refusal:
+            return refusal
+        wanted = song if isinstance(song, dict) and song.get("id") else None
+        return self.playlist_changes.make(player, name or "", wanted)
 
     # Timers, reminders and alarms
 

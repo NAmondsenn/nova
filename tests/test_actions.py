@@ -2353,3 +2353,248 @@ def test_without_home_assistant_journeys_say_so():
     for tool in ("journey", "set_leave_reminder"):
         result = executor.execute(Action(tool, {"place": "Work"}))
         assert (result.ok, result.say) == (False, "Journeys need Home Assistant.")
+
+
+# Playlists and liked songs - see playlist_changes.py
+
+ENDLESS = {"id": "s1", "title": "Endless", "artist": "Made Up Band"}
+BEFORE = {"id": "s0", "title": "Before", "artist": "Made Up Band"}
+
+
+class SongPlayer:
+    """
+    Stands in for NavidromePlayer with a song playing and the one before it, noting each time a song is read.
+    A name other than Navidrome makes it another service's.
+    """
+
+    needs_internet = False
+
+    def __init__(self, this=ENDLESS, last=BEFORE, name="Navidrome", playing=True):
+        self.name = name
+        self.songs = {"this": this, "last": last}
+        self.playing = playing
+        self.read = []
+
+    def song_at(self, which):
+        self.read.append(which)
+        return self.songs[which]
+
+    def was_playing(self):
+        return self.playing
+
+
+class RecordingPlaylistChanges:
+    """Stands in for PlaylistChanges, noting each call as (what, library, ...) and answering with the reply given."""
+
+    def __init__(self, reply=None):
+        self.reply = reply or {"success": True, "message": "Done."}
+        self.calls = []
+
+    def add(self, library, song, names):
+        self.calls.append(("add", library, song, names))
+        return dict(self.reply)
+
+    def remove(self, library, song, names):
+        self.calls.append(("remove", library, song, names))
+        return dict(self.reply)
+
+    def make(self, library, name, song):
+        self.calls.append(("make", library, name, song))
+        return dict(self.reply)
+
+    def like(self, library, song, liked):
+        self.calls.append(("like", library, song, liked))
+        return dict(self.reply)
+
+
+# What Claude calls for each of the four, bar which song.
+PLAYLIST_ACTIONS = [
+    Action("add_to_playlists", {"playlists": ["Gym", "Car"]}, from_model=True),
+    Action("take_off_playlists", {"playlists": ["Gym"]}, from_model=True),
+    Action("make_playlist", {"name": "Chill", "with_song": True}, from_model=True),
+    Action("like_song", {}, from_model=True),
+]
+
+
+def test_add_this_to_playlists_gives_the_song_playing_and_the_names(make_executor):
+    player = SongPlayer()
+    changes = RecordingPlaylistChanges({"success": True, "message": "Added Endless to Gym and Car."})
+    executor = make_executor(player, playlist_changes=changes)
+    result = executor.execute(PLAYLIST_ACTIONS[0])
+    assert (result.ok, result.say) == (True, "Added Endless to Gym and Car.")
+    # The player itself is the library, and the song is the one at the queue's place unless "last" is said.
+    assert changes.calls == [("add", player, ENDLESS, ["Gym", "Car"])]
+    assert player.read == ["this"]
+
+
+def test_each_tool_gives_what_it_changes_the_song_and_what_was_said(make_executor):
+    player, changes = SongPlayer(), RecordingPlaylistChanges()
+    executor = make_executor(player, playlist_changes=changes)
+    for action in PLAYLIST_ACTIONS:
+        assert executor.execute(action).ok
+    # Making one with the song on it, or not, and liking being what's wanted unless unliking is said.
+    executor.execute(Action("make_playlist", {"name": "Empty"}, from_model=True))
+    executor.execute(Action("like_song", {"like": False}, from_model=True))
+    assert changes.calls == [("add", player, ENDLESS, ["Gym", "Car"]), ("remove", player, ENDLESS, ["Gym"]),
+                             ("make", player, "Chill", ENDLESS), ("like", player, ENDLESS, True),
+                             ("make", player, "Empty", None), ("like", player, ENDLESS, False)]
+
+
+def test_the_last_song_is_the_one_before(make_executor):
+    player, changes = SongPlayer(), RecordingPlaylistChanges()
+    executor = make_executor(player, playlist_changes=changes)
+    executor.execute(Action("add_to_playlists", {"playlists": ["Gym"], "song": "last"}, from_model=True))
+    executor.execute(Action("take_off_playlists", {"playlists": ["Gym"], "song": "last"}, from_model=True))
+    executor.execute(Action("make_playlist", {"name": "Chill", "with_song": True, "song": "last"}, from_model=True))
+    executor.execute(Action("like_song", {"song": "last"}, from_model=True))
+    assert [call[2] if call[0] != "make" else call[3] for call in changes.calls] == [BEFORE] * 4
+    assert player.read == ["last"] * 4
+    # Anything else Claude says is this one.
+    executor.execute(Action("like_song", {"song": "the one before"}, from_model=True))
+    assert player.read[-1] == "this"
+
+
+def test_nothing_playing_or_no_last_song_says_so(make_executor):
+    player, changes = SongPlayer(this=None, last=None), RecordingPlaylistChanges()
+    executor = make_executor(player, playlist_changes=changes)
+    for action in PLAYLIST_ACTIONS:
+        result = executor.execute(action)
+        assert (result.ok, result.say) == (False, "Nothing's playing."), action.tool
+    for action in PLAYLIST_ACTIONS:
+        last = Action(action.tool, {**action.params, "song": "last"}, from_model=True)
+        result = executor.execute(last)
+        assert (result.ok, result.say) == (False, "There isn't a last song."), action.tool
+    assert changes.calls == []
+    # A playlist made empty asks nothing of a song.
+    assert executor.execute(Action("make_playlist", {"name": "Chill"}, from_model=True)).ok
+    assert changes.calls == [("make", player, "Chill", None)]
+
+
+def test_playlists_on_spotify_say_they_need_navidrome(make_executor):
+    player, changes = SongPlayer(name="Spotify"), RecordingPlaylistChanges()
+    executor = make_executor(player, playlist_changes=changes)
+    for action in PLAYLIST_ACTIONS + [Action("make_playlist", {"name": "Chill"}, from_model=True),
+                                      Action("make_offered_playlist", {"name": "Jim", "song": ENDLESS})]:
+        result = executor.execute(action)
+        assert (result.ok, result.say) == (False, "Changing playlists only works with Navidrome."), action.tool
+    assert changes.calls == [] and player.read == []
+
+
+def test_navidrome_is_checked_on_the_player_whose_song_is_used(make_executor):
+    # In a room, the music heard is the first player playing - which may not be this satellite's own.
+    here, there = SongPlayer(name="Spotify", playing=False), SongPlayer(playing=True)
+    changes = RecordingPlaylistChanges()
+    executor = make_executor(here, playlist_changes=changes, room_players=lambda: [here, there])
+    assert executor.execute(Action("like_song", {}, from_model=True)).ok
+    assert changes.calls == [("like", there, ENDLESS, True)]
+    assert here.read == [] and there.read == ["this"]
+
+    # And the other way round: this satellite's Navidrome isn't what's playing.
+    here, there = SongPlayer(playing=False), SongPlayer(name="Spotify", playing=True)
+    changes = RecordingPlaylistChanges()
+    executor = make_executor(here, playlist_changes=changes, room_players=lambda: [here, there])
+    result = executor.execute(Action("like_song", {}, from_model=True))
+    assert (result.ok, result.say) == (False, "Changing playlists only works with Navidrome.")
+    assert changes.calls == []
+
+
+def test_without_playlist_changes_set_up_each_tool_says_so(make_executor):
+    player = SongPlayer()
+    executor = make_executor(player)
+    for action in PLAYLIST_ACTIONS:
+        result = executor.execute(action)
+        assert (result.ok, result.say) == (False, "Changing playlists isn't set up."), action.tool
+    result = executor.execute(Action("make_offered_playlist", {"name": "Jim", "song": ENDLESS}))
+    assert (result.ok, result.say) == (False, "Changing playlists isn't set up.")
+    assert player.read == []
+
+
+def test_with_no_music_the_playlist_tools_say_so_and_are_not_offered(make_executor):
+    executor = make_executor(playlist_changes=RecordingPlaylistChanges())
+    assert not {"add_to_playlists", "take_off_playlists", "make_playlist", "like_song"} & {
+        schema["name"] for schema in executor.tool_schemas()}
+    assert executor.execute(Action("like_song", {}, from_model=True)).say == "The music isn't available right now."
+
+
+def test_playlists_offline_say_so_without_asking(make_executor, monkeypatch):
+    from voice_assistant import actions as actions_module
+    monkeypatch.setattr(actions_module.network, "online", lambda: False)
+    player, changes = SongPlayer(), RecordingPlaylistChanges()
+    player.needs_internet = True
+    executor = make_executor(player, playlist_changes=changes)
+    result = executor.execute(Action("like_song", {}, from_model=True))
+    assert (result.ok, result.say) == (False, "Navidrome needs the internet, and I can't reach it right now.")
+    assert changes.calls == [] and player.read == []
+
+
+def test_the_offered_playlist_is_made_with_the_song_asked_about_not_the_one_playing_now(make_executor):
+    # "Add this to Jim" offered to make Jim; the next song started before the yes. Review Focus 1.
+    player, changes = SongPlayer(this=BEFORE, last=ENDLESS), RecordingPlaylistChanges(
+        {"success": True, "message": "Made Jim with Endless on it."})
+    executor = make_executor(player, playlist_changes=changes)
+    result = executor.execute(Action("make_offered_playlist", {"name": "Jim", "song": ENDLESS}))
+    assert (result.ok, result.say) == (True, "Made Jim with Endless on it.")
+    assert changes.calls == [("make", player, "Jim", ENDLESS)]
+    assert player.read == []
+
+
+def test_the_offer_carried_by_a_reply_reaches_the_result_to_be_run_on_a_yes(make_executor):
+    offer = Action("make_offered_playlist", {"name": "Jim", "song": ENDLESS})
+    changes = RecordingPlaylistChanges({"success": True, "ask_first": offer,
+                                        "message": "You haven't got a playlist called Jim. Want me to make it?"})
+    executor = make_executor(SongPlayer(), playlist_changes=changes)
+    result = executor.execute(Action("add_to_playlists", {"playlists": ["Jim"]}, from_model=True))
+    assert result.ok and result.ask_first is offer
+
+
+def test_the_offer_is_never_offered_to_claude(make_executor):
+    player, changes = SongPlayer(), RecordingPlaylistChanges()
+    executor = make_executor(player, playlist_changes=changes)
+    offered = {schema["name"] for schema in executor.tool_schemas()}
+    assert "make_offered_playlist" not in offered
+    assert {"add_to_playlists", "take_off_playlists", "make_playlist", "like_song"} <= offered
+    # Nor can it run it by name.
+    result = executor.execute(Action("make_offered_playlist", {"name": "Jim", "song": ENDLESS}, from_model=True))
+    assert result.ok is False and changes.calls == []
+
+
+def test_an_offer_without_a_song_to_put_on_it_makes_an_empty_playlist_rather_than_failing(make_executor):
+    player, changes = SongPlayer(), RecordingPlaylistChanges()
+    executor = make_executor(player, playlist_changes=changes)
+    executor.execute(Action("make_offered_playlist", {"name": "Jim"}))
+    executor.execute(Action("make_offered_playlist", {"name": "Jim", "song": {"title": "No id"}}))
+    assert changes.calls == [("make", player, "Jim", None)] * 2
+
+
+def test_the_playlist_tools_are_described_for_claude(make_executor):
+    executor = make_executor(SongPlayer(), playlist_changes=object())
+    offered = {schema["name"]: schema for schema in executor.tool_schemas()}
+    properties = {name: offered[name]["input_schema"]["properties"] for name in offered if name in (
+        "add_to_playlists", "take_off_playlists", "make_playlist", "like_song")}
+    assert set(properties["add_to_playlists"]) == set(properties["take_off_playlists"]) == {"playlists", "song"}
+    assert properties["add_to_playlists"]["playlists"]["type"] == "array"
+    assert set(properties["make_playlist"]) == {"name", "with_song", "song"}
+    assert set(properties["like_song"]) == {"like", "song"}
+    for each in properties.values():
+        assert each["song"]["enum"] == ["this", "last"]
+    for name in ("add_to_playlists", "take_off_playlists", "make_playlist", "like_song"):
+        assert "just reply 'Okay.'" in offered[name]["description"], name
+        assert offered[name]["input_schema"].get("required", []) == [], name
+    assert "liked songs" in offered["add_to_playlists"]["description"]
+    assert "Never make a playlist unless the user says new or make" in offered["add_to_playlists"]["description"]
+    assert "make a playlist called" in offered["make_playlist"]["description"]
+    assert "add this to a new playlist called" in offered["make_playlist"]["description"]
+
+
+def test_the_playlist_tools_change_things_so_a_later_undo_reaches_only_the_last(make_executor):
+    tools = ActionExecutor.tools()
+    for name in ("add_to_playlists", "take_off_playlists", "make_playlist", "like_song", "make_offered_playlist"):
+        assert tools[name].tool["changes"] is True and tools[name].tool["needs"] == "music", name
+    assert tools["make_offered_playlist"].tool["for_model"] is False
+
+    undone = []
+    changes = RecordingPlaylistChanges({"success": True, "message": "Added.", "undo": lambda: (
+        undone.append(1) or {"success": True, "message": "Took it back."})})
+    executor = make_executor(SongPlayer(), playlist_changes=changes)
+    executor.execute(Action("add_to_playlists", {"playlists": ["Gym"]}, from_model=True))
+    assert executor.execute(UNDO_THAT).say == "Took it back." and undone == [1]

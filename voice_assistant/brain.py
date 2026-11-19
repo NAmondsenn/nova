@@ -59,6 +59,7 @@ from voice_assistant.music_folder import MusicFolder
 from voice_assistant.new_music import NewMusicPlaylist
 from voice_assistant.ntfy import RETOPIC, Ntfy
 from voice_assistant.pc import PCPower
+from voice_assistant.playlist_changes import PlaylistChanges
 from voice_assistant.protocol import ProtocolError, Refused, admit
 from voice_assistant.remote import RemoteSatellite
 from voice_assistant.routines import Routines
@@ -392,6 +393,13 @@ class Brain:
         self.new_music_playlist = NewMusicPlaylist(lambda: self.downloads.library(),
                                                    os.path.join(paths.DATA_DIR, "new_music.json"),
                                                    lambda: self.config.section("new_music"))
+        # The rules for changing his playlists by voice, which every satellite's session uses: SoulSync is made at
+        # each request as the settings are then, and the playlist Nova makes each morning is told by the id it
+        # recorded, under the name set then - it's remade each morning, so a change to it wouldn't stay.
+        self.playlist_changes = PlaylistChanges(
+            lambda: SoulSync.from_config(self.config, os.getenv("SOULSYNC_API_KEY")),
+            lambda: self.new_music_playlist.playlist_id(
+                (self.config.section("new_music").get("playlist") or "").strip()))
         # The brain's second device in Home Assistant, showing that snapshot - or None with no MQTT
         # broker set. Made here as it needs the listening stats. Started by run().
         self.music_device = MusicDevice.from_config(config, os.getenv("MQTT_PASSWORD"), self.listening)
