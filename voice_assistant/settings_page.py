@@ -50,7 +50,7 @@ from urllib.parse import parse_qs, urlsplit
 import requests
 import yaml
 
-from voice_assistant import paths, storage, timeline
+from voice_assistant import paths, satellite_names, storage, timeline
 from voice_assistant.batteries import HOME_FAILURES
 from voice_assistant.clock import format_duration
 from voice_assistant.config import CHOICES, LIMITS, Config, ConfigError, check, clashes, limit_problem
@@ -247,6 +247,11 @@ PLAYBACK = ("pause", "skip", "previous")
 # What's said when the satellites' passwords file can't be read - rather than that
 # there's no such satellite, which would send the user looking for one.
 SATELLITES_UNREADABLE = "The satellites' file can't be read, so nothing was changed."
+
+# How many other names a satellite can be given on the page, and how long each can be - so
+# the box stays something to read, and what's said in a reply stays short.
+MOST_CALLED = 5
+LONGEST_CALLED = 30
 
 
 def _kind(default: Any) -> str:
@@ -616,8 +621,9 @@ class SettingsPage:
         """
         Each satellite the brain lets in, whether it's the default, and whether it's
         connected - with what it's doing, its mute, whether it records on a press of a
-        key, whether it travels with the user and, if Spotify is the player, the speaker
-        it plays on. Never its password.
+        key, whether it travels with the user, what machine it is (None if it hasn't said),
+        whether it saves notes, the other names he has given it and, if Spotify is the
+        player, the speaker it plays on. Never its password.
 
         Args:
             names: The satellites, as the brain has them - the first is the default.
@@ -625,6 +631,7 @@ class SettingsPage:
         found = []
         default = names[0] if names else None
         journeys = self.brain.journeys
+        rooms = self.brain.rooms
         # With Navidrome as the player, Spotify plays nowhere, so none is said. Spotify
         # is the player when none is chosen, as with no config at all.
         spotify = self.brain.config is None or _chosen(self.brain.config) == "spotify"
@@ -636,9 +643,11 @@ class SettingsPage:
             found.append({"name": name, "connected": session is not None,
                           "activity": session.activity if session is not None else "idle",
                           "muted": session is not None and session.muted, "default": name == default,
-                          "spotify_speaker": speaker, "push_to_talk": self.brain.rooms.push_to_talk(name),
+                          "spotify_speaker": speaker, "push_to_talk": rooms.push_to_talk(name),
                           # Never true without journeys, which is what keeps it.
-                          "travels": journeys is not None and journeys.travels(name)})
+                          "travels": journeys is not None and journeys.travels(name),
+                          "machine": rooms.machine(name), "called": rooms.called(name),
+                          "saves_notes": rooms.saves_notes(name)})
         return found
 
     def state(self, satellite: Optional[str] = None) -> Dict:
@@ -2094,6 +2103,72 @@ class SettingsPage:
         return {"success": True,
                 "message": f"{name} travels with you now." if on else f"{name} stays at home now."}
 
+    def set_called(self, name, called, who: str) -> Dict:
+        """
+        Gives a satellite the other names he says for it, in place of any it had - so
+        "put it on the desk" finds it. See SatelliteRooms.set_called. Nothing is saved if
+        any of them is refused. Rooms keeps its own file under its own lock, so _saving
+        isn't held.
+
+        A name is refused if another satellite has it - as its own name or a name set for
+        it - or if it's one of the words for another satellite's machine ("pc" for the
+        Mac while there's a PC), unless it's one of this satellite's own as well ("computer"
+        for the PC, though the Mac is one too). All are compared as they're said: see
+        satellite_names.plain.
+
+        Args:
+            name: The satellite, as the page sent it.
+            called: The names as typed in the page's box, apart by commas - empty for none.
+            who: The Tailscale login asking, for the log.
+
+        Returns:
+            Dict with 'success' and a 'message'.
+        """
+        if not (isinstance(name, str) and isinstance(called, str)):
+            return {"success": False, "message": "That didn't make sense."}
+        names = self._satellite_names()
+        if names is None:
+            return {"success": False, "message": SATELLITES_UNREADABLE}
+        if name not in names:
+            return {"success": False, "message": f"There's no satellite called {name}."}
+        given = [each.strip() for each in called.split(",") if each.strip()]
+        if len(given) > MOST_CALLED:
+            return {"success": False, "message": f"That's more than {MOST_CALLED} names."}
+        if any(len(each) > LONGEST_CALLED for each in given):
+            return {"success": False, "message": f"A name can't be more than {LONGEST_CALLED} characters."}
+        # One of marks alone, such as "?!", is nothing anyone could say, so it would be kept and never found.
+        for each in given:
+            if not satellite_names.plain(each):
+                return {"success": False, "message": f"{each} has no words in it."}
+        rooms = self.brain.rooms
+        # What each of the others is known by, which a name here would be taken for, and which of
+        # them it is. It's told by the name the page shows, as that's the row he'd look for.
+        taken: Dict[str, str] = {}
+        own = satellite_names.MACHINE_WORDS.get(rooms.machine(name), ())
+        for other in names:
+            if other == name:
+                continue
+            for word in [other] + rooms.called(other):
+                taken.setdefault(satellite_names.plain(word), other)
+            # Shared with this one's own, they aren't taken: "computer" is the PC's and the Mac's.
+            for word in satellite_names.MACHINE_WORDS.get(rooms.machine(other), ()):
+                if word not in own:
+                    taken.setdefault(word, other)
+        for each in given:
+            other = taken.get(satellite_names.plain(each))
+            if other is not None:
+                return {"success": False, "message": f"{each} is already what you call {other}."}
+        try:
+            rooms.set_called(name, given)
+        except OSError as e:
+            logger.error(f"Settings page: couldn't save the other names of the {name} satellite: {e}")
+            return {"success": False, "message": "That couldn't be saved."}
+        if not given:
+            logger.info(f"Settings page: {who} cleared the other names of the {name} satellite")
+            return {"success": True, "message": f"{name} has no other names now."}
+        logger.info(f"Settings page: {who} gave the {name} satellite the other names {given!r}")
+        return {"success": True, "message": f"{name} is also called {satellite_names.listed(given, 'and')}."}
+
     # The clock displays. Their file keeps its own lock, as the satellites' passwords
     # do, so none of these holds _saving either. See docs/decisions/0013.
 
@@ -2394,6 +2469,7 @@ ACTIONS: Dict[str, Callable[[SettingsPage, Dict, str], Dict]] = {
     "/api/satellites/remove": lambda page, body, who: page.remove_satellite(body["name"], who),
     "/api/satellites/default": lambda page, body, who: page.make_default(body["name"], who),
     "/api/satellites/travels": lambda page, body, who: page.set_travels(body["name"], body["on"], who),
+    "/api/satellites/called": lambda page, body, who: page.set_called(body["name"], body["called"], who),
     # A new clock's fields are sent as one, as the page adds the satellite it's looking
     # after to every change it sends, which would otherwise be taken for the clock's.
     # Its satellite is always sent - null for the default's.
