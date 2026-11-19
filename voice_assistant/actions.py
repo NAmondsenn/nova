@@ -1687,8 +1687,8 @@ class ActionExecutor:
         "shift back an hour' or 'call my Tuesday meeting Planning'. Give search, and the day and time only when "
         "the user said them, for the event as it is now. new_start and new_end are local 'YYYY-MM-DD HH:MM', "
         "'YYYY-MM-DD' for the day alone, which keeps its time, or 'HH:MM' for the time alone, which keeps its day. "
-        "When only the time changes, give the time alone - never guess a day - and always with following unless "
-        "the user named a new day. Leave out whatever isn't changing. Give following only for 'all of them', "
+        "When only the time changes, give the time alone - never guess a day - and with following, always the "
+        "time alone unless the user named a new day. Leave out whatever isn't changing. Give following only for 'all of them', "
         "'every week' or 'from now on' - it changes only that one and the ones after it, never earlier ones, and "
         "only their time, not their days. What was done is said for you, so just reply 'Okay.' When Nova lists "
         "several and asks which, call again with the day, time or calendar the user picks.",
