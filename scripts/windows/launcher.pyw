@@ -11,8 +11,13 @@ Windows never sends SIGTERM, so a logoff, a shutdown or a deploy ends the satell
 without its clean-up, leaving its running mark. A fresh launcher follows each of those,
 so it takes the mark away before its first start, and the brain isn't told of an unclean
 stop; a satellite which crashes while the launcher runs still leaves it for the next.
+
+Only one launcher runs in the user's session: the Start-menu shortcut "Nova", which
+names Nova's music in Windows' media controls (docs/decisions/0030), points here too,
+and opening it would otherwise start a second satellite beside the first.
 """
 
+import ctypes
 import logging
 import os
 import subprocess
@@ -32,6 +37,16 @@ LONGEST_WAIT = 300
 # The satellite's stderr log is moved aside when it reaches this size, so it and its one
 # earlier copy hold about twice as much at most, however long the satellite runs.
 STDERR_LOG_MOST = 1_000_000
+
+# The mutex the running launcher holds, named for the user's session alone, which a second
+# launcher finds already there.
+MUTEX_NAME = "Local\\NovaSatelliteLauncher"
+# What GetLastError says when CreateMutexW opened one which was already there.
+ERROR_ALREADY_EXISTS = 183
+
+# The mutex's handle, kept for as long as the launcher runs - Windows lets it go as the
+# process ends, and the next launcher can run.
+_mutex = None
 
 
 class Backoff:
@@ -94,6 +109,50 @@ def copy_lines(stream, log: logging.Logger) -> None:
         logger.warning(f"Couldn't read the satellite's stderr: {error}")
 
 
+class _Kernel32:
+    """The two calls of Windows' kernel32 the launcher makes, with the last error read as ctypes keeps it."""
+
+    def __init__(self):
+        self._dll = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._dll.CreateMutexW.restype = ctypes.c_void_p
+        self._dll.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p)
+
+    def CreateMutexW(self, security, owned, name):
+        return self._dll.CreateMutexW(security, owned, name)
+
+    def GetLastError(self):
+        return ctypes.get_last_error()
+
+
+def _kernel32():
+    """Windows' kernel32 - None off Windows, where the tests run."""
+    if sys.platform != "win32":
+        return None
+    return _Kernel32()
+
+
+def only_launcher() -> bool:
+    """
+    Takes the launchers' mutex, unless another launcher has it.
+
+    Returns:
+        False if another launcher is already running - True otherwise, including off
+        Windows, and when the mutex can't be made, as two launchers are better than none.
+    """
+    global _mutex
+    kernel32 = _kernel32()
+    if kernel32 is None:
+        return True
+    handle = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+    if not handle:
+        logger.warning(f"Couldn't make the launchers' mutex (error {kernel32.GetLastError()}), so carrying on")
+        return True
+    if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        return False
+    _mutex = handle
+    return True
+
+
 def main():
     local = os.environ.get("LOCALAPPDATA")
     if not local:
@@ -109,6 +168,11 @@ def main():
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
+
+    # Before anything else, the running satellite's mark above all, is touched.
+    if not only_launcher():
+        logger.info("Another launcher is already running, so this one exits")
+        return
 
     # paths.py reads these two to find the install's settings, keys and saved data.
     environment = dict(os.environ, NOVA_CONFIG=os.path.join(base, "config"), NOVA_DATA=data)
