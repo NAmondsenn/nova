@@ -1250,10 +1250,16 @@ class Brain:
             try:
                 speaking = {session.satellite: session.satellite.speaker.speaking
                             for session in self.connected_sessions() if session.satellite.connected}
-                for satellite, quiet in self.quiet_others.tell(speaking, time.monotonic()):
-                    satellite.send("quiet", on=quiet)
+                changes = self.quiet_others.tell(speaking, time.monotonic())
             except Exception as e:
-                logger.error(f"Couldn't tell the satellites whether to be quiet: {e}")
+                logger.error(f"Couldn't work out which satellites to quiet: {e}")
+                continue
+            # Each on its own, so one which fails can't keep the rest from being told.
+            for satellite, quiet in changes:
+                try:
+                    satellite.send("quiet", on=quiet)
+                except Exception as e:
+                    logger.error(f"Couldn't tell the {satellite.name} satellite whether to be quiet: {e}")
 
     def _removed(self, name: str, password: Optional[str] = None) -> bool:
         """
