@@ -1,4 +1,4 @@
-# 0030: Nova's music in Windows' media controls
+# 0031: Nova's music in Windows' media controls
 
 19 November 2026 · Agreed with the user in chat ("yes"), after a throwaway test on his PC · Built
 

@@ -326,7 +326,7 @@ class Session:
         # What the satellite's own music is doing, sent to it as it changes, for Windows'
         # media controls to show - only to a satellite which said it has them, and only
         # with music. Their buttons act on this satellite's music alone. See
-        # _keep_media_controls and docs/decisions/0030.
+        # _keep_media_controls and docs/decisions/0031.
         self._now_playing = (NowPlayingFeed(satellite.send_now_playing)
                              if satellite.media_controls and self.music_player else None)
 

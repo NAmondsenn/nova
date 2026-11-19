@@ -267,7 +267,7 @@ class Satellite:
 
         # Nova's music in Windows' media controls, whose buttons go to the brain - only on
         # a push-to-talk satellite, which only the PC is, and only where winrt can be had,
-        # else None and the hello says there are none. See docs/decisions/0030.
+        # else None and the hello says there are none. See docs/decisions/0031.
         self.media: Optional[WindowsMedia] = None
         if self.push_to_talk:
             media = WindowsMedia(self._media_pressed)

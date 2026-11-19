@@ -2,7 +2,7 @@
 Media Controls Test
 Checks what the brain tells a satellite with Windows' media controls of its own music:
 only what changed, the cover only when it changes, and music elsewhere as none - see
-docs/decisions/0030. Needs nothing beyond the standard library.
+docs/decisions/0031. Needs nothing beyond the standard library.
 """
 
 import logging

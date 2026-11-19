@@ -2186,7 +2186,7 @@ def test_a_press_still_works_while_nova_speaks_on_another_satellite(brain, make)
     brain.say("stop_listening")
 
 
-# Windows' media controls - see docs/decisions/0030
+# Windows' media controls - see docs/decisions/0031
 
 class FakeWindowsMedia:
     """Stands in for WindowsMedia, keeping what it was asked to show - available unless the test says not."""

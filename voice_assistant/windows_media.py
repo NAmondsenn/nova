@@ -2,7 +2,7 @@
 Windows Media Module.
 
 Nova's music in Windows' own media controls, on the PC satellite - see
-docs/decisions/0030. The brain says what the satellite's music is doing (now_playing),
+docs/decisions/0031. The brain says what the satellite's music is doing (now_playing),
 and this shows it as a music session: the track, artist, album and cover, playing or
 paused, in the volume pop-up and wherever else Windows shows what's playing - and so in
 HASS.Agent's media player, which reads them. Stopped, it's cleared and switched off. The
@@ -200,7 +200,7 @@ class WindowsMedia:
         if not self._enabled:
             controls.is_enabled = True
             # Each on a line of its own: set together in one chained line, Windows left
-            # next and previous off without an error (docs/decisions/0030).
+            # next and previous off without an error (docs/decisions/0031).
             controls.is_play_enabled = True
             controls.is_pause_enabled = True
             controls.is_next_enabled = True

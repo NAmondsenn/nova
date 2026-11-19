@@ -1,7 +1,7 @@
 """
 Windows Media Test
 Checks how the PC satellite shows Nova's music in Windows' media controls and passes on
-their buttons - see docs/decisions/0030 - against a fake of the few parts of winrt it
+their buttons - see docs/decisions/0031 - against a fake of the few parts of winrt it
 uses, which notes every property set and the line it was set on. winrt itself is never
 imported: it's only on the PC.
 """

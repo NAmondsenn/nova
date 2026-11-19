@@ -1503,7 +1503,7 @@ class PausingPlayer:
 
 
 def test_a_satellite_with_media_controls_is_told_what_plays_and_its_buttons_work(brain, connect, monkeypatch):
-    # Through a real connection and a real session, from the hello on - see docs/decisions/0030.
+    # Through a real connection and a real session, from the hello on - see docs/decisions/0031.
     _real_sessions(monkeypatch)
     players = {}
 

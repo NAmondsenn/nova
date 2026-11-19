@@ -113,7 +113,7 @@ Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Pr
     -Settings $taskSettings -Description "Nova's satellite, started at logon" -Force | Out-Null
 
 # A Start-menu shortcut "Nova", which Windows names the satellite's music after in its
-# media controls (docs/decisions/0030): the satellite says it is Nova.Satellite, and
+# media controls (docs/decisions/0031): the satellite says it is Nova.Satellite, and
 # Windows looks for the shortcut with that AppUserModelID. It points at the launcher, as
 # the task does. Made again each time, and a shortcut which can't be made only leaves
 # the music named "pythonw.exe", so that is a warning, never a failed install.

@@ -1970,7 +1970,7 @@ def test_what_home_assistant_does_to_the_music_is_logged_without_what_plays(with
     assert "Secret Song" not in logged and "Private Gym" not in logged
 
 
-# Windows' media controls - see docs/decisions/0030
+# Windows' media controls - see docs/decisions/0031
 
 class ButtonPlayer(StubPlayer):
     """A stub player which also keeps what the buttons of Windows' media controls had it do."""

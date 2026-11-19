@@ -20,7 +20,7 @@ After the handshake, what a satellite sends the brain:
     progress  {"id": ..., "position": ...}
     away  {"rang": [ids], "dismissed": [ids], "ringing": [ids]}
     media  {"action": "play"|"pause"|"next"|"previous"}  (a button of Windows' media
-        controls, from a satellite which said it has them - see docs/decisions/0030)
+        controls, from a satellite which said it has them - see docs/decisions/0031)
 
 and what the brain sends a satellite:
 
@@ -47,7 +47,7 @@ and what the brain sends a satellite:
         "album": ..., "cover"?: ...}  (what the satellite's own music is doing, for a
         satellite which said it has Windows' media controls, sent when it changes;
         cover: true with the new cover as the payload, false for none now, left out
-        when the cover is as it was - see docs/decisions/0030)
+        when the cover is as it was - see docs/decisions/0031)
     restart
 
 The handshake comes first, and proves the satellite's password to the brain and the

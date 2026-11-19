@@ -511,7 +511,7 @@ class RemoteSatellite:
         # satellite which doesn't say.
         self.push_to_talk: bool = bool(hello.get("push_to_talk", False))
         # Whether it shows its music in Windows' media controls, and passes on their
-        # buttons - False from a satellite which doesn't say. See docs/decisions/0030.
+        # buttons - False from a satellite which doesn't say. See docs/decisions/0031.
         self.media_controls: bool = bool(hello.get("media_controls", False))
         self.speaker = RemoteSpeaker(self.send, self.sample_rate)
         # Each wake word heard, in order: {"talked_over": whether a reply was playing,

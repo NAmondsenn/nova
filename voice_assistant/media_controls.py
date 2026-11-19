@@ -4,7 +4,7 @@ Media Controls Module.
 What the brain tells a satellite with Windows' media controls of its own music, for
 Windows to show: whether it's playing, paused or stopped, the track, artist and album,
 and the cover - each only when it changes, and the cover, which is the most of it, only
-when it's a new one. See docs/decisions/0030. The session reads its player every
+when it's a new one. See docs/decisions/0031. The session reads its player every
 EVERY seconds, and straight after acting on one of the controls' buttons.
 """
 

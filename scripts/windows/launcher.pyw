@@ -13,7 +13,7 @@ so it takes the mark away before its first start, and the brain isn't told of an
 stop; a satellite which crashes while the launcher runs still leaves it for the next.
 
 Only one launcher runs in the user's session: the Start-menu shortcut "Nova", which
-names Nova's music in Windows' media controls (docs/decisions/0030), points here too,
+names Nova's music in Windows' media controls (docs/decisions/0031), points here too,
 and opening it would otherwise start a second satellite beside the first.
 """
 
