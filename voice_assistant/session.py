@@ -207,6 +207,8 @@ class Session:
         # recording - see listen_now. Forgotten once let go, or once its conversation is over.
         self._held: Optional[AudioFeed] = None
         self._held_lock = threading.Lock()
+        # While a turn answers something typed in Home Assistant, rather than said - see _here.
+        self._typing = False
         # The sessions of the user's room, this one first, whose music a conversation
         # here holds - just this one outside a conversation. See _converse.
         self._room_held: List["Session"] = [self]
@@ -454,7 +456,7 @@ class Session:
             return usual
         return max(usual, _number(thresholds.get("media_wake_word_confidence"), 0.75))
 
-    def _here(self) -> str:
+    def _here(self) -> Optional[str]:
         """
         Which satellite the user is speaking through, for Claude: its spoken name and how
         it listens, and the others in its room, which may hear too - so "what device are
@@ -462,15 +464,25 @@ class Session:
 
         Returns:
             e.g. "You're speaking through Nathaniel's PC (push-to-talk). Also in this room:
-            the bedroom Pi."
+            the bedroom Pi." - or, for something typed in Home Assistant, that it was typed
+            and where the reply is said. None if it can't be worked out.
         """
-        name = self.satellite.name
-        kind = "push-to-talk" if self.brain.rooms.push_to_talk(name) else "wake word"
-        here = f"You're speaking through {self.brain.spoken_name(name)} ({kind})."
-        others = [self.brain.spoken_name(other) for other in self.brain.room_of(name) if other != name]
-        if others:
-            here += f" Also in this room: {', '.join(others)}."
-        return here
+        try:
+            name = self.satellite.name
+            kind = "push-to-talk" if self.brain.rooms.push_to_talk(name) else "wake word"
+            device = f"{self.brain.spoken_name(name)} ({kind})"
+            if self._typing:
+                here = f"The user typed this in Home Assistant's Ask Nova box, and the reply is said through {device}."
+            else:
+                here = f"You're speaking through {device}."
+            others = [self.brain.spoken_name(other) for other in self.brain.room_of(name) if other != name]
+            if others:
+                here += f" Also in this room: {', '.join(others)}."
+            return here
+        except Exception as e:
+            # Only the sentence is lost: the request itself goes on.
+            logger.error(f"Couldn't say which device the user is speaking through: {e}")
+            return None
 
     def playing_here(self) -> List[str]:
         """
@@ -1161,7 +1173,12 @@ class Session:
         self.activity = "thinking"
         logger.info("Answering what was typed in Home Assistant")
 
-        heard_over, asked = self._reply_to(text, follow_up=follow_up, timeline=timeline)
+        # So Claude is told it was typed, not said - see _here.
+        self._typing = True
+        try:
+            heard_over, asked = self._reply_to(text, follow_up=follow_up, timeline=timeline)
+        finally:
+            self._typing = False
         if heard_over is not None or not asked:
             return heard_over
 

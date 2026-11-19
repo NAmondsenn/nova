@@ -1359,7 +1359,10 @@ def test_claude_is_told_which_device_it_is_spoken_through():
     assert llm.devices == ["You're speaking through Nathaniel's PC (push-to-talk)."]
 
 
-def test_without_a_device_claude_is_told_nothing_of_it():
-    llm = FakeLLM(_answer("Nova."))
-    _conversation(llm=llm).handle("what device are you")
+def test_a_routines_steps_are_never_said_to_come_through_a_device():
+    # Nobody spoke them, so "you're speaking through" would be false.
+    evening = FakeRoutines({"name": "Evening", "phrases": ["evening"], "steps": ["is it sunny"]})
+    llm = FakeLLM(_answer("Yes."))
+    _conversation(llm=llm, routines=evening, here=lambda: "You're speaking through the bedroom Pi (wake word).").handle(
+        "evening")
     assert llm.devices == [None]

@@ -6,6 +6,6 @@
 
 **Decisions.**
 
-1. **The device in the situation line.** Every request Claude answers starts with the line it already gets (the time, timers, the room and lights, what plays). It now also says which satellite the user is speaking through, how it listens, and the others in its room, which may hear too: "You're speaking through Nathaniel's PC (push-to-talk). Also in this room: the bedroom Pi." Built by Session._here and passed through Conversation to LLMHandler._situation.
+1. **The device in the situation line.** Every request Claude answers starts with the line it already gets (the time, timers, the room and lights, what plays). It now also says which satellite the user is speaking through, how it listens, and the others in its room, which may hear too: "You're speaking through Nathaniel's PC (push-to-talk). Also in this room: the bedroom Pi." Something typed in Home Assistant's Ask Nova box says it was typed and where the reply is said; a routine's steps, which nobody spoke, say nothing of a device. Built by Session._here (which never fails the request: without it, only the sentence is lost) and passed through Conversation to LLMHandler._situation.
 2. **Spoken names.** `backend.names` in the brain's settings gives each satellite's name the words Nova uses for it, e.g. `pc: "Nathaniel's PC"`, `home-assistant: "the bedroom Pi"`. One without is called by its name. A value which isn't words is refused as the settings are read.
 3. **Nothing else changes.** What a request does, and where music plays, is as it was: only what Claude is told.

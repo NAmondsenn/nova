@@ -801,7 +801,7 @@ class Brain:
         "pc" - or its name, without one.
         """
         names = self.config.section("backend").get("names") or {}
-        return names.get(name) or name
+        return (names.get(name) or name).strip()
 
     def room_of(self, name: str) -> List[str]:
         """

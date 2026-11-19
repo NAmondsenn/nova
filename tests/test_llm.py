@@ -225,7 +225,17 @@ def test_the_device_spoken_through_comes_before_the_room():
         "You're speaking through Nathaniel's PC (push-to-talk). Also in this room: the bedroom Pi. "
         "Nova is in the Bedroom. Lights: Lamp (light.lamp, Bedroom) off.] ")
     # Without one, as it always was.
-    assert LLMHandler._situation(LUNCHTIME, None, LAMP) == LLMHandler._situation(LUNCHTIME, None, LAMP, device=None)
+    assert LLMHandler._situation(LUNCHTIME, None, LAMP, device=None) == (
+        "[Wednesday 21 October 2026, 11:50 AM (BST). Timers and reminders running: none. "
+        "Nova is in the Bedroom. Lights: Lamp (light.lamp, Bedroom) off.] ")
+
+
+def test_the_device_reaches_what_claude_is_sent(llm):
+    llm.client = FakeClient(_reply("Your PC."))
+    llm.process_query("what device are you", device="You're speaking through Nathaniel's PC (push-to-talk).")
+    sent = llm.client.requests[-1]["messages"][-1]["content"]
+    text = sent if isinstance(sent, str) else " ".join(part.get("text", "") for part in sent)
+    assert "You're speaking through Nathaniel's PC (push-to-talk).]" in text and text.endswith("what device are you")
 
 
 def test_lights_which_already_end_in_a_full_stop_arent_given_another():

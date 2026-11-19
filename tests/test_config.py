@@ -870,7 +870,7 @@ def test_the_satellites_spoken_names_are_words_for_each(tmp_path):
 
     names = read("backend:\n  names:\n    pc: \"Nathaniel's PC\"\n    home-assistant: the bedroom Pi\n")
     assert names.section("backend")["names"] == {"pc": "Nathaniel's PC", "home-assistant": "the bedroom Pi"}
-    for bad in ("    pc: 3\n", "    pc: \"\"\n"):
+    for bad in ("    pc: 3\n", "    pc: \"\"\n", "    1: the one\n"):
         with pytest.raises(ConfigError) as caught:
             read("backend:\n  names:\n" + bad)
         assert "'backend.names'" in str(caught.value)

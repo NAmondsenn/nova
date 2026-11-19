@@ -3122,3 +3122,20 @@ def test_a_wake_word_satellite_alone_is_said_so(brain, make_session, connect):
     session = make_session(connect(name="home-assistant")[0])
     brain.spoken_name = {"home-assistant": "the bedroom Pi"}.get
     assert session._here() == "You're speaking through the bedroom Pi (wake word)."
+
+
+def test_something_typed_is_said_to_have_been_typed(brain, make_session, connect):
+    session = make_session(connect(name="home-assistant")[0])
+    brain.spoken_name = {"home-assistant": "the bedroom Pi"}.get
+    session._typing = True
+    assert session._here() == ("The user typed this in Home Assistant's Ask Nova box, "
+                               "and the reply is said through the bedroom Pi (wake word).")
+
+
+def test_the_device_failing_to_be_worked_out_costs_only_the_sentence(brain, make_session, connect):
+    session = make_session(connect(name="pc")[0])
+
+    def broken(name):
+        raise RuntimeError("no rooms")
+    brain.room_of = broken
+    assert session._here() is None

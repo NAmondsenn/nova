@@ -406,7 +406,8 @@ class Conversation:
         # What Claude reads, such as home_status, goes back to it to answer from.
         result = self.llm.process_query(text, context=timers, lights=lights, playing=playing,
                                         read=lambda action: self.actions.execute(action).say,
-                                        device=self.here() if self.here else None)
+                                        # Nobody spoke a routine's steps, so no device was spoken through.
+                                        device=self.here() if self.here and not in_routine else None)
         self.progress()
         if result.get("not_for_me"):
             result["playing"] = playing
