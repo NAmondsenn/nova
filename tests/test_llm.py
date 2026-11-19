@@ -218,6 +218,16 @@ def test_the_lights_follow_the_timers_in_the_same_brackets():
         LUNCHTIME, "timer 1: 5 minutes", LAMP)
 
 
+def test_the_device_spoken_through_comes_before_the_room():
+    here = "You're speaking through Nathaniel's PC (push-to-talk). Also in this room: the bedroom Pi."
+    assert LLMHandler._situation(LUNCHTIME, None, LAMP, device=here) == (
+        "[Wednesday 21 October 2026, 11:50 AM (BST). Timers and reminders running: none. "
+        "You're speaking through Nathaniel's PC (push-to-talk). Also in this room: the bedroom Pi. "
+        "Nova is in the Bedroom. Lights: Lamp (light.lamp, Bedroom) off.] ")
+    # Without one, as it always was.
+    assert LLMHandler._situation(LUNCHTIME, None, LAMP) == LLMHandler._situation(LUNCHTIME, None, LAMP, device=None)
+
+
 def test_lights_which_already_end_in_a_full_stop_arent_given_another():
     assert LLMHandler._situation(LUNCHTIME, None, "Nova is in the Bedroom. There are no lights.").endswith(
         "There are no lights.] ")

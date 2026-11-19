@@ -343,7 +343,7 @@ class Session:
                                          max_follow_ups=self.thresholds.get("max_follow_ups", 3),
                                          routines=brain.routines, satellite=satellite.name,
                                          playing=self.playing_here, progress=self._moved,
-                                         room=lambda: brain.room_of(satellite.name))
+                                         room=lambda: brain.room_of(satellite.name), here=self._here)
 
     @property
     def thresholds(self) -> Dict:
@@ -453,6 +453,24 @@ class Session:
         if not playing:
             return usual
         return max(usual, _number(thresholds.get("media_wake_word_confidence"), 0.75))
+
+    def _here(self) -> str:
+        """
+        Which satellite the user is speaking through, for Claude: its spoken name and how
+        it listens, and the others in its room, which may hear too - so "what device are
+        you?" has an answer, and "here" means this one.
+
+        Returns:
+            e.g. "You're speaking through Nathaniel's PC (push-to-talk). Also in this room:
+            the bedroom Pi."
+        """
+        name = self.satellite.name
+        kind = "push-to-talk" if self.brain.rooms.push_to_talk(name) else "wake word"
+        here = f"You're speaking through {self.brain.spoken_name(name)} ({kind})."
+        others = [self.brain.spoken_name(other) for other in self.brain.room_of(name) if other != name]
+        if others:
+            here += f" Also in this room: {', '.join(others)}."
+        return here
 
     def playing_here(self) -> List[str]:
         """

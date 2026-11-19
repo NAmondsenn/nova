@@ -258,6 +258,7 @@ def brain(tmp_path, monkeypatch, make_config):
     return SimpleNamespace(config=config, clock=Clock(config=config, start=False), memory=None,
                            rooms=SatelliteRooms(str(tmp_path / "satellite_rooms.json")),
                            ring_on=lambda name: name, room_of=lambda name: [name], room_sessions=lambda name: [],
+                           spoken_name=lambda name: name,
                            routines=Routines(path=str(tmp_path / "routines.json")), ntfy=None, weather=None,
                            batteries=None, lists=None, pc=None, registry=None, calendar=None, media=None,
                            downloads=None, football=None, listening=None, wrapped_store=None, usage=None, new_music_playlist=None,
@@ -3105,3 +3106,19 @@ def test_the_reminder_sound_switch_never_silences_what_the_clock_rings(brain, co
 
     session.announce(None, sound, boost=True, start=start, length=2.0, ringing=True)
     assert [message["name"] for message in pi.messages("play_sound")] == [sound]
+
+
+# The device spoken through
+
+def test_the_device_is_said_with_its_kind_and_the_others_in_its_room(brain, make_session, connect):
+    session = make_session(connect(name="pc")[0])
+    brain.spoken_name = {"pc": "Nathaniel's PC", "home-assistant": "the bedroom Pi"}.get
+    brain.rooms.seen("pc", True)
+    brain.room_of = lambda name: ["pc", "home-assistant"]
+    assert session._here() == "You're speaking through Nathaniel's PC (push-to-talk). Also in this room: the bedroom Pi."
+
+
+def test_a_wake_word_satellite_alone_is_said_so(brain, make_session, connect):
+    session = make_session(connect(name="home-assistant")[0])
+    brain.spoken_name = {"home-assistant": "the bedroom Pi"}.get
+    assert session._here() == "You're speaking through the bedroom Pi (wake word)."

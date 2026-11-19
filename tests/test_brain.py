@@ -3661,3 +3661,10 @@ def test_music_never_quiets_the_others(brain, connect):
     time.sleep(0.3)
     assert bedroom.messages("quiet") == []
     release.set()
+
+
+def test_a_satellite_s_spoken_name_comes_from_the_settings(make_brain, make_config):
+    brain = make_brain()
+    brain.config = make_config(backend={"port": 0, "names": {"pc": "Nathaniel's PC"}})
+    assert brain.spoken_name("pc") == "Nathaniel's PC"
+    assert brain.spoken_name("kitchen") == "kitchen"

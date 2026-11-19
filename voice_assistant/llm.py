@@ -453,7 +453,7 @@ class LLMHandler:
 
     @staticmethod
     def _situation(now: datetime, context: Optional[str], lights: Optional[str] = None,
-                   playing: Sequence[str] = ()) -> str:
+                   playing: Sequence[str] = (), device: Optional[str] = None) -> str:
         """
         The details which change from one request to the next, put in front of what
         the user said - see _system_prompt.
@@ -464,6 +464,8 @@ class LLMHandler:
             lights: The lights and the room Nova is in, as words - see
                 HomeAssistant.describe_lights - or None.
             playing: The names of what's playing in the room - see Session.playing_here.
+            device: Which satellite the user is speaking through, as words - see
+                Session._here - or None.
 
         Returns:
             e.g. "[Monday 19 October 2026, 7:36 PM (BST). Timers and reminders running:
@@ -474,6 +476,8 @@ class LLMHandler:
                      f"({now.strftime('%Z')}). Timers and reminders running: {context or 'none'}.")
         # Sentences of their own, not put in the list of timers, where Claude would take
         # them for one. "There are no lights." already ends in the full stop.
+        if device:
+            situation += f" {device.rstrip('.')}."
         if lights:
             situation += f" {lights.rstrip('.')}."
         if playing:
@@ -481,7 +485,7 @@ class LLMHandler:
         return situation + "] "
 
     def process_query(self, text, context=None, lights=None, read: Optional[Callable[[Action], str]] = None,
-                      playing: Sequence[str] = ()):
+                      playing: Sequence[str] = (), device: Optional[str] = None):
         """
         Asks Claude to answer what the user said, with the recent conversation and
         the tools it may call. The keyword parser (_parse_action) is only used when
@@ -540,7 +544,7 @@ class LLMHandler:
                 messages.extend(self._earlier_messages(number, turn))
             # Adds the current user query to the messages list, after the details which
             # change from one request to the next - see _system_prompt.
-            messages.append({"role": "user", "content": self._situation(now, context, lights, playing) + text})
+            messages.append({"role": "user", "content": self._situation(now, context, lights, playing, device) + text})
 
             # The tools are always offered, so the model decides what the user meant
             # rather than a keyword match guessing at it.

@@ -795,6 +795,14 @@ class Brain:
         with self._lock:
             return list(self.sessions.values())
 
+    def spoken_name(self, name: str) -> str:
+        """
+        What Nova calls a satellite to Claude - backend.names, e.g. "Nathaniel's PC" for
+        "pc" - or its name, without one.
+        """
+        names = self.config.section("backend").get("names") or {}
+        return names.get(name) or name
+
     def room_of(self, name: str) -> List[str]:
         """
         Args:

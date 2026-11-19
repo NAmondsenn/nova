@@ -84,11 +84,14 @@ class FakeLLM:
         self.to_read, self.read = [], []
         # The tools it's offered, and those of them it only reads from - as each request found them.
         self.tools, self.read_tools, self.offered = [], set(), []
+        # What Claude was told of the device spoken through, for each request.
+        self.devices = []
 
     def forget_stale_history(self):
         pass
 
-    def process_query(self, text, context=None, lights=None, read=None, playing=()):
+    def process_query(self, text, context=None, lights=None, read=None, playing=(), device=None):
+        self.devices.append(device)
         self.asked.append(text)
         self.contexts.append(context)
         self.lights.append(lights)
@@ -1345,3 +1348,18 @@ def test_a_yes_to_making_the_playlist_is_kept_for_undo():
 
     assert conversation.handle("undo that").say == "Deleted Jim."
     assert navidrome.deleted == ["p1"]
+
+
+# The device spoken through
+
+def test_claude_is_told_which_device_it_is_spoken_through():
+    llm = FakeLLM(_answer("Your PC."))
+    _conversation(llm=llm, here=lambda: "You're speaking through Nathaniel's PC (push-to-talk).").handle(
+        "what device are you")
+    assert llm.devices == ["You're speaking through Nathaniel's PC (push-to-talk)."]
+
+
+def test_without_a_device_claude_is_told_nothing_of_it():
+    llm = FakeLLM(_answer("Nova."))
+    _conversation(llm=llm).handle("what device are you")
+    assert llm.devices == [None]

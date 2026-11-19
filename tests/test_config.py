@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from voice_assistant import football_watch
+from voice_assistant import paths
 from voice_assistant.config import LIMITS, Config, ConfigError, check, clashes, limit_problem, removed
 
 DEFAULTS = """
@@ -860,3 +861,16 @@ def test_the_repositorys_config_has_the_usage_settings(tmp_path):
     for name, value in usage.items():
         assert limit_problem("usage", name, value) is None, name
     assert limit_problem("usage", "daily_limit", -1) == "should be from 0 to 100"
+
+
+def test_the_satellites_spoken_names_are_words_for_each(tmp_path):
+    def read(own):
+        (tmp_path / "config.yaml").write_text(own)
+        return Config(path=str(tmp_path / "config.yaml"), defaults=paths.DEFAULTS_FILE)
+
+    names = read("backend:\n  names:\n    pc: \"Nathaniel's PC\"\n    home-assistant: the bedroom Pi\n")
+    assert names.section("backend")["names"] == {"pc": "Nathaniel's PC", "home-assistant": "the bedroom Pi"}
+    for bad in ("    pc: 3\n", "    pc: \"\"\n"):
+        with pytest.raises(ConfigError) as caught:
+            read("backend:\n  names:\n" + bad)
+        assert "'backend.names'" in str(caught.value)

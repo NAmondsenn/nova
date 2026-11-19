@@ -79,7 +79,7 @@ class Conversation:
     def __init__(self, clock, intents, llm, actions, music, chime_enabled: Union[bool, Callable[[], bool]] = True,
                  max_follow_ups: int = 3, routines=None, satellite: Optional[str] = None,
                  playing: Optional[Callable[[], List[str]]] = None, progress: Optional[Callable[[], None]] = None,
-                 room: Optional[Callable[[], List[str]]] = None):
+                 room: Optional[Callable[[], List[str]]] = None, here: Optional[Callable[[], str]] = None):
         """
         Args:
             clock: The Clock, for what's ringing and for dismissing it.
@@ -107,6 +107,8 @@ class Conversation:
             room: Gives every satellite in the user's room, theirs first - see
                 Brain.room_of - or None for a room of its own. What rings on any of
                 them is heard, and stopped, from here.
+            here: Says which satellite the user is speaking through, for Claude - see
+                Session._here - or None to say nothing of it.
         """
         self.clock = clock
         self.intents = intents
@@ -120,6 +122,7 @@ class Conversation:
         self.playing = playing
         self.progress = progress or (lambda: None)
         self.room = room
+        self.here = here
         self.start()
 
     def _heard_here(self) -> Where:
@@ -402,7 +405,8 @@ class Conversation:
         playing = [] if in_routine or self.pressed or self.playing is None else list(self.playing())
         # What Claude reads, such as home_status, goes back to it to answer from.
         result = self.llm.process_query(text, context=timers, lights=lights, playing=playing,
-                                        read=lambda action: self.actions.execute(action).say)
+                                        read=lambda action: self.actions.execute(action).say,
+                                        device=self.here() if self.here else None)
         self.progress()
         if result.get("not_for_me"):
             result["playing"] = playing
