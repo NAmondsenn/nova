@@ -288,7 +288,8 @@ class Satellite:
     stream finished as soon as it has all arrived.
     """
 
-    def __init__(self, brain, name="bedroom", password=BEDROOM, unclean=False, away=NOTHING_AWAY, push_to_talk=False):
+    def __init__(self, brain, name="bedroom", password=BEDROOM, unclean=False, away=NOTHING_AWAY, push_to_talk=False,
+                 media_controls=False):
         self.socket = socket.create_connection(("127.0.0.1", brain.port), timeout=5)
         self.stream = self.socket.makefile("rwb")
         self.lock = threading.Lock()
@@ -296,7 +297,8 @@ class Satellite:
         # Set once the brain has let it go.
         self.gone = threading.Event()
         try:
-            protocol.greet(self.stream, name, f"{name}-pi", password, 48000, unclean, push_to_talk=push_to_talk)
+            protocol.greet(self.stream, name, f"{name}-pi", password, 48000, unclean, push_to_talk=push_to_talk,
+                           media_controls=media_controls)
         except BaseException:
             # As satellite_link does, so the brain sees it hang up.
             self.socket.close()
@@ -1471,6 +1473,57 @@ def _real_sessions(monkeypatch):
     monkeypatch.setattr(brain_module, "Session", session_module.Session)
     monkeypatch.setattr(session_module, "make_detector", lambda config: LoudnessDetector())
     monkeypatch.setattr(session_module, "make_player", lambda config, speaker, volume, spotify_speaker=None: None)
+
+
+class PausingPlayer:
+    """A music player which is playing one song until it's paused - for Windows' media controls."""
+
+    def __init__(self):
+        self.playing = {"track": "Song", "artist": "Band", "album": "Album", "playing": True, "cover": None}
+        self.done = []
+
+    def now_playing(self):
+        return dict(self.playing)
+
+    def cover(self):
+        return None
+
+    def pause(self):
+        self.done.append("pause")
+        self.playing["playing"] = False
+        return {"success": True}
+
+    def cancel_resume(self):
+        self.done.append("cancel_resume")
+
+    def close(self):
+        pass
+
+
+def test_a_satellite_with_media_controls_is_told_what_plays_and_its_buttons_work(brain, connect, monkeypatch):
+    # Through a real connection and a real session, from the hello on - see docs/decisions/0030.
+    _real_sessions(monkeypatch)
+    players = {}
+
+    def make_player(config, speaker, volume, spotify_speaker=None):
+        players[len(players)] = PausingPlayer()
+        return players[len(players) - 1]
+
+    monkeypatch.setattr(session_module, "make_player", make_player)
+    serving(brain)
+    with_controls = connect(brain, "bedroom", BEDROOM, media_controls=True)
+    without = connect(brain, "kitchen", KITCHEN)
+    connected(brain, "bedroom"), connected(brain, "kitchen")
+
+    assert wait_for(lambda: with_controls.messages("now_playing"))
+    assert with_controls.messages("now_playing")[0] == {"type": "now_playing", "state": "playing", "track": "Song",
+                                                        "artist": "Band", "album": "Album"}
+    with_controls.say("media", action="pause")
+    assert wait_for(lambda: len(with_controls.messages("now_playing")) == 2)
+    assert with_controls.messages("now_playing")[1]["state"] == "paused"
+    assert brain.session_for("bedroom").music_player.done == ["pause", "cancel_resume"]
+    assert without.messages("now_playing") == []
+    assert brain.session_for("kitchen").music_player.done == []
 
 
 def test_a_satellite_which_goes_mid_turn_leaves_the_brain_working(brain, connect, monkeypatch):

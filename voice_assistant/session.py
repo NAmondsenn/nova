@@ -32,6 +32,8 @@ from voice_assistant.ha_device import DeviceControls, NovaDevice
 from voice_assistant.home_assistant import HomeAssistant
 from voice_assistant.intents import LocalIntents
 from voice_assistant.llm import LLMHandler
+from voice_assistant.media_controls import EVERY as MEDIA_EVERY
+from voice_assistant.media_controls import NowPlayingFeed
 from voice_assistant.logging_setup import transcripts_logged
 from voice_assistant.music import MusicHold, make_player
 from voice_assistant.network import online
@@ -319,6 +321,13 @@ class Session:
         self.device = NovaDevice.from_config(config, os.getenv("MQTT_PASSWORD"), self._device_controls(),
                                              hostname=satellite.hostname)
         self._stop_looking_up = threading.Event()
+
+        # What the satellite's own music is doing, sent to it as it changes, for Windows'
+        # media controls to show - only to a satellite which said it has them, and only
+        # with music. Their buttons act on this satellite's music alone. See
+        # _keep_media_controls and docs/decisions/0030.
+        self._now_playing = (NowPlayingFeed(satellite.send_now_playing)
+                             if satellite.media_controls and self.music_player else None)
 
         # Claude, offered whichever of those tools can actually work here, and told
         # what's known about the user. Each of its responses is recorded in the brain's usage log.
@@ -759,6 +768,9 @@ class Session:
                 if self.home:
                     threading.Thread(target=self._look_up_device, daemon=True,
                                      name=f"ha-device-lookup-{self.satellite.name}").start()
+            if self._now_playing is not None:
+                threading.Thread(target=self._keep_media_controls, daemon=True,
+                                 name=f"media-controls-{self.satellite.name}").start()
         try:
             while self.satellite.connected and not self._closed.is_set():
                 # Waiting for the wake word is never being stuck.
@@ -1699,6 +1711,59 @@ class Session:
             self.actions.control_playback("previous")
         else:
             logger.warning(f"Home Assistant asked the music to do something unknown: {action!r}")
+
+    def _keep_media_controls(self):
+        """
+        Keeps the satellite's media controls showing what its music is doing, and acts on
+        their buttons, on a thread of its own until the session ends: reads the player
+        every MEDIA_EVERY seconds, and straight after each button. One which fails is
+        logged once, until it works again. What's playing is never logged.
+        """
+        failing = False
+        pressed: Optional[str] = None
+        while self.satellite.connected and not self._closed.is_set():
+            try:
+                if pressed is not None:
+                    self._media_from_windows(pressed)
+                self._now_playing.update(self.music_player.now_playing(), self.music_player.cover,
+                                         force=pressed is not None)
+                failing = False
+            except Exception as e:
+                if not failing:
+                    logger.error(f"Couldn't keep Windows' media controls up to date on the "
+                                 f"{self.satellite.name} satellite: {e}")
+                failing = True
+            try:
+                pressed = self.satellite.media_presses.get(timeout=MEDIA_EVERY)
+            except queue.Empty:
+                pressed = None
+
+    def _media_from_windows(self, action: str):
+        """
+        Acts on a button of Windows' media controls, on this satellite's own music only -
+        never the rest of the room's, as a pause said out loud does (0026). What's playing
+        isn't logged.
+
+        Args:
+            action: "pause", which keeps it paused once Nova finishes talking, as asking
+                does; "play", which carries on what's paused here, or plays as Home
+                Assistant's play button does with nothing to carry on; "next" or "previous".
+        """
+        logger.info(f"{action.capitalize()} from Windows")
+        player = self.music_player
+        # After any pause or resume for Nova talking which is still on its way, so it
+        # can't land after this and undo it.
+        self.music.wait()
+        if action == "pause":
+            if player.pause().get("success"):
+                player.cancel_resume()
+        elif action == "play":
+            # Without the offer to download anything: nobody is listening for a yes.
+            self.actions.play_without_offer(None)
+        elif action == "next":
+            player.skip()
+        elif action == "previous":
+            player.previous()
 
     def _playlist_from_home_assistant(self, name):
         """
