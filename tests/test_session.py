@@ -1671,6 +1671,13 @@ def test_a_typed_request_waits_for_an_announcement_being_said(brain, connect, ma
     thread.join(5)
 
 
+def test_only_a_wake_word_satellite_gets_playlist_tiles(make_session, connect):
+    assert make_session()._device_controls().playlist_tiles is True
+    satellite, _ = connect(name="pc", hostname="pc.local")
+    satellite.push_to_talk = True
+    assert make_session(satellite)._device_controls().playlist_tiles is False
+
+
 def test_the_device_is_given_ask(make_session):
     session = make_session()
     assert session._device_controls().ask == session.ask

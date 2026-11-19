@@ -1073,3 +1073,34 @@ def test_each_playlist_has_a_tile_which_plays_it(nova, player, monkeypatch):
         assert client.sent(f"{BASE}/playlist/2/cover")[-1] == (f"{BASE}/playlist/2/cover", b"", 1, True)
     finally:
         device.stop()
+
+
+def test_a_device_without_playlist_tiles_removes_any_it_had_and_reads_no_covers(nova, player, monkeypatch):
+    monkeypatch.setattr(ha_device, "MUSIC_EVERY", 3600)
+    read = []
+    controls = player.controls(nova)
+    controls.playlist_covers = lambda names: read.append(names) or {}
+    controls.playlist_tiles = False
+    made = []
+    device = NovaDevice("broker.local", 1883, "nova", "secret", controls, node_id="nova_test",
+                        client_factory=lambda client_id: made.append(FakeClient(client_id)) or made[-1])
+    device.start()
+    try:
+        assert _eventually(lambda: "playlists" in player.reads)
+        device.refresh_playlists()
+        client = made[0]
+        client.connects()
+        announced = json.loads(client.sent(DISCOVERY)[-1][1])["cmps"]
+        # Every tile number sent as its platform alone, once, so an earlier run's tiles go...
+        assert all(announced[f"playlist_{n}"] == {"p": "button"} for n in range(1, 13))
+        assert all(announced[f"playlist_{n}_cover"] == {"p": "image"} for n in range(1, 13))
+        # ...and never again, nor announced over and over: the playlist select stays.
+        again = _components(device)
+        assert "playlist_1" not in again and "playlist" in again
+        sent = len(client.sent(DISCOVERY))
+        device.publish_music()
+        device.refresh_playlists()
+        assert len(client.sent(DISCOVERY)) == sent
+        assert read == []
+    finally:
+        device.stop()

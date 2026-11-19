@@ -1667,6 +1667,10 @@ class Session:
             playlists=(lambda: self.music_player.playlists()) if player else None,
             playlist_covers=((lambda names: self.music_player.playlist_covers(names))
                              if player and hasattr(player, "playlist_covers") else None),
+            # Only a wake-word satellite - the room's own speaker, whose Nova view shows them - gets
+            # playlist tiles; a push-to-talk one like the PC doesn't, so the two devices, both named
+            # Nova, never race for a new tile's entity id.
+            playlist_tiles=not self.satellite.push_to_talk,
             playback=self._playback_from_home_assistant if player else None,
             play_playlist=self._playlist_from_home_assistant if player else None,
             # The Ask Nova box, whose replies are said here and never sent back.
