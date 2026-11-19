@@ -6,7 +6,8 @@
 #
 # It's safe to run again, which is how an update goes: the code is copied over, the
 # packages are installed again only if requirements-pc.txt changed, the settings file
-# is left alone if there is one, and the logon task is replaced. It never writes .env:
+# is left alone if there is one, and the logon task and the Start-menu shortcut are
+# replaced. It never writes .env:
 # the password the brain's `add-satellite pc` gave goes in config\.env by hand, as
 # NOVA_BACKEND_TOKEN=<password>. It doesn't start or stop the satellite either.
 #
@@ -110,6 +111,90 @@ $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopI
 Write-Host "Registering the task '$taskName' for $user"
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal `
     -Settings $taskSettings -Description "Nova's satellite, started at logon" -Force | Out-Null
+
+# A Start-menu shortcut "Nova", which Windows names the satellite's music after in its
+# media controls (docs/decisions/0030): the satellite says it is Nova.Satellite, and
+# Windows looks for the shortcut with that AppUserModelID. It points at the launcher, as
+# the task does. Made again each time, and a shortcut which can't be made only leaves
+# the music named "pythonw.exe", so that is a warning, never a failed install.
+try {
+    $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'Nova.lnk'
+    if (-not ('NovaInstall.AppUserModel' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace NovaInstall {
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct PropertyKey {
+        public Guid FormatId;
+        public uint PropertyId;
+    }
+
+    // A PROPVARIANT holding a string: its type, then a pointer to the text. 24 bytes on
+    // 64-bit Windows, as the real one is.
+    [StructLayout(LayoutKind.Explicit)]
+    public struct PropVariant {
+        [FieldOffset(0)] public ushort Type;
+        [FieldOffset(8)] public IntPtr Pointer;
+        [FieldOffset(16)] public IntPtr Spare;
+    }
+
+    [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IPropertyStore {
+        [PreserveSig] int GetCount(out uint count);
+        [PreserveSig] int GetAt(uint index, out PropertyKey key);
+        [PreserveSig] int GetValue(ref PropertyKey key, out PropVariant value);
+        [PreserveSig] int SetValue(ref PropertyKey key, ref PropVariant value);
+        [PreserveSig] int Commit();
+    }
+
+    public static class AppUserModel {
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+        private static extern void SHGetPropertyStoreFromParsingName(string path, IntPtr bindContext, int flags,
+            ref Guid interfaceId, [MarshalAs(UnmanagedType.Interface)] out IPropertyStore store);
+
+        // Gives a shortcut file an AppUserModelID (PKEY_AppUserModel_ID).
+        public static void SetId(string path, string id) {
+            Guid interfaceId = typeof(IPropertyStore).GUID;
+            IPropertyStore store;
+            // GPS_READWRITE
+            SHGetPropertyStoreFromParsingName(path, IntPtr.Zero, 2, ref interfaceId, out store);
+            try {
+                PropertyKey key = new PropertyKey();
+                key.FormatId = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
+                key.PropertyId = 5;
+                PropVariant value = new PropVariant();
+                value.Type = 31; // VT_LPWSTR
+                value.Pointer = Marshal.StringToCoTaskMemUni(id);
+                try {
+                    Marshal.ThrowExceptionForHR(store.SetValue(ref key, ref value));
+                    Marshal.ThrowExceptionForHR(store.Commit());
+                }
+                finally {
+                    Marshal.FreeCoTaskMem(value.Pointer);
+                }
+            }
+            finally {
+                Marshal.ReleaseComObject(store);
+            }
+        }
+    }
+}
+'@
+    }
+    $link = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut)
+    $link.TargetPath = $venvPythonw
+    $link.Arguments = '"' + $launcher + '"'
+    $link.WorkingDirectory = $app
+    $link.Description = "Nova's satellite"
+    $link.Save()
+    [NovaInstall.AppUserModel]::SetId($shortcut, 'Nova.Satellite')
+    Write-Host "Made the Start-menu shortcut $shortcut, so Windows' media controls say Nova"
+}
+catch {
+    Write-Warning "Couldn't make the Start-menu shortcut, so Windows' media controls will say pythonw.exe: $($_.Exception.Message)"
+}
 
 if (-not (Test-Path (Join-Path $config '.env'))) {
     Write-Host "No password yet: put NOVA_BACKEND_TOKEN=<the password add-satellite pc gave> in $(Join-Path $config '.env')"
