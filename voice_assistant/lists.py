@@ -73,13 +73,13 @@ def list_words(name: str) -> Tuple[str, ...]:
     if words and words[0] in ("my", "the"):
         words = words[1:]
     # Singular first, so "to-dos" is todo too.
-    joined = []
+    kept = []
     for word in map(_singular, words):
-        if word == "do" and joined and joined[-1] == "to":
-            joined[-1] = "todo"
+        if word == "do" and kept and kept[-1] == "to":
+            kept[-1] = "todo"
         else:
-            joined.append(word)
-    return tuple(word for word in joined if word != "list")
+            kept.append(word)
+    return tuple(word for word in kept if word != "list")
 
 
 def _begins(said: Tuple[str, ...], name: Tuple[str, ...]) -> bool:
@@ -178,8 +178,11 @@ def match_item(said: str, items: List[Dict]) -> List[Dict]:
     return [item for item in items if _has_words(words, _item_words(item["summary"]))]
 
 
-def _joined(things: List[str], last: str = "and") -> str:
-    """Things as said in a sentence, e.g. "eggs, milk and bread"."""
+def joined(things: List[str], last: str = "and") -> str:
+    """
+    Things as said in a sentence, e.g. "eggs, milk and bread", or "eggs, milk or bread" with last "or" - one
+    alone as it is, and two as "eggs and milk". There must be one at least.
+    """
     return things[0] if len(things) == 1 else f"{', '.join(things[:-1])} {last} {things[-1]}"
 
 
@@ -206,7 +209,7 @@ def say_items(name: str, items: List[Dict]) -> str:
     said = [item["summary"] for item in items[:MOST_ITEMS]]
     if len(items) > MOST_ITEMS:
         return f"Your {_list_said(name)} has {', '.join(said)}, and {len(items) - MOST_ITEMS} more."
-    return f"Your {_list_said(name)} has {_joined(said)}."
+    return f"Your {_list_said(name)} has {joined(said)}."
 
 
 def names_list(said: Optional[str]) -> bool:
@@ -311,12 +314,12 @@ class Lists:
                 return found, None
             if not lists:
                 return None, "Home Assistant hasn't got any lists."
-            return None, f"Which list, {_joined([each['name'] for each in lists], 'or')}?"
+            return None, f"Which list, {joined([each['name'] for each in lists], 'or')}?"
         fits = match_list(said, lists)
         if len(fits) == 1:
             return fits[0], None
         if fits:
-            return None, f"Which list, {_joined([found['name'] for found in fits], 'or')}?"
+            return None, f"Which list, {joined([found['name'] for found in fits], 'or')}?"
         return None, NO_SUCH_LIST
 
     def _not_found(self, said: Optional[str], sentence: str) -> Dict:
@@ -357,7 +360,7 @@ class Lists:
                 logger.warning(f"Could not add a thing to {found['id']}: {e}")
                 return {"success": False, "message": _not_added(added, items[len(added):], where, e)}
             added.append(item)
-        return {"success": True, "message": f"Added {_joined(added)} to {where}."}
+        return {"success": True, "message": f"Added {joined(added)} to {where}."}
 
     def read(self, said: Optional[str]) -> Dict:
         """
@@ -418,9 +421,9 @@ class Lists:
             summaries = list({_item_words(thing["summary"]): thing["summary"] for thing in fits}.values())
             on = list({thing["list"]["id"]: thing["list"]["name"] for thing in fits}.values())
             if len(summaries) > 1:
-                return {"success": False, "message": f"Which one, {_joined(summaries, 'or')}?"}
+                return {"success": False, "message": f"Which one, {joined(summaries, 'or')}?"}
             if len(on) > 1:
-                return {"success": False, "message": f"Which list, {_joined(on, 'or')}?"}
+                return {"success": False, "message": f"Which list, {joined(on, 'or')}?"}
             # The same thing twice on one list is still the one thing, so the first is ticked off.
             thing = fits[0]
             try:
@@ -456,13 +459,13 @@ def _not_added(added: List[str], left: List[str], where: str, error: Exception) 
         unsure = f"{NO_ANSWER}, so I can't tell if {left[0]} was added"
         if not added:
             return f"{unsure} to {where}."
-        rest = f", and I didn't add {_joined(left[1:])}" if left[1:] else ""
-        return f"Added {_joined(added)} to {where}, but {unsure}{rest}."
+        rest = f", and I didn't add {joined(left[1:])}" if left[1:] else ""
+        return f"Added {joined(added)} to {where}, but {unsure}{rest}."
     if not added:
         if getattr(getattr(error, "response", None), "status_code", None) == 401:
             return HomeAssistant.failure_message(error)
         return f"I couldn't add that to {where}."
-    return f"Added {_joined(added)} to {where}, but I couldn't add {_joined(left, 'or')}."
+    return f"Added {joined(added)} to {where}, but I couldn't add {joined(left, 'or')}."
 
 
 def _failed(doing: str, error: Exception) -> Dict:

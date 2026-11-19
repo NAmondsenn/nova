@@ -9,7 +9,7 @@ import requests
 
 from voice_assistant.choices import ChoiceStore
 from voice_assistant.home_assistant import CANT_REACH
-from voice_assistant.lists import Lists, list_words
+from voice_assistant.lists import Lists, joined, list_words
 
 # The lists as the live checks found them, each with its entity id.
 TODAY = {"Shopping list": "todo.shopping_list", "todo": "todo.todo", "notepad": "todo.notepad",
@@ -351,3 +351,12 @@ def test_a_choice_for_something_gone_is_kept_for_its_return(make_lists):
     assert lists.choices.get("main") == "todo.shopping_list"
     lists.home.lists = gone
     assert [found["name"] for found in lists.overview() if found["main"]] == ["Shopping list"]
+
+
+def test_things_are_joined_as_they_are_said_in_a_sentence():
+    # One is itself, two have no comma, and three or more are separated by commas and have no comma before the last.
+    assert joined(["Gym"]) == "Gym"
+    assert joined(["Gym", "Car"]) == "Gym and Car"
+    assert joined(["Gym", "Car", "Chill"]) == "Gym, Car and Chill"
+    assert joined(["Gym", "Car", "Chill"], "or") == "Gym, Car or Chill"
+    assert joined(["Gym", "Car"], "or") == "Gym or Car"

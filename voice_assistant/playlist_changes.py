@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import requests
 
 from voice_assistant.actions import Action
+from voice_assistant.lists import joined
 from voice_assistant.music import means_liked_songs
 from voice_assistant.navidrome import NavidromeError, closest_playlist, normalise, same_song
 from voice_assistant.soulsync import SoulSync, SoulSyncError
@@ -35,11 +36,6 @@ from voice_assistant.soulsync import SoulSync, SoulSyncError
 # What Navidrome failing looks like: it couldn't be reached, it answered with an error, or its
 # answer couldn't be read. Each is said with NavidromeLibrary._failure_message.
 NAVIDROME_FAILURES = (requests.RequestException, NavidromeError, ValueError)
-
-
-def _joined(names: List[str]) -> str:
-    """Names as they're said in a sentence: "Gym", or "Gym, Car and Chill". There must be one at least."""
-    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
 
 
 def _them(names: List[str]) -> str:
@@ -397,22 +393,22 @@ class PlaylistChanges:
         sentences = []
         if outcome.changed:
             names = [name for _, name, _ in outcome.changed]
-            sentence = f"Added {title} to {_joined(names)}" if adding else f"Took {title} off {_joined(names)}"
+            sentence = f"Added {title} to {joined(names)}" if adding else f"Took {title} off {joined(names)}"
             if outcome.switched:
-                sentence += (f", and set {_joined(outcome.switched)} to append only in SoulSync so "
+                sentence += (f", and set {joined(outcome.switched)} to append only in SoulSync so "
                              f"{'it stays' if len(outcome.switched) == 1 else 'they stay'}")
             sentences.append(sentence + ".")
         if outcome.liked:
             sentences.append(outcome.liked)
         if outcome.already:
-            sentences.append(f"{title} is already on {_joined(outcome.already)}." if adding
-                             else f"{title} isn't on {_joined(outcome.already)}.")
+            sentences.append(f"{title} is already on {joined(outcome.already)}." if adding
+                             else f"{title} isn't on {joined(outcome.already)}.")
         sentences += outcome.refusals
         if outcome.unreachable:
-            sentences.append(f"I can't reach SoulSync to check {_joined(outcome.unreachable)}, so I haven't changed "
+            sentences.append(f"I can't reach SoulSync to check {joined(outcome.unreachable)}, so I haven't changed "
                              f"{_them(outcome.unreachable)}.")
         if outcome.unswitched:
-            sentences.append(f"I couldn't set {_joined(outcome.unswitched)} to append only in SoulSync, so I haven't "
+            sentences.append(f"I couldn't set {joined(outcome.unswitched)} to append only in SoulSync, so I haven't "
                              f"added {title} to {_them(outcome.unswitched)}. Set {_them(outcome.unswitched)} to "
                              "append only there and ask me again.")
         ask_first = None
@@ -427,7 +423,7 @@ class PlaylistChanges:
         elif len(outcome.missing) == 1:
             sentences.append(f"You haven't got a playlist called {outcome.missing[0]}.")
         elif outcome.missing:
-            sentences.append(f"You haven't got playlists called {_joined(outcome.missing)}.")
+            sentences.append(f"You haven't got playlists called {joined(outcome.missing)}.")
         if outcome.failure:
             sentences.append(outcome.failure)
 
@@ -470,12 +466,12 @@ def _take_back(library, song: Dict, added: List[Tuple[str, str, str]]) -> Callab
             # slot is spent, since asking again would only find it gone from the first.
             failure = library._failure_message(e)
             if taken:
-                return {"success": True, "message": f"Took {title} back off {_joined(taken)}. {failure}"}
+                return {"success": True, "message": f"Took {title} back off {joined(taken)}. {failure}"}
             return {"success": False, "message": failure}
         if not taken:
-            names = _joined([name for _, name, _ in added])
+            names = joined([name for _, name, _ in added])
             return {"success": False, "message": f"{title} isn't on {names} any more."}
-        return {"success": True, "message": f"Took {title} back off {_joined(taken)}."}
+        return {"success": True, "message": f"Took {title} back off {joined(taken)}."}
 
     return undo
 
@@ -500,9 +496,9 @@ def _put_back(library, song: Dict, removed: List[Tuple[str, str, str]]) -> Calla
             # What was put back before it stays done, so it's said first, as for the change itself.
             failure = library._failure_message(e)
             if put:
-                return {"success": True, "message": f"Put {title} back on {_joined(put)}. {failure}"}
+                return {"success": True, "message": f"Put {title} back on {joined(put)}. {failure}"}
             return {"success": False, "message": failure}
-        return {"success": True, "message": f"Put {title} back on {_joined(put)}."}
+        return {"success": True, "message": f"Put {title} back on {joined(put)}."}
 
     return undo
 
