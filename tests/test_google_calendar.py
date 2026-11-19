@@ -2404,7 +2404,8 @@ GYM_INSTANCES = f"{GYM_URL}/instances"
 # Looked for two years on - 730 days - and no further: a series with no end is listed on and on.
 FROM_THE_24TH = {"timeMin": "2026-11-24T18:00:00+00:00", "timeMax": "2028-11-23T18:00:00+00:00",
                  "showDeleted": "true", "maxResults": 250}
-BEFORE_THE_24TH_ASKED = {"timeMax": "2026-11-24T18:00:00+00:00", "showDeleted": "true", "maxResults": 250}
+# The times before it for the COUNT are read 60 days past it: one moved on from before it has a start after it.
+BEFORE_THE_24TH_ASKED = {"timeMax": "2027-01-23T18:00:00+00:00", "showDeleted": "true", "maxResults": 250}
 
 
 def _splitting(**answers):
@@ -2688,11 +2689,12 @@ def test_from_this_one_on_splits_the_series_with_the_times_left(for_changing):
         f"POST {PERSONAL_EVENTS}": [_inserted()]})
     reply = calendar.change("gym", day=date(2026, 12, 1), start="2026-12-01 19:00", following=True, today=NOVEMBER_21)
     assert _said(reply) == {"success": True, "message": "Moved Gym to 7 PM from Tuesday the 1st of December on."}
-    # Those deleted on their own read from when this one was meant to be, then counted up to it, with those deleted.
+    # Those deleted on their own read from when this one was meant to be, then the times before it counted, with
+    # those deleted - read 60 days on, for any moved on from before it.
     assert [params for url, params in calendar._session.asked if url == instances] == [
         {"timeMin": "2026-12-01T18:00:00+00:00", "timeMax": "2028-11-30T18:00:00+00:00", "showDeleted": "true",
          "maxResults": 250},
-        {"timeMax": "2026-12-01T18:00:00+00:00", "showDeleted": "true", "maxResults": 250}]
+        {"timeMax": "2027-01-30T18:00:00+00:00", "showDeleted": "true", "maxResults": 250}]
     # The old series ended just before it, then a new one from it at the new time, with the six times left.
     assert calendar._session.sent == [
         _write("PATCH", GYM_URL, {"recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261201T175959Z",
@@ -2758,7 +2760,7 @@ def test_an_all_day_series_is_split_from_this_one_on_with_the_times_left(for_cha
     assert [params for url, params in calendar._session.asked if url == f"{bins}/instances"] == [
         {"timeMin": "2026-11-24T00:00:00+00:00", "timeMax": "2028-11-23T00:00:00+00:00", "showDeleted": "true",
          "maxResults": 250},
-        {"timeMax": "2026-11-24T00:00:00+00:00", "showDeleted": "true", "maxResults": 250}]
+        {"timeMax": "2027-01-23T00:00:00+00:00", "showDeleted": "true", "maxResults": 250}]
     assert calendar._session.sent == [
         _write("PATCH", bins, {"recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261123", rules[1]]}),
         _write("POST", PERSONAL_EVENTS, {
@@ -3054,8 +3056,40 @@ def test_a_count_counts_a_day_deleted_on_its_own_before_the_one_it_splits_at(for
     assert [params for url, params in calendar._session.asked if url == GYM_INSTANCES] == [
         {"timeMin": "2026-11-17T18:00:00+00:00", "timeMax": "2028-11-16T18:00:00+00:00", "showDeleted": "true",
          "maxResults": 250},
-        {"timeMax": "2026-11-17T18:00:00+00:00", "showDeleted": "true", "maxResults": 250}]
+        {"timeMax": "2027-01-16T18:00:00+00:00", "showDeleted": "true", "maxResults": 250}]
     assert calendar._session.sent[1]["json"]["recurrence"] == ["RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=3"]
+
+
+def test_a_time_moved_from_before_the_split_to_after_it_is_still_counted_before_it(for_changing):
+    # Five from the 3rd of November, split from the 24th: the 3rd, 10th and 17th were meant to be before it, so
+    # two are left. The 17th was moved to the 25th, and Google's timeMax bounds that start, not the 17th - so it
+    # is only read if the read goes on past the split, and counting it is what keeps the COUNT at 2, not 3.
+    rules = ["RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=5"]
+    series = _series("Gym", "made-up-gym", "2026-11-03T18:00:00Z", "2026-11-03T19:00:00Z", *rules)
+    seventeenth_moved = _occurrence("Gym", "made-up-gym", "2026-11-25T18:00:00Z", "2026-11-25T19:00:00Z",
+                                    meant="2026-11-17T18:00:00Z")
+    tenth_deleted = _cancelled("made-up-gym", "2026-11-10T18:00:00Z")
+    first = _occurrence("Gym", "made-up-gym", "2026-11-03T18:00:00Z", "2026-11-03T19:00:00Z")
+    # What Google gives for timeMax: the times which start before it, as the fake below picks them - a deleted
+    # one has no start, so by when it was meant to be.
+    page = [first, tenth_deleted, seventeenth_moved, GYM_24TH, GYM_1ST]
+    calendar = for_changing(personal=[seventeenth_moved, GYM_24TH, GYM_1ST], answers={
+        GYM_URL: [series], GYM_INSTANCES: [_events_page(), _events_page()], f"PATCH {GYM_URL}": [series],
+        f"POST {PERSONAL_EVENTS}": [_inserted()]})
+    session = calendar._session
+    asked = session.get
+
+    def get(url, params=None, **kwargs):
+        answer = asked(url, params=params, **kwargs)
+        if "timeMax" in (params or {}) and "timeMin" not in params:
+            limit = datetime.fromisoformat(params["timeMax"])
+            answer.body["items"] = [each for each in page if google_calendar._sort_key(
+                google_calendar._google_when(each.get("start") or each["originalStartTime"])) < limit]
+        return answer
+
+    session.get = get
+    assert _said(calendar.change("gym", start="2026-11-24 19:00", following=True, today=NOVEMBER_21))["success"]
+    assert calendar._session.sent[1]["json"]["recurrence"] == ["RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=2"]
 
 
 @pytest.mark.parametrize("answer", [_refused(404, "notFound"), _refused(410, "deleted")])

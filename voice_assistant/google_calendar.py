@@ -137,6 +137,11 @@ EVENT_GONE = (404, 410)
 # back, or is in a new series.
 CANCELLED_LOOKED_FOR = timedelta(days=730)
 
+# How far past a split a time of a repeating event which was meant to be before it may have been moved, for
+# counting the times before it - two months. Google's timeMax bounds the start a time has now, not the one it
+# was meant to have, so a time moved on from before the split would be missed if it were read only up to it.
+MOVED_LATER_LOOKED_FOR = timedelta(days=60)
+
 # The most days named when some deleted on their own came back - "Tuesday, Wednesday, Thursday and 2 more".
 MOST_DAYS_SAID = 3
 
@@ -1358,7 +1363,9 @@ class GoogleCalendar:
         """
         How many times of a repeating event were meant to be before one of them - for its COUNT,
         which counts every time its rule makes, so one deleted on its own counts too, and each
-        by when it was meant to be, wherever it's been moved since.
+        by when it was meant to be, wherever it's been moved since: one moved from before this one
+        to after it is read for by looking MOVED_LATER_LOOKED_FOR past it, and one moved further
+        than that isn't counted.
 
         Args:
             series_url: The series' address.
@@ -1372,7 +1379,8 @@ class GoogleCalendar:
         """
         until = _sort_key(this)
         listed = self._pages(f"{series_url}/instances",
-                             {"timeMax": until.isoformat(), "showDeleted": "true", "maxResults": EVENTS_PAGE})
+                             {"timeMax": (until + MOVED_LATER_LOOKED_FOR).isoformat(), "showDeleted": "true",
+                              "maxResults": EVENTS_PAGE})
         return sum(1 for each in listed if _sort_key(_google_when(each.get("originalStartTime") or each["start"])) < until)
 
     def _cancelled_from(self, series_url: str, this: Union[date, datetime]) -> List[Tuple[str, Union[date, datetime]]]:
