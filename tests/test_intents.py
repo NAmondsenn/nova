@@ -726,6 +726,9 @@ def test_a_thing_is_only_left_to_claude_when_it_points_back(text, item):
     "Add the last song to Gym.", "Take the song before off car.", "Add this song to gym.",
     "Add the previous track to my gym list.", "Put the last song on my car playlist.",
     "Add the song before that to chill.", "Take the last track off my gym list.", "Add the last song to my playlist.",
+    # Said by what it is doing or where it is, not as a song.
+    "Add what's playing to Gym.", "Add what is playing to Gym.", "Add the one playing to Gym.",
+    "Add the one before to Gym.", "Take the one before off Gym.",
 ])
 def test_a_song_pointed_at_is_never_put_on_a_to_do_list(text):
     # A song isn't a thing for a list: it's Claude's, which has the playlists.
