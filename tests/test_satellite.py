@@ -1321,7 +1321,7 @@ def test_the_away_report_is_sent_on_connecting(brain, make, tmp_path):
                                        "ringing": ["alarm-1@1729587600"]}]
     assert brain.hellos == [{"name": "bedroom", "hostname": socket.gethostname(), "sample_rate": 48000,
                              "unclean": True, "speaker": None,
-                             "push_to_talk": False}]
+                             "push_to_talk": False, "media_controls": False}]
 
 
 def test_the_satellite_tells_the_brain_its_spotify_speaker(brain, make):
