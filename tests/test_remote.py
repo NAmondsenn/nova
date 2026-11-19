@@ -298,25 +298,41 @@ def test_hello_fields_kept():
         theirs.close()
 
 
-def _answer_notes(fake, **answer):
-    """Has the fake satellite answer each save_note it's sent, with the same id and this answer."""
-    def answering():
-        seen = 0
-        while True:
-            if len(fake.messages("save_note")) > seen:
-                seen += 1
-                try:
-                    fake.say("note_saved", id=fake.messages("save_note")[seen - 1]["id"], **answer)
-                except OSError:
-                    return
-            time.sleep(0.005)
+@pytest.fixture
+def answer_notes():
+    """
+    Gives a test a way to have a fake satellite answer each save_note it's sent, with the same id and
+    the answer given. The answering ends with the test - left to poll for ever, each would wake 200
+    times a second through every test which follows.
+    """
+    over = threading.Event()
+    threads = []
 
-    threading.Thread(target=answering, daemon=True).start()
+    def answer(fake, **answer):
+        def answering():
+            seen = 0
+            while not over.is_set():
+                if len(fake.messages("save_note")) > seen:
+                    seen += 1
+                    try:
+                        fake.say("note_saved", id=fake.messages("save_note")[seen - 1]["id"], **answer)
+                    except OSError:
+                        return
+                over.wait(0.005)
+
+        threads.append(threading.Thread(target=answering, daemon=True, name="answering"))
+        threads[-1].start()
+
+    yield answer
+    over.set()
+    for thread in threads:
+        thread.join(2)
+    assert not any(thread.is_alive() for thread in threads)
 
 
-def test_save_note_sends_and_returns_the_answer(pair):
+def test_save_note_sends_and_returns_the_answer(pair, answer_notes):
     satellite, fake, serving = pair
-    _answer_notes(fake, file="Bins.txt")
+    answer_notes(fake, file="Bins.txt")
 
     assert satellite.save_note("Bins", "green on Tuesday") == {"file": "Bins.txt"}
 
@@ -327,19 +343,19 @@ def test_save_note_sends_and_returns_the_answer(pair):
     assert "text" not in message
 
 
-def test_save_note_returns_the_satellites_reason(pair):
+def test_save_note_returns_the_satellites_reason(pair, answer_notes):
     satellite, fake, serving = pair
-    _answer_notes(fake, error="There's no Downloads folder to save it in.")
+    answer_notes(fake, error="There's no Downloads folder to save it in.")
 
     assert satellite.save_note("Bins", "x") == {"error": "There's no Downloads folder to save it in."}
 
 
-def test_the_longest_note_and_a_hostile_title_still_make_a_message_the_satellite_can_read(pair):
+def test_the_longest_note_and_a_hostile_title_still_make_a_message_the_satellite_can_read(pair, answer_notes):
     # A note's text is up to 50,000 characters - 200,000 bytes of UTF-8 at worst - and
     # a title may be anything, but a line of JSON may not be over protocol.MAX_LINE. An
     # emoji is the worst, as it's 12 bytes there.
     satellite, fake, serving = pair
-    _answer_notes(fake, file="x.txt")
+    answer_notes(fake, file="x.txt")
     text = "\u00e9\u4e2d" * 25_000
 
     assert satellite.save_note("\U0001F600" * 500, text) == {"file": "x.txt"}
@@ -349,11 +365,11 @@ def test_the_longest_note_and_a_hostile_title_still_make_a_message_the_satellite
     assert len(message["title"]) <= remote.MOST_TITLE_SENT
 
 
-def test_a_note_with_a_character_which_cant_be_encoded_still_reaches_the_satellite_to_refuse(pair):
+def test_a_note_with_a_character_which_cant_be_encoded_still_reaches_the_satellite_to_refuse(pair, answer_notes):
     # A lone surrogate from a broken reply: it's the satellite, with notes.save_note,
     # which says it can't be written, as it says it for anything else.
     satellite, fake, serving = pair
-    _answer_notes(fake, error="The file couldn't be written.")
+    answer_notes(fake, error="The file couldn't be written.")
 
     assert satellite.save_note("Bins", "a\ud800b") == {"error": "The file couldn't be written."}
     assert fake.payloads("save_note")[0].decode("utf-8", "surrogatepass") == "a\ud800b"
