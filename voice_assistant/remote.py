@@ -229,6 +229,12 @@ class RemoteSpeaker:
         self.on_speech: Optional[Callable[[bool], None]] = None
         self._speaking = False
 
+    @property
+    def speaking(self) -> bool:
+        """Whether the satellite is saying something now - see on_speech."""
+        with self._lock:
+            return self._speaking
+
     def play(self, audio: np.ndarray, sample_rate: Optional[int] = None, volume: float = 1.0,
              kind: str = "reply") -> RemotePlayback:
         """
@@ -391,7 +397,8 @@ class RemoteSpeaker:
     def _check_speaking(self):
         """Tells on_speech when the satellite starts or stops saying something."""
         with self._lock:
-            speaking = any(playback._rate is not None and playback.kind != "music"
+            # Only what the satellite has been sent the start of, as _matching.
+            speaking = any(playback._told and playback._rate is not None and playback.kind != "music"
                            for playback in self._playing.values())
             changed = speaking != self._speaking
             self._speaking = speaking

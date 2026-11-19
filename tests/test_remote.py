@@ -790,7 +790,7 @@ def test_the_speaker_says_when_it_starts_and_stops_speaking():
     speaker.on_speech = heard.append
 
     reply = speaker.play_stream(iter([]), kind="reply")
-    assert heard == [True]
+    assert heard == [True] and speaker.speaking
     # A second while the first goes on changes nothing; music and the satellite's own sounds never count.
     speaker.play_stream(iter([]), kind="announcement")
     speaker.play_stream(iter([]), kind="music")
@@ -817,4 +817,5 @@ def test_speech_the_satellite_couldnt_be_sent_never_counts():
     heard = []
     speaker.on_speech = heard.append
     speaker.play_stream(iter([]), kind="reply")
-    assert heard in ([], [True, False])
+    assert heard == []
+    assert not speaker.speaking
