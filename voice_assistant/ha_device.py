@@ -7,12 +7,13 @@ through MQTT discovery, with eleven controls: what Nova's doing, its three volum
 the next alarm, the timers running, Stop, Restart, Speak for automations ("the
 washing's done"), whether it's reaching its backend, and a microphone mute. A device
 which has a player also shows its music, and one which can be asked things has an Ask
-Nova box to type into. Its room is whichever area it's given in Home Assistant - see
+Nova box to type into, and a Say on Nova box whose words it says out loud, with no
+sound first. Its room is whichever area it's given in Home Assistant - see
 docs/decisions/0005.
 
 Home Assistant is told how Nova is set and what it's doing, and nothing else - never
-anything said to it, nor its answers. What's typed into Ask Nova comes in on its command
-topic only: the box's state topic only ever says a fixed placeholder, which its
+anything said to it, nor its answers. What's typed into Ask Nova or Say on Nova comes in
+on its command topic only: each box's state topic only ever says a fixed placeholder, which its
 discovery turns into an empty state, and the text is logged only as heard text is. The
 whole device shows as unavailable while Nova isn't running: the broker says "offline"
 for it if its connection drops.
@@ -133,6 +134,9 @@ class DeviceControls:
     # Puts what was typed into Ask Nova to Nova, as if it had been said - the answer is
     # spoken, never sent back. Only shown when set.
     ask: Optional[Callable[[str], None]] = None
+    # Says out loud what was typed into Say on Nova, word for word and with no sound
+    # first - the person typing knows it's coming. Only shown when set.
+    say: Optional[Callable[[str], None]] = None
 
 
 def _slug(text: str) -> str:
@@ -212,6 +216,8 @@ class NovaDevice:
         self._playlist_set = f"{base}/playlist/set"
         self._ask = f"{base}/ask"
         self._ask_set = f"{base}/ask/set"
+        self._say = f"{base}/say"
+        self._say_set = f"{base}/say/set"
         self._discovery_topic = f"{DISCOVERY_PREFIX}/device/{self.node_id}/config"
 
         self._client = None
@@ -316,6 +322,12 @@ class NovaDevice:
                                "state_topic": self._ask, "value_template": "{{ '' }}", "max": 255,
                                "icon": "mdi:keyboard-outline",
                                "default_entity_id": f"text.{_slug(self.name)}_ask"}
+        if self._has_say():
+            # The same kind of box as Ask Nova, kept as empty the same way.
+            controls["say"] = {"p": "text", "name": "Say on Nova", "command_topic": self._say_set,
+                               "state_topic": self._say, "value_template": "{{ '' }}", "max": 255,
+                               "icon": "mdi:bullhorn-outline",
+                               "default_entity_id": f"text.{_slug(self.name)}_say"}
         for control, settings in controls.items():
             settings["unique_id"] = f"{self.node_id}_{control}"
             settings["qos"] = QOS
@@ -331,6 +343,10 @@ class NovaDevice:
     def _has_ask(self) -> bool:
         """Whether Nova can be asked things from Home Assistant - the brain's usage device can't."""
         return self.controls is not None and self.controls.ask is not None
+
+    def _has_say(self) -> bool:
+        """Whether Nova can be given words to say from Home Assistant's Say on Nova box."""
+        return self.controls is not None and self.controls.say is not None
 
     def _music_discovery(self) -> Dict[str, Dict]:
         """
@@ -493,6 +509,8 @@ class NovaDevice:
             topics += [(topic, QOS) for topic in (*self._playback.values(), self._playlist_set)]
         if self._has_ask():
             topics.append((self._ask_set, QOS))
+        if self._has_say():
+            topics.append((self._say_set, QOS))
         return topics
 
     def _announce(self):
@@ -531,6 +549,9 @@ class NovaDevice:
             # sent back to be shown or kept. Not "", which the broker would take as
             # forgetting the message, leaving the box "unknown" after Home Assistant restarts.
             state[self._ask] = ASK_PLACEHOLDER
+        if self._has_say():
+            # Kept empty as Ask Nova's is, for the same reasons.
+            state[self._say] = ASK_PLACEHOLDER
         if self._has_music():
             # Always "None": see the playlist select in _music_discovery.
             state[self._playlist] = UNKNOWN
@@ -732,6 +753,10 @@ class NovaDevice:
                 # Logged as heard text is, so the transcripts setting decides if it's kept.
                 logger.info(f"Home Assistant asked: '{payload}'", extra=TRANSCRIPT)
                 self._queue("Ask Nova", self.controls.ask, payload)
+        elif self._has_say() and topic == self._say_set:
+            if payload:
+                logger.info(f"Home Assistant asked to say aloud: '{payload}'", extra=TRANSCRIPT)
+                self._queue("Say on Nova", self.controls.say, payload)
         elif topic == f"{self._muted}/set":
             if payload in (ON, OFF):
                 logger.info(f"Microphone {'muted' if payload == ON else 'unmuted'} from Home Assistant")
