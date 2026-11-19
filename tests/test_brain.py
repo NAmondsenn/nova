@@ -579,6 +579,15 @@ def test_spoken_name(named, passwords):
     assert named.spoken_name("pc") == "Desk"
 
 
+def test_spoken_name_isnt_the_satellites_machine_word(named):
+    # "computer" on the PC makes "the computer" the PC, but a reply still says "the PC", not "computer".
+    named.rooms.set_called("pc", ["computer"])
+    assert named.find_satellite("the computer") == ("pc", None)
+    assert named.spoken_name("pc") == "the PC"
+    named.rooms.set_called("pc", ["computer", "Desk"])
+    assert named.spoken_name("pc") == "Desk"
+
+
 @pytest.fixture
 def two_pis(brain, passwords):
     """A brain with two Pis (the bedroom, the default, and the kitchen) and a PC, none of them connected."""

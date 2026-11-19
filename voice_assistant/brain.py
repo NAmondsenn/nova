@@ -896,7 +896,8 @@ class Brain:
 
         Returns:
             What it's called in a reply - "the PC", or the name he gave it on the settings
-            page - as it's said mid-sentence: capitalise it to start one. If another
+            page (not one of its machine's own words, as "computer" is for the PC) - as it's
+            said mid-sentence: capitalise it to start one. If another
             satellite is called the same, its own name, as "the Pi" would mean both of two
             Pis - and if the satellites can't be read, what the machine gives it.
         """

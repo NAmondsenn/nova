@@ -113,6 +113,20 @@ def test_spoken():
     assert spoken("study", "linux", ["Workshop"]) == "Workshop"
 
 
+def test_spoken_skips_a_name_which_is_one_of_the_machines_own_words():
+    # "computer" on the PC settles what "the computer" means, but it's no name to call the PC by in a reply.
+    assert spoken("pc", "pc", ["computer"]) == "the PC"
+    assert spoken("pc", "pc", ["The Computer"]) == "the PC"
+    assert spoken("home-assistant", "pi", ["Pie"]) == "the Pi"
+    # The first which isn't one is used, wherever it comes.
+    assert spoken("pc", "pc", ["computer", "Desk", "Study"]) == "Desk"
+    assert spoken("pc", "pc", ["my PC", "desktop", "Desk"]) == "Desk"
+    # A word for another kind of machine, or any name where the machine isn't known, is a name like any.
+    assert spoken("pc", "pc", ["laptop"]) == "laptop"
+    assert spoken("study", "linux", ["computer"]) == "computer"
+    assert spoken("kitchen", None, ["computer"]) == "computer"
+
+
 def test_listed():
     assert listed([], "and") == ""
     assert listed(["the PC"], "or") == "the PC"

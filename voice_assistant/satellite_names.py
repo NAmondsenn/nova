@@ -90,12 +90,17 @@ def spoken(name: str, machine: Optional[str], called: List[str]) -> str:
         called: The names set for it on the settings page.
 
     Returns:
-        The first name set on the settings page, as it's what he calls it; otherwise "the
-        Pi", "the PC" or "the Mac"; otherwise the satellite's own name. The case is as it
-        is in the middle of a sentence - the caller capitalises one it starts.
+        The first name set on the settings page which isn't one of the machine's own words,
+        as it's what he calls it; otherwise "the Pi", "the PC" or "the Mac"; otherwise the
+        satellite's own name. The case is as it is in the middle of a sentence - the caller
+        capitalises one it starts.
     """
-    if called:
-        return called[0]
+    own = MACHINE_WORDS.get(machine, ())
+    for each in called:
+        # "computer" set on the PC is for settling what "the computer" means, and in a reply
+        # "Moved to computer." is worse than "Moved to the PC.".
+        if plain(each) not in own:
+            return each
     return SPOKEN.get(machine, name)
 
 
