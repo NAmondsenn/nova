@@ -54,6 +54,10 @@
     "logging.": "Privacy",
   };
 
+  // The sub-headings in the order a section shows them, which is the order the old groups were
+  // in: the one place they are all named, with SUBHEADINGS and subheadingOf.
+  const SUBHEADING_ORDER = ["Music", "Wrapped", "Voice", "Sounds", "Listening", "Home", "Privacy", "Other"];
+
   // Which section a settings key is in.
   const sectionOf = (key) => {
     const text = String(key);
@@ -147,7 +151,7 @@
     displays: (view) => {
       const displays = view.displays;
       if (!displays) return { text: "" };
-      return { text: displays.total ? `${displays.connected} connected` : "None added" };
+      return { text: displays.total ? count(displays.total, "clock display", "clock displays") : "None added" };
     },
     journeys: (view) => {
       const journeys = view.journeys;
@@ -242,7 +246,7 @@
     .map((word) => word.slice(0, LONGEST_WORD));
 
   // The sections which a search finds, in the list's order. `entries` are the page's rows,
-  // as { section, kind: "name" | "line" | "setting" | "control", text, target }. A section
+  // as { section, kind: "name" | "line" | "setting" | "control", text, target, label? }. A section
   // is found when every word is in the text of some entry of it, and lists as hits its
   // settings and controls which hold every word. Words are looked for as plain text, never
   // as a pattern.
@@ -254,10 +258,12 @@
     for (const section of SECTIONS) {
       const own = lower.filter((one) => one.entry.section === section.id);
       if (!wanted.every((word) => own.some((one) => one.text.includes(word)))) continue;
+      // A hit shows its entry's `label` where it has one, as a setting's text also holds the words
+      // of its key, which are there to be found and not to be read.
       const hits = own
         .filter((one) => (one.entry.kind === "setting" || one.entry.kind === "control") && wanted.every((word) => one.text.includes(word)))
         .slice(0, MOST_HITS)
-        .map((one) => ({ label: one.entry.text, target: one.entry.target }));
+        .map((one) => ({ label: one.entry.label == null ? one.entry.text : one.entry.label, target: one.entry.target }));
       found.push({ section: section.id, hits });
     }
     return found;
@@ -271,5 +277,5 @@
     return section ? section.id : null;
   };
 
-  globalThis.NovaList = { GROUPS, SECTIONS, sectionOf, subheadingOf, lines, attention, words, search, fromHash };
+  globalThis.NovaList = { GROUPS, SECTIONS, SUBHEADING_ORDER, sectionOf, subheadingOf, lines, attention, words, search, fromHash };
 })();

@@ -210,12 +210,23 @@ const STATE = {
   journeys: null,
 };
 
+// The labels Nova gives the settings these tests use, as settings_page.EDITABLE has them: a search
+// has to find a setting by what a person reads, and by its key, not by a label made from it.
+const LABELS = {
+  "ntfy.quiet_from": "Quiet hours start at",
+  "ntfy.quiet_until": "Quiet hours end at",
+  "journeys.buffer_minutes": "Minutes to spare when working out when to leave",
+  "web_search.enabled": "Search the web when asked to",
+  "music.player": "What plays the music",
+};
+const labelOf = (key) => LABELS[key] || assert.fail(`No label for ${key}: copy it from EDITABLE`);
+
 // A setting as /api/state gives one, with made-up values.
-const timeOf = (key, value) => ({ key, label: `Label of ${key}`, used: "Used straight away", kind: "text", value,
+const timeOf = (key, value) => ({ key, label: labelOf(key), used: "Used straight away", kind: "text", value,
                                   form: "time" });
-const number = (key, value) => ({ key, label: `Label of ${key}`, used: "Used straight away", kind: "number", value,
+const number = (key, value) => ({ key, label: labelOf(key), used: "Used straight away", kind: "number", value,
                                   form: "number", min: 0, max: 100, whole: true });
-const yesNo = (key, value) => ({ key, label: `Label of ${key}`, used: "Used straight away", kind: "yes/no", value });
+const yesNo = (key, value) => ({ key, label: labelOf(key), used: "Used straight away", kind: "yes/no", value });
 
 // What the other loads say, with nothing the matter.
 const MUSIC = { available: true, now: null, playlists: [], spotify: { signed_in: true } };
@@ -565,19 +576,22 @@ test("saved settings which can't be read leave the setting-based lines empty, as
   assert.equal(shown.attention().join("|"), "else: line 3 is wrong");
 });
 
-test("the clocks count as connected as their satellite is, the default's when they have none", async () => {
-  const satellites = [{ name: "bedroom", connected: true, default: true }, { name: "pc", connected: false, default: false }];
-  const displays = { port: 0, list: [{ id: "1", satellite: null }, { id: "2", satellite: "pc" }, { id: "3", satellite: "bedroom" }] };
-  const shown = page({ state: { ...STATE, satellites, displays } });
-  shown.set("stateSaid", { ...STATE, satellites, displays });
-  assert.equal(JSON.stringify(shown.view().displays), '{"connected":2,"total":3}');
-  // The satellites' file can't be read, so nothing of either is known.
-  shown.set("stateSaid", { ...STATE, satellites: [], satellites_unreadable: true, displays });
-  const view = shown.view();
-  assert.equal(`${view.satellites},${view.displays}`, "null,null");
-  // No clocks is none added, as it is.
-  shown.set("stateSaid", { ...STATE, satellites, displays: { port: 0, list: [] } });
-  assert.equal(JSON.stringify(shown.view().displays), '{"connected":0,"total":0}');
+test("the clock displays row says how many there are and nothing of connection, whatever the clock server is doing", async () => {
+  const list = [{ id: "1", satellite: null }, { id: "2", satellite: "pc" }];
+  const shown = page({ state: { ...STATE, displays: { port: 0, list } } });
+  await shown.context.load();
+  assert.equal(JSON.stringify(shown.view().displays), '{"total":2}');
+  assert.equal(shown.line("displays"), "2 clock displays");
+  // With its port on, or its satellites unreadable, no differently.
+  shown.given.state = { ...STATE, satellites_unreadable: true, displays: { port: 8765, list: list.slice(0, 1) } };
+  await shown.context.load();
+  assert.equal(shown.line("displays"), "1 clock display");
+  shown.given.state = { ...STATE, displays: { port: 0, list: [] } };
+  await shown.context.load();
+  assert.equal(shown.line("displays"), "None added");
+  shown.given.state = null;
+  await shown.context.load();
+  assert.equal(shown.line("displays"), "");
 });
 
 test("the default satellite being away needs attention, and the volume, journeys and keys are read", async () => {
@@ -628,6 +642,8 @@ function withWords(shown) {
   return {
     heading: own("status", "h3", "Recent problems"),
     mute: own("satellites", "label", "Mute the microphone", { htmlFor: "mute" }),
+    muteControl: own("satellites", "input", "", { id: "mute" }),
+    loose: own("satellites", "label", "Loose label", { htmlFor: "" }),
     add: own("satellites", "button", "Add a satellite"),
     placeholder: own("satellites", "input", "", { placeholder: "Its Pi's machine name, e.g. bedroom" }),
     alarm: own("clock", "button", "Add alarm"),
@@ -645,13 +661,13 @@ function withWords(shown) {
 
 const QUIET = [timeOf("ntfy.quiet_from", "23:00"), timeOf("ntfy.quiet_until", "07:00")];
 
-test("typing 'quiet' lists Notifications with the quiet hours as hits, which open it and mark the field", async () => {
+test("typing 'quiet hours' lists Notifications with both night settings as hits, which open it and mark the field", async () => {
   const shown = page({ state: { ...STATE, settings: QUIET } });
   await shown.loadAll();
   withWords(shown);
-  shown.type("quiet");
+  shown.type("quiet hours");
   assert.equal(shown.rows().join(","), "notifications");
-  assert.equal(shown.hits().map((one) => one.textContent).join("|"), "Label of ntfy.quiet_from|Label of ntfy.quiet_until");
+  assert.equal(shown.hits().map((one) => one.textContent).join("|"), "Quiet hours start at|Quiet hours end at");
   assert.equal(shown.hits()[0].tag, "button");
   // The row in the results has the line, as the list's own does.
   assert.equal(shown.line("notifications"), "Quiet from 23:00 to 07:00");
@@ -665,7 +681,7 @@ test("typing 'quiet' lists Notifications with the quiet hours as hits, which ope
   shown.wait(2000);
   assert.equal(field.classes.has("found"), false);
   // The box's words are left in place, so going back is to the same results.
-  assert.equal(shown.node("find").value, "quiet");
+  assert.equal(shown.node("find").value, "quiet hours");
   assert.equal(shown.rows().join(","), "notifications");
 });
 
@@ -723,13 +739,85 @@ test("a search reads each section's own words from the page: headings, labels, b
   assert.equal(found("timers"), "clock: ");
   assert.equal(found("mute alarm"), ": ");
   // A setting's label is listed with its setting, once.
-  assert.equal(found("ntfy.quiet_from"), "notifications: Label of ntfy.quiet_from");
-  // Pressing a control's hit marks the element itself.
+  assert.equal(found("ntfy quiet from"), "notifications: Quiet hours start at");
+  // A label's hit is its control, which a visually hidden label would leave nothing to mark by; a
+  // label with no control is itself the target.
   shown.type("mute");
   await shown.click(shown.hits()[0]);
   assert.equal(shown.body.dataset.open, "satellites");
-  assert.equal(words.mute.classes.has("found"), true);
-  assert.equal(words.mute.scrolled, "center");
+  assert.equal(words.muteControl.classes.has("found"), true);
+  assert.equal(words.muteControl.scrolled, "center");
+  assert.equal(words.mute.classes.has("found"), false);
+  shown.type("loose label");
+  await shown.click(shown.hits()[0]);
+  assert.equal(words.loose.classes.has("found"), true);
+});
+
+test("a setting is found by the words of its key too, though its label alone is shown", async () => {
+  const shown = page({ state: { ...STATE, settings: [number("journeys.buffer_minutes", 10), ...QUIET] } });
+  await shown.loadAll();
+  const found = (query) => {
+    shown.type(query);
+    return `${shown.rows().join(",")}: ${shown.hits().map((one) => one.textContent).join("|")}`;
+  };
+  assert.equal(found("buffer"), "journeys: Minutes to spare when working out when to leave");
+  assert.equal(found("buffer minutes"), "journeys: Minutes to spare when working out when to leave");
+  assert.equal(found("quiet from"), "notifications: Quiet hours start at");
+  // The hit's words and its accessible name are the label, not the key's.
+  shown.type("buffer");
+  assert.equal(shown.hits()[0].getAttribute("aria-label"), "Minutes to spare when working out when to leave, in Journeys");
+  // And one it has no words of is not found.
+  assert.equal(found("buffer volume"), ": ");
+});
+
+test("a key's field for a new key is not found until the key is open, as CSS hides it till then", async () => {
+  const shown = page();
+  await shown.loadAll();
+  const key = Object.assign(new Node("form"), {});
+  key.className = "tile key";
+  const label = Object.assign(new Node("label"), { htmlFor: "key-CLAUDE" });
+  label.textContent = "Claude";
+  const opener = Object.assign(new Node("button"), {});
+  opener.textContent = "Replace";
+  const entry = new Node("div");
+  entry.className = "entry";
+  const paste = Object.assign(new Node("input"), { placeholder: "Paste it here", id: "key-CLAUDE" });
+  const save = Object.assign(new Node("button"), {});
+  save.textContent = "Save the key";
+  entry.append(paste, save);
+  key.append(label, opener, entry);
+  shown.node("section-keys").append(key);
+  const found = (query) => {
+    shown.type(query);
+    return `${shown.rows().join(",")}: ${shown.hits().map((one) => one.textContent).join("|")}`;
+  };
+  assert.equal(found("paste"), ": ");
+  assert.equal(found("save the key"), ": ");
+  // What is shown of it is found.
+  assert.equal(found("replace"), "keys: Replace");
+  key.classList.add("open");
+  assert.equal(found("paste"), "keys: Paste it here");
+  assert.equal(found("save the key"), "keys: Save the key");
+});
+
+test("a setting says when it's used only if that isn't straight away", async () => {
+  const later = { ...number("music.player", 1), used: "Used once Nova restarts" };
+  const shown = page({ state: { ...STATE, settings: [later, ...QUIET] } });
+  await shown.context.load();
+  assert.equal(shown.node("setting-music.player-used").textContent, "Used once Nova restarts");
+  assert.equal(shown.node("setting-music.player").getAttribute("aria-describedby"), "setting-music.player-used");
+  const field = (key) => shown.node(`setting-${key}`).closest(".field");
+  assert.equal(field("ntfy.quiet_from").textContent.includes("Used"), false);
+  assert.equal(shown.node("setting-ntfy.quiet_from").getAttribute("aria-describedby"), null);
+  // The second night setting is described by its note once the two are the same, and by nothing before.
+  const until = shown.node("setting-ntfy.quiet_until");
+  assert.equal(until.getAttribute("aria-describedby"), null);
+  until.value = shown.node("setting-ntfy.quiet_from").value;
+  shown.context.showNight();
+  assert.equal(until.getAttribute("aria-describedby"), "setting-ntfy.quiet_until-night");
+  until.value = "07:00";
+  shown.context.showNight();
+  assert.equal(until.getAttribute("aria-describedby"), null);
 });
 
 test("a label which holds its field is read as its own words, not the field's choices too", async () => {

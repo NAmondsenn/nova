@@ -139,11 +139,6 @@ const VOLUMES = {
   music: { label: "Music", icon: "i-music" },
 };
 
-// The sub-headings inside a section, in the order they are shown: settings_list.js says
-// which one a setting is under, and this says which comes before which where a section has
-// more than one - the order the old groups were in.
-const HEADINGS = ["Music", "Wrapped", "Voice", "Sounds", "Listening", "Home", "Privacy", "Other"];
-
 // Every setting's input or select, wherever it is drawn: each is part of the one settings
 // form by its form attribute, so this is what that form holds - its events don't reach it
 // from outside it, and an input outside it isn't found from it by a selector.
@@ -151,6 +146,10 @@ const SETTING_INPUTS = 'input[form="settings"], select[form="settings"]';
 
 // The night's two settings - quiet hours, which there are none of while they're the same.
 const NIGHT = ["ntfy.quiet_from", "ntfy.quiet_until"];
+
+// What Nova says of a setting used at once, which the page leaves unsaid: only a setting which
+// waits for a restart says so under its label (the words of NOW in settings_page.py).
+const USED_NOW = "Used straight away";
 
 // How long a setting or control found by a search stays marked after it is opened to, in
 // milliseconds.
@@ -1245,7 +1244,7 @@ function showDisplayKey(name, result, added) {
     ? ["Open ", element("code", `http://<the brain's address>:${displaysPort}${result.path}`),
        " in the clock's kiosk app, with the brain's address on your Wi-Fi."]
     : ["Nova isn't serving the clocks - their port is off, or another program has it, which the brain's log says. "
-       + "Set “Port the clock displays connect on” under Settings and restart Nova, then open ", element("code", `http://<the brain's address>:<that port>${result.path}`),
+       + "Set “Port the clock displays connect on” below and restart Nova, then open ", element("code", `http://<the brain's address>:<that port>${result.path}`),
        " in the clock's kiosk app."]));
   const copy = document.getElementById("display-key-copy");
   copy.textContent = "Copy";
@@ -2611,11 +2610,12 @@ function showSettings(settings) {
     }
     const problem = element("p", undefined, "panel problem");
     problemLines.push(problem);
-    const groups = [...headings].sort(([one], [other]) => HEADINGS.indexOf(one) - HEADINGS.indexOf(other))
+    const groups = [...headings].sort(([one], [other]) => NovaList.SUBHEADING_ORDER.indexOf(one) - NovaList.SUBHEADING_ORDER.indexOf(other))
       .map(([name, members]) => settingsGroup(name, members));
     const panel = element("div", undefined, "panel settings");
     panel.append(...groups);
-    block.replaceChildren(problem, panel, ...(SETTINGS_HINTS[section.id] ? [element("p", SETTINGS_HINTS[section.id], "hint")] : []));
+    const hint = SETTINGS_HINTS[section.id];
+    block.replaceChildren(problem, panel, ...(hint ? [element("p", hint, "hint")] : []));
   }
   showSettingsProblem(settingsProblem);
   countChanges();
@@ -2639,16 +2639,14 @@ function settingsGroup(name, members) {
   return group;
 }
 
-// A setting, with when it's used under its label: "Used straight away".
+// A setting, with under its label when it's used if that is not straight away.
 function settingField(setting) {
   const id = `setting-${setting.key}`;
   const field = element("div", undefined, setting.kind === "yes/no" ? "field switch" : "field");
   const about = element("span", undefined, "about");
   const label = element("label", setting.label);
   label.htmlFor = id;
-  const used = element("span", setting.used, "detail");
-  used.id = `${id}-used`;
-  about.append(label, used);
+  about.append(label);
   const input = setting.choices ? choiceInput(setting) : valueInput(setting);
   input.id = id;
   input.name = setting.key;
@@ -2658,7 +2656,13 @@ function settingField(setting) {
   // file becoming 1.1 - so it's what's saved that it's compared with, and the moved one
   // shows as a change rather than as what the file says.
   input.dataset.saved = input.type === "range" ? String(setting.value) : valueOf(input);
-  input.setAttribute("aria-describedby", used.id);
+  if (setting.used !== USED_NOW) {
+    const used = element("span", setting.used, "detail");
+    used.id = `${id}-used`;
+    about.append(used);
+    input.setAttribute("aria-describedby", used.id);
+    input.dataset.used = "yes";
+  }
   field.append(about, setting.choices ? selectBox(input) : input.type === "range" ? speedControl(input) : input);
   // Under the second of the night's two, so it's said once.
   if (setting.key === NIGHT[1]) {
@@ -2749,13 +2753,15 @@ function speedControl(slider) {
 
 // Says under the night's second setting when there are no quiet hours, as the two are
 // the same - and only then reads it out with it, as a description is read even hidden.
-// The first has no note of its own, so keeps just when it's used.
+// The first has no note of its own, so keeps just when it's used, if it says.
 function showNight() {
   const [from, until] = NIGHT.map((key) => document.getElementById(`setting-${key}`));
   if (!from || !until) return;
   const none = from.value === until.value;
   document.getElementById(`${until.id}-night`).hidden = !none;
-  until.setAttribute("aria-describedby", none ? `${until.id}-used ${until.id}-night` : `${until.id}-used`);
+  const described = [...(until.dataset.used ? [`${until.id}-used`] : []), ...(none ? [`${until.id}-night`] : [])];
+  if (described.length) until.setAttribute("aria-describedby", described.join(" "));
+  else until.removeAttribute("aria-describedby");
 }
 
 // A select with the page's own arrow, the browser's being hidden so it matches the fields.
@@ -3009,17 +3015,6 @@ function batteryIsLow(device) {
     && device.marks.length > 0 && device.level <= Math.max(...device.marks);
 }
 
-// How many of the clocks are connected. The page is told no more of a clock than the satellite
-// it hears through, so that is what counts, as Nova counts it (session_of in display_server.py):
-// the clock's own satellite, or the default's when it has none, being connected.
-function clocksConnected(state) {
-  const connected = new Set(state.satellites.filter((one) => one.connected).map((one) => one.name));
-  const fallback = state.satellites.find((one) => one.default);
-  const list = state.displays.list;
-  const heard = list.filter((display) => connected.has(display.satellite || (fallback && fallback.name)));
-  return { connected: heard.length, total: list.length };
-}
-
 // The view settings_list.js reads, from what the page has been told: each part is null unless
 // the load it comes from last worked, so no line or attention row shows an old value as now.
 // Nova's saved settings which can't be read are shown as its own defaults, which say nothing
@@ -3054,7 +3049,7 @@ function currentView() {
     lights: lights ? { on: lights.filter((light) => light.on).length, total: lights.length } : null,
     batteries: worked.batteries && batteries && batteries.available
       ? batteries.devices.map((device) => ({ name: device.name, percent: device.level, low: batteryIsLow(device) })) : null,
-    displays: readable ? clocksConnected(state) : null,
+    displays: state ? { total: state.displays.list.length } : null,
     journeys: journeys && Number.isFinite(journeys.requests) && Number.isFinite(journeys.cap)
       ? { requests: journeys.requests, cap: journeys.cap } : null,
     football: worked.football && football && football.available ? { teams: football.teams.length } : null,
@@ -3136,12 +3131,12 @@ function drawAttention(found) {
 
 // Draws what the list says from what the page has loaded: after every load, of the state or of
 // any other part. Not while a row is pressed, whose redrawing under the finger could lose the
-// press - it's tried again at the next load, unless `force`d, for a search's box being emptied.
-function drawList(force = false) {
+// press - it's tried again at the next load.
+function drawList() {
   const view = currentView();
   const now = Date.now() / 1000;
   drawJourneys(view.journeys);
-  if (!force && document.getElementById("list").querySelector(".row:active")) return;
+  if (document.getElementById("list").querySelector(".row:active")) return;
   drawLines(NovaList.lines(view, now));
   drawAttention(NovaList.attention(view, now));
 }
@@ -3158,25 +3153,34 @@ function labelWords(label) {
   return copy.textContent.trim();
 }
 
-// Whether an element, or any of those above it in the section, is hidden.
+// Whether an element, or any of those above it in the section, is hidden - not shown on the page.
 function isHidden(one, section) {
-  for (let up = one; up && up !== section; up = up.parentElement) if (up.hidden) return true;
+  for (let up = one; up && up !== section; up = up.parentElement) {
+    if (up.hidden) return true;
+    // A key's field for a new one is hidden by CSS, not by `hidden`, until the key is opened: the
+    // only block of the page which is.
+    const key = up.parentElement;
+    if (up.classList.contains("entry") && key && key.classList.contains("key") && !key.classList.contains("open")) return true;
+  }
   return false;
 }
 
 // What a search looks through, as NovaList.search has it: each section's name and line, each
 // setting's label with its field as the target, and each section's own words as the page stands,
-// with the element as the target. A hidden or empty element is passed over, as is a setting's
-// own label, which is listed once with its setting; the same words twice in a section, once.
+// with the element as the target (a label's control, where it has one, as a label can be hidden
+// from sight). A setting is found by its label and by the words of its key too, "quiet hours
+// start at ntfy quiet from", though only the label is shown. A hidden or empty element is passed
+// over, as is a setting's own label, which is listed once with its setting; the same words twice
+// in a section, once.
 function searchEntries() {
   const lines = NovaList.lines(currentView(), Date.now() / 1000);
   const entries = [];
   const seen = new Set();
-  const add = (section, kind, text, target) => {
+  const add = (section, kind, text, target, label) => {
     const key = `${section}\n${kind}\n${text.toLowerCase()}`;
     if (!text || seen.has(key)) return;
     seen.add(key);
-    entries.push({ section, kind, text, target });
+    entries.push({ section, kind, text, target, label });
   };
   for (const section of NovaList.SECTIONS) {
     add(section.id, "name", section.name, null);
@@ -3188,9 +3192,14 @@ function searchEntries() {
         add(section.id, "control", one.placeholder.trim(), one);
       } else if (typeof one.htmlFor === "string" && one.htmlFor.startsWith("setting-")) {
         const input = document.getElementById(one.htmlFor);
-        add(section.id, "setting", labelWords(one), input ? input.closest(".field") || input : one);
+        const label = labelWords(one);
+        const key = one.htmlFor.slice("setting-".length).replace(/[._]/g, " ");
+        add(section.id, "setting", `${label} ${key}`, input ? input.closest(".field") || input : one, label);
+      } else if (typeof one.htmlFor === "string") {
+        const control = one.htmlFor ? document.getElementById(one.htmlFor) : null;
+        add(section.id, "control", labelWords(one), control || one);
       } else {
-        add(section.id, "control", typeof one.htmlFor === "string" ? labelWords(one) : one.textContent.trim(), one);
+        add(section.id, "control", one.textContent.trim(), one);
       }
     }
   }

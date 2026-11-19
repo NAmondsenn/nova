@@ -37,7 +37,7 @@ const view = (changes = {}) => ({
   clock: { timers: 0, reminders: 1, alarms: 1 },
   lights: { on: 2, total: 5 },
   batteries: [{ name: "Tablet", percent: 14, low: true }],
-  displays: { connected: 1, total: 1 },
+  displays: { total: 1 },
   journeys: { requests: 21, cap: 3000 },
   football: { teams: 2 },
   google: "in",
@@ -99,6 +99,13 @@ test("every key start in the table belongs to its section and sub-heading", () =
     assert.equal(List.sectionOf(key), section, key);
     assert.equal(List.subheadingOf(key), subheading, key);
   }
+});
+
+test("every sub-heading a key can be under is in the order, and the order has no other", () => {
+  const keys = List.SECTIONS.flatMap((section) => section.starts.map((start) => `${start}x`)).concat("made.up");
+  const given = new Set(keys.map((key) => List.subheadingOf(key)).filter(Boolean));
+  assert.equal([...given].sort().join(","), [...List.SUBHEADING_ORDER].sort().join(","));
+  assert.equal(plain(List.SUBHEADING_ORDER).join(","), "Music,Wrapped,Voice,Sounds,Listening,Home,Privacy,Other");
 });
 
 test("a key nothing claims is in Everything else under Other", () => {
@@ -222,10 +229,10 @@ test("a battery with no usable percent is passed over", () => {
   assert.deepEqual(attention({ batteries: mixed }), ["batteries: Tablet is at 14%"]);
 });
 
-test("the displays line counts those connected", () => {
-  assert.equal(said("displays"), "1 connected");
-  assert.equal(said("displays", { displays: { connected: 0, total: 2 } }), "0 connected");
-  assert.equal(said("displays", { displays: { connected: 0, total: 0 } }), "None added");
+test("the displays line says how many there are, and nothing of whether they are connected", () => {
+  assert.equal(said("displays"), "1 clock display");
+  assert.equal(said("displays", { displays: { total: 2 } }), "2 clock displays");
+  assert.equal(said("displays", { displays: { total: 0 } }), "None added");
   assert.equal(said("displays", { displays: null }), "");
 });
 
@@ -405,6 +412,15 @@ test("a search finds a section by a setting's label, listing the setting", () =>
   const hit = plain(List.search("loud", entries))[0].hits[0];
   assert.equal(hit.label, "How loud Nova speaks");
   assert.equal(hit.target, "voice.volume");
+});
+
+test("a hit shows its entry's label where it has one, and is found by the text, which holds more", () => {
+  const withKey = [{ section: "sound", kind: "setting", text: "How loud Nova speaks voice volume", label: "How loud Nova speaks",
+                     target: "voice.volume" },
+                   { section: "sound", kind: "control", text: "Say something", target: "say-button" }];
+  const hit = plain(List.search("voice volume", withKey))[0].hits[0];
+  assert.equal(hit.label, "How loud Nova speaks");
+  assert.equal(plain(List.search("something", withKey))[0].hits[0].label, "Say something");
 });
 
 test("a search finds a section by a control", () => {
