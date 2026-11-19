@@ -258,6 +258,7 @@ class NovaDevice:
         self._commands = queue.Queue()
         # What each state topic was last sent, so only what's changed is sent again.
         self._lock = threading.Lock()
+        self._announcing = threading.Lock()
         self._published: Dict[str, Union[str, bytes]] = {}
         # Whether a problem has been logged since things last worked, so an outage is
         # logged once rather than at every try.
@@ -591,10 +592,15 @@ class NovaDevice:
         return topics
 
     def _announce(self):
-        """Tells Home Assistant about Nova's device and its controls."""
+        """
+        Tells Home Assistant about Nova's device and its controls. One at a time: paho's
+        thread and the music thread both announce, and an older announcement sent after a
+        newer one would bring back tiles the newer one removed.
+        """
         client = self._client
         if client is not None:
-            client.publish(self._discovery_topic, json.dumps(self.discovery()), qos=QOS, retain=True)
+            with self._announcing:
+                client.publish(self._discovery_topic, json.dumps(self.discovery()), qos=QOS, retain=True)
 
     # Nova's state, to Home Assistant
 

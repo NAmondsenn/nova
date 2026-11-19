@@ -1038,6 +1038,20 @@ def test_a_navidrome_which_is_down_costs_one_wait_for_all_the_covers(make_player
     assert len(asked) == 1
 
 
+def test_one_cover_navidrome_refuses_doesnt_stop_the_rest(make_player):
+    player = make_player({"getPlaylists": {"playlists": {"playlist": [
+        {"id": "p1", "name": "a", "coverArt": "pl-p1"}, {"id": "p2", "name": "b", "coverArt": "pl-p2"}]}}})
+    answer = player._session.get
+
+    def get(url, params=None, timeout=None):
+        if url.endswith("/getCoverArt"):
+            return FakeHttp(status=404) if params["id"] == "pl-p1" else FakeImage()
+        return answer(url, params=params, timeout=timeout)
+
+    player._session.get = get
+    assert player.playlist_covers(["a", "b"]) == {"b": (b"a cover", "image/jpeg")}
+
+
 # What Navidrome says of a song's file, sound and lyrics, for listening (decision 0022)
 
 class FakeHttp:

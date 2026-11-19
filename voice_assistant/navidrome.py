@@ -1179,7 +1179,11 @@ class NavidromePlayer(NavidromeLibrary):
                 response = self._session.get(f"{self.url}/rest/getCoverArt",
                                              params={**self._sign_in(), "id": art[name], "size": COVER_SIZE},
                                              timeout=REQUEST_TIMEOUT)
-                response.raise_for_status()
+                try:
+                    response.raise_for_status()
+                except requests.HTTPError:
+                    # Navidrome answered, but not with this cover: the rest are still asked for.
+                    continue
                 kind = response.headers.get("Content-Type", "")
                 covers[name] = (response.content, kind) if kind.startswith("image/") else None
         except (requests.RequestException, NavidromeError) as e:
