@@ -506,6 +506,25 @@ def test_find_satellite_by_machine_word(named):
     assert named.names_satellite("my Pi") is True and named.names_satellite("the PC") is True
 
 
+def test_find_satellite_knows_this_pc(named):
+    assert named.find_satellite("this PC") == ("pc", None)
+    assert named.find_satellite("that Mac") == ("mac", None)
+
+
+@pytest.mark.parametrize("said", ["here", "this device", "this one", "this speaker", "this satellite", "That One"])
+def test_find_satellite_knows_here_as_the_satellite_spoken_to(named, said):
+    assert named.find_satellite(said, here="pc") == ("pc", None)
+    # Whichever it is, and not a satellite which is connected or the default.
+    assert named.find_satellite(said, here="mac") == ("mac", None)
+
+
+def test_find_satellite_has_no_here_without_one_given(named):
+    assert named.find_satellite("here") == (None, "There's no satellite called here. There's the Pi, the PC and the Mac.")
+    # The rule for words which name a satellite at once stays as it was: "switch to this one" is Claude's.
+    assert not named.names_satellite("here") and not named.names_satellite("this one")
+    assert named.names_satellite("this PC")
+
+
 def test_find_satellite_by_a_name_set_on_the_page(named):
     named.rooms.set_called("pc", ["Desk", "computer"])
     # "Computer" is the PC's alone now, not the Mac's too.
@@ -733,6 +752,20 @@ def test_move_from_the_satellite_spoken_to(moving):
     # Where it was said wins over another which is playing too.
     assert moving.brain.move_music("bedroom", "the Mac") == {"success": True, "message": "Moved to the Mac."}
     assert [event[:2] for event in moving.moved()] == [("hand_over", "bedroom"), ("take_over", "mac")]
+
+
+def test_move_to_here_is_where_it_was_said(moving):
+    moving.add("bedroom")
+    moving.add("pc", music=True, playing=True)
+    assert moving.brain.move_music("bedroom", "here") == {"success": True, "message": "Moved to the Pi."}
+    assert [event[:2] for event in moving.moved()] == [("hand_over", "pc"), ("take_over", "bedroom")]
+
+
+def test_move_to_this_pc_from_the_pi(moving):
+    moving.add("bedroom", music=True, playing=True)
+    moving.add("pc")
+    assert moving.brain.move_music("bedroom", "this PC") == {"success": True, "message": "Moved to the PC."}
+    assert [event[:2] for event in moving.moved()] == [("hand_over", "bedroom"), ("take_over", "pc")]
 
 
 def test_move_from_the_room_when_here_has_none(moving):

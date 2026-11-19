@@ -7,7 +7,8 @@ from voice_assistant.machine import MACHINES
 from voice_assistant.satellite_names import listed, matching, plain, spoken
 
 
-@pytest.mark.parametrize("said", ["pc", "PC", "The PC", "my pc", "the PC satellite", "My PC Satellite", "p.c.", "the p.c."])
+@pytest.mark.parametrize("said", ["pc", "PC", "The PC", "my pc", "the PC satellite", "My PC Satellite", "p.c.", "the p.c.",
+                                  "this PC", "That pc", "this PC satellite"])
 def test_plain_drops_articles_and_satellite(said):
     assert plain(said) == "pc"
 
@@ -20,9 +21,20 @@ def test_plain_reads_a_name_as_words():
 
 def test_plain_keeps_a_last_word_that_is_only_an_article():
     # Nothing is left to name otherwise, so a satellite called "the" or "satellite" can still be said.
-    assert plain("the") == "the"
+    assert plain("the") == "the" and plain("this") == "this" and plain("that") == "that"
     assert plain("my satellite") == "satellite"
     assert plain("") == "" and plain("the ...") == "the"
+
+
+@pytest.mark.parametrize("said", ["here", "Here", "this device", "this one", "that one", "this speaker",
+                                  "this satellite"])
+def test_the_words_for_the_satellite_spoken_to(said):
+    assert satellite_names.means_here(said)
+
+
+@pytest.mark.parametrize("said", ["the PC", "this PC", "my Pi", "there", "the bedroom", "", "this", "desk"])
+def test_other_words_arent_for_the_satellite_spoken_to(said):
+    assert not satellite_names.means_here(said)
 
 
 def test_machine_words_cover_every_machine_and_are_plain():
