@@ -579,6 +579,45 @@ def test_spoken_name(named, passwords):
     assert named.spoken_name("pc") == "Desk"
 
 
+@pytest.fixture
+def two_pis(brain, passwords):
+    """A brain with two Pis (the bedroom, the default, and the kitchen) and a PC, none of them connected."""
+    passwords.add("pc", "the-pcs-password")
+    brain.rooms.seen("bedroom", False, "pi")
+    brain.rooms.seen("kitchen", False, "pi")
+    brain.rooms.seen("pc", True, "pc", True)
+    return brain
+
+
+def test_two_of_a_kind_are_asked_about_by_their_own_names(two_pis):
+    # "the Pi or the Pi" couldn't be answered, as "the Pi" would be both again.
+    assert two_pis.find_satellite("the pi") == (None, "Which one: bedroom or kitchen?")
+    assert two_pis.find_satellite("the phone") == (
+        None, "There's no satellite called the phone. There's bedroom, kitchen and the PC.")
+    # The answer he gives names one of them.
+    assert two_pis.find_satellite("bedroom") == ("bedroom", None)
+    assert two_pis.find_satellite("the kitchen satellite") == ("kitchen", None)
+
+
+def test_spoken_name_is_the_satellites_own_name_when_another_shares_its_form(two_pis):
+    assert two_pis.spoken_name("bedroom") == "bedroom" and two_pis.spoken_name("kitchen") == "kitchen"
+    # The one of its kind is still called by what it is.
+    assert two_pis.spoken_name("pc") == "the PC"
+    # A name set on the page tells them apart, so the other is called by what it is again.
+    two_pis.rooms.set_called("kitchen", ["Kitchen Pi"])
+    assert two_pis.spoken_name("kitchen") == "Kitchen Pi" and two_pis.spoken_name("bedroom") == "the Pi"
+    # "The Pi" still fits both, but the question can be answered now.
+    assert two_pis.find_satellite("the pi") == (None, "Which one: the Pi or Kitchen Pi?")
+
+
+def test_spoken_name_keeps_the_machines_form_when_the_satellites_cant_be_read(two_pis, monkeypatch):
+    def unreadable():
+        raise OSError("gone")
+
+    monkeypatch.setattr(two_pis, "satellites", unreadable)
+    assert two_pis.spoken_name("bedroom") == "the Pi" and two_pis.spoken_name("pc") == "the PC"
+
+
 def test_the_brain_lists_the_satellites_of_a_room_own_first(brain, connect):
     serving(brain)
     connect(brain, "bedroom", BEDROOM)

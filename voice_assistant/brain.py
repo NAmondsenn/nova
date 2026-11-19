@@ -860,9 +860,19 @@ class Brain:
 
         Returns:
             What it's called in a reply - "the PC", or the name he gave it on the settings
-            page - as it's said mid-sentence: capitalise it to start one.
+            page - as it's said mid-sentence: capitalise it to start one. If another
+            satellite is called the same, its own name, as "the Pi" would mean both of two
+            Pis - and if the satellites can't be read, what the machine gives it.
         """
-        return satellite_names.spoken(name, self.rooms.machine(name), self.rooms.called(name))
+        spoken = satellite_names.spoken(name, self.rooms.machine(name), self.rooms.called(name))
+        try:
+            others = [other for other in self.satellites() if other != name]
+        except (OSError, ValueError) as e:
+            logger.warning(f"Couldn't read the satellites to tell the {name} satellite's name from the others': {e}")
+            return spoken
+        shared = any(spoken == satellite_names.spoken(other, self.rooms.machine(other), self.rooms.called(other))
+                     for other in others)
+        return name if shared else spoken
 
     def ring_on(self, name: str) -> str:
         """
