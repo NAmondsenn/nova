@@ -3186,9 +3186,31 @@ def test_the_offer_is_never_offered_to_claude(make_executor):
 def test_an_offer_without_a_song_to_put_on_it_makes_an_empty_playlist_rather_than_failing(make_executor):
     player, changes = SongPlayer(), RecordingPlaylistChanges()
     executor = make_executor(player, playlist_changes=changes)
-    executor.execute(Action("make_offered_playlist", {"name": "Jim"}))
-    executor.execute(Action("make_offered_playlist", {"name": "Jim", "song": {"title": "No id"}}))
-    assert changes.calls == [("make", player, "Jim", None)] * 2
+    assert executor.execute(Action("make_offered_playlist", {"name": "Jim"})).ok
+    assert changes.calls == [("make", player, "Jim", None)]
+
+
+def test_an_offer_whose_song_has_lost_its_id_is_refused_not_made_empty(make_executor):
+    # The offer was for a playlist with a song on it, so an empty one is not what the yes was for.
+    player, changes = SongPlayer(), RecordingPlaylistChanges()
+    executor = make_executor(player, playlist_changes=changes)
+    for song in ({"title": "No id"}, {"id": None, "title": "None"}, {"id": "", "title": "Empty"}, "Endless", {}):
+        result = executor.execute(Action("make_offered_playlist", {"name": "Jim", "song": song}))
+        assert (result.ok, result.say) == (False, "I've lost which song that was."), song
+    assert changes.calls == []
+
+
+def test_a_playlist_given_on_its_own_is_the_playlist_named(make_executor):
+    # Claude sometimes gives "Gym" where the tool takes ["Gym"].
+    player, changes = SongPlayer(), RecordingPlaylistChanges()
+    executor = make_executor(player, playlist_changes=changes)
+    executor.execute(Action("add_to_playlists", {"playlists": "Gym"}, from_model=True))
+    executor.execute(Action("take_off_playlists", {"playlists": " Gym "}, from_model=True))
+    assert changes.calls == [("add", player, ENDLESS, ["Gym"]), ("remove", player, ENDLESS, ["Gym"])]
+    # Nothing in it is still nothing, for the playlists to say.
+    executor.execute(Action("add_to_playlists", {"playlists": "  "}, from_model=True))
+    executor.execute(Action("add_to_playlists", {"playlists": 7}, from_model=True))
+    assert changes.calls[2:] == [("add", player, ENDLESS, []), ("add", player, ENDLESS, [])]
 
 
 def test_the_playlist_tools_are_described_for_claude(make_executor):

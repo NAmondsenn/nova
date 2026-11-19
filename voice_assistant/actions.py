@@ -331,6 +331,11 @@ def _things(items: Any) -> List[str]:
     return [item.strip() for item in items if isinstance(item, str) and item.strip()]
 
 
+def _playlist_names(playlists: Any) -> List[str]:
+    """The playlists the model gave - a list of names, or a single name on its own: ["gym", "car"] or "gym"."""
+    return _things([playlists] if isinstance(playlists, str) else playlists)
+
+
 class ActionExecutor:
     """Runs an Action against the part of the assistant it's for."""
 
@@ -1120,7 +1125,7 @@ class ActionExecutor:
     )
     def add_to_playlists(self, playlists: Optional[List[str]] = None, song: Optional[str] = None):
         player, found, refusal = self._song_to_change(song)
-        return refusal or self.playlist_changes.add(player, found, _things(playlists))
+        return refusal or self.playlist_changes.add(player, found, _playlist_names(playlists))
 
     @tool(
         "Take the song playing off one or more of the user's playlists, for 'take this off Gym', 'remove this from "
@@ -1137,7 +1142,7 @@ class ActionExecutor:
     )
     def take_off_playlists(self, playlists: Optional[List[str]] = None, song: Optional[str] = None):
         player, found, refusal = self._song_to_change(song)
-        return refusal or self.playlist_changes.remove(player, found, _things(playlists))
+        return refusal or self.playlist_changes.remove(player, found, _playlist_names(playlists))
 
     @tool(
         "Make a new playlist, only for 'make a playlist called X' or 'add this to a new playlist called X' - for "
@@ -1182,8 +1187,11 @@ class ActionExecutor:
         player, _, refusal = self._song_to_change(None, needs_song=False)
         if refusal:
             return refusal
-        wanted = song if isinstance(song, dict) and song.get("id") else None
-        return self.playlist_changes.make(player, name or "", wanted)
+        # A song carried without its id is no song to put on it: said, rather than an empty playlist made
+        # which the user didn't ask for.
+        if song is not None and not (isinstance(song, dict) and song.get("id")):
+            return {"success": False, "message": "I've lost which song that was."}
+        return self.playlist_changes.make(player, name or "", song)
 
     # Timers, reminders and alarms
 
