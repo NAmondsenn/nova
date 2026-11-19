@@ -38,6 +38,7 @@ import time
 from datetime import date, datetime, time as day_time, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
+from zoneinfo import ZoneInfo
 
 import requests
 import urllib3
@@ -1850,17 +1851,29 @@ def _cut_rules(rules: List[str], before: Union[date, datetime]) -> List[str]:
             series, a date for an all-day one.
 
     Returns:
-        The rules, each RRULE ending before it.
+        The rules, each RRULE ending before it and each RDATE line with only the times before it.
+
+    Raises:
+        _SeriesUnreadable: If an RDATE time can't be read.
     """
     # Each RRULE loses its COUNT and UNTIL and ends just before `before`: a second before it, in UTC,
     # for a timed series ("UNTIL=20261124T085959Z"), the day before for an all-day one
-    # ("UNTIL=20261123"). EXDATE and RDATE lines are kept as they are.
+    # ("UNTIL=20261123"). An RDATE is a time added to the series, as a series imported has, which an UNTIL
+    # doesn't end: "RDATE;VALUE=DATE:20261119,20261126" cut at the 24th keeps the 19th and drops the 26th, or
+    # the line goes if no time is left, or "Removed Gym from Tuesday on" would not be true. EXDATE lines are
+    # kept as they are, since a time left out which is never made is no harm - and the undo puts the old
+    # rules back whole.
     if isinstance(before, datetime):
         until = (before.astimezone(timezone.utc) - timedelta(seconds=1)).strftime("%Y%m%dT%H%M%SZ")
     else:
         until = (before - timedelta(days=1)).strftime("%Y%m%d")
     cut = []
     for rule in rules:
+        if rule.upper().startswith(("RDATE:", "RDATE;")):
+            kept = _rdates_before(rule, before)
+            if kept:
+                cut.append(kept)
+            continue
         if not rule.upper().startswith("RRULE:"):
             cut.append(rule)
             continue
@@ -1868,6 +1881,51 @@ def _cut_rules(rules: List[str], before: Union[date, datetime]) -> List[str]:
                  if part.split("=", 1)[0].upper() not in ("COUNT", "UNTIL")]
         cut.append(rule[:len("RRULE:")] + ";".join(parts + [f"UNTIL={until}"]))
     return cut
+
+
+def _rdates_before(rule: str, before: Union[date, datetime]) -> Optional[str]:
+    """
+    An RDATE line of a repeating event's rules with only the times before one of its times left.
+
+    Args:
+        rule: The line as Google gives it - "RDATE;VALUE=DATE:20261119,20261126",
+            "RDATE;TZID=Europe/London:20261119T180000" or "RDATE:20261119T180000Z"; a time given as a
+            period, "start/end", is by its start.
+        before: The time they must be before, as the series' start is given.
+
+    Returns:
+        The line with those times - or None if there are none.
+
+    Raises:
+        _SeriesUnreadable: If a time can't be read.
+    """
+    head, _, values = rule.partition(":")
+    zone = next((value for name, _, value in (parameter.partition("=") for parameter in head.split(";")[1:])
+                 if name.upper() == "TZID"), None)
+    kept = []
+    for value in values.split(","):
+        start = value.strip().split("/", 1)[0]
+        try:
+            if re.fullmatch(r"\d{8}", start):
+                when = datetime.strptime(start, "%Y%m%d").date()
+            elif start.upper().endswith("Z"):
+                when = datetime.strptime(start[:-1], "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
+            else:
+                # A zone it names, else the local one, as a time with none is.
+                when = datetime.strptime(start, "%Y%m%dT%H%M%S")
+                when = when.replace(tzinfo=ZoneInfo(zone)) if zone else when.astimezone()
+        except (ValueError, KeyError, OSError) as e:
+            raise _SeriesUnreadable("An RDATE time can't be read") from e
+        # A day against a time is by the day the time is on, here.
+        if isinstance(before, datetime) and not isinstance(when, datetime):
+            late = when >= before.astimezone().date()
+        elif isinstance(when, datetime) and not isinstance(before, datetime):
+            late = when.astimezone().date() >= before
+        else:
+            late = when >= before
+        if not late:
+            kept.append(value)
+    return f"{head}:{','.join(kept)}" if kept else None
 
 
 def _rules_left(rules: List[str], before: int) -> List[str]:

@@ -2172,10 +2172,54 @@ def test_cut_rules_end_a_count_series_and_an_all_day_series_just_before():
     assert cut(["RRULE:FREQ=YEARLY;COUNT=5"], date(2026, 11, 24)) == ["RRULE:FREQ=YEARLY;UNTIL=20261123"]
     assert cut(["RRULE:FREQ=MONTHLY;BYMONTHDAY=1;COUNT=12"], date(2027, 1, 1)) == \
         ["RRULE:FREQ=MONTHLY;BYMONTHDAY=1;UNTIL=20261231"]
-    # EXDATE and RDATE lines are kept as they are.
+    # EXDATE lines are kept as they are, and so are the times an RDATE line adds before the cut.
     assert cut(["EXDATE;VALUE=DATE:20261117", "RRULE:FREQ=WEEKLY;COUNT=10", "RDATE;VALUE=DATE:20261119"],
                date(2026, 11, 24)) == \
         ["EXDATE;VALUE=DATE:20261117", "RRULE:FREQ=WEEKLY;UNTIL=20261123", "RDATE;VALUE=DATE:20261119"]
+
+
+def test_cut_rules_drop_the_times_an_rdate_adds_from_the_cut_on():
+    cut = google_calendar._cut_rules
+    rrule = "RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=10"
+    # All day: the 24th, the cut, and the 26th go; the 19th stays - and the line goes if none is left.
+    assert cut([rrule, "RDATE;VALUE=DATE:20261119,20261126,20261124"], date(2026, 11, 24)) == [
+        "RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261123", "RDATE;VALUE=DATE:20261119"]
+    assert cut(["RDATE;VALUE=DATE:20261124,20261126", rrule], date(2026, 11, 24)) == [
+        "RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261123"]
+    # Timed, on GMT: a time in its own zone, in UTC, and one with no zone - which is the local one, London here.
+    at_nine = datetime(2026, 11, 24, 9, 0, tzinfo=LONDON)
+    assert cut(["RDATE;TZID=Europe/London:20261119T180000,20261124T090000,20261124T180000"], at_nine) == [
+        "RDATE;TZID=Europe/London:20261119T180000"]
+    assert cut(["RDATE:20261124T085959Z,20261124T090000Z"], at_nine) == ["RDATE:20261124T085959Z"]
+    assert cut(["RDATE:20261124T080000,20261124T100000"], at_nine) == ["RDATE:20261124T080000"]
+    # In another zone, 9 AM on the 24th in London is 4 AM in New York, so 8 AM there is later.
+    assert cut(["RDATE;TZID=America/New_York:20261124T030000,20261124T080000"], at_nine) == [
+        "RDATE;TZID=America/New_York:20261124T030000"]
+    # A period is by its start, and a day against a time is by the day it is on in London.
+    assert cut(["RDATE;VALUE=PERIOD:20261119T180000Z/PT1H,20261125T180000Z/PT1H"], at_nine) == [
+        "RDATE;VALUE=PERIOD:20261119T180000Z/PT1H"]
+    assert cut(["RDATE;VALUE=DATE:20261123,20261124"], at_nine) == ["RDATE;VALUE=DATE:20261123"]
+    assert cut(["RDATE:20261123T235959Z,20261124T000000Z"], date(2026, 11, 24)) == ["RDATE:20261123T235959Z"]
+    # Times which can't be read are never guessed at.
+    for rule in ("RDATE:not a time", "RDATE;TZID=Nowhere/Made_Up:20261119T180000", "RDATE:20261340"):
+        with pytest.raises(google_calendar._SeriesUnreadable):
+            cut([rule], at_nine)
+
+
+def test_an_imported_series_removed_from_a_time_on_has_no_rdate_from_it_on(for_changing):
+    rules = ["RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=10", "RDATE;TZID=Europe/London:20261119T180000,20261126T180000",
+             "RDATE:20261201T180000Z"]
+    imported = _series("Gym", "made-up-gym", "2026-11-03T18:00:00Z", "2026-11-03T19:00:00Z", *rules)
+    calendar = for_changing(personal=[GYM_24TH, GYM_1ST], answers={
+        GYM_URL: [imported], GYM_INSTANCES: [_events_page()], f"PATCH {GYM_URL}": [imported, imported]})
+    reply = calendar.remove("gym", following=True, today=NOVEMBER_21)
+    assert _said(reply) == {"success": True, "message": "Removed Gym from Tuesday on."}
+    # The 26th and the 1st would have stayed on the calendar, so they go from the rules - the 19th stays.
+    assert calendar._session.sent == [_write("PATCH", GYM_URL, {"recurrence": [
+        "RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261124T175959Z", "RDATE;TZID=Europe/London:20261119T180000"]})]
+    # Undone, the old rules go back whole.
+    assert reply["undo"]() == {"success": True, "message": "Put Gym back from Tuesday on."}
+    assert calendar._session.sent[-1] == _write("PATCH", GYM_URL, {"recurrence": rules})
 
 
 @pytest.mark.parametrize("status", [404, 410])
