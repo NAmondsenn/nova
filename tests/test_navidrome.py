@@ -1094,6 +1094,52 @@ def test_the_next_song_starts_with_nothing_played(make_player):
     assert places == [0.0, 0.0]
 
 
+def test_the_page_counts_from_where_a_song_was_taken_over(make_player):
+    player = make_player()
+    player.take_over(_state(position=60.0))
+    _playing(player).position = 5 * FakeSpeaker.sample_rate
+    assert player.now_playing()["position"] == pytest.approx(65.0)
+
+
+def test_previous_straight_after_a_take_over_starts_the_song_again(make_player):
+    # The song is 60 seconds in, not 0, so the one before isn't what's wanted.
+    player = make_player()
+    player.take_over(_state(index=1, position=60.0))
+    _playing(player)
+    assert player.previous()["message"] == "Starting it again"
+    _until(lambda: len(player.speaker_started) == 2)
+    assert player.speaker_started[1].song["id"] == "2"
+
+
+def test_previous_once_the_queue_has_run_out_plays_the_last_song_again(make_player):
+    player = make_player()
+    player._start(SONGS[:2])
+    _playing(player)
+    player.skip()
+    _until(lambda: len(player.speaker_started) == 2)
+    player.speaker_started[1].position = 100 * FakeSpeaker.sample_rate
+    player.speaker_started[1].finish()
+    _until(lambda: not player.has_music())
+
+    assert player.previous()["message"] == "Starting it again"
+    _until(lambda: len(player.speaker_started) == 3)
+    assert player.speaker_started[2].song["id"] == "2"
+
+
+def test_previous_once_a_taken_over_queue_has_run_out_plays_the_last_song_again(make_player):
+    # Only a second of it played here, but it began 60 seconds in, so it was a long way through.
+    player = make_player()
+    player.take_over(_state(queue=SONGS[:2], unshuffled=SONGS[:2], index=1, position=60.0))
+    playing = _playing(player)
+    playing.position = FakeSpeaker.sample_rate
+    playing.finish()
+    _until(lambda: not player.has_music())
+
+    assert player.previous()["message"] == "Starting it again"
+    _until(lambda: len(player.speaker_started) == 2)
+    assert player.speaker_started[1].song["id"] == "2"
+
+
 def test_a_speaker_which_cant_say_how_far_it_got_counts_nothing_played(make_player):
     player = make_player()
     player._start(SONGS)

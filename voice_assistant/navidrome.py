@@ -1065,8 +1065,7 @@ class NavidromePlayer(NavidromeLibrary):
                 return {"success": False, "message": "There's nothing to go back to."}
             # Once the queue has run out, the last song is the one to go back to.
             index = min(self._index, len(self._queue) - 1)
-            played = self._playback.position / self.speaker.sample_rate if self._playback else 0
-            if played > RESTART_AFTER or index == 0:
+            if self._place() > RESTART_AFTER or index == 0:
                 self._jump(index)
                 return {"success": True, "message": "Starting it again", "silent": True}
             self._jump(index - 1)
@@ -1126,9 +1125,9 @@ class NavidromePlayer(NavidromeLibrary):
                 return None
             song = self._queue[self._index]
             playing = not self._paused or (self._talking and self._resume_after)
-            played = self._playback.position / self.speaker.sample_rate if self._playback is not None else 0.0
+            place = self._place()
         return {"track": song.get("title") or "Something", "artist": song.get("artist") or "",
-                "album": song.get("album") or "", "playing": playing, "position": round(played, 1),
+                "album": song.get("album") or "", "playing": playing, "position": round(place, 1),
                 "duration": song.get("duration"), "cover": song.get("coverArt")}
 
     def cover(self) -> Optional[Tuple[bytes, str]]:
@@ -1251,14 +1250,8 @@ class NavidromePlayer(NavidromeLibrary):
         with self._lock:
             if not self.has_music():
                 return None
-            # Where the song began as well as how far it's got, since a song which was
-            # itself handed over part way began there: moved at 60 seconds and again 10
-            # seconds later, it's at 70, not 10.
-            playback = self._playback
-            rate = getattr(playback, "sample_rate", 0)
-            played = getattr(playback, "position", 0) / rate if rate else 0.0
             state = {"queue": list(self._queue), "unshuffled": list(self._unshuffled), "index": self._index,
-                     "position": self._offset + played, "repeat": self._repeat, "shuffle": self._shuffle}
+                     "position": self._place(), "repeat": self._repeat, "shuffle": self._shuffle}
             self._queue, self._unshuffled = [], []
             # Nothing's left here to carry on after the reply, or to have been playing.
             self._resume_after = self._interrupted = False
@@ -1294,6 +1287,19 @@ class NavidromePlayer(NavidromeLibrary):
         self._paused = paused
         if self._playback is not None:
             self._playback.paused = paused
+
+    def _place(self) -> float:
+        """
+        How far into the song at the index the music is, in seconds. Called with the lock held.
+
+        It's where the song began as well as how far it's got, since a song which another
+        player handed over part way began there: moved at 60 seconds and again 10 seconds
+        later, it's at 70, not 10. A speaker which can't say how far it has got counts none
+        of it as played.
+        """
+        playback = self._playback
+        rate = getattr(playback, "sample_rate", 0)
+        return self._offset + (getattr(playback, "position", 0) / rate if rate else 0.0)
 
     def _start(self, songs: List[Dict], index: int = 0, start: float = 0.0, unshuffled: Optional[List[Dict]] = None):
         """
@@ -1353,11 +1359,7 @@ class NavidromePlayer(NavidromeLibrary):
             with self._lock:
                 if self._turn != turn:
                     continue
-                # It finished by itself: on to the next, unless none of it played. Even
-                # the same song, repeated, is played from its beginning, with none of it
-                # played yet - see hand_over.
-                self._offset = 0.0
-                self._playback = None
+                # It finished by itself: on to the next, unless none of it played.
                 failures = failures + 1 if playback.duration == 0 else 0
                 if failures >= MOST_FAILURES:
                     logger.error(f"{failures} songs in a row wouldn't play, so the queue is stopped")
@@ -1365,6 +1367,13 @@ class NavidromePlayer(NavidromeLibrary):
                 elif self._repeat != "track":
                     following = self._index + 1
                     self._index = 0 if following >= len(self._queue) and self._repeat == "all" else following
+                if self._index < len(self._queue):
+                    # Whatever plays next, even this song repeated, starts from its beginning
+                    # with none of it played - see _place. A queue which has run out keeps
+                    # its last song as played through, which is how previous knows to play
+                    # that again rather than the one before.
+                    self._offset = 0.0
+                    self._playback = None
 
     def _open_song(self, song_id: str) -> requests.Response:
         """Starts downloading a song from Navidrome, as an MP3 whatever it's stored as."""
