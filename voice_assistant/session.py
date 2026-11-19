@@ -86,6 +86,45 @@ TYPED_ANSWER_WAIT = 60
 ASK_MOST = 255
 
 
+# The longest timer the Nova view's Add timer box sets, in seconds.
+LONGEST_TIMER = 24 * 3600
+
+_TIMER_UNITS = {"h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+                "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
+                "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1}
+
+
+def timer_seconds(text: str) -> Optional[int]:
+    """
+    A length of time typed or tapped into the Nova view's Add timer box, in seconds - or
+    None if it isn't one, or is nothing or more than LONGEST_TIMER.
+
+    A bare number is minutes ("10"); hours and minutes can be "1:20"; otherwise numbers with
+    units, where a number left over after hours is minutes ("1h 20", "1 hour 20 minutes", "90s").
+    """
+    text = (text or "").strip().lower()
+    if re.fullmatch(r"\d+", text):
+        seconds = int(text) * 60
+    elif re.fullmatch(r"\d{1,2}:\d\d", text):
+        hours, minutes = text.split(":")
+        seconds = int(hours) * 3600 + int(minutes) * 60
+    else:
+        parts = re.findall(r"(\d+)\s*([a-z]*)", text)
+        if not parts or re.sub(r"[\d\s]|" + "|".join(sorted(_TIMER_UNITS, key=len, reverse=True)) + r"|and|,", "", text):
+            return None
+        seconds, last = 0, None
+        for number, unit in parts:
+            if unit and unit not in _TIMER_UNITS:
+                return None
+            # A number with no unit after hours is minutes ("1h 20"); on its own it was handled above.
+            size = _TIMER_UNITS[unit] if unit else (60 if last == 3600 else None)
+            if size is None:
+                return None
+            seconds += int(number) * size
+            last = size
+    return seconds if 0 < seconds <= LONGEST_TIMER else None
+
+
 def _kept_for(what: str, satellite: str) -> str:
     """
     Where one of a satellite's own settings is kept in the data folder, e.g.
@@ -1619,11 +1658,15 @@ class Session:
             restart=self.satellite.restart,
             speak=self._speak_from_home_assistant,
             say=self._say_from_home_assistant,
+            add_timer=self._add_timer_from_home_assistant,
+            add_alarm=self._add_alarm_from_home_assistant,
             # Read by the device on a thread of its own, never the one that publishes the
             # state every second, as the player may be asking Navidrome or Spotify.
             now_playing=(lambda: self.music_player.now_playing()) if player else None,
             cover=(lambda: self.music_player.cover()) if player else None,
             playlists=(lambda: self.music_player.playlists()) if player else None,
+            playlist_cover=((lambda name: self.music_player.playlist_cover(name))
+                            if player and hasattr(player, "playlist_cover") else None),
             playback=self._playback_from_home_assistant if player else None,
             play_playlist=self._playlist_from_home_assistant if player else None,
             # The Ask Nova box, whose replies are said here and never sent back.
@@ -1703,6 +1746,35 @@ class Session:
         """
         threading.Thread(target=self.announce, args=(message,), kwargs={"sound": None},
                          daemon=True, name="ha-say").start()
+
+    def _add_timer_from_home_assistant(self, text: str):
+        """
+        Sets a timer on this satellite from the Nova view's Add timer box, silently - the
+        page shows it, so nothing is said. Something which isn't a length of time is logged
+        and left.
+
+        Args:
+            text: What was typed or tapped: "10" (minutes), "1:20", "1h 20m", "90 min".
+        """
+        seconds = timer_seconds(text)
+        if seconds is None:
+            logger.warning("Home Assistant's Add timer wasn't a length of time")
+            return
+        self.brain.clock.set_timer(duration_seconds=seconds, satellite=self.satellite.name)
+
+    def _add_alarm_from_home_assistant(self, text: str):
+        """
+        Sets a one-off alarm on this satellite from the Nova view's Add alarm box, silently.
+        Repeating alarms are still set by voice or on the settings page.
+
+        Args:
+            text: The time, "07:00" or "7:00", as the view's time picker sends it.
+        """
+        found = re.fullmatch(r"\s*(\d{1,2}):(\d\d)(?::\d\d)?\s*", text or "")
+        if not found or int(found[1]) > 23 or int(found[2]) > 59:
+            logger.warning("Home Assistant's Add alarm wasn't a time")
+            return
+        self.brain.clock.set_alarm(int(found[1]), int(found[2]), None, satellite=self.satellite.name)
 
     def _room(self) -> Optional[Tuple[Optional[str], Optional[str]]]:
         """

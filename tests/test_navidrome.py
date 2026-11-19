@@ -1003,6 +1003,27 @@ def test_the_page_is_offered_the_playlists_by_name(make_player):
     assert player.playlists() == []
 
 
+
+def test_a_playlists_cover_is_navidromes_own(make_player):
+    player = make_player({"getPlaylists": {"playlists": {"playlist": [
+        {"id": "p2", "name": "workout", "coverArt": "pl-p2"}, {"id": "p1", "name": "Chill"}]}}})
+    asked, answer = [], player._session.get
+
+    def get(url, params=None, timeout=None):
+        if url.endswith("/getCoverArt"):
+            asked.append(params)
+            return FakeImage()
+        return answer(url, params=params, timeout=timeout)
+
+    player._session.get = get
+    assert player.playlist_cover("workout") == (b"a cover", "image/jpeg")
+    assert asked[0]["id"] == "pl-p2"
+    # None without a cover, without such a playlist, or when Navidrome can't be asked.
+    assert player.playlist_cover("Chill") is None
+    assert player.playlist_cover("Nope") is None
+    player._session.answers["getPlaylists"] = requests.ConnectionError("down")
+    assert player.playlist_cover("workout") is None
+
 # What Navidrome says of a song's file, sound and lyrics, for listening (decision 0022)
 
 class FakeHttp:

@@ -1156,6 +1156,29 @@ class NavidromePlayer(NavidromeLibrary):
         self._cover = (art, (response.content, kind))
         return self._cover[1]
 
+    def playlist_cover(self, name: str) -> Optional[Tuple[bytes, str]]:
+        """
+        The cover of the user's playlist of that name - Navidrome's own, made from what's
+        in it - as an image and its type, for the Nova view's playlist tiles. None without
+        one, or if Navidrome couldn't be asked.
+        """
+        try:
+            found = self._call("getPlaylists").get("playlists", {}).get("playlist") or []
+            art = next((playlist.get("coverArt") for playlist in found if playlist.get("name") == name), None)
+            if not art:
+                return None
+            if not network.online():
+                raise requests.ConnectionError("No network connection")
+            response = self._session.get(f"{self.url}/rest/getCoverArt",
+                                         params={**self._sign_in(), "id": art, "size": COVER_SIZE},
+                                         timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+        except (requests.RequestException, NavidromeError) as e:
+            self._failure_message(e)
+            return None
+        kind = response.headers.get("Content-Type", "")
+        return (response.content, kind) if kind.startswith("image/") else None
+
     def playlists(self) -> List[str]:
         """The names of the user's playlists, for the settings page to offer - none if Navidrome couldn't be asked."""
         try:

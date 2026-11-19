@@ -1760,6 +1760,34 @@ def test_speak_is_said_in_turn_even_when_muted(make_session):
     assert said_out_loud == ["The washing's done"]
 
 
+@pytest.mark.parametrize("typed, seconds", [
+    ("10", 600), ("1:20", 4800), ("1h 20m", 4800), ("1h 20", 4800), ("1 hour 20 minutes", 4800),
+    ("90 min", 5400), ("30s", 30), ("2 hours", 7200), ("1 hour and 5 minutes", 3900),
+    ("", None), ("0", None), ("soon", None), ("25 hours", None), ("10 bananas", None), ("20 5", None)])
+def test_a_length_of_time_typed_for_a_timer(typed, seconds):
+    assert session_module.timer_seconds(typed) == seconds
+
+
+def test_timers_and_alarms_from_home_assistant_are_set_silently(make_session, brain):
+    set_up = []
+    brain.clock = SimpleNamespace(
+        set_timer=lambda duration_seconds=None, satellite=None: set_up.append(("timer", duration_seconds, satellite)),
+        set_alarm=lambda hour, minute, repeat=None, satellite=None: set_up.append(("alarm", hour, minute, repeat, satellite)),
+        overview=lambda satellite=None: {})
+    session = make_session()
+    said = []
+    session.announce = lambda *args, **kwargs: said.append(args)
+    controls = session._device_controls()
+    controls.add_timer("1h 20")
+    controls.add_alarm("07:05")
+    controls.add_alarm("7:5")
+    controls.add_alarm("25:00")
+    controls.add_timer("whenever")
+    name = session.satellite.name
+    assert set_up == [("timer", 4800, name), ("alarm", 7, 5, None, name)]
+    assert said == []
+
+
 def test_say_on_nova_is_said_in_turn_without_a_sound(make_session):
     # Typed on the Nova view to be said out loud, so no chime first: the person typing
     # knows it's coming. Speak, which automations use, keeps its sound.

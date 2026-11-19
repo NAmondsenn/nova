@@ -837,7 +837,7 @@ def test_ask_is_announced_only_when_nova_can_be_asked(started, asking):
     assert ask["command_topic"] == f"{BASE}/ask/set"
     assert ask["state_topic"] == f"{BASE}/ask"
     # Whatever the state topic says, the box's state is empty.
-    assert ask["value_template"] == "{{ '' }}"
+    assert ask["value_template"] == ha_device.BOX_TEMPLATE
     assert ask["max"] == 255
     assert ask["icon"] == "mdi:keyboard-outline"
     assert ask["default_entity_id"] == "text.nova_ask"
@@ -856,7 +856,10 @@ def test_what_is_typed_reaches_nova_and_is_never_sent_back(asking, asked):
     # into empty, so it never shows, nor keeps, what was typed. Not "": the broker takes
     # an empty retained message as forgetting it, and Home Assistant would never get it.
     device.publish_state()
-    assert client.sent(f"{BASE}/ask") == [(f"{BASE}/ask", "-", 1, True)]
+    # The placeholder, then - once what was typed was taken - the flipped one, so Home
+    # Assistant redraws the box empty.
+    assert _eventually(lambda: client.sent(f"{BASE}/ask") == [(f"{BASE}/ask", "-", 1, True),
+                                                                (f"{BASE}/ask", "--", 1, True)])
     assert not any("Fashion Killa" in topic or "Fashion Killa" in str(payload)
                    for topic, payload, _, _ in client.published)
 
@@ -923,7 +926,7 @@ def test_say_is_announced_only_when_nova_can_be_given_words(started, saying):
     assert say["name"] == "Say on Nova"
     assert say["command_topic"] == f"{BASE}/say/set"
     assert say["state_topic"] == f"{BASE}/say"
-    assert say["value_template"] == "{{ '' }}"
+    assert say["value_template"] == ha_device.BOX_TEMPLATE
     assert say["max"] == 255
     assert say["icon"] == "mdi:bullhorn-outline"
     assert say["default_entity_id"] == "text.nova_say"
@@ -940,7 +943,8 @@ def test_words_to_say_reach_nova_and_are_never_sent_back(saying, said, caplog):
     assert _eventually(lambda: said == [TYPED])
 
     device.publish_state()
-    assert client.sent(f"{BASE}/say") == [(f"{BASE}/say", "-", 1, True)]
+    assert _eventually(lambda: client.sent(f"{BASE}/say") == [(f"{BASE}/say", "-", 1, True),
+                                                                (f"{BASE}/say", "--", 1, True)])
     assert not any("Fashion Killa" in topic or "Fashion Killa" in str(payload)
                    for topic, payload, _, _ in client.published)
     heard = [record for record in caplog.records if "Fashion Killa" in record.getMessage()]
@@ -956,3 +960,89 @@ def test_kept_or_empty_words_to_say_are_ignored(saying, said, nova):
     client.delivers(f"{BASE}/stop", "PRESS")
     assert _eventually(lambda: ("stop",) in nova.calls)
     assert said == []
+
+
+# Timers and alarms added from the Nova view, and its playlist tiles
+
+def test_the_box_template_shows_a_box_empty_either_way():
+    # "-" shows "" and "--" a lone space: both blank, and a change Home Assistant redraws on.
+    assert ha_device.BOX_TEMPLATE == "{{ ' ' if value == '--' else '' }}"
+
+
+@pytest.fixture
+def clocked(nova):
+    """A started NovaDevice which can add timers and alarms, with what each was given and its client."""
+    added, made = [], []
+
+    def factory(client_id):
+        made.append(FakeClient(client_id))
+        return made[-1]
+
+    controls = dataclasses.replace(nova.controls(), add_timer=lambda text: added.append(("timer", text)),
+                                   add_alarm=lambda text: added.append(("alarm", text)))
+    device = NovaDevice("broker.local", 1883, "nova", "secret", controls, node_id="nova_test",
+                        client_factory=factory)
+    device.start()
+    try:
+        yield device, made[0], added
+    finally:
+        device.stop()
+
+
+def test_add_timer_and_alarm_are_announced_only_when_they_can_be(started, clocked):
+    plain, _ = started
+    assert not {"add_timer", "add_alarm"} & set(_components(plain))
+    device, _, _ = clocked
+    controls = _components(device)
+    assert controls["add_timer"]["default_entity_id"] == "text.nova_add_timer"
+    assert controls["add_alarm"]["default_entity_id"] == "text.nova_add_alarm"
+    assert controls["add_timer"]["command_topic"] == f"{BASE}/add_timer/set"
+    assert controls["add_alarm"]["state_topic"] == f"{BASE}/add_alarm"
+    assert controls["add_timer"]["value_template"] == ha_device.BOX_TEMPLATE
+
+
+def test_timers_and_alarms_typed_reach_nova_and_clear_the_box(clocked, nova):
+    device, client, added = clocked
+    client.connects()
+    client.delivers(f"{BASE}/add_timer/set", "10")
+    client.delivers(f"{BASE}/add_alarm/set", "07:00")
+    client.delivers(f"{BASE}/add_alarm/set", "08:00", retain=True)
+    client.delivers(f"{BASE}/add_timer/set", "  ")
+    client.delivers(f"{BASE}/stop", "PRESS")
+    assert _eventually(lambda: ("stop",) in nova.calls)
+    assert added == [("timer", "10"), ("alarm", "07:00")]
+    assert _eventually(lambda: client.sent(f"{BASE}/add_timer")[-1][1] == "--")
+    assert client.sent(f"{BASE}/add_alarm")[-1][1] == "--"
+
+
+def test_each_playlist_has_a_tile_which_plays_it(nova, player, monkeypatch):
+    monkeypatch.setattr(ha_device, "MUSIC_EVERY", 3600)
+    covers = {"Chill": (b"chill-cover", "image/png")}
+    controls = player.controls(nova)
+    controls.playlist_cover = lambda name: covers.get(name)
+    made = []
+    device = NovaDevice("broker.local", 1883, "nova", "secret", controls, node_id="nova_test",
+                        client_factory=lambda client_id: made.append(FakeClient(client_id)) or made[-1])
+    device.start()
+    try:
+        assert _eventually(lambda: "playlists" in player.reads)
+        device.refresh_playlists()
+        client = made[0]
+        client.connects()
+        tiles = _components(device)
+        assert tiles["playlist_1"]["name"] == "Chill" and tiles["playlist_2"]["name"] == "Gym"
+        assert tiles["playlist_1"]["default_entity_id"] == "button.nova_playlist_1"
+        assert tiles["playlist_2_cover"]["default_entity_id"] == "image.nova_playlist_2"
+        assert tiles["playlist_1_cover"]["content_type"] == "image/png"
+        assert "playlist_3" not in tiles
+
+        device.publish_music()
+        assert client.sent(f"{BASE}/playlist/1/cover") == [(f"{BASE}/playlist/1/cover", b"chill-cover", 1, True)]
+        assert client.sent(f"{BASE}/playlist/2/cover") == [(f"{BASE}/playlist/2/cover", b"", 1, True)]
+
+        client.delivers(f"{BASE}/playlist/2/play", "PRESS")
+        client.delivers(f"{BASE}/playlist/9/play", "PRESS")
+        assert _eventually(lambda: ("play_playlist", "Gym") in player.calls)
+        assert [call for call in player.calls if call[0] == "play_playlist"] == [("play_playlist", "Gym")]
+    finally:
+        device.stop()
