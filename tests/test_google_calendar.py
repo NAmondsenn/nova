@@ -3206,3 +3206,145 @@ def test_a_series_with_no_end_is_cut_and_split_with_the_days_deleted_inside_the_
     assert reply["undo"]() == {"success": True, "message": "Put Gym back as it was."}
     assert calendar._session.sent[2:] == [_write("DELETE", new), _write("PATCH", GYM_URL, {"recurrence": rules}),
                                           _write("DELETE", deleted_url)]
+
+
+# Telling Home Assistant a change was made
+#
+# GoogleCalendar.after_change is called, on a thread of its own, after each write Google says it
+# did - which is what has Home Assistant read its calendars again.
+
+@pytest.fixture
+def told(monkeypatch):
+    """
+    Gives a calendar an after_change which notes each call - as the writes sent by then,
+    each as (method, address) - run at once, where the calendar would have a thread run it.
+    """
+    monkeypatch.setattr(google_calendar.threading, "Thread", RunsAtOnce)
+
+    def watch(calendar):
+        calls = []
+        calendar.after_change = lambda: calls.append([(sent["method"], sent["url"])
+                                                      for sent in calendar._session.sent])
+        return calls
+
+    return watch
+
+
+def test_a_calendar_has_nobody_to_tell_until_it_is_given_one(for_adding, for_changing, make_calendar):
+    assert for_adding().after_change is None
+    assert for_changing().after_change is None
+    assert make_calendar().after_change is None
+
+
+def test_an_event_added_is_told_of_once_google_has_added_it(for_adding, told):
+    calendar = for_adding()
+    calls = told(calendar)
+    assert calendar.add("Dentist", "2026-10-29 15:00", today=SATURDAY)["success"] is True
+    # Told after the write was sent, not before.
+    assert calls == [[("POST", _events_url("calendar-personal"))]]
+
+
+def test_an_event_removed_is_told_of_once_google_has_removed_it(for_changing, told):
+    dentist = _event_url("calendar-personal", "made-up-dentist")
+    calendar = for_changing(personal=[DENTIST_THURSDAY], answers={f"DELETE {dentist}": [DELETED]})
+    calls = told(calendar)
+    assert calendar.remove("dentist", today=NOVEMBER_21)["success"] is True
+    assert calls == [[("DELETE", dentist)]]
+
+
+def test_an_event_changed_is_told_of_once_google_has_changed_it(for_changing, told):
+    calendar = for_changing(personal=[DENTIST_THURSDAY], answers={f"PATCH {DENTIST_URL}": [CHANGED]})
+    calls = told(calendar)
+    assert calendar.change("dentist", start="2026-11-27 16:00", today=NOVEMBER_21)["success"] is True
+    assert calls == [[("PATCH", DENTIST_URL)]]
+
+
+def test_a_series_split_is_told_of_after_its_writes(for_changing, told):
+    # A split is two writes, so it may tell of each - at least once, after the first was sent.
+    calendar = for_changing(**_splitting(**{f"PATCH {GYM_URL}": [GYM]}))
+    calls = told(calendar)
+    assert calendar.change("gym", start="19:00", following=True, today=date(2026, 11, 23))["success"] is True
+    assert calls and calls[0][0] == ("PATCH", GYM_URL) and calls[-1][-1] == ("POST", PERSONAL_EVENTS)
+
+
+def test_an_undo_is_told_of_too(for_changing, told):
+    calendar = for_changing(personal=[DENTIST_THURSDAY],
+                            answers={f"PATCH {DENTIST_URL}": [CHANGED, CHANGED]})
+    calls = told(calendar)
+    undo = calendar.change("dentist", start="2026-11-27 16:00", today=NOVEMBER_21)["undo"]
+    assert len(calls) == 1
+    assert undo()["success"] is True
+    assert calls[1:] == [[("PATCH", DENTIST_URL), ("PATCH", DENTIST_URL)]]
+
+
+def test_a_write_sent_again_after_a_401_is_told_of_only_once_it_landed(for_changing, told):
+    # Google turned the first down unread, so there was nothing to read again - the one that landed is told of.
+    calendar = for_changing(personal=[DENTIST_THURSDAY],
+                            answers={f"PATCH {DENTIST_URL}": [_refused(401, "authError"), CHANGED]})
+    calls = told(calendar)
+    assert calendar.change("dentist", start="2026-11-27 16:00", today=NOVEMBER_21)["success"] is True
+    assert len(calendar._session.sent) == 2 and len(calls) == 1 and len(calls[0]) == 2
+
+
+@pytest.mark.parametrize("answer", [
+    # Refused, or the event gone.
+    _refused(400, "invalid"), _refused(403), _refused(404, "notFound"), _refused(410, "deleted"),
+    # Google's own trouble, and sent but never answered - which may have been done, but isn't known to be.
+    _refused(500, "backendError"), FakeResponse(504, "Gateway Timeout"), requests.ReadTimeout("Read timed out."),
+    FakeResponse(200, "not an answer"),
+    # Never sent, or never accepted.
+    requests.ConnectTimeout("Connection timed out."), _refused(401, "authError")])
+def test_a_write_which_didnt_land_is_told_of_to_nobody(for_changing, told, answer):
+    calendar = for_changing(personal=[DENTIST_THURSDAY], answers={f"PATCH {DENTIST_URL}": [answer, answer]})
+    calls = told(calendar)
+    assert calendar.change("dentist", start="2026-11-27 16:00", today=NOVEMBER_21)["success"] is False
+    assert calls == []
+
+
+def test_an_add_which_didnt_land_is_told_of_to_nobody(for_adding, told):
+    calendar = for_adding(answers=[_refused(403), _refused(403)])
+    calls = told(calendar)
+    assert calendar.add("Dentist", "2026-10-29 15:00", today=SATURDAY)["success"] is False
+    assert calls == []
+
+
+def test_a_read_is_told_of_to_nobody(make_calendar, told):
+    calendar = make_calendar([_google_event("Dentist", "2026-10-22T09:30:00+01:00")])
+    calls = told(calendar)
+    assert [event["summary"] for event in calendar.events(date(2026, 10, 22), 1)] == ["Dentist"]
+    assert calls == [] and calendar._session.sent == []
+
+
+def test_a_failing_after_change_leaves_the_reply_as_it_was(for_adding, monkeypatch, caplog):
+    monkeypatch.setattr(google_calendar.threading, "Thread", RunsAtOnce)
+    calendar = for_adding()
+    calendar.after_change = lambda: (_ for _ in ()).throw(RuntimeError("made-up trouble with Dentist"))
+    with caplog.at_level(logging.INFO):
+        assert _said(calendar.add("Dentist", "2026-10-29 15:00", today=SATURDAY)) == {
+            "success": True, "message": "Added Dentist, Thursday the 29th at 3 PM."}
+    # Logged, as only the kind of error - never what it said, which could hold the event.
+    [warning] = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert "RuntimeError" in warning.getMessage() and "Dentist" not in warning.getMessage()
+
+
+def test_the_calendar_never_waits_for_after_change(for_adding, monkeypatch):
+    started = []
+
+    class Waits:
+        """Stands in for threading.Thread, starting nothing - work for the thread alone to do."""
+
+        def __init__(self, target, **kwargs):
+            started.append((target, kwargs))
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(google_calendar.threading, "Thread", Waits)
+    calendar = for_adding()
+    called = []
+    calendar.after_change = lambda: called.append(True)
+    assert calendar.add("Dentist", "2026-10-29 15:00", today=SATURDAY)["success"] is True
+    # Left to a daemon thread, so Home Assistant being slow, or the brain stopping, waits for nothing.
+    assert called == [] and len(started) == 1 and started[0][1]["daemon"] is True
+    started[0][0]()
+    assert called == [True]

@@ -729,6 +729,25 @@ class HomeAssistant:
             raise ValueError(f"Home Assistant's state of {entity_id} isn't a state")
         return state
 
+    def refresh_calendars(self) -> None:
+        """
+        Asks Home Assistant to read its calendars from Google again, now. It does so only every
+        15 minutes by itself, so its dashboards would show an event Nova has just removed, moved
+        or added for up to that long. Never raises: it's asked after the change is made, so
+        failing is only logged.
+        """
+        # Found each time, so a calendar added later is asked too. This is Nova's own fixed
+        # request - only ever update_entity, and only of the calendars - so it isn't sent through
+        # _call_service, which holds what Assist or Claude asks for to what it allows.
+        try:
+            calendars = [state["entity_id"] for state in self.states()
+                         if isinstance(state.get("entity_id"), str) and state["entity_id"].startswith("calendar.")]
+            if calendars:
+                self._request("POST", "/api/services/homeassistant/update_entity", json={"entity_id": calendars})
+        except (requests.RequestException, ValueError) as e:
+            # The kind of error alone, as the address and the token are in what it says.
+            logger.warning(f"Couldn't ask Home Assistant to read the calendars again: {type(e).__name__}")
+
     def football_ask(self, what: str, name: str, date: str = "", days: int = 1, against: str = "") -> Dict:
         """
         Asks Home Assistant's football command a question - which asks ESPN, as Nova
