@@ -2765,6 +2765,78 @@ def test_from_this_one_on_splits_the_series_with_the_times_left(for_changing):
     assert [params for url, params in calendar._session.asked if url == instances] == [FROM_THE_24TH]
 
 
+def test_a_series_in_another_zone_keeps_its_own_clock_time_when_it_is_split(for_changing):
+    # Gym at 6 PM in New York, every Tuesday from the 27th of October, when New York was on EDT (-4) and
+    # London already on GMT. Renamed from the 10th, when New York is on EST (-5): 6 PM there is 11 PM in London,
+    # not the 10 PM which was London's clock on the first day, which would be 5 PM in New York.
+    rules = ["RRULE:FREQ=WEEKLY;BYDAY=TU"]
+    series = {**_series("Gym", "made-up-gym", "2026-10-27T22:00:00Z", "2026-10-27T23:00:00Z", *rules),
+              "start": {"dateTime": "2026-10-27T18:00:00-04:00", "timeZone": "America/New_York"},
+              "end": {"dateTime": "2026-10-27T19:00:00-04:00", "timeZone": "America/New_York"}}
+    tenth = _occurrence("Gym", "made-up-gym", "2026-11-10T23:00:00Z", "2026-11-11T00:00:00Z")
+    seventeenth = _occurrence("Gym", "made-up-gym", "2026-11-17T23:00:00Z", "2026-11-18T00:00:00Z")
+    calendar = for_changing(personal=[tenth, seventeenth], answers={
+        GYM_URL: [series], GYM_INSTANCES: [_events_page()], f"PATCH {GYM_URL}": [series],
+        f"POST {PERSONAL_EVENTS}": [_inserted()]})
+    reply = calendar.change("gym", summary="Gym class", following=True, today=date(2026, 11, 5))
+    assert _said(reply) == {"success": True, "message": "Renamed Gym to Gym class from Tuesday on."}
+    assert calendar._session.sent[1] == _write("POST", PERSONAL_EVENTS, {
+        "summary": "Gym class", "recurrence": rules,
+        "start": {"dateTime": "2026-11-10T18:00:00-05:00", "timeZone": "America/New_York"},
+        "end": {"dateTime": "2026-11-10T19:00:00-05:00", "timeZone": "America/New_York"}})
+
+    # A series at 8 PM in New York is the next day's 1 AM in London: it's still the 10th's, in its own zone.
+    late = {**series, "start": {"dateTime": "2026-10-27T20:00:00-04:00", "timeZone": "America/New_York"},
+            "end": {"dateTime": "2026-10-27T21:00:00-04:00", "timeZone": "America/New_York"}}
+    tenth = _occurrence("Gym", "made-up-gym", "2026-11-11T01:00:00Z", "2026-11-11T02:00:00Z",
+                        meant="2026-11-11T01:00:00Z")
+    calendar = for_changing(personal=[tenth], answers={
+        GYM_URL: [late], GYM_INSTANCES: [_events_page()], f"PATCH {GYM_URL}": [late],
+        f"POST {PERSONAL_EVENTS}": [_inserted()]})
+    assert calendar.change("gym", summary="Gym class", following=True, today=date(2026, 11, 5))["success"]
+    assert calendar._session.sent[1]["json"]["start"] == {"dateTime": "2026-11-10T20:00:00-05:00",
+                                                          "timeZone": "America/New_York"}
+
+
+def test_a_time_said_for_a_series_in_another_zone_is_the_time_on_the_users_clock(for_changing):
+    # "Move my gym to 7 PM from now on" is 7 PM where the user is - London - whatever zone the series repeats in,
+    # and on the day they said, which is London's.
+    rules = ["RRULE:FREQ=WEEKLY;BYDAY=TU"]
+    series = {**_series("Gym", "made-up-gym", "2026-10-27T22:00:00Z", "2026-10-27T23:00:00Z", *rules),
+              "start": {"dateTime": "2026-10-27T18:00:00-04:00", "timeZone": "America/New_York"},
+              "end": {"dateTime": "2026-10-27T19:00:00-04:00", "timeZone": "America/New_York"}}
+    tenth = _occurrence("Gym", "made-up-gym", "2026-11-10T23:00:00Z", "2026-11-11T00:00:00Z")
+    calendar = for_changing(personal=[tenth], answers={
+        GYM_URL: [series], GYM_INSTANCES: [_events_page()], f"PATCH {GYM_URL}": [series],
+        f"POST {PERSONAL_EVENTS}": [_inserted()]})
+    assert calendar.change("gym", start="19:00", following=True, today=date(2026, 11, 5))["success"]
+    assert calendar._session.sent[1]["json"]["start"] == {"dateTime": "2026-11-10T19:00:00+00:00",
+                                                          "timeZone": "America/New_York"}
+    assert calendar._session.sent[1]["json"]["end"] == {"dateTime": "2026-11-10T20:00:00+00:00",
+                                                        "timeZone": "America/New_York"}
+
+
+def test_on_day_puts_a_time_on_a_day_by_the_clock_of_the_zone_given():
+    on_day = google_calendar._on_day
+    new_york = ({"dateTime": "2026-10-27T18:00:00-04:00", "timeZone": "America/New_York"},
+                {"dateTime": "2026-10-27T19:30:00-04:00", "timeZone": "America/New_York"})
+    # By New York's clock: 6 PM on EST, an hour and a half long - and with no zone given, by the brain's.
+    assert on_day(new_york, date(2026, 11, 10), "America/New_York") == (
+        {"dateTime": "2026-11-10T18:00:00-05:00"}, {"dateTime": "2026-11-10T19:30:00-05:00"})
+    assert on_day(new_york, date(2026, 11, 10)) == (
+        {"dateTime": "2026-11-10T22:00:00+00:00"}, {"dateTime": "2026-11-10T23:30:00+00:00"})
+    # A zone this can't load is the brain's, as none is.
+    assert on_day(new_york, date(2026, 11, 10), "Nowhere/Made_Up") == on_day(new_york, date(2026, 11, 10))
+    # An event over the clocks going back keeps its length - 1 AM to 3 AM on the 1st of November in New York
+    # is three hours, as the hour between is repeated.
+    over = ({"dateTime": "2026-10-25T01:00:00-04:00"}, {"dateTime": "2026-10-25T03:00:00-04:00"})
+    assert on_day(over, date(2026, 11, 1), "America/New_York") == (
+        {"dateTime": "2026-11-01T01:00:00-04:00"}, {"dateTime": "2026-11-01T02:00:00-05:00"})
+    # One all day is only moved.
+    assert on_day(({"date": "2026-11-03"}, {"date": "2026-11-04"}), date(2026, 11, 10), "America/New_York") == (
+        {"date": "2026-11-10"}, {"date": "2026-11-11"})
+
+
 def test_from_this_one_on_with_a_time_alone_splits_at_the_next_time(for_changing):
     # "Move my gym to 7 from now on": no day is said, so none is guessed - it's the next gym's own, the 24th.
     calendar = for_changing(**_splitting(**{f"PATCH {GYM_URL}": [GYM]}))

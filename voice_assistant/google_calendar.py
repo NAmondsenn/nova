@@ -1267,11 +1267,15 @@ class GoogleCalendar:
             # By when this one was meant to be, which the series' rules make it - not where it's
             # been moved to since.
             this = _google_when(found["event"].get("originalStartTime") or found["event"]["start"])
-            day = this.astimezone().date() if isinstance(this, datetime) else this
             # The new times - or for a new name alone, the series' own - on the day this one was
             # meant to be, in the zone the series repeats in, which Google needs of a repeating event.
-            moved = _in_zone(_on_day(times or (series["start"], series["end"]), day),
-                             (series["start"] or {}).get("timeZone"))
+            # The user's new times are on the clock where the user is, so the brain's zone; the series'
+            # own are on the clock of its own zone - or a series at 6 PM in New York, split from a day when
+            # only one of the two zones has changed its clocks, would start an hour out.
+            repeats_in = (series["start"] or {}).get("timeZone")
+            own = None if times else repeats_in
+            day = this.astimezone(_zone_named(own)).date() if isinstance(this, datetime) else this
+            moved = _in_zone(_on_day(times or (series["start"], series["end"]), day, own), repeats_in)
             if this == _google_when(series["start"]):
                 changed, back = {}, {}
                 if times:
@@ -2070,17 +2074,35 @@ def _moved_times(first: Union[date, datetime], last: Union[date, datetime, None]
     return {"dateTime": first.isoformat()}, {"dateTime": last.isoformat()}
 
 
-def _on_day(times: Tuple[Dict, Dict], day: date) -> Tuple[Dict, Dict]:
+def _zone_named(zone: Optional[str]) -> Optional[ZoneInfo]:
+    """A zone as Google names one - "Europe/London" - or None for the brain's own: none named, or one not loaded."""
+    try:
+        return ZoneInfo(zone) if zone else None
+    except (ValueError, KeyError, OSError):
+        return None
+
+
+def _on_day(times: Tuple[Dict, Dict], day: date, zone: Optional[str] = None) -> Tuple[Dict, Dict]:
     """
     A start and end, as Google gives them, put on another day - at the same time on the clock,
     for as long: a time of a series, as a new series from it starts.
+
+    Args:
+        times: The start and end.
+        day: The day to put them on.
+        zone: The zone whose clock it's the same time on, as Google names one - a series' own, for one in
+            another zone than the brain's. None for the brain's own zone, or when it can't be loaded.
     """
     start, end = times
     if "date" in start:
         return {"date": day.isoformat()}, {"date": (day + (_google_when(end) - _google_when(start))).isoformat()}
-    first, last = _google_when(start).astimezone(), _google_when(end)
-    moved = datetime.combine(day, first.time()).astimezone()
-    return {"dateTime": moved.isoformat()}, {"dateTime": (moved + (last - first)).astimezone().isoformat()}
+    where = _zone_named(zone)
+    first, last = _google_when(start).astimezone(where), _google_when(end)
+    moved = datetime.combine(day, first.time(), tzinfo=where)
+    moved = moved if where else moved.astimezone()
+    # Added to as a moment, not by the clock, so a change of the clocks in between doesn't change its length.
+    finished = (moved.astimezone(timezone.utc) + (last - first)).astimezone(where)
+    return {"dateTime": moved.isoformat()}, {"dateTime": finished.isoformat()}
 
 
 def _in_zone(times: Tuple[Dict, Dict], zone: Optional[str]) -> Tuple[Dict, Dict]:
