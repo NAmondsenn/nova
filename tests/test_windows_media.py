@@ -6,6 +6,7 @@ uses, which notes every property set and the line it was set on. winrt itself is
 imported: it's only on the PC.
 """
 
+import threading
 import logging
 import sys
 from types import SimpleNamespace
@@ -53,12 +54,16 @@ class FakeWinrt:
         self.controls = Noted(log, "smtc", display_updater=self.updater, add_button_pressed=self._add,
                               remove_button_pressed=self._remove)
         self.players = []
+        # Which thread made the player and registered the handler - see the thread test.
+        self.made_on = None
+        self.registered_on = None
 
     def set_app_id(self, app_id):
         self.log.append(("app_id", app_id, None))
 
     def MediaPlayer(self):
         self.log.append(("MediaPlayer()", None, None))
+        self.made_on = threading.get_ident()
         player = SimpleNamespace(command_manager=Noted(self.log, "command_manager"),
                                  system_media_transport_controls=self.controls)
         self.players.append(player)
@@ -80,6 +85,7 @@ class FakeWinrt:
         self.log.append(("clear_all()", None, None))
 
     def _add(self, handler):
+        self.registered_on = threading.get_ident()
         self.handlers[7] = handler
         return 7
 
@@ -308,3 +314,13 @@ def test_covers_which_keep_failing_are_logged_once_until_one_works(media, winrt,
         winrt.failing = "thumbnail"
         media.show("playing", "Four", "Band", "Album", cover=b"four")
         assert cover_warnings() == 2
+
+
+def test_the_controls_are_made_on_a_fresh_thread_so_windows_buttons_arrive():
+    # On the PC the satellite's main thread has started PortAudio, which leaves it in a
+    # single-threaded apartment with no message pump: a handler registered there only got
+    # Windows' buttons when the thread ended (19 November). Made on a fresh thread, they come at once.
+    winrt = FakeWinrt()
+    WindowsMedia(lambda action: None, backend=winrt)
+    assert winrt.made_on is not None and winrt.made_on != threading.get_ident()
+    assert winrt.registered_on == winrt.made_on

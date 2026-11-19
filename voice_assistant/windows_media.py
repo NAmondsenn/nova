@@ -98,6 +98,10 @@ def _load_backend():
     return None
 
 
+# The most seconds the satellite waits for Windows' media controls to be set up.
+SET_UP_WAIT = 10
+
+
 class WindowsMedia:
     """
     One music session in Windows' media controls, for as long as the satellite runs:
@@ -126,6 +130,17 @@ class WindowsMedia:
         self._cover_failing = False
         if self._backend is None:
             return
+        # On a fresh thread, waited for: the satellite's own has started PortAudio by now,
+        # which leaves it in a single-threaded apartment with no message pump, and a handler
+        # registered there was only given Windows' buttons once the thread ended (seen on the
+        # PC on 19 November). A fresh one is in the multithreaded apartment, where they come
+        # at once, on a thread of Windows'. What's made works from any thread after.
+        setting_up = threading.Thread(target=self._set_up, daemon=True, name="windows-media")
+        setting_up.start()
+        setting_up.join(SET_UP_WAIT)
+
+    def _set_up(self):
+        """Makes the player and its controls, and registers the button handler - see __init__."""
         try:
             backend = self._backend
             # First, as Windows takes the name from the process as the controls are made.
