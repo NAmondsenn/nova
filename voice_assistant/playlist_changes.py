@@ -466,7 +466,12 @@ def _take_back(library, song: Dict, added: List[Tuple[str, str, str]]) -> Callab
                     library.remove_entries(playlist_id, [at[-1]])
                     taken.append(name)
         except NAVIDROME_FAILURES as e:
-            return {"success": False, "message": library._failure_message(e)}
+            # What was taken back before it stays done, so it's said first, as for the change itself - and the
+            # slot is spent, since asking again would only find it gone from the first.
+            failure = library._failure_message(e)
+            if taken:
+                return {"success": True, "message": f"Took {title} back off {_joined(taken)}. {failure}"}
+            return {"success": False, "message": failure}
         if not taken:
             names = _joined([name for _, name, _ in added])
             return {"success": False, "message": f"{title} isn't on {names} any more."}
@@ -486,12 +491,18 @@ def _put_back(library, song: Dict, removed: List[Tuple[str, str, str]]) -> Calla
     title = _title(song)
 
     def undo() -> Dict:
+        put = []
         try:
-            for playlist_id, _, entry_id in removed:
+            for playlist_id, name, entry_id in removed:
                 library.add_songs(playlist_id, [entry_id])
+                put.append(name)
         except NAVIDROME_FAILURES as e:
-            return {"success": False, "message": library._failure_message(e)}
-        return {"success": True, "message": f"Put {title} back on {_joined([name for _, name, _ in removed])}."}
+            # What was put back before it stays done, so it's said first, as for the change itself.
+            failure = library._failure_message(e)
+            if put:
+                return {"success": True, "message": f"Put {title} back on {_joined(put)}. {failure}"}
+            return {"success": False, "message": failure}
+        return {"success": True, "message": f"Put {title} back on {_joined(put)}."}
 
     return undo
 
