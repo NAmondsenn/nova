@@ -455,8 +455,10 @@ class Satellite:
                 recording.set()
                 # As _stop_listening does, so losing the brain now says it can't be reached.
                 self._turn_open = True
+                logger.info("Pressed: the recording ends")
                 return
             self._press_pending = True
+        logger.info("Pressed: listening")
         self._nudged.set()
 
     def _keep_clip(self, score: float):
@@ -732,6 +734,7 @@ class Satellite:
             self.link.send("played", id=message["id"], stopped=False, position=0)
             return
         self._follow(message["id"], _FromBrain(playback, kind))
+        self._stop_if_listening(playback, kind)
 
     def _play_stream(self, message: Dict, payload: bytes):
         kind = message.get("kind", "reply")
@@ -740,6 +743,27 @@ class Satellite:
                                             volume=message.get("volume", 1.0), kind=kind,
                                             paused=bool(message.get("paused", False)))
         self._follow(message["id"], _FromBrain(playback, kind, message.get("channels", 1), waiting))
+        self._stop_if_listening(playback, kind)
+
+    def _stop_if_listening(self, playback: Playback, kind: str):
+        """
+        Stops a reply which starts while a push-to-talk satellite is listening - pressed
+        while the brain was still working on the last request, say. It would play into the
+        open microphone, which has no echo cancelling here, and come back as the user's
+        next request. So it goes as one a press over it would have, and the brain is told
+        it was stopped. The Pi cancels its own echo, so its replies play as they always have.
+
+        Args:
+            playback: The reply, just started.
+            kind: What the brain says it is.
+        """
+        if not self.push_to_talk or kind != "reply":
+            return
+        with self._lock:
+            listening = self._recording is not None and not self._recording.is_set()
+        if listening:
+            logger.info("A reply came while listening after a press, so it isn't played")
+            playback.stop()
 
     def _stream_audio(self, message: Dict, payload: bytes):
         with self._lock:
