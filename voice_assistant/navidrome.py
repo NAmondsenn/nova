@@ -839,6 +839,9 @@ class NavidromePlayer(NavidromeLibrary):
         self._queue: List[Dict] = []
         self._unshuffled: List[Dict] = []
         self._index = 0
+        # How far into its song the playing one began, in seconds - not 0 for music
+        # another player handed over part way through. See hand_over.
+        self._offset = 0.0
         # Changed by anything which changes what plays next - skipping, a new
         # request - so the song which was stopped for it doesn't move the queue on
         # as well, as if it had finished by itself.
@@ -1219,6 +1222,65 @@ class NavidromePlayer(NavidromeLibrary):
         """Whether music was playing when the user started speaking."""
         return self._interrupted
 
+    # Moving the music to another player, and taking it from one
+
+    def has_music(self) -> bool:
+        """Whether there's a song to play, now or when it's carried on - playing or paused."""
+        with self._lock:
+            return self._index < len(self._queue)
+
+    def is_playing(self) -> bool:
+        """
+        Whether music is playing - which it is while held for the assistant to talk, if
+        it was playing before, as it carries on after.
+        """
+        with self._lock:
+            if not self.has_music():
+                return False
+            return self._interrupted if self._talking else not self._paused
+
+    def hand_over(self) -> Optional[Dict]:
+        """
+        Gives up the music, to be played by another player from the same place, and stops.
+
+        Returns:
+            Dict of the "queue" and how it was "unshuffled", the "index" of the song
+            playing and its "position" in seconds, and the "repeat" and "shuffle" modes - the
+            lists copies, so the two players never share one. None, with no music.
+        """
+        with self._lock:
+            if not self.has_music():
+                return None
+            # Where the song began as well as how far it's got, since a song which was
+            # itself handed over part way began there: moved at 60 seconds and again 10
+            # seconds later, it's at 70, not 10.
+            playback = self._playback
+            rate = getattr(playback, "sample_rate", 0)
+            played = getattr(playback, "position", 0) / rate if rate else 0.0
+            state = {"queue": list(self._queue), "unshuffled": list(self._unshuffled), "index": self._index,
+                     "position": self._offset + played, "repeat": self._repeat, "shuffle": self._shuffle}
+            self._queue, self._unshuffled = [], []
+            # Nothing's left here to carry on after the reply, or to have been playing.
+            self._resume_after = self._interrupted = False
+            self._jump(0)
+        return state
+
+    def take_over(self, state: Dict) -> Dict:
+        """
+        Plays what another player handed over, from the same place - as _start does, so
+        once the assistant has finished talking, if it's talking now.
+
+        Args:
+            state: What the other player's hand_over gave.
+
+        Returns:
+            Dict with 'success' and a 'message'.
+        """
+        with self._lock:
+            self._repeat, self._shuffle = state["repeat"], state["shuffle"]
+            self._start(state["queue"], state["index"], state["position"], state["unshuffled"])
+        return {"success": True, "message": "Playing"}
+
     def close(self):
         """Stops the music, for good - the player's own thread ends."""
         with self._lock:
@@ -1233,22 +1295,40 @@ class NavidromePlayer(NavidromeLibrary):
         if self._playback is not None:
             self._playback.paused = paused
 
-    def _start(self, songs: List[Dict]):
-        """Plays these instead of whatever was queued - paused while the assistant is talking."""
+    def _start(self, songs: List[Dict], index: int = 0, start: float = 0.0, unshuffled: Optional[List[Dict]] = None):
+        """
+        Plays these instead of whatever was queued - paused while the assistant is talking.
+
+        Args:
+            songs: The queue, in the order it's to be played.
+            index: The song in it to start with.
+            start: How many seconds into that song to start.
+            unshuffled: The queue in its own order, if that isn't how it's to be played.
+        """
         with self._lock:
-            self._unshuffled = list(songs)
+            self._unshuffled = list(songs if unshuffled is None else unshuffled)
             self._queue = list(songs)
             self._paused = self._talking
             if self._talking:
                 self._resume_after = True
-            self._jump(0)
+            self._jump(index, start)
 
-    def _jump(self, index: int):
-        """Plays the song at this place in the queue, stopping the one playing."""
+    def _jump(self, index: int, start: float = 0.0):
+        """
+        Plays the song at this place in the queue, stopping the one playing.
+
+        Args:
+            index: The song to play.
+            start: How many seconds into it to start - only for the song jumped to, so any
+                other jump, skipping or a new request, starts a song at its beginning.
+        """
         self._index = index
+        self._offset = max(0.0, start)
         self._turn += 1
         if self._playback is not None:
             self._playback.stop()
+            # None of the new song has played, whatever the stopped one had - see hand_over.
+            self._playback = None
         self._lock.notify_all()
 
     def _play_queue(self):
@@ -1261,7 +1341,7 @@ class NavidromePlayer(NavidromeLibrary):
                 if self._closed:
                     return
                 song, turn = self._queue[self._index], self._turn
-                playback = self.speaker.play_stream(self._decode(song), volume=self.volume.get("music"),
+                playback = self.speaker.play_stream(self._decode(song, self._offset), volume=self.volume.get("music"),
                                                     kind="music", paused=self._paused, most_ahead=DECODE_AHEAD)
                 self._playback = playback
 
@@ -1273,7 +1353,11 @@ class NavidromePlayer(NavidromeLibrary):
             with self._lock:
                 if self._turn != turn:
                     continue
-                # It finished by itself: on to the next, unless none of it played.
+                # It finished by itself: on to the next, unless none of it played. Even
+                # the same song, repeated, is played from its beginning, with none of it
+                # played yet - see hand_over.
+                self._offset = 0.0
+                self._playback = None
                 failures = failures + 1 if playback.duration == 0 else 0
                 if failures >= MOST_FAILURES:
                     logger.error(f"{failures} songs in a row wouldn't play, so the queue is stopped")
@@ -1295,7 +1379,7 @@ class NavidromePlayer(NavidromeLibrary):
             raise NavidromeError("Navidrome sent something other than audio")
         return response
 
-    def _decode(self, song: Dict) -> Iterator[np.ndarray]:
+    def _decode(self, song: Dict, start: float = 0.0) -> Iterator[np.ndarray]:
         """
         A song as stereo audio at the speaker's rate, a piece at a time.
 
@@ -1304,12 +1388,19 @@ class NavidromePlayer(NavidromeLibrary):
         decodes as fast as it's played. Feeding the download straight into ffmpeg
         would hold the connection still for as long as the music was paused, and
         Navidrome would give up on it.
+
+        Args:
+            song: The song to play.
+            start: How many seconds into it to start, for music handed over part way. It's
+                asked of ffmpeg after the input, which skips what's before as it decodes it,
+                since a download isn't something it could jump about in.
         """
         response = ffmpeg = None
         try:
             response = self._open_song(song["id"])
+            seek = ["-ss", f"{start:.3f}"] if start > 0 else []
             ffmpeg = subprocess.Popen(
-                ["ffmpeg", "-loglevel", "error", "-i", "pipe:0", "-f", "f32le", "-ac", "2",
+                ["ffmpeg", "-loglevel", "error", "-i", "pipe:0", *seek, "-f", "f32le", "-ac", "2",
                  "-ar", str(self.speaker.sample_rate), "pipe:1"],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             downloaded: "queue.Queue[Optional[bytes]]" = queue.Queue()
