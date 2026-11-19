@@ -233,6 +233,17 @@ def test_the_closest_playlist_being_remade_is_refused_not_the_next(library):
     assert library.called("playlist_entries") == []
 
 
+def test_loose_wording_which_fits_a_remade_playlist_best_never_adds_to_another(library):
+    # "My daily mix" fits both Daily Mixes better than Mix Tape, which isn't remade and so could be added to:
+    # the closest is judged, and refused, and nothing goes on the other.
+    library.playlist("Daily Mix 1")
+    library.playlist("Daily Mix 2")
+    mix_tape = library.playlist("Mix Tape")
+    reply = Built(FakeSoulSync(remade=["Daily Mix 1", "Daily Mix 2"])).changes.add(library, SONG, ["my daily mix"])
+    assert reply == {"success": False, "message": "SoulSync remakes Daily Mix 1, so that wouldn't stay."}
+    assert library.called("add_songs") == [] and library.playlists[mix_tape]["songs"] == []
+
+
 def test_a_remade_playlist_is_refused_for_taking_a_song_off_too(library):
     library.playlist("Daily Mix 1", [SONG])
     reply = Built(FakeSoulSync(remade=["Daily Mix 1"])).changes.remove(library, SONG, ["daily mix"])

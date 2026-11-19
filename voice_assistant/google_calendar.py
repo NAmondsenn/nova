@@ -6,9 +6,9 @@ sign-in to Google. See docs/decisions/0008.
 
 The calendar comes straight from Google, not through Home Assistant - the user's
 answer 2 - so Nova signs in to Google itself (decision 10). It asks only for what it
-uses: the list of calendars, and reading and adding events. The sign-in is kept on
-the brain, readable by Nova's user only, never on a satellite. It's done on the
-settings page, under Calendars and lists - see settings_page.py - in place of 0008's
+uses: the list of calendars, and reading, adding, changing and removing events. The
+sign-in is kept on the brain, readable by Nova's user only, never on a satellite. It's
+done on the settings page, under Calendars and lists - see settings_page.py - in place of 0008's
 command on the brain, so there's only the one way in to keep safe (0009's decision 8).
 
 It's plain HTTPS with requests - an authorisation code with PKCE, from a "Desktop
@@ -67,7 +67,7 @@ SCOPES = [
 SCOPES_SAID = {
     "https://www.googleapis.com/auth/calendar.calendarlist.readonly": "see the list of your calendars",
     "https://www.googleapis.com/auth/calendar.events.readonly": "read your calendars' events",
-    "https://www.googleapis.com/auth/calendar.events.owned": "add events to your own calendars",
+    "https://www.googleapis.com/auth/calendar.events.owned": "add, change and remove events on your own calendars",
 }
 
 # The OAuth errors from Google's token address that only signing in again can put right:
@@ -1123,7 +1123,7 @@ class GoogleCalendar:
         undo = _undo(summary, put_back, f"Put {summary} back {on}.", f"I can't tell whether {summary} was put back.")
         return f"Removed {summary} {on}.", undo
 
-    def _confirm_or_copy(self, url: str, calendar_id: str, copy: Dict):
+    def _confirm_or_copy(self, url: str, calendar_id: str, copy: Dict) -> bool:
         """
         Puts an event removed back: set back to confirmed, so its reminders, guests and
         repeats come back with it - else, if Google won't, a copy added in its place.
@@ -1758,7 +1758,7 @@ class _NotSure(Exception):
     def __init__(self, said: str, why: str):
         """
         Args:
-            said: How it's said, before "so I can't tell whether ... was added".
+            said: How it's said, before "so I can't tell whether ... was added" - or removed, changed or put back.
             why: Why, for the log - without the event, or its calendar's id.
         """
         super().__init__(why)
@@ -1818,7 +1818,7 @@ def _gone(error: Exception) -> bool:
     return isinstance(error, requests.HTTPError) and getattr(error.response, "status_code", None) in EVENT_GONE
 
 
-def _undo(summary: str, write: Callable[[], None], done: str, unclear: str) -> Callable[[], Dict]:
+def _undo(summary: str, write: Callable[[], Union[Dict, str, None]], done: str, unclear: str) -> Callable[[], Dict]:
     """
     How to take a change to the calendar back, for "undo that" - sent once, as the change was.
 

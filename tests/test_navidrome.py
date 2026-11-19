@@ -983,6 +983,15 @@ def test_the_song_playing_and_the_one_before_are_found(make_player):
     assert player.song_at("this")["id"] == "2" and player.song_at("last")["id"] == "1"
 
 
+def test_a_song_asked_for_by_anything_but_this_or_last_is_a_mistake(make_player):
+    player = make_player()
+    player._start(SONGS)
+    _playing(player)
+    for which in ("next", "", None, "THIS"):
+        with pytest.raises(ValueError):
+            player.song_at(which)
+
+
 def test_the_song_is_found_while_paused_and_nothing_is_playing_once_the_queue_has_run_out(make_player):
     player = make_player()
     player._start(SONGS[:1])

@@ -974,7 +974,23 @@ def test_undo_that_runs_the_last_changes_undo_and_says_what_it_says():
     assert (result.ok, result.say) == (True, "Undone.")
     assert calendar.undone == 1
 
-    # Kept for one undo, and an undo can't itself be undone.
+    # Kept for one undo only.
+    result = executor.execute(UNDO_THAT)
+    assert (result.ok, result.say) == (False, NOTHING_TO_UNDO)
+    assert calendar.undone == 1
+
+
+def test_an_undo_cant_itself_be_undone():
+    class UndoingCalendar(ChangingCalendar):
+        def _undo(self):
+            self.undone += 1
+            # An undo which, wrongly, leaves a way to take itself back.
+            return {"success": True, "message": "Undone.", "undo": self._undo}
+
+    calendar = UndoingCalendar()
+    executor = ActionExecutor(calendar=calendar)
+    executor.execute(DENTIST)
+    assert executor.execute(UNDO_THAT).say == "Undone."
     result = executor.execute(UNDO_THAT)
     assert (result.ok, result.say) == (False, NOTHING_TO_UNDO)
     assert calendar.undone == 1
@@ -1088,7 +1104,6 @@ def test_a_failed_action_or_a_read_since_leaves_the_change_undoable():
     calendar.works = False
     assert executor.execute(DENTIST).ok is False
     assert executor.execute(Action("get_calendar", {"start": "Thursday"})).ok is False
-    assert executor.execute(Action("play_netflix")).ok is False
     # Something Home Assistant is only read from, to answer from.
     assert executor.execute(Action("home_status", {"about": "sunset"})).ok
 

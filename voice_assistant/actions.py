@@ -571,10 +571,10 @@ class ActionExecutor:
         accepted = list(inspect.signature(method).parameters)[1:]
         params = {name: value for name, value in action.params.items() if name in accepted}
         reply = method(self, **params)
-        self._keep_or_note(action.tool, method, reply)
+        self._keep_or_note(method, reply)
         return reply if isinstance(reply, ActionResult) else ActionResult.from_reply(reply)
 
-    def _keep_or_note(self, name: str, method: Callable, reply: Union[Dict, ActionResult]) -> None:
+    def _keep_or_note(self, method: Callable, reply: Union[Dict, ActionResult]) -> None:
         """
         Keeps a change which has just been made for "undo that", or notes that something
         else was done since the last one - "undo that" only reaches a change which was
@@ -588,13 +588,13 @@ class ActionExecutor:
         whose ok counts as success but which can't carry an undo.
 
         Args:
-            name: The tool's name.
             method: The tool.
             reply: What it answered.
         """
         # Undoing touches nothing more: taking the change emptied the slot if it worked, and a
-        # refusal - "I've left it" - leaves it as it was, to be said the same again.
-        if name == "undo_last_change":
+        # refusal - "I've left it" - leaves it as it was, to be said the same again. Whatever an
+        # undo's reply holds, it is never kept: an undo can't itself be undone.
+        if method is ActionExecutor.undo_last_change:
             return
         if isinstance(reply, ActionResult):
             succeeded, undo = reply.ok, None

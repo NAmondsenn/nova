@@ -326,7 +326,7 @@ def test_a_sign_in_without_every_permission_isnt_kept(token_file):
         sign_in.finish(_pasted(state))
 
     said = str(refused.value)
-    assert "add events to your own calendars" in said and "read your calendars' events" not in said
+    assert "add, change and remove events on your own calendars" in said and "read your calendars' events" not in said
     assert "sign in again, with every box ticked" in said
     assert not os.path.exists(token_file)
 
