@@ -131,6 +131,12 @@ RATE_LIMITED = ("rateLimitExceeded", "userRateLimitExceeded")
 # for one it has forgotten, a 410 for one deleted. Said as that, and nothing more is sent.
 EVENT_GONE = (404, 410)
 
+# How far past a cut the times of a repeating event deleted on their own are looked for - two years.
+# A series with no end ("every Tuesday") would otherwise be listed on and on, past MOST_PAGES, and a
+# change from this one on refused. One deleted further ahead than that comes back when its series is put
+# back, or is in a new series.
+CANCELLED_LOOKED_FOR = timedelta(days=730)
+
 # The most days named when some deleted on their own came back - "Tuesday, Wednesday, Thursday and 2 more".
 MOST_DAYS_SAID = 3
 
@@ -1357,10 +1363,10 @@ class GoogleCalendar:
 
     def _cancelled_from(self, series_url: str, this: Union[date, datetime]) -> List[Tuple[str, Union[date, datetime]]]:
         """
-        The times of a repeating event deleted on their own, from one of its times on - for a
-        cut of its series at that time, after which Google forgets them, so that putting the
-        series back doesn't bring them back deleted. Google keeps each as a cancelled instance
-        of the series, by an id of its own.
+        The times of a repeating event deleted on their own, from one of its times on, for as
+        far as CANCELLED_LOOKED_FOR - for a cut of its series at that time, after which Google
+        forgets them, so that putting the series back doesn't bring them back deleted. Google
+        keeps each as a cancelled instance of the series, by an id of its own.
 
         Args:
             series_url: The series' address.
@@ -1374,7 +1380,8 @@ class GoogleCalendar:
         """
         since = _sort_key(this)
         listed = self._pages(f"{series_url}/instances",
-                             {"timeMin": since.isoformat(), "showDeleted": "true", "maxResults": EVENTS_PAGE})
+                             {"timeMin": since.isoformat(), "timeMax": (since + CANCELLED_LOOKED_FOR).isoformat(),
+                              "showDeleted": "true", "maxResults": EVENTS_PAGE})
         cancelled = []
         for each in listed:
             if each.get("status") != "cancelled":

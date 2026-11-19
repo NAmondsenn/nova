@@ -65,7 +65,7 @@ For the calendar there was one sensible way: Google's own `events.delete` and `e
 
 - Once the three stop being mirrors, the few songs still missing from them download into the library but aren't put on their playlists.
 - A restart forgets the last change.
-- Deleting days again after an undo of a cut, and the `EXDATE`s of a new series, are sent as Google's own `instances` and `recurrence` describe them but have not yet been tried on a real series (the live check of 19 Nov found the flaw; the check of the fix is in 34m and 34n). An `instances` read from the cut on of a series with no end ("every Tuesday" with no `UNTIL` or `COUNT`) pages as far as Google gives, and a change is not made if that is more than 20 pages.
+- Deleting days again after an undo of a cut, and the `EXDATE`s of a new series, are sent as Google's own `instances` and `recurrence` describe them but have not yet been tried on a real series (the live check of 19 Nov found the flaw; the check of the fix is in 34m and 34n). The `instances` read of the days deleted on their own is bounded at two years (730 days) past the cut, so a series with no end ("every Tuesday" with no `UNTIL` or `COUNT`) is not listed on and on and refused; a day deleted on its own further ahead than that is accepted as not restored when a cut is undone, and not left out of a split's new series.
 - Putting a removed event back by setting it to confirmed has not yet been tried on a real event, nor on one occurrence of a repeating event; the copy is the fallback, and the live check on a throwaway event is still to do.
 - With repeat-all on, the first song of the queue has no "last song", though the last one plays before it.
 
