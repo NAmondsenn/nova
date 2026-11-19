@@ -57,6 +57,7 @@ class FakeWinrt:
         # Which thread made the player and registered the handler - see the thread test.
         self.made_on = None
         self.registered_on = None
+        self.updated_on = None
 
     def set_app_id(self, app_id):
         self.log.append(("app_id", app_id, None))
@@ -75,6 +76,7 @@ class FakeWinrt:
         return ("thumbnail", picture)
 
     def _update(self):
+        self.updated_on = threading.get_ident()
         if self.failing == "update":
             raise OSError("The display couldn't be updated")
         self.updates += 1
@@ -316,11 +318,18 @@ def test_covers_which_keep_failing_are_logged_once_until_one_works(media, winrt,
         assert cover_warnings() == 2
 
 
-def test_the_controls_are_made_on_a_fresh_thread_so_windows_buttons_arrive():
+def test_one_thread_of_its_own_makes_shows_and_keeps_the_controls():
     # On the PC the satellite's main thread has started PortAudio, which leaves it in a
     # single-threaded apartment with no message pump: a handler registered there only got
-    # Windows' buttons when the thread ended (19 November). Made on a fresh thread, they come at once.
+    # Windows' buttons when the thread ended. Made on a thread which then ended, the session
+    # vanished, and showing from another thread did nothing. One thread which lives as long
+    # as the controls, and does every call, is what worked (19 November).
     winrt = FakeWinrt()
-    WindowsMedia(lambda action: None, backend=winrt)
-    assert winrt.made_on is not None and winrt.made_on != threading.get_ident()
-    assert winrt.registered_on == winrt.made_on
+    made = WindowsMedia(lambda action: None, backend=winrt)
+    made.show("playing", "August 10", "Artist", "Album")
+    assert winrt.updated_on is not None
+    assert winrt.made_on not in (None, threading.get_ident())
+    assert winrt.registered_on == winrt.made_on == winrt.updated_on
+    owner = [thread for thread in threading.enumerate() if thread.ident == winrt.made_on]
+    assert owner and owner[0].is_alive()
+    made.close()

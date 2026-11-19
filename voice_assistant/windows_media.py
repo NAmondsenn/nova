@@ -21,6 +21,7 @@ which app it is: it says Nova.Satellite, the AppUserModelID of the Start-menu sh
 
 import asyncio
 import logging
+import queue
 import sys
 import threading
 from typing import Callable, Optional
@@ -98,8 +99,10 @@ def _load_backend():
     return None
 
 
-# The most seconds the satellite waits for Windows' media controls to be set up.
+# The most seconds the satellite waits for Windows' media controls to be set up, and for
+# each change to them after.
 SET_UP_WAIT = 10
+JOB_WAIT = 5
 
 
 class WindowsMedia:
@@ -128,16 +131,42 @@ class WindowsMedia:
         # and likewise the last cover.
         self._failing = False
         self._cover_failing = False
+        self._jobs: "queue.Queue" = queue.Queue()
+        self._owner = None
         if self._backend is None:
             return
-        # On a fresh thread, waited for: the satellite's own has started PortAudio by now,
-        # which leaves it in a single-threaded apartment with no message pump, and a handler
-        # registered there was only given Windows' buttons once the thread ended (seen on the
-        # PC on 19 November). A fresh one is in the multithreaded apartment, where they come
-        # at once, on a thread of Windows'. What's made works from any thread after.
-        setting_up = threading.Thread(target=self._set_up, daemon=True, name="windows-media")
-        setting_up.start()
-        setting_up.join(SET_UP_WAIT)
+        # Everything to do with Windows is done on one thread of its own, which lives as long
+        # as the controls: seen on the PC on 19 November, the satellite's own thread has
+        # started PortAudio by now, leaving it in a single-threaded apartment with no message
+        # pump, so a handler registered there only got Windows' buttons once the thread
+        # ended; and made on a thread which then ended, the session vanished, and showing
+        # it from another thread did nothing. The buttons come on a thread of Windows'.
+        self._owner = threading.Thread(target=self._serve, daemon=True, name="windows-media")
+        self._owner.start()
+        self._do(self._set_up, SET_UP_WAIT)
+
+    def _serve(self):
+        """The thread which owns the controls: does each job handed to it, in turn, until told to stop."""
+        while True:
+            job = self._jobs.get()
+            if job is None:
+                return
+            work, done = job
+            try:
+                work()
+            except Exception:
+                logger.exception("Something to do with Windows' media controls failed")
+            finally:
+                done.set()
+
+    def _do(self, work, wait: float):
+        """Has the owning thread do something, and waits for it, for at most `wait` seconds."""
+        if self._owner is None:
+            return
+        done = threading.Event()
+        self._jobs.put((work, done))
+        if not done.wait(wait):
+            logger.warning("Windows' media controls took too long to answer")
 
     def _set_up(self):
         """Makes the player and its controls, and registers the button handler - see __init__."""
@@ -170,8 +199,9 @@ class WindowsMedia:
 
     def show(self, state: str, track: str, artist: str, album: str, cover=UNCHANGED):
         """
-        Shows what the music is doing, as the brain's now_playing says. Never raises: a
-        display which fails is logged, once until it works again.
+        Shows what the music is doing, as the brain's now_playing says, on the owning
+        thread - see __init__. Never raises: a display which fails is logged, once until it
+        works again.
 
         Args:
             state: "playing", "paused" or "stopped" - which clears it and switches it off.
@@ -181,6 +211,10 @@ class WindowsMedia:
             cover: The new cover's picture, None to take the last away, or left out to
                 keep it.
         """
+        self._do(lambda: self._show_now(state, track, artist, album, cover), JOB_WAIT)
+
+    def _show_now(self, state: str, track: str, artist: str, album: str, cover):
+        """show, on the owning thread."""
         with self._lock:
             if self._controls is None:
                 return
@@ -196,7 +230,13 @@ class WindowsMedia:
                 self._failing = True
 
     def close(self):
-        """Lets go of the buttons and switches the controls off, as the satellite stops."""
+        """Lets go of the buttons and switches the controls off, as the satellite stops - and lets the owning thread go."""
+        self._do(self._close_now, JOB_WAIT)
+        if self._owner is not None:
+            self._jobs.put(None)
+
+    def _close_now(self):
+        """close, on the owning thread."""
         with self._lock:
             controls, self._controls = self._controls, None
             if controls is None:
