@@ -263,7 +263,9 @@ class Session:
                                       listening=brain.listening, wrapped=brain.wrapped_store, config=config,
                                       new_music=brain.new_music_playlist, journeys=brain.journeys,
                                       ring_on=brain.ring_on, room_of=brain.room_of,
-                                      room_players=self._room_players)
+                                      room_players=self._room_players,
+                                      mover=lambda said: brain.move_music(self.satellite.name, said),
+                                      elsewhere=self._elsewhere)
 
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.
@@ -271,7 +273,7 @@ class Session:
         self.intents = LocalIntents(clock=brain.clock, ntfy=brain.ntfy, home=self.home,
                                     activities=brain.calendar.activity_words if brain.calendar else None,
                                     football=brain.football.known_as if brain.football else None,
-                                    wake_word=self.wake_word)
+                                    wake_word=self.wake_word, names_satellite=brain.names_satellite)
 
         # The satellite as a device of its own in Home Assistant, over MQTT, or None
         # until mqtt.host is set - see ha_device.py. It's named after the satellite's
@@ -831,6 +833,27 @@ class Session:
         except Exception as e:
             logger.error(f"Couldn't look up the room, so acting alone: {e}")
             return [self]
+
+    def _elsewhere(self, said: str) -> Tuple[Optional[ActionExecutor], Optional[str]]:
+        """
+        Finds the actions of the satellite some words name, for playing something there.
+
+        Args:
+            said: The words for it, e.g. "the PC".
+
+        Returns:
+            Its session's actions and None - this session's own, if it's the one named; or
+            None and what to say, if the words name none or more than one, or the one named
+            isn't connected.
+        """
+        name, problem = self.brain.find_satellite(said)
+        if name is None:
+            return None, problem
+        session = self.brain.session_for(name)
+        if session is None:
+            away = self.brain.spoken_name(name)
+            return None, f"{away[:1].upper() + away[1:]} isn't connected."
+        return session.actions, None
 
     def _room_players(self) -> List:
         """

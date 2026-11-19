@@ -257,6 +257,7 @@ def brain(tmp_path, monkeypatch, make_config):
     return SimpleNamespace(config=config, clock=Clock(config=config, start=False), memory=None,
                            rooms=SatelliteRooms(str(tmp_path / "satellite_rooms.json")),
                            ring_on=lambda name: name, room_of=lambda name: [name], room_sessions=lambda name: [],
+                           names_satellite=lambda said: False,
                            routines=Routines(path=str(tmp_path / "routines.json")), ntfy=None, weather=None,
                            batteries=None, lists=None, pc=None, registry=None, calendar=None, media=None,
                            downloads=None, football=None, listening=None, wrapped_store=None, usage=None, new_music_playlist=None,
@@ -874,6 +875,109 @@ def test_a_satellite_alone_holds_only_its_own(make_session, brain):
     pi._handle_interaction = lambda feed, timeline, pre_roll=None, pressed=False: None
     pi._converse({"talked_over": False, "feed": AudioFeed()})
     assert held == [("hold", "pi"), ("release", "pi")]
+
+
+# Moving the music to another satellite, and playing something there
+
+class MovingPlayback:
+    """One song 'playing' on a satellite, paused or not until it's stopped."""
+
+    sample_rate = 48000
+
+    def __init__(self, paused):
+        self.paused = paused
+        self.stopped = False
+        self.position = 0
+        self.duration = 200.0
+        self._done = threading.Event()
+
+    def wait(self, timeout=None):
+        return self._done.wait(timeout)
+
+    def stop(self):
+        self.stopped = True
+        self._done.set()
+
+
+class MovingSpeaker:
+    """A satellite's speaker, keeping each song it was asked to play."""
+
+    sample_rate = 48000
+
+    def __init__(self):
+        self.started = []
+
+    def play_stream(self, song, volume=1.0, kind="reply", paused=False, most_ahead=None):
+        self.started.append(MovingPlayback(paused))
+        return self.started[-1]
+
+
+def _with_navidrome(session):
+    """Gives a session a real Navidrome player on a speaker of its own, returning the speaker."""
+    speaker = MovingSpeaker()
+    player = NavidromePlayer("http://navidrome.local:4533", "nova", "secret", speaker, session.volume)
+    # The song itself stands in for its audio.
+    player._decode = lambda song, start=0.0: song
+    session.music_player = session.actions.music = player
+    session.music = music.MusicHold(player)
+    return speaker
+
+
+def test_move_during_a_reply_waits_for_it_and_the_source_stays_quiet(brain, connect, make_session):
+    # Talking to the Pi, with the PC in the same room - both held while he's heard.
+    pi, pc = make_session(connect("bedroom")[0]), make_session(connect("pc")[0])
+    pi_speaker, pc_speaker = _with_navidrome(pi), _with_navidrome(pc)
+    sessions, spoken = {"bedroom": pi, "pc": pc}, {"bedroom": "the Pi", "pc": "the PC"}
+    brain.room_sessions = lambda name: [pi, pc] if name == "bedroom" else [pc, pi]
+    brain.connected_sessions = lambda: [pi, pc]
+    brain.session_for = sessions.get
+    brain.find_satellite = lambda said: ("pc", None)
+    brain.spoken_name = spoken.get
+    brain.move_music = MethodType(Brain.move_music, brain)
+
+    songs = [{"id": str(number), "title": f"Song {number}", "artist": "Band"} for number in range(1, 4)]
+    pi.music_player._start(songs)
+    assert wait_for(lambda: pi_speaker.started and not pi_speaker.started[0].paused)
+    pi.conversation = ScriptedConversation()
+    moved, during = [], []
+
+    def answer(feed, timeline, pre_roll=None, pressed=False):
+        moved.append(pi.actions.execute(Action("move_music", {"to": "the PC"})))
+        # The reply isn't over, so the PC has the song ready but is not playing it.
+        during.append(wait_for(lambda: pc_speaker.started and pc_speaker.started[-1].paused))
+        return None
+
+    pi._handle_interaction = answer
+    pi._converse({"talked_over": False, "feed": AudioFeed()})
+
+    assert [(result.ok, result.say) for result in moved] == [(True, "Moved to the PC.")]
+    assert during == [True]
+    # Let go at the end of the conversation, the PC plays on from the first song, and the Pi has none.
+    pi.music.wait(), pc.music.wait()
+    assert wait_for(lambda: not pc_speaker.started[-1].paused)
+    assert len(pc_speaker.started) == 1 and pc.music_player.is_playing()
+    assert not pi.music_player.has_music() and not pi.music_player.is_playing()
+    assert len(pi_speaker.started) == 1 and pi_speaker.started[0].stopped
+
+
+def test_elsewhere_gives_the_named_sessions_executor(brain, connect, make_session):
+    pi, pc = make_session(connect("bedroom")[0]), make_session(connect("pc")[0])
+    named = {"the Pi": "bedroom", "the PC": "pc", "the Mac": "mac"}
+    brain.find_satellite = lambda said: (named[said], None) if said in named else (None, f"Which one: {said}?")
+    brain.session_for = {"bedroom": pi, "pc": pc}.get
+    brain.spoken_name = {"mac": "the Mac"}.get
+    asked = []
+    brain.move_music = lambda spoken_at, said: asked.append((spoken_at, said)) or {"success": True, "message": "Moved."}
+
+    assert pi.actions.elsewhere("the PC") == (pc.actions, None)
+    # Itself too, which the executor takes for "here".
+    assert pi.actions.elsewhere("the Pi") == (pi.actions, None)
+    # One which is away, or no one at all, as the brain says it.
+    assert pi.actions.elsewhere("the Mac") == (None, "The Mac isn't connected.")
+    assert pi.actions.elsewhere("the phone") == (None, "Which one: the phone?")
+    # A move is asked of the brain from the satellite spoken to.
+    assert pi.actions.mover("the PC") == {"success": True, "message": "Moved."}
+    assert asked == [("bedroom", "the PC")]
 
 
 def test_closing_lets_go_of_the_device_the_music_and_the_satellites_sounds_once_in_order(make_session):

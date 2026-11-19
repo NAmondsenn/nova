@@ -650,6 +650,194 @@ def test_a_satellite_whose_room_cant_be_read_is_a_room_of_its_own(brain, passwor
     assert any("kitchen" in record.message and str(problem) in record.message for record in caplog.records)
 
 
+# Moving music from one satellite to another
+
+class MovingPlayer:
+    """Stands in for a Navidrome player: has music or not, and notes what it's asked to hand over or take."""
+
+    def __init__(self, name, happened, music=False, playing=False):
+        self.name, self.happened, self.music, self.playing = name, happened, music, playing
+
+    def has_music(self):
+        return self.music
+
+    def is_playing(self):
+        return self.playing
+
+    def hand_over(self):
+        self.happened.append(("hand_over", self.name))
+        if not self.music:
+            return None
+        self.music = self.playing = False
+        return {"queue": [f"a song from {self.name}"]}
+
+    def take_over(self, state):
+        self.happened.append(("take_over", self.name, state))
+        self.music = self.playing = True
+        return {"success": True, "message": "Playing"}
+
+
+class Spotify:
+    """Stands in for Spotify's controller, which can't hand its music over."""
+
+    name = "Spotify"
+
+
+class Moving:
+    """Connects stand-in sessions, each with a player, to a brain - noting in `happened` what each is asked."""
+
+    def __init__(self, brain):
+        self.brain, self.happened = brain, []
+
+    def add(self, name, music=False, playing=False, player=None):
+        player = player or MovingPlayer(name, self.happened, music, playing)
+        hold = SimpleNamespace(wait=lambda: self.happened.append(("wait", name)))
+        satellite = SimpleNamespace(name=name, connected=True, close=lambda: None)
+        self.brain.sessions[name] = SimpleNamespace(satellite=satellite, music_player=player, music=hold,
+                                                    close=lambda: None)
+        return player
+
+    def moved(self):
+        """What was handed over and taken, leaving out the waits."""
+        return [event for event in self.happened if event[0] != "wait"]
+
+
+@pytest.fixture
+def moving(named):
+    """The Pi (bedroom), the PC and the Mac of `named`, with sessions added as each test says."""
+    return Moving(named)
+
+
+def test_move_from_the_satellite_spoken_to(moving):
+    moving.add("bedroom", music=True)
+    moving.add("pc", music=True, playing=True)
+    moving.add("mac")
+    # Where it was said wins over another which is playing.
+    assert moving.brain.move_music("bedroom", "the Mac") == {"success": True, "message": "Moved to the Mac."}
+    assert [event[:2] for event in moving.moved()] == [("hand_over", "bedroom"), ("take_over", "mac")]
+
+
+def test_move_from_the_room_when_here_has_none(moving):
+    for name in ("bedroom", "pc"):
+        moving.brain.rooms.set_area(name, "Study")
+    moving.brain.rooms.set_area("mac", "Lounge")
+    moving.add("bedroom")
+    moving.add("pc", music=True)
+    # Playing, but in another room: the room's own wins.
+    moving.add("mac", music=True, playing=True)
+    assert moving.brain.move_music("bedroom", "my Pi") == {"success": True, "message": "Moved to the Pi."}
+    assert [event[:2] for event in moving.moved()] == [("hand_over", "pc"), ("take_over", "bedroom")]
+
+
+def test_move_from_the_one_playing_anywhere(moving):
+    moving.add("bedroom")
+    moving.add("pc", music=True)
+    moving.add("mac", music=True, playing=True)
+    assert moving.brain.move_music("bedroom", "my Pi")["success"] is True
+    # Not the PC, whose music is only paused.
+    assert [event[:2] for event in moving.moved()] == [("hand_over", "mac"), ("take_over", "bedroom")]
+
+
+def test_move_from_the_one_with_music_paused_when_none_is_playing(moving):
+    moving.add("bedroom")
+    moving.add("pc")
+    moving.add("mac", music=True)
+    assert moving.brain.move_music("bedroom", "the PC") == {"success": True, "message": "Moved to the PC."}
+    assert [event[:2] for event in moving.moved()] == [("hand_over", "mac"), ("take_over", "pc")]
+
+
+def test_move_leaves_music_on_a_satellite_which_has_gone(moving):
+    moving.add("bedroom")
+    moving.add("pc", music=True, playing=True)
+    # Still in the brain's list as its connection ends, but no longer there to move music from.
+    moving.brain.sessions["pc"].satellite.connected = False
+    moving.add("mac")
+    assert moving.brain.move_music("bedroom", "the Mac") == {"success": False, "message": "There's no music to move."}
+    assert moving.moved() == []
+
+
+def test_move_with_two_equals_takes_the_first_connected(moving):
+    moving.add("bedroom")
+    moving.add("pc", music=True, playing=True)
+    moving.add("mac", music=True, playing=True)
+    moving.brain.move_music("bedroom", "my Pi")
+    assert [event[:2] for event in moving.moved()] == [("hand_over", "pc"), ("take_over", "bedroom")]
+
+
+def test_move_with_no_music_says_so(moving):
+    moving.add("bedroom")
+    moving.add("pc")
+    assert moving.brain.move_music("bedroom", "the PC") == {"success": False, "message": "There's no music to move."}
+    assert moving.moved() == []
+
+
+def test_move_to_itself_says_already(moving):
+    moving.add("bedroom")
+    moving.add("pc", music=True, playing=True)
+    # Said at the PC, and from the Pi where the PC's music is the one playing anywhere.
+    for spoken_at in ("pc", "bedroom"):
+        assert moving.brain.move_music(spoken_at, "the PC") == {"success": False, "message": "It's already on the PC."}
+    assert moving.moved() == []
+
+
+def test_move_to_a_disconnected_one_stays(moving):
+    moving.add("bedroom", music=True)
+    # The PC may connect, but hasn't.
+    assert moving.brain.move_music("bedroom", "the PC") == {
+        "success": False, "message": "The PC isn't connected, so the music's staying on the Pi."}
+    assert moving.moved() == []
+
+
+def test_move_ambiguous_moves_nothing(moving):
+    moving.add("bedroom", music=True)
+    moving.add("pc")
+    moving.add("mac")
+    assert moving.brain.move_music("bedroom", "the computer") == {
+        "success": False, "message": "Which one: the PC or the Mac?"}
+    # Nor to one which isn't there.
+    result = moving.brain.move_music("bedroom", "the phone")
+    assert result["success"] is False and result["message"].startswith("There's no satellite called the phone.")
+    assert moving.moved() == []
+
+
+def test_move_with_spotify_says_navidrome_only(moving):
+    moving.add("bedroom", player=Spotify())
+    moving.add("pc", player=Spotify())
+    assert moving.brain.move_music("bedroom", "the PC") == {
+        "success": False, "message": "Moving music only works with Navidrome."}
+
+
+def test_move_to_one_which_cant_take_it_says_navidrome_only_and_keeps_the_music(moving):
+    moving.add("bedroom", music=True, playing=True)
+    moving.add("pc", player=Spotify())
+    assert moving.brain.move_music("bedroom", "the PC") == {
+        "success": False, "message": "Moving music only works with Navidrome."}
+    assert moving.happened == []
+
+
+def test_move_success_says_moved(moving):
+    moving.add("bedroom", music=True, playing=True)
+    moving.add("pc")
+    assert moving.brain.move_music("bedroom", "my desktop") == {"success": True, "message": "Moved to the PC."}
+    # The source's pause lands first, as does a hold on the target, before the music moves.
+    assert moving.happened == [("wait", "bedroom"), ("wait", "pc"), ("hand_over", "bedroom"),
+                               ("take_over", "pc", {"queue": ["a song from bedroom"]})]
+
+
+def test_a_move_the_target_cant_take_gives_the_music_back(moving):
+    moving.add("bedroom", music=True, playing=True)
+    pc = moving.add("pc")
+
+    def refuse(state):
+        moving.happened.append(("take_over", "pc", state))
+        raise OSError("speaker gone")
+
+    pc.take_over = refuse
+    assert moving.brain.move_music("bedroom", "the PC") == {
+        "success": False, "message": "I couldn't move the music to the PC, so it's staying on the Pi."}
+    assert moving.happened[-1] == ("take_over", "bedroom", {"queue": ["a song from bedroom"]})
+
+
 def test_a_second_connection_replaces_the_first(brain, connect, caplog):
     serving(brain)
     first = connect(brain)

@@ -756,6 +756,68 @@ def test_what_the_pc_rules_mustnt_catch_is_left_alone(text, tools):
     assert (None if actions is None else [action.tool for action in actions]) == tools
 
 
+# Moving the music to another satellite
+
+# The words the brain says name a satellite, as Brain.names_satellite says them of the Pi, the PC and the Mac.
+SATELLITE_WORDS = {"pc", "the pc", "my pi", "mac"}
+
+
+def _moves(text, names=SATELLITE_WORDS.__contains__, **others):
+    """The actions a request is handled with when the brain knows which words name a satellite, or None."""
+    result = LocalIntents(home=HOME, names_satellite=names, **others).match(text)
+    return None if result is None else result["actions"]
+
+
+@pytest.mark.parametrize("text, where", [
+    ("Play it on my Pi.", "my pi"), ("Move this to the PC.", "the pc"), ("Switch to the PC.", "the pc"),
+    ("Change it to the PC.", "the pc"), ("Move the music over to the PC.", "the pc"),
+    ("Transfer the song to the PC.", "the pc"), ("Take it to my Pi.", "my pi"),
+    # The rest of the verbs, objects and joiners.
+    ("Swap the music to Mac.", "mac"), ("Play the music onto the PC.", "the pc"),
+    ("Play this on the PC.", "the pc"), ("Switch this song over to my Pi.", "my pi"),
+    ("Could you move that to the PC please?", "the pc"),
+])
+def test_move_phrases(text, where):
+    assert _moves(text) == [Action("move_music", {"to": where})]
+
+
+@pytest.mark.parametrize("text", ["Switch to the next song.", "Change it to 50.", "Play it on repeat.",
+                                  "Move this to the kitchen."])
+def test_move_words_that_name_no_satellite_fall_through(text):
+    # Left to the rules after, or to Claude, as before the move rule.
+    actions = _moves(text)
+    assert actions is None or all(action.tool != "move_music" for action in actions)
+
+
+@pytest.mark.parametrize("text, action", [
+    ("Send it to my Mac.", Action("send_to_phone", {"device": "mac"})),
+    ("Put that on my Mac.", Action("send_to_phone", {"device": "mac"})),
+    ("Put it on my phone.", Action("send_to_phone")),
+])
+def test_send_and_put_phrases_still_send_the_reply(text, action):
+    # Even though "mac" names a satellite: only "play it on", and the move verbs, are a move.
+    assert _moves(text, ntfy=FakeNtfy()) == [action]
+
+
+def test_bare_play_still_resumes():
+    assert _moves("Play.") == [Action("play_music")]
+    assert _moves("Play the music.") == [Action("play_music")]
+
+
+@pytest.mark.parametrize("text, action", [("Switch on the PC.", "on"), ("Switch on my PC.", "on"),
+                                          ("Turn on the PC.", "on")])
+def test_switch_on_the_pc_is_still_power(text, action):
+    # "On" only means somewhere to play after "play" - and "pc" names a satellite here.
+    assert _moves(text) == [Action("pc_power", {"action": action})]
+
+
+def test_without_names_satellite_nothing_moves():
+    # A brain without satellites to name, as the tests of every other rule have, leaves these as they were.
+    for text in ("Play it on my Pi.", "Move this to the PC.", "Switch to the PC."):
+        actions = _actions(text)
+        assert actions is None or all(action.tool != "move_music" for action in actions)
+
+
 def _journey(place, mode, leave):
     return [Action("journey", {"place": place, "mode": mode, "leave": leave})]
 

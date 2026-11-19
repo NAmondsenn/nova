@@ -69,6 +69,17 @@ NEW_MUSIC_MISSING = "Your new-music playlist isn't made yet; Nova makes it each 
 NO_NEW_MUSIC_PLAYLIST = "No new-music playlist is set. It goes in Settings, under Music."
 NEW_MUSIC_NOT_ON_SPOTIFY = "New music plays from Navidrome, and Spotify is your music player right now."
 
+# What play_music and play_playlist are told of their "on": only for somewhere other than the
+# satellite the user is talking to, where music plays unless they say otherwise.
+ON_ANOTHER_SATELLITE = {
+    "type": "string",
+    "description": (
+        "Only when the user names somewhere other than here to play it - 'on the PC', 'on my Pi' - as they said "
+        "it, e.g. 'the PC'. Leave this out when they don't, which plays here. With no query, it moves what is "
+        "playing there, as move_music does."
+    ),
+}
+
 # How many days back "what's new" may look, and looks without being told: a month at most, as
 # a longer look reads ever more of Navidrome's newest albums - and how many artists it names.
 MOST_NEW_DAYS = 31
@@ -289,7 +300,9 @@ class ActionExecutor:
                  downloads=None, football=None, listening=None, wrapped=None, config=None, new_music=None,
                  journeys=None, ring_on: Callable[[str], str] = lambda name: name,
                  room_of: Callable[[str], List[str]] = lambda name: [name],
-                 room_players: Optional[Callable[[], List]] = None):
+                 room_players: Optional[Callable[[], List]] = None,
+                 mover: Optional[Callable[[str], Dict]] = None,
+                 elsewhere: Optional[Callable[[str], Tuple[Optional["ActionExecutor"], Optional[str]]]] = None):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -333,6 +346,12 @@ class ActionExecutor:
             room_players: Gives the music players of the satellites in the user's room
                 which are connected, this one's first - or None for this one's alone.
                 Pausing, resuming and the music's volume act on the room's music.
+            mover: Moves the music to the satellite the words name, e.g. "the PC" - given them,
+                gives what the brain says of it - or None if the music can't be moved from here.
+            elsewhere: Given the words for a satellite, gives the executor of that satellite -
+                this one's own, if it's the one named - and None; or None and what to say, when
+                they name none, or one which isn't connected. None if there's no other satellite
+                to play on.
         """
         self.music = music
         self.clock = clock
@@ -356,6 +375,8 @@ class ActionExecutor:
         self.ring_on = ring_on
         self.room_of = room_of
         self.room_players = room_players or (lambda: [self.music])
+        self.mover = mover
+        self.elsewhere = elsewhere
         # What was last asked, and what the assistant said - or the last alert, and
         # all of it - for "send that to my phone". Kept up to date by the Conversation.
         self.last_answer: Optional[Tuple[str, str]] = None
@@ -564,8 +585,17 @@ class ActionExecutor:
                 "as a song, even when you know it's also an album."
             ),
         },
+        on=ON_ANOTHER_SATELLITE,
     )
-    def play_music(self, query: Optional[str] = None, search_type: Optional[str] = None):
+    def play_music(self, query: Optional[str] = None, search_type: Optional[str] = None, on: Optional[str] = None):
+        other, failure = self._named(on)
+        if failure:
+            return failure
+        if other is not None:
+            if not query:
+                # Nothing new to play, so it's what's playing which is wanted there.
+                return self.move_music(on)
+            return self._play_on(other, "play_music", {"query": query, "search_type": search_type}, on)
         if not query:
             # Carries on whatever is paused in the user's room - see _resumes.
             return self._music_offline() or self._resumes().play(None, search_type=search_type)
@@ -598,8 +628,14 @@ class ActionExecutor:
         needs="music",
         required=["name"],
         name={"type": "string", "description": "The playlist name as the user said it."},
+        on=ON_ANOTHER_SATELLITE,
     )
-    def play_playlist(self, name: str = ""):
+    def play_playlist(self, name: str = "", on: Optional[str] = None):
+        other, failure = self._named(on)
+        if failure:
+            return failure
+        if other is not None:
+            return self._play_on(other, "play_playlist", {"name": name}, on)
         return self._music_offline() or self.music.play_playlist(name or "")
 
     @tool(
@@ -802,6 +838,69 @@ class ActionExecutor:
     )
     def shuffle(self, enabled: bool = True):
         return self._music_offline() or self.music.shuffle(bool(enabled))
+
+    @tool(
+        "Move the music to another satellite, such as the Pi, the PC or the Mac, so it carries on from the same "
+        "place with the same queue, repeat and shuffle, and stops where it was. Use it for 'play it on my Pi', "
+        "'move this to the PC' or 'switch the music to the Mac'. For something new to play there, use play_music "
+        "or play_playlist with 'on' instead. It only works with Navidrome.",
+        needs=("music", "mover"),
+        required=["to"],
+        to={"type": "string", "description": "Where to, as the user said it, e.g. 'the PC' or 'my Pi'."},
+    )
+    def move_music(self, to: str = ""):
+        if self.mover is None:
+            return {"success": False, "message": UNAVAILABLE["music"]}
+        try:
+            return self.mover(to or "")
+        except Exception as e:
+            # The other end is the brain's, and another satellite's: never the end of this request.
+            logger.warning(f"Couldn't move the music: {e}")
+            return {"success": False, "message": "I couldn't move the music."}
+
+    def _named(self, on: Optional[str]) -> Tuple[Optional["ActionExecutor"], Optional[Dict]]:
+        """
+        Finds where play_music or play_playlist is asked to play, when that isn't here.
+
+        Args:
+            on: The satellite as the user said it, e.g. "the PC" - or None for here.
+
+        Returns:
+            Tuple of (the executor of another satellite, None) to hand the request on to;
+            (None, None) to carry on here, as nothing was named, or this is the one named, or
+            there's no telling of any other; or (None, a failure to say) when the words name no
+            satellite, or one which isn't connected, or can't be looked up.
+        """
+        if not isinstance(on, str) or not on.strip() or self.elsewhere is None:
+            return None, None
+        try:
+            other, sentence = self.elsewhere(on.strip())
+        except Exception as e:
+            logger.warning(f"Couldn't look up the satellite to play on: {e}")
+            return None, {"success": False, "message": "I couldn't tell which satellite you meant."}
+        if other is None:
+            return None, {"success": False, "message": sentence or "I couldn't tell which satellite you meant."}
+        return (None if other is self else other), None
+
+    @staticmethod
+    def _play_on(other: "ActionExecutor", tool_name: str, params: Dict[str, Any], on: str):
+        """
+        Has another satellite's executor play something, as it would for the user talking to it.
+
+        Args:
+            other: That satellite's executor.
+            tool_name: "play_music" or "play_playlist".
+            params: What it's asked to play.
+            on: The satellite as the user said it, for saying it couldn't.
+
+        Returns:
+            What it came to - an ActionResult - or a failure to say, if it couldn't be asked.
+        """
+        try:
+            return other.execute(Action(tool_name, params))
+        except Exception as e:
+            logger.warning(f"Couldn't play on the satellite asked for: {e}")
+            return {"success": False, "message": f"I couldn't play that on {on.strip()}."}
 
     # Timers, reminders and alarms
 

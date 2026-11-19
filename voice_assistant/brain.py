@@ -145,6 +145,11 @@ STOP_CHECK = 0.5
 # fallback.Phrase.
 FALLBACK_PHRASE = "Sorry, I can't reach my server right now."
 
+# What's said when there's no music to move, and when the player can't move it - Spotify's
+# can't hand its music over, and plays on one speaker of its own.
+NO_MUSIC_TO_MOVE = "There's no music to move."
+MOVING_NEEDS_NAVIDROME = "Moving music only works with Navidrome."
+
 # The settings each satellite is sent with its state - see Session.send_state - so a
 # save of any of them on the settings page sends every satellite its state again.
 SENT_IN_STATE = (("thresholds", "recording_timeout"), ("thresholds", "wake_word_confidence"),
@@ -186,6 +191,36 @@ def _speech_to_text(config, tts: TextToSpeech):
             logger.warning(f"The second speech model couldn't be loaded, so Nova will hear lone words again by "
                            f"itself: {e}")
     return NemotronSpeechToText(nemotron, please=make_please(tts), fallback=fallback)
+
+
+def _music_source(room: List[Session], everyone: List[Session]) -> Optional[Session]:
+    """
+    Finds the music to move: where it was asked for, else somewhere near, else the only
+    music there is - so "move this to the PC" works from any room.
+
+    Args:
+        room: The connected sessions of the room the user is in, the satellite they're
+            talking to first.
+        everyone: Every connected session, in the order they connected.
+
+    Returns:
+        The first of the room with music, playing or paused; else the first of everyone
+        playing now; else the first of everyone with music paused - or None. A player which
+        can't say, as Spotify's can't, has none.
+    """
+    def has_music(session: Session) -> bool:
+        asked = getattr(session.music_player, "has_music", None)
+        return bool(asked and asked())
+
+    def is_playing(session: Session) -> bool:
+        asked = getattr(session.music_player, "is_playing", None)
+        return bool(asked and asked())
+
+    for sessions, has in ((room, has_music), (everyone, is_playing), (everyone, has_music)):
+        found = next((session for session in sessions if has(session)), None)
+        if found is not None:
+            return found
+    return None
 
 
 def _skipped_message(skipped: List[Dict]) -> str:
@@ -923,6 +958,69 @@ class Brain:
         with self._lock:
             session = self.sessions.get(name) if name else None
         return session if session is not None and session.satellite.connected else None
+
+    def move_music(self, spoken_at: str, said: str) -> Dict:
+        """
+        Moves the music to the satellite some words name, as the user asked at spoken_at -
+        from where it is, or where it's playing if that isn't there - to play on from the
+        same place, with the other's stopped. Nothing moves if the words name none or more
+        than one, if the one named is where it already is or isn't connected (a sleeping PC
+        isn't woken for it), or if either player is Spotify's.
+
+        Args:
+            spoken_at: The satellite the user was talking to.
+            said: The words for where to, e.g. "the PC".
+
+        Returns:
+            Dict with 'success' and the 'message' to say - "Moved to the PC.", or why not.
+        """
+        name, problem = self.find_satellite(said)
+        if name is None:
+            return {"success": False, "message": problem}
+        # A session stays in the brain's list for a moment after its satellite goes.
+        everyone = [session for session in self.connected_sessions() if session.satellite.connected]
+        source = _music_source(self.room_sessions(spoken_at), everyone)
+        if source is None:
+            here = self.session_for(spoken_at)
+            can_move = here is None or here.music_player is None or hasattr(here.music_player, "hand_over")
+            return {"success": False, "message": NO_MUSIC_TO_MOVE if can_move else MOVING_NEEDS_NAVIDROME}
+        there, from_here = self.spoken_name(name), self.spoken_name(source.satellite.name)
+        if name == source.satellite.name:
+            return {"success": False, "message": f"It's already on {there}."}
+        target = self.session_for(name)
+        if target is None:
+            away = there[:1].upper() + there[1:]
+            return {"success": False, "message": f"{away} isn't connected, so the music's staying on {from_here}."}
+        if not hasattr(target.music_player, "take_over"):
+            return {"success": False, "message": MOVING_NEEDS_NAVIDROME}
+
+        stays = {"success": False, "message": f"I couldn't move the music to {there}, so it's staying on {from_here}."}
+        # A pause or resume on its way to either lands first: the source's, so it can't undo
+        # the hand-over, and the target's, so music moved in the middle of a reply is held
+        # until the reply is over - and nothing plays under it for a moment before.
+        source.music.wait()
+        target.music.wait()
+        try:
+            state = source.music_player.hand_over()
+        except Exception as e:
+            logger.warning(f"The {source.satellite.name} satellite couldn't hand its music over: {e}")
+            return stays
+        if state is None:
+            return {"success": False, "message": NO_MUSIC_TO_MOVE}
+        try:
+            taken = target.music_player.take_over(state)
+        except Exception as e:
+            logger.warning(f"The {name} satellite couldn't take the music over: {e}")
+            taken = {}
+        if not taken.get("success"):
+            # So he isn't left with none playing anywhere.
+            try:
+                source.music_player.take_over(state)
+            except Exception as e:
+                logger.warning(f"The {source.satellite.name} satellite couldn't take its music back: {e}")
+            return stays
+        logger.info(f"Moved the music from the {source.satellite.name} satellite to the {name} one")
+        return {"success": True, "message": f"Moved to {there}."}
 
     def _stoppable_sessions(self) -> List[Tuple[str, Session]]:
         """
