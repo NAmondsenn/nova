@@ -2717,6 +2717,40 @@ def test_from_this_one_on_with_a_time_alone_splits_at_the_next_time(for_changing
                                                         "timeZone": "Europe/London"}
 
 
+def test_an_all_day_series_is_split_from_this_one_on_with_the_times_left(for_changing):
+    # Bins all day every Tuesday from the 3rd of November, eight times, the 10th deleted on its own: three
+    # were meant to be before the 24th, so five are left - and the new series, made two days long, is from the
+    # 24th. All day, the old one ends the day before, as a date.
+    bins = _event_url("calendar-personal", "made-up-bins")
+    rules = ["RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=8", "EXDATE;VALUE=DATE:20261110"]
+    series = _series("Bins", "made-up-bins", "2026-11-03", "2026-11-04", *rules)
+    before = [_occurrence("Bins", "made-up-bins", "2026-11-03", "2026-11-04"),
+              {"kind": "calendar#event", "id": "made-up-bins_20261110", "status": "cancelled",
+               "recurringEventId": "made-up-bins", "originalStartTime": {"date": "2026-11-10"}},
+              _occurrence("Bins", "made-up-bins", "2026-11-17", "2026-11-18")]
+    calendar = for_changing(personal=[_occurrence("Bins", "made-up-bins", "2026-11-24", "2026-11-25"),
+                                      _occurrence("Bins", "made-up-bins", "2026-12-01", "2026-12-02")],
+                            answers={bins: [series], f"{bins}/instances": [_events_page(*before)],
+                                     f"PATCH {bins}": [series, series], f"POST {PERSONAL_EVENTS}": [_inserted()],
+                                     f"DELETE {_event_url('calendar-personal', 'made-up-event')}": [DELETED]})
+    reply = calendar.change("bins", start="2026-11-24", end="2026-11-25", summary="Bins and recycling",
+                            following=True, today=NOVEMBER_21)
+    assert _said(reply) == {"success": True, "message": "Moved Bins to all day from Tuesday on and renamed it "
+                                                        "Bins and recycling."}
+    assert [params for url, params in calendar._session.asked if url == f"{bins}/instances"] == [
+        {"timeMax": "2026-11-24T00:00:00+00:00", "showDeleted": "true", "maxResults": 250}]
+    assert calendar._session.sent == [
+        _write("PATCH", bins, {"recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261123", rules[1]]}),
+        _write("POST", PERSONAL_EVENTS, {
+            "summary": "Bins and recycling", "start": {"date": "2026-11-24"}, "end": {"date": "2026-11-26"},
+            "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=5", rules[1]]})]
+
+    # Undone, the new series goes and the old one has its rules back.
+    assert reply["undo"]() == {"success": True, "message": "Put Bins back as it was."}
+    assert calendar._session.sent[2:] == [_write("DELETE", _event_url("calendar-personal", "made-up-event")),
+                                          _write("PATCH", bins, {"recurrence": rules})]
+
+
 def test_a_series_with_guests_isnt_split_from_this_one_on(for_changing):
     # A new series from this one on has no guests, so cutting the old one would take their future times
     # away. Nothing is cut, added or put back - only the series is read.
