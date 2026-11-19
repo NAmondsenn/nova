@@ -5,6 +5,7 @@ against a fake satellite over a socketpair, which reads what the brain sends wit
 real protocol. Needs numpy installed (as it is on the Pi), and is skipped anywhere it isn't.
 """
 
+import json
 import logging
 import select
 import socket
@@ -73,12 +74,15 @@ class FakeSatellite:
         self.socket.close()
 
 
-def connect(stream_class=satellite_link.Stream):
-    """The brain's view of a satellite which has just been admitted, serving on a thread of its own."""
+def connect(stream_class=satellite_link.Stream, **said):
+    """
+    The brain's view of a satellite which has just been admitted, serving on a thread of
+    its own - with anything else its hello said, e.g. media_controls=True.
+    """
     ours, theirs = socket.socketpair()
     # Short, so the brain's reading wakes often to check on the satellite.
     ours.settimeout(0.05)
-    satellite = RemoteSatellite(stream_class(ours), dict(HELLO))
+    satellite = RemoteSatellite(stream_class(ours), dict(HELLO, **said))
     fake = FakeSatellite(theirs)
     serving = threading.Thread(target=satellite.serve, daemon=True)
     serving.start()
@@ -284,6 +288,86 @@ def test_the_satellite_says_it_is_push_to_talk():
     finally:
         ours.close()
         theirs.close()
+
+
+def test_the_satellite_says_it_has_media_controls():
+    ours, theirs = socket.socketpair()
+    try:
+        assert RemoteSatellite(satellite_link.Stream(ours), dict(HELLO, media_controls=True)).media_controls is True
+        assert RemoteSatellite(satellite_link.Stream(ours), dict(HELLO)).media_controls is False
+    finally:
+        ours.close()
+        theirs.close()
+
+
+def test_the_buttons_of_windows_media_controls_are_passed_on():
+    satellite, fake, serving = made = connect(media_controls=True)
+    try:
+        for action in ("play", "pause", "next", "previous"):
+            fake.say("media", action=action)
+        assert [satellite.media_presses.get(timeout=2) for _ in range(4)] == ["play", "pause", "next", "previous"]
+    finally:
+        disconnect(*made)
+
+
+def test_a_media_button_which_isnt_one_of_the_four_is_dropped(caplog):
+    satellite, fake, serving = made = connect(media_controls=True)
+    try:
+        with caplog.at_level(logging.WARNING):
+            for action in ("stop", "PLAY", 3, None, ["pause"]):
+                fake.say("media", action=action)
+            fake.say("media")
+            fake.say("media", action="next")
+            assert satellite.media_presses.get(timeout=2) == "next"
+        assert satellite.media_presses.empty()
+        assert len([record for record in caplog.records if "media" in record.getMessage()]) == 6
+        # The connection is kept.
+        assert satellite.connected
+    finally:
+        disconnect(*made)
+
+
+def test_media_buttons_from_a_satellite_which_didnt_say_it_has_them_are_dropped(pair):
+    satellite, fake, serving = pair
+    fake.say("media", action="pause")
+    fake.say("ping")
+    assert wait_for(lambda: fake.messages("pong"))
+    assert satellite.media_presses.empty()
+
+
+def test_what_plays_reaches_the_satellite_with_its_cover_only_when_given(pair):
+    satellite, fake, serving = pair
+    assert satellite.send_now_playing("playing", "Song", "Band", "Album", cover=b"jpeg")
+    assert satellite.send_now_playing("paused", "Song", "Band", "Album")
+    assert satellite.send_now_playing("paused", "Song", "Band", "Album", cover=None)
+    assert satellite.send_now_playing("stopped", "", "", "")
+    assert wait_for(lambda: len(fake.messages("now_playing")) == 4)
+    assert [message for message, _ in fake.received if message["type"] == "now_playing"] == [
+        {"type": "now_playing", "state": "playing", "track": "Song", "artist": "Band", "album": "Album",
+         "cover": True, "bytes": 4},
+        {"type": "now_playing", "state": "paused", "track": "Song", "artist": "Band", "album": "Album"},
+        {"type": "now_playing", "state": "paused", "track": "Song", "artist": "Band", "album": "Album",
+         "cover": False},
+        {"type": "now_playing", "state": "stopped", "track": "", "artist": "", "album": ""}]
+    assert fake.payloads("now_playing") == [b"jpeg", b"", b"", b""]
+
+
+def test_long_names_in_any_script_are_cut_to_fit_one_line(pair):
+    # A character outside the Basic Multilingual Plane is 12 bytes of JSON, as a pair of
+    # \u escapes - so 500 of each, uncut, would be far past the line the satellite reads,
+    # and it would drop the connection.
+    satellite, fake, serving = pair
+    note = "\U0001F3B5"
+    assert satellite.send_now_playing("playing", note * 500, note * 500, note * 500, cover=b"jpeg")
+    assert wait_for(lambda: fake.messages("now_playing"))
+    [message] = fake.messages("now_playing")
+    assert message["track"] == message["artist"] == message["album"] == note * remote.MOST_TEXT
+    assert len(json.dumps(message).encode()) + 1 <= protocol.MAX_LINE
+    assert fake.payloads("now_playing") == [b"jpeg"]
+    # And the connection carries on.
+    fake.say("ping")
+    assert wait_for(lambda: fake.messages("pong"))
+    assert satellite.connected
 
 
 def test_a_follow_up_is_heard_until_the_brain_stops_listening(pair):

@@ -1,28 +1,39 @@
 """
 Undo Module.
 
-What was just removed on the settings page - an alarm, a timer or a reminder - kept
-for a minute, so the page's Undo can put it back (see 0009, decision 4). Each is
-kept behind a token of its own, which the page is given in place of what was
+Two things kept so that something done can be taken back, both in memory only, never
+written down, so a restart forgets them and what was done before it stays done.
+
+UndoShelf keeps what was just removed on the settings page - an alarm, a timer or a
+reminder - for a minute, so the page's Undo can put it back (see 0009, decision 4). Each
+is kept behind a token of its own, which the page is given in place of what was
 removed, and which works once it has put it back - one refused, as it would clash
 with something set since, can be tried again until its time is up. The page offers
 Undo for ten seconds (UNDO_SHOWN, in web/settings.js), and the brain keeps each for
 UNDO_KEPT.
 
-Kept in memory only, never written down, so a restart forgets it all - what was
-removed before it stays removed.
+LastChange keeps the last playlist or calendar change Nova made by voice, for ten
+minutes, so "undo that" can take it back - but only while it's still the last thing
+Nova did.
 """
 
 import secrets
 import threading
 import time
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 # How long what was removed can be put back, in seconds.
 UNDO_KEPT = 60.0
 # The most kept at once - far more than anyone removes in a minute, but a limit, so the
 # page can't grow it without end.
 MOST_KEPT = 50
+
+# How long the last playlist or calendar change can be taken back by "undo that", in seconds.
+UNDO_CHANGE_KEPT = 600.0
+# What's said when "undo that" can't, and why.
+NOTHING_TO_UNDO = "There's nothing to undo."
+SOMETHING_ELSE_SINCE = "The last thing I did wasn't a playlist or calendar change, so I've left it."
+TOO_LATE = "That was too long ago to undo."
 
 
 class UndoShelf:
@@ -116,3 +127,64 @@ class UndoShelf:
                 if secrets.compare_digest(kept.encode(), given):
                     found = kept
             return None if found is None else self._kept.pop(found)
+
+
+class LastChange:
+    """The last playlist or calendar change, as the way to take it back."""
+
+    def __init__(self, keep_for: float = UNDO_CHANGE_KEPT, clock: Callable[[], float] = time.monotonic):
+        """
+        Args:
+            keep_for: How long the change is kept, in seconds.
+            clock: What tells the time, in seconds - steady, so the wall clock being
+                set while one is kept can't keep it longer, or lose it sooner.
+        """
+        self.keep_for = keep_for
+        self._clock = clock
+        # The way to take it back, when it was kept, and whether anything else has been
+        # done since - "put milk on the list" after "add this to Gym" means "undo that" is
+        # no longer about the song.
+        self._undo: Optional[Callable[[], Dict]] = None
+        self._kept_at = 0.0
+        self._else_since = False
+        # Kept and taken from whichever thread a request is answered on, so two "undo that"s
+        # at once can't both take the one change.
+        self._lock = threading.Lock()
+
+    def keep(self, undo: Callable[[], Dict]) -> None:
+        """
+        Keeps a change just made, in place of the last, as the last thing done.
+
+        Args:
+            undo: Takes it back, answering with 'success' and a 'message'.
+        """
+        with self._lock:
+            self._undo = undo
+            self._kept_at = self._clock()
+            self._else_since = False
+
+    def note_other(self) -> None:
+        """Notes that something which wasn't a change was done, so the change kept is no longer the last thing."""
+        with self._lock:
+            self._else_since = True
+
+    def take(self) -> Union[Callable[[], Dict], str]:
+        """
+        Takes the way to undo the change kept - which empties the slot, so it's only
+        ever given once - unless it can't be, in time or in sense.
+
+        Returns:
+            The undo, or what to say of why there isn't one: NOTHING_TO_UNDO, TOO_LATE
+            (which lets go of the change) or SOMETHING_ELSE_SINCE (which leaves it, as it
+            wasn't undone).
+        """
+        with self._lock:
+            if self._undo is None:
+                return NOTHING_TO_UNDO
+            if self._clock() - self._kept_at > self.keep_for:
+                self._undo = None
+                return TOO_LATE
+            if self._else_since:
+                return SOMETHING_ELSE_SINCE
+            undo, self._undo = self._undo, None
+            return undo

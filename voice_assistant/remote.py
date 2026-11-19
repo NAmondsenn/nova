@@ -38,6 +38,14 @@ SILENT_FOR = 15.0
 # far inside protocol.MAX_AUDIO.
 PIECE_SECONDS = 0.1
 
+# The most characters of a track, artist or album sent in a now_playing, so that even one
+# all in characters JSON writes as 12 bytes each, three times over, is inside
+# protocol.MAX_LINE.
+MOST_TEXT = 100
+
+# What send_now_playing is given for a cover which is as it was.
+UNCHANGED = object()
+
 # Playback ids, counted across every connection rather than from 1 on each. A satellite
 # reports a sound's end on whichever link it has by then, so after it reconnects a late
 # "played" for the old link's "1" would otherwise finish the new link's "1".
@@ -490,7 +498,8 @@ class RemoteSatellite:
                 wake at each timeout, for serve() to notice a satellite gone quiet, and
                 no send blocks for longer.
             hello: What admit returned - the satellite's name, hostname, sample_rate,
-                speaker and whether it is push-to-talk.
+                speaker, whether it is push-to-talk and whether it has Windows' media
+                controls.
         """
         self.name = hello["name"]
         self.hostname = hello["hostname"]
@@ -501,6 +510,9 @@ class RemoteSatellite:
         # Whether it records on a press of a key, not on a wake word - False from a
         # satellite which doesn't say.
         self.push_to_talk: bool = bool(hello.get("push_to_talk", False))
+        # Whether it shows its music in Windows' media controls, and passes on their
+        # buttons - False from a satellite which doesn't say. See docs/decisions/0031.
+        self.media_controls: bool = bool(hello.get("media_controls", False))
         self.speaker = RemoteSpeaker(self.send, self.sample_rate)
         # Each wake word heard, in order: {"talked_over": whether a reply was playing,
         # "pre_roll": how many samples of the feed are from before the wake word - or
@@ -511,6 +523,10 @@ class RemoteSatellite:
         # the brain, and what was still ringing as it did, as {"rang": [ids],
         # "dismissed": [ids], "ringing": [ids]} - which it says as it connects.
         self.away_reports: "queue.Queue[Dict]" = queue.Queue()
+        # Each button of Windows' media controls pressed on it, in order - one of
+        # protocol.MEDIA_ACTIONS - for its session to act on. Only from a satellite
+        # which said it has them.
+        self.media_presses: "queue.Queue[str]" = queue.Queue()
         self._stream = stream
         # Guards writing to the stream, so messages sent from several threads at once
         # can't be interleaved.
@@ -530,6 +546,7 @@ class RemoteSatellite:
             "played": lambda message, payload: self.speaker._played(message["id"], message.get("position")),
             "progress": lambda message, payload: self.speaker._progress(message["id"], message["position"]),
             "away": self._away,
+            "media": self._media,
         }
 
     @property
@@ -691,6 +708,30 @@ class RemoteSatellite:
         """
         return self.send("phrase", audio, rate=rate)
 
+    def send_now_playing(self, state: str, track: str, artist: str, album: str, cover=UNCHANGED) -> bool:
+        """
+        Tells a satellite with Windows' media controls what its music is doing, for
+        them to show.
+
+        Args:
+            state: "playing", "paused" or "stopped".
+            track: What's playing, cut to MOST_TEXT characters, as are the next two.
+            artist: Who it's by.
+            album: What it's from.
+            cover: The new cover, as an image of at most protocol.MAX_AUDIO bytes, or
+                None for none now - or left out, when it's the one sent last.
+
+        Returns:
+            Whether it was sent.
+        """
+        fields = {"state": state, "track": track[:MOST_TEXT], "artist": artist[:MOST_TEXT],
+                  "album": album[:MOST_TEXT]}
+        payload = b""
+        if cover is not UNCHANGED:
+            fields["cover"] = bool(cover)
+            payload = cover or b""
+        return self.send("now_playing", payload, **fields)
+
     def settle_away(self) -> bool:
         """
         Tells the satellite the brain has saved what it said happened while it was
@@ -767,6 +808,16 @@ class RemoteSatellite:
         self.away_reports.put({"rang": list(message.get("rang") or []),
                                "dismissed": list(message.get("dismissed") or []),
                                "ringing": list(message.get("ringing") or [])})
+
+    def _media(self, message: Dict, payload: bytes):
+        """A button of Windows' media controls, from a satellite which said it has them."""
+        action = message.get("action")
+        if not self.media_controls:
+            logger.warning(f"The {self.name} satellite sent a media button without saying it has media controls")
+        elif not isinstance(action, str) or action not in protocol.MEDIA_ACTIONS:
+            logger.warning(f"The {self.name} satellite sent a media button which isn't one: {ascii(action)[:40]}")
+        else:
+            self.media_presses.put(action)
 
     def _new_feed(self, recording: Optional[str]) -> AudioFeed:
         """

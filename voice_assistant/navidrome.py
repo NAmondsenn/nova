@@ -201,6 +201,28 @@ def best(items: List[Dict], name_key: str, name: str, artist: Optional[str]) -> 
     return max(scored, key=lambda scored_item: (scored_item[0], -scored_item[1]))[2]
 
 
+def closest_playlist(playlists: List[Dict], name: str) -> Optional[Dict]:
+    """
+    The playlist which best matches a name as it's spoken, by the words which tell playlists
+    apart (see distinctive): "gym" finds "Gym Bangers", and "my songs" finds none, as it
+    has no word of its own to go by.
+
+    Args:
+        playlists: Navidrome's playlists, each with its name.
+        name: The playlist as it was said.
+
+    Returns:
+        The playlist, as it was in playlists, or None if none matches.
+    """
+    wanted = distinctive(name)
+    if not wanted:
+        return None
+    # best reads each name from a field of its item, so the words which tell it apart go in one.
+    candidates = [{**playlist, "distinctive": distinctive(playlist.get("name", ""))} for playlist in playlists]
+    found = best(candidates, "distinctive", wanted, None)
+    return next((playlist for playlist, candidate in zip(playlists, candidates) if candidate is found), None)
+
+
 def _names_version(text: str, version: str) -> bool:
     """Whether text has the version's words, as whole words: "Alive" has no "live"."""
     return f" {version} " in f" {normalise(text)} "
@@ -299,6 +321,31 @@ def _wider_title(name: str, titles: List[str]) -> bool:
     """
     own = set(_own_words(name))
     return not any(own <= set(normalise(title).split()) for title in titles)
+
+
+def same_song(a: Dict, b: Dict) -> bool:
+    """
+    Whether two songs are the same one: the same id, or else the same title, version
+    and artist - so the clean copy of a song is the song, but its live version or a
+    longer title ("Endless Love" for "Endless") isn't. A song with no id to go by and
+    no title of its own (see _own_words) is never the same as another.
+
+    Args:
+        a: A song as Navidrome describes it, with its id, title and artist.
+        b: Another.
+    """
+    if a.get("id") and a.get("id") == b.get("id"):
+        return True
+
+    def identity(song: Dict) -> Tuple[List[str], Optional[str], str]:
+        title = song.get("title") or ""
+        version = version_of(title)
+        # A clean version is the song with the swearing taken out, so it counts as the song itself;
+        # any other version is a song of its own.
+        return _own_words(title), None if version in CLEAN_VERSIONS else version, normalise(song.get("artist") or "")
+
+    own = identity(a)
+    return bool(own[0]) and own == identity(b)
 
 
 def _asked_for(item: Dict, name_key: str, title: str, artist: Optional[str], also: Optional[str] = None) -> bool:
@@ -640,6 +687,122 @@ class NavidromeLibrary:
             self._call("updatePlaylist", playlistId=playlist_id, songIdToAdd=rest[start:start + PLAYLIST_SONGS_AT_ONCE])
         self._call("updatePlaylist", playlistId=playlist_id, public="true")
 
+    def all_playlists(self) -> List[Dict]:
+        """
+        The playlists which belong to the user Nova signs in as - never another user's,
+        public or not, which Nova doesn't change (see playlist_with_id).
+
+        Returns:
+            Navidrome's playlists, each with its id and name, as it lists them.
+
+        Raises:
+            requests.RequestException: If Navidrome couldn't be reached.
+            NavidromeError: If it answered with an error.
+            ValueError: If its answer couldn't be read.
+        """
+        playlists = self._call("getPlaylists").get("playlists", {}).get("playlist") or []
+        return [playlist for playlist in playlists
+                if str(playlist.get("owner") or "").casefold() == self.username.casefold()]
+
+    def playlist_entries(self, playlist_id: str) -> List[Dict]:
+        """
+        The songs on the playlist of this id, in its order.
+
+        Args:
+            playlist_id: The playlist's id.
+
+        Returns:
+            The songs as Navidrome describes them - none for an empty playlist. A song on it
+            twice is listed twice, and its place in the list is its index for remove_entries.
+
+        Raises:
+            requests.RequestException: If Navidrome couldn't be reached.
+            NavidromeError: If it answered with an error, such as there being no such playlist.
+            ValueError: If its answer couldn't be read.
+        """
+        return self._call("getPlaylist", id=playlist_id).get("playlist", {}).get("entry") or []
+
+    def add_songs(self, playlist_id: str, song_ids: List[str]):
+        """
+        Adds songs to the end of the playlist of this id.
+
+        Args:
+            playlist_id: The playlist's id.
+            song_ids: The songs to add, in order.
+
+        Raises:
+            requests.RequestException: If Navidrome couldn't be reached.
+            NavidromeError: If it answered with an error - part way, only some may be added.
+            ValueError: If its answer couldn't be read.
+        """
+        for start in range(0, len(song_ids), PLAYLIST_SONGS_AT_ONCE):
+            self._call("updatePlaylist", playlistId=playlist_id,
+                       songIdToAdd=song_ids[start:start + PLAYLIST_SONGS_AT_ONCE])
+
+    def remove_entries(self, playlist_id: str, indexes: List[int]):
+        """
+        Takes the songs at these places off the playlist of this id, in one request.
+
+        Args:
+            playlist_id: The playlist's id.
+            indexes: The places to take off, from 0, as playlist_entries lists them - read just
+                before, as the places move when the playlist changes.
+
+        Raises:
+            requests.RequestException: If Navidrome couldn't be reached.
+            NavidromeError: If it answered with an error.
+            ValueError: If its answer couldn't be read.
+        """
+        if not indexes:
+            return
+        # Last first, so taking one off doesn't move the place of the next; and each place once,
+        # as a place given twice would take off the song which comes to it as well.
+        self._call("updatePlaylist", playlistId=playlist_id, songIndexToRemove=sorted(set(indexes), reverse=True))
+
+    def delete_playlist(self, playlist_id: str):
+        """
+        Deletes the playlist of this id.
+
+        Args:
+            playlist_id: The playlist's id.
+
+        Raises:
+            requests.RequestException: If Navidrome couldn't be reached.
+            NavidromeError: If it answered with an error.
+            ValueError: If its answer couldn't be read.
+        """
+        self._call("deletePlaylist", id=playlist_id)
+
+    def set_starred(self, song_id: str, starred: bool):
+        """
+        Likes a song - stars it - or unlikes it.
+
+        Args:
+            song_id: The song's id.
+            starred: True to like it, False to unlike it.
+
+        Raises:
+            requests.RequestException: If Navidrome couldn't be reached.
+            NavidromeError: If it answered with an error.
+            ValueError: If its answer couldn't be read.
+        """
+        self._call("star" if starred else "unstar", id=song_id)
+
+    def is_starred(self, song_id: str) -> bool:
+        """
+        Whether the song of this id is liked, as Navidrome has it.
+
+        Args:
+            song_id: The song's id.
+
+        Raises:
+            requests.RequestException: If Navidrome couldn't be reached.
+            NavidromeError: If it answered with an error.
+            ValueError: If its answer couldn't be read.
+        """
+        song = self._call("getSong", id=song_id).get("song")
+        return isinstance(song, dict) and bool(song.get("starred"))
+
     def start_scan(self) -> bool:
         """
         Asks Navidrome to scan its folders for new music, which it does in its own time.
@@ -950,9 +1113,7 @@ class NavidromePlayer(NavidromeLibrary):
             playlist = next((found for found in named if str(found.get("owner") or "").casefold()
                              == self.username.casefold()), named[0] if named else None)
         else:
-            wanted = distinctive(name)
-            playlist = wanted and best([{**playlist, "distinctive": distinctive(playlist.get("name", ""))}
-                                        for playlist in playlists], "distinctive", wanted, None)
+            playlist = closest_playlist(playlists, name)
         if not playlist:
             return [], ""
         songs = self._call("getPlaylist", id=playlist["id"]).get("playlist", {}).get("entry") or []
@@ -1106,6 +1267,24 @@ class NavidromePlayer(NavidromeLibrary):
                 return {"success": False, "message": "Nothing playing"}
             song = self._queue[self._index]
         return {"success": True, "track": song.get("title", "something"), "artist": song.get("artist", "someone")}
+
+    def song_at(self, which: str) -> Optional[Dict]:
+        """
+        The song playing, or the one before it in the queue - for adding to a playlist, or liking,
+        by voice. A paused song is the one playing, whoever paused it.
+
+        Args:
+            which: "this" for the song at the queue's place, "last" for the one before it - the
+                song which played just before, if the queue has just moved on, or which has just
+                ended, if it has run out.
+
+        Returns:
+            The song as Navidrome describes it, or None - for "this" with nothing queued, or
+            the queue run out; for "last" with no song before the one playing.
+        """
+        with self._lock:
+            place = self._index - 1 if which == "last" else self._index
+            return self._queue[place] if 0 <= place < len(self._queue) else None
 
     # For the settings page
 

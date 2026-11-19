@@ -19,6 +19,8 @@ After the handshake, what a satellite sends the brain:
     played  {"id": ..., "stopped": ..., "position": ...}
     progress  {"id": ..., "position": ...}
     away  {"rang": [ids], "dismissed": [ids], "ringing": [ids]}
+    media  {"action": "play"|"pause"|"next"|"previous"}  (a button of Windows' media
+        controls, from a satellite which said it has them - see docs/decisions/0031)
 
 and what the brain sends a satellite:
 
@@ -41,12 +43,18 @@ and what the brain sends a satellite:
     away_settled  (once the brain has saved what away said)
     quiet  {"on": ...}  (Nova has started, or stopped, speaking on another satellite, so
         ignore the wake word meanwhile - see docs/decisions/0029)
+    now_playing  {"state": "playing"|"paused"|"stopped", "track": ..., "artist": ...,
+        "album": ..., "cover"?: ...}  (what the satellite's own music is doing, for a
+        satellite which said it has Windows' media controls, sent when it changes;
+        cover: true with the new cover as the payload, false for none now, left out
+        when the cover is as it was - see docs/decisions/0031)
     restart
 
 The handshake comes first, and proves the satellite's password to the brain and the
 brain's to the satellite, without the password itself ever being sent:
 
-    hello  {name, hostname, sample_rate, unclean, nonce, speaker?, push_to_talk?}    (satellite)
+    hello  {name, hostname, sample_rate, unclean, nonce, speaker?, push_to_talk?,
+            media_controls?}    (satellite)
     challenge  {nonce, proof}    (brain; or refused, and the connection is closed)
     proof  {proof}    (satellite, once the brain's proof is right)
     ready, or refused    (brain)
@@ -70,6 +78,9 @@ MAX_AUDIO = 10 * 16000 * 2
 
 # The longest Spotify speaker name a hello may carry, e.g. "Bedroom Pi".
 MAX_SPEAKER = 64
+
+# The buttons of Windows' media controls a satellite passes on, as media's action.
+MEDIA_ACTIONS = ("play", "pause", "next", "previous")
 
 # What a nonce is: 32 hex digits, as secrets.token_hex(16) makes. Written out rather than
 # tried with int(nonce, 16), which lets through digits of other scripts, and spaces.
@@ -166,7 +177,7 @@ def _expect(stream: BinaryIO, kind: str, *fields: str) -> Dict:
 
 
 def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate: int, unclean: bool,
-          speaker: Optional[str] = None, push_to_talk: bool = False):
+          speaker: Optional[str] = None, push_to_talk: bool = False, media_controls: bool = False):
     """
     The satellite's side of the handshake.
 
@@ -181,6 +192,8 @@ def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate
             left out of the hello if None.
         push_to_talk: Whether this satellite records on a press of a key, not on a wake
             word - left out of the hello if False.
+        media_controls: Whether this satellite shows its music in Windows' media
+            controls, and passes on their buttons - left out of the hello if False.
 
     Raises:
         Refused: The brain refused it, or couldn't prove it knows the password - in
@@ -193,6 +206,8 @@ def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate
     # Likewise, so the hello of a satellite which listens for a wake word is unchanged.
     if push_to_talk:
         extra["push_to_talk"] = True
+    if media_controls:
+        extra["media_controls"] = True
     send(stream, "hello", name=name, hostname=hostname, sample_rate=sample_rate,
          unclean=unclean, nonce=nonce, **extra)
     challenge = _expect(stream, "challenge", "nonce", "proof")
@@ -214,7 +229,8 @@ def admit(stream: BinaryIO, password_for: Callable[[str], Optional[str]]) -> Dic
     Returns:
         The hello's name, hostname, sample_rate and unclean, its speaker - None if
         it doesn't say one, as a satellite from before speakers were said doesn't - and
-        whether it is push-to-talk, False if it doesn't say.
+        whether it is push-to-talk and whether it has Windows' media controls, each False
+        if it doesn't say.
 
     Raises:
         Refused: The satellite is unknown or got the password wrong. It has been told so.
@@ -227,9 +243,11 @@ def admit(stream: BinaryIO, password_for: Callable[[str], Optional[str]]) -> Dic
     sample_rate = hello.get("sample_rate")
     unclean = hello.get("unclean")
     push_to_talk = hello.get("push_to_talk", False)
+    media_controls = hello.get("media_controls", False)
     if (hello["type"] != "hello" or not isinstance(name, str) or not isinstance(hostname, str)
             or isinstance(sample_rate, bool) or not isinstance(sample_rate, int)
             or not isinstance(unclean, bool) or not isinstance(push_to_talk, bool)
+            or not isinstance(media_controls, bool)
             or not isinstance(nonce, str) or not NONCE.fullmatch(nonce)):
         raise ProtocolError("Expected a hello")
     password = password_for(name)
@@ -249,7 +267,7 @@ def admit(stream: BinaryIO, password_for: Callable[[str], Optional[str]]) -> Dic
         logger.warning(f"{name} said a Spotify speaker which can't be one, so plays on the brain's "
                        f"own speaker name: {ascii(hello['speaker'])[:80]}")
     return {"name": name, "hostname": hostname, "sample_rate": sample_rate, "unclean": unclean,
-            "speaker": speaker, "push_to_talk": push_to_talk}
+            "speaker": speaker, "push_to_talk": push_to_talk, "media_controls": media_controls}
 
 
 def _speaker(said) -> Optional[str]:

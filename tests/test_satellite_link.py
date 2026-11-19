@@ -160,13 +160,22 @@ def test_the_link_sends_push_to_talk_in_hello(brain, make):
     assert [hello["push_to_talk"] for hello in brain.hellos] == [True, True]
 
 
+def test_the_link_says_it_has_media_controls_each_time_it_connects(brain, make):
+    link, events, messages = make(brain.address, media_controls=True)
+    link.start()
+    assert wait_for(lambda: len(brain.hellos) == 1)
+    brain.drop_everyone()
+    assert wait_for(lambda: len(brain.hellos) == 2)
+    assert [hello["media_controls"] for hello in brain.hellos] == [True, True]
+
+
 def test_the_link_connects_and_reports_it(brain, make):
     link, events, messages = make(brain.address)
     link.start()
     assert wait_for(lambda: events == [True] and len(brain.hellos) == 1)
     assert link.connected
     assert brain.hellos == [{"name": "bedroom", "hostname": "pi", "sample_rate": 48000, "unclean": True,
-                             "speaker": None, "push_to_talk": False}]
+                             "speaker": None, "push_to_talk": False, "media_controls": False}]
 
     brain.say("listen")
     brain.say("phrase", rate=22050)

@@ -50,14 +50,16 @@ from voice_assistant.listening import Listening
 from voice_assistant.wrapped import WrappedStore, WrappedWatcher
 from voice_assistant.media_watch import MediaWatcher
 from voice_assistant.music_device import MusicDevice
-from voice_assistant.navidrome import NavidromeLibrary
+from voice_assistant.navidrome import NavidromeLibrary, normalise
 from voice_assistant.new_music import NewMusicPlaylist
 from voice_assistant.ntfy import Alert
+from voice_assistant.playlist_changes import PlaylistChanges
 from voice_assistant.recording import RATE
 from voice_assistant.remote import RemoteSatellite
 from voice_assistant.satellite_passwords import SatellitePasswords
 from voice_assistant.satellite_rooms import SatelliteRooms
 from voice_assistant.soulsync import SoulSync
+from voice_assistant.undo import LastChange
 from voice_assistant.usage import UsageLog
 from voice_assistant.usage_device import UsageDevice
 from voice_assistant.vad import LoudnessDetector
@@ -288,7 +290,8 @@ class Satellite:
     stream finished as soon as it has all arrived.
     """
 
-    def __init__(self, brain, name="bedroom", password=BEDROOM, unclean=False, away=NOTHING_AWAY, push_to_talk=False):
+    def __init__(self, brain, name="bedroom", password=BEDROOM, unclean=False, away=NOTHING_AWAY, push_to_talk=False,
+                 media_controls=False):
         self.socket = socket.create_connection(("127.0.0.1", brain.port), timeout=5)
         self.stream = self.socket.makefile("rwb")
         self.lock = threading.Lock()
@@ -296,7 +299,8 @@ class Satellite:
         # Set once the brain has let it go.
         self.gone = threading.Event()
         try:
-            protocol.greet(self.stream, name, f"{name}-pi", password, 48000, unclean, push_to_talk=push_to_talk)
+            protocol.greet(self.stream, name, f"{name}-pi", password, 48000, unclean, push_to_talk=push_to_talk,
+                           media_controls=media_controls)
         except BaseException:
             # As satellite_link does, so the brain sees it hang up.
             self.socket.close()
@@ -1471,6 +1475,57 @@ def _real_sessions(monkeypatch):
     monkeypatch.setattr(brain_module, "Session", session_module.Session)
     monkeypatch.setattr(session_module, "make_detector", lambda config: LoudnessDetector())
     monkeypatch.setattr(session_module, "make_player", lambda config, speaker, volume, spotify_speaker=None: None)
+
+
+class PausingPlayer:
+    """A music player which is playing one song until it's paused - for Windows' media controls."""
+
+    def __init__(self):
+        self.playing = {"track": "Song", "artist": "Band", "album": "Album", "playing": True, "cover": None}
+        self.done = []
+
+    def now_playing(self):
+        return dict(self.playing)
+
+    def cover(self):
+        return None
+
+    def pause(self):
+        self.done.append("pause")
+        self.playing["playing"] = False
+        return {"success": True}
+
+    def cancel_resume(self):
+        self.done.append("cancel_resume")
+
+    def close(self):
+        pass
+
+
+def test_a_satellite_with_media_controls_is_told_what_plays_and_its_buttons_work(brain, connect, monkeypatch):
+    # Through a real connection and a real session, from the hello on - see docs/decisions/0031.
+    _real_sessions(monkeypatch)
+    players = {}
+
+    def make_player(config, speaker, volume, spotify_speaker=None):
+        players[len(players)] = PausingPlayer()
+        return players[len(players) - 1]
+
+    monkeypatch.setattr(session_module, "make_player", make_player)
+    serving(brain)
+    with_controls = connect(brain, "bedroom", BEDROOM, media_controls=True)
+    without = connect(brain, "kitchen", KITCHEN)
+    connected(brain, "bedroom"), connected(brain, "kitchen")
+
+    assert wait_for(lambda: with_controls.messages("now_playing"))
+    assert with_controls.messages("now_playing")[0] == {"type": "now_playing", "state": "playing", "track": "Song",
+                                                        "artist": "Band", "album": "Album"}
+    with_controls.say("media", action="pause")
+    assert wait_for(lambda: len(with_controls.messages("now_playing")) == 2)
+    assert with_controls.messages("now_playing")[1]["state"] == "paused"
+    assert brain.session_for("bedroom").music_player.done == ["pause", "cancel_resume"]
+    assert without.messages("now_playing") == []
+    assert brain.session_for("kitchen").music_player.done == []
 
 
 def test_a_satellite_which_goes_mid_turn_leaves_the_brain_working(brain, connect, monkeypatch):
@@ -3001,6 +3056,35 @@ def test_the_top_artists_are_followed_while_the_brain_runs(make_brain, tmp_path,
     assert running == [True]
     assert not any(thread.name == "following" for thread in threading.enumerate())
     assert watcher._thread is None
+
+
+def test_playlist_changes_are_made_once_with_soulsync_and_the_new_music_playlist_as_they_are_now(
+        make_brain, tmp_path, monkeypatch):
+    monkeypatch.setenv("SOULSYNC_API_KEY", "made-up-key")
+    brain = make_brain(new_music={"playlist": "Discovery Shuffle"}, soulsync={"url": "http://soulsync.local:8008"})
+    changes = brain.playlist_changes
+    assert isinstance(changes, PlaylistChanges)
+
+    # SoulSync as it is set up now.
+    soulsync = changes._soulsync()
+    assert isinstance(soulsync, SoulSync) and soulsync.url == "http://soulsync.local:8008"
+    brain.apply_settings({("soulsync", "url"): ""})
+    assert changes._soulsync() is None
+
+    # The id Nova recorded for the playlist it makes under the name set now - none before it's made one.
+    assert changes._new_music_id() is None
+    (tmp_path / "new_music.json").write_text(json.dumps({"id": "made-up-id", "name": normalise("Discovery Shuffle")}))
+    assert changes._new_music_id() == "made-up-id"
+    brain.apply_settings({("new_music", "playlist"): "Fresh Finds"})
+    assert changes._new_music_id() is None
+    brain.apply_settings({("new_music", "playlist"): ""})
+    assert changes._new_music_id() is None
+
+
+def test_the_brain_keeps_the_one_slot_undo_that_takes_for_every_satellite(make_brain):
+    brain = make_brain()
+    assert isinstance(brain.last_change, LastChange)
+    assert make_brain().last_change is not brain.last_change
 
 
 def test_the_new_music_playlist_is_kept_while_the_brain_runs(make_brain, tmp_path, monkeypatch):

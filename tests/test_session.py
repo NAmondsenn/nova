@@ -37,6 +37,7 @@ from voice_assistant.recording import RATE, AudioFeed
 from voice_assistant.remote import RemoteSatellite
 from voice_assistant.routines import Routines
 from voice_assistant.satellite_rooms import SatelliteRooms
+from voice_assistant.undo import LastChange
 from voice_assistant.vad import LoudnessDetector
 
 
@@ -260,7 +261,7 @@ def brain(tmp_path, monkeypatch, make_config):
                            routines=Routines(path=str(tmp_path / "routines.json")), ntfy=None, weather=None,
                            batteries=None, lists=None, pc=None, registry=None, calendar=None, media=None,
                            downloads=None, football=None, listening=None, wrapped_store=None, usage=None, new_music_playlist=None,
-                           journeys=None,
+                           playlist_changes=None, journeys=None, last_change=LastChange(),
                            tts=FakePiper(), stt=FakeSpeechToText(), sounds_folder=Path(paths.SOUNDS_DIR))
 
 
@@ -269,11 +270,12 @@ def connect():
     """Connects fake Pis, each a satellite the brain has just let in, and lets them all go after the test."""
     made = []
 
-    def connect(name="bedroom", hostname="bedroom-pi.local", speaker=None):
+    def connect(name="bedroom", hostname="bedroom-pi.local", speaker=None, media_controls=False):
         ours, theirs = socket.socketpair()
         # Short, so the brain's reading wakes often to check on the satellite.
         ours.settimeout(0.05)
-        hello = {"name": name, "hostname": hostname, "sample_rate": 48000, "unclean": False, "speaker": speaker}
+        hello = {"name": name, "hostname": hostname, "sample_rate": 48000, "unclean": False, "speaker": speaker,
+                 "media_controls": media_controls}
         satellite = RemoteSatellite(satellite_link.Stream(ours), hello)
         pi = Pi(theirs)
         threading.Thread(target=satellite.serve, daemon=True).start()
@@ -351,6 +353,17 @@ def test_a_wake_is_recorded_heard_and_answered_through_the_satellite(brain, conn
     pi.go()
     thread.join(2)
     assert not thread.is_alive()
+
+
+def test_every_session_changes_playlists_with_the_brains_one(brain, connect, make_session):
+    brain.playlist_changes = object()
+    assert make_session().actions.playlist_changes is brain.playlist_changes
+
+
+def test_every_session_undoes_from_the_brains_one_slot(brain, connect, make_session):
+    # One "undo that" for the house: a change by voice at one satellite is the last thing done at every other.
+    assert make_session().actions.last_change is brain.last_change
+    assert make_session().actions.last_change is make_session().actions.last_change
 
 
 def test_a_timer_set_through_a_satellite_rings_on_it(brain, connect, make_session):
@@ -1962,6 +1975,189 @@ def test_what_home_assistant_does_to_the_music_is_logged_without_what_plays(with
     assert "Play/pause from Home Assistant" in logged
     assert "Next from Home Assistant" in logged and "Previous from Home Assistant" in logged
     assert "Secret Song" not in logged and "Private Gym" not in logged
+
+
+# Windows' media controls - see docs/decisions/0031
+
+class ButtonPlayer(StubPlayer):
+    """A stub player which also keeps what the buttons of Windows' media controls had it do."""
+
+    def __init__(self, playing=None):
+        super().__init__(playing)
+        self.done = []
+
+    def pause(self):
+        self.done.append("pause")
+        if self.playing:
+            self.playing = dict(self.playing, playing=False)
+        return {"success": True, "message": "Paused"}
+
+    def cancel_resume(self):
+        self.done.append("cancel_resume")
+
+    def skip(self):
+        self.done.append("skip")
+        return {"success": True, "message": "Skipped"}
+
+    def previous(self):
+        self.done.append("previous")
+        return {"success": True, "message": "Previous track"}
+
+    def was_playing(self):
+        return False
+
+
+@pytest.fixture
+def with_media_controls(brain, connect, monkeypatch, make_session):
+    """
+    Makes a running session for a satellite with Windows' media controls - or without, if
+    asked - with a player saying what it plays, and actions which keep what they're asked.
+    """
+    monkeypatch.setattr(session_module, "MEDIA_EVERY", 0.05)
+
+    def make(playing=None, media_controls=True, player=True, name="pc"):
+        made = ButtonPlayer(playing) if player else None
+        monkeypatch.setattr(session_module, "make_player",
+                            lambda config, speaker, volume, spotify_speaker=None: made)
+        satellite, pi = connect(name, f"{name}.local", media_controls=media_controls)
+        session = make_session(satellite)
+        session.actions = RecordingActions()
+        running(session)
+        return session, made, pi
+
+    return make
+
+
+def now_playing(pi):
+    return [(message, payload) for message, payload in pi.received if message["type"] == "now_playing"]
+
+
+SONG = {"track": "Song", "artist": "Band", "album": "Album", "playing": True, "position": 3.0,
+        "duration": 200, "cover": "al-1"}
+
+
+def test_a_satellite_with_media_controls_is_told_what_its_music_is_doing(with_media_controls):
+    session, player, pi = with_media_controls(dict(SONG))
+    assert wait_for(lambda: now_playing(pi))
+    assert now_playing(pi) == [({"type": "now_playing", "state": "playing", "track": "Song", "artist": "Band",
+                                 "album": "Album", "cover": True, "bytes": 4}, b"jpeg")]
+    # Read again and again, but sent only when it changes - and the cover only with a new one.
+    time.sleep(0.3)
+    assert len(now_playing(pi)) == 1
+    player.playing = dict(SONG, playing=False, position=4.0)
+    assert wait_for(lambda: len(now_playing(pi)) == 2)
+    assert now_playing(pi)[1] == ({"type": "now_playing", "state": "paused", "track": "Song", "artist": "Band",
+                                   "album": "Album"}, b"")
+    player.playing = None
+    assert wait_for(lambda: len(now_playing(pi)) == 3)
+    assert now_playing(pi)[2][0] == {"type": "now_playing", "state": "stopped", "track": "", "artist": "",
+                                     "album": ""}
+
+
+def test_spotify_playing_elsewhere_is_stopped_on_the_satellite(with_media_controls):
+    session, player, pi = with_media_controls(dict(SONG, here=False))
+    assert wait_for(lambda: now_playing(pi))
+    assert now_playing(pi)[0][0]["state"] == "stopped"
+
+
+def test_a_satellite_without_media_controls_is_never_told(with_media_controls):
+    session, player, pi = with_media_controls(dict(SONG), media_controls=False)
+    pi.say("media", action="pause")
+    time.sleep(0.3)
+    assert now_playing(pi) == []
+    assert player.done == []
+
+
+def test_without_music_a_satellite_with_media_controls_is_never_told(with_media_controls):
+    session, player, pi = with_media_controls(media_controls=True, player=False)
+    time.sleep(0.3)
+    assert now_playing(pi) == []
+
+
+def test_pause_from_windows_pauses_this_satellites_own_music_and_keeps_it_paused(with_media_controls):
+    session, player, pi = with_media_controls(dict(SONG))
+    assert wait_for(lambda: now_playing(pi))
+    pi.say("media", action="pause")
+    assert wait_for(lambda: len(now_playing(pi)) == 2)
+    # Paused here, and not brought back once Nova finishes talking.
+    assert player.done == ["pause", "cancel_resume"]
+    assert now_playing(pi)[1][0]["state"] == "paused"
+    # Never through the actions, which pause the whole room.
+    assert session.actions.calls == []
+
+
+def test_a_pause_from_windows_which_fails_still_keeps_the_music_from_coming_back(with_media_controls):
+    # Spotify's pause can fail, say, while the music is paused for Nova talking: the
+    # user still asked for it paused, so it isn't brought back once Nova finishes.
+    session, player, pi = with_media_controls(dict(SONG))
+    player.pause = lambda: player.done.append("pause") or {"success": False, "message": "No"}
+    assert wait_for(lambda: now_playing(pi))
+    pi.say("media", action="pause")
+    assert wait_for(lambda: len(now_playing(pi)) == 2)
+    assert player.done == ["pause", "cancel_resume"]
+
+
+@pytest.mark.parametrize("action, done", [("next", ["skip"]), ("previous", ["previous"])])
+def test_next_and_previous_from_windows_skip_this_satellites_own_music(with_media_controls, action, done):
+    session, player, pi = with_media_controls(dict(SONG))
+    assert wait_for(lambda: now_playing(pi))
+    pi.say("media", action=action)
+    # Sent again at once, even unchanged, so the satellite shows what the brain made of it.
+    assert wait_for(lambda: len(now_playing(pi)) == 2)
+    assert player.done == done
+    assert session.actions.calls == []
+
+
+@pytest.mark.parametrize("playing", [dict(SONG, playing=False), None], ids=["paused", "nothing"])
+def test_play_from_windows_plays_as_home_assistants_play_does(with_media_controls, playing):
+    # Carries on what's paused here, or with nothing loaded plays as "play some music" does.
+    session, player, pi = with_media_controls(playing)
+    assert wait_for(lambda: now_playing(pi))
+    pi.say("media", action="play")
+    assert wait_for(lambda: len(now_playing(pi)) == 2)
+    assert session.actions.calls == [("play_without_offer", None)]
+    assert player.done == []
+
+
+def test_pause_from_windows_leaves_the_rest_of_the_room_playing(brain, with_media_controls):
+    pc, pc_player, pi = with_media_controls(dict(SONG))
+    other, other_player, _ = with_media_controls(dict(SONG), media_controls=False, name="bedroom")
+    brain.room_sessions = lambda name: [pc, other]
+    assert wait_for(lambda: now_playing(pi))
+    pi.say("media", action="pause")
+    assert wait_for(lambda: len(now_playing(pi)) == 2)
+    assert pc_player.done == ["pause", "cancel_resume"]
+    assert other_player.done == []
+
+
+def test_what_windows_does_to_the_music_is_logged_without_what_plays(with_media_controls, caplog):
+    session, player, pi = with_media_controls(dict(SONG, track="Secret Song"))
+    assert wait_for(lambda: now_playing(pi))
+    with caplog.at_level(logging.INFO):
+        for action in ("pause", "play", "next", "previous"):
+            pi.say("media", action=action)
+        assert wait_for(lambda: len(now_playing(pi)) == 5)
+    logged = " ".join(record.getMessage() for record in caplog.records)
+    for said in ("Pause from Windows", "Play from Windows", "Next from Windows", "Previous from Windows"):
+        assert said in logged
+    assert "Secret Song" not in logged
+
+
+def test_a_player_which_fails_is_logged_once_and_tried_again(with_media_controls, caplog):
+    session, player, pi = with_media_controls(dict(SONG))
+    failing = [True]
+
+    def now():
+        if failing[0]:
+            raise RuntimeError("Navidrome went away")
+        return dict(SONG, track="Back")
+
+    with caplog.at_level(logging.ERROR):
+        player.now_playing = now
+        time.sleep(0.3)
+        failing[0] = False
+        assert wait_for(lambda: [message for message, _ in now_playing(pi) if message["track"] == "Back"])
+    assert len([record for record in caplog.records if "Navidrome went away" in record.getMessage()]) == 1
 
 
 def test_stop_never_deletes_a_repeating_alarm(brain, make_session):

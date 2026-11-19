@@ -4,7 +4,9 @@
 # PortAudio and libsndfile. scripts/windows/install.ps1 installs it without dependency
 # resolution, since everything is listed:
 #   venv\Scripts\python.exe -m pip install --no-deps -r requirements-pc.txt
-# Keep it in step with requirements.lock by hand when a version there changes.
+# Keep it in step with requirements.lock by hand when a version there changes. The winrt
+# packages, for Nova's music in Windows' media controls (docs/decisions/0030), are the
+# PC's alone, at the versions installed there on 19 November 2026.
 cffi==2.1.0
 numpy==2.4.6
 pycparser==3.0
@@ -14,3 +16,9 @@ sounddevice==0.5.5
 soundfile==0.14.0
 soxr==1.1.0
 typing_extensions==4.16.0
+winrt-runtime==4.2.0
+winrt-Windows.Foundation==4!10.0.28000.2957
+winrt-Windows.Foundation.Collections==4!10.0.28000.2957
+winrt-Windows.Media==4!10.0.28000.2957
+winrt-Windows.Media.Playback==4!10.0.28000.2957
+winrt-Windows.Storage.Streams==4!10.0.28000.2957
