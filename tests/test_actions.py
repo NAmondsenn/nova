@@ -3060,6 +3060,46 @@ def test_navidrome_is_checked_on_the_player_whose_song_is_used(make_executor):
     assert changes.calls == []
 
 
+def test_an_empty_playlist_is_made_on_a_navidrome_player_not_a_paused_spotify_one(make_executor):
+    # Nothing is heard to follow for an empty playlist, so a Spotify player paused in the room, which is the
+    # one a song would be taken from, mustn't refuse it while a Navidrome one is right there.
+    make = Action("make_playlist", {"name": "Chill"}, from_model=True)
+    offered = Action("make_offered_playlist", {"name": "Chill", "song": ENDLESS})
+    for action in (make, offered):
+        mine = SongPlayer(this=None, last=None, playing=False)
+        there = SongPlayer(name="Spotify", playing=False)
+        changes = RecordingPlaylistChanges()
+        executor = make_executor(mine, playlist_changes=changes, room_players=lambda: [mine, there])
+        assert executor.execute(action).ok, action.tool
+        assert changes.calls[0][1] is mine, action.tool
+
+    # This satellite's own Navidrome player is used even when the room's other one is the one playing.
+    mine, there = SongPlayer(playing=False), SongPlayer(playing=True)
+    changes = RecordingPlaylistChanges()
+    executor = make_executor(mine, playlist_changes=changes, room_players=lambda: [mine, there])
+    assert executor.execute(make).ok
+    assert changes.calls == [("make", mine, "Chill", None)]
+
+    # Else the room's first Navidrome player, skipping a Spotify one beside it.
+    mine = SongPlayer(name="Spotify", playing=False)
+    first, second = SongPlayer(name="Spotify", playing=True), SongPlayer(playing=False)
+    third = SongPlayer(playing=True)
+    changes = RecordingPlaylistChanges()
+    executor = make_executor(mine, playlist_changes=changes, room_players=lambda: [mine, first, second, third])
+    assert executor.execute(make).ok
+    assert changes.calls == [("make", second, "Chill", None)]
+
+    # And none of them Navidrome is still refused, as is a playlist made with a song on a Spotify player.
+    only = SongPlayer(name="Spotify", playing=False)
+    executor = make_executor(only, playlist_changes=RecordingPlaylistChanges(), room_players=lambda: [only])
+    assert executor.execute(make).say == "Changing playlists only works with Navidrome."
+    with_song = Action("make_playlist", {"name": "Chill", "with_song": True}, from_model=True)
+    spotify = SongPlayer(name="Spotify", playing=True)
+    mine = SongPlayer(playing=False)
+    executor = make_executor(mine, playlist_changes=RecordingPlaylistChanges(), room_players=lambda: [mine, spotify])
+    assert executor.execute(with_song).say == "Changing playlists only works with Navidrome."
+
+
 def test_a_song_paused_on_another_satellite_in_the_room_is_the_one_changed(make_executor):
     # "Playing or paused, whoever paused it": paused on the other satellite, with nothing on this one.
     here, there = SongPlayer(this=None, last=None, playing=False), SongPlayer(playing=False)

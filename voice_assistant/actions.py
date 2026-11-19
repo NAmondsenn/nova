@@ -1071,6 +1071,10 @@ class ActionExecutor:
         song which is heard, and Navidrome is checked on it, not on this satellite's own player, which in a
         room may be another. Only Navidrome has playlists Nova can change.
 
+        With no song wanted, nothing is heard to follow, so the player is this satellite's own if it is
+        Navidrome, else the first in the room which is - never one of another service's which happens to be
+        paused, which would refuse "make a playlist called Chill" for a Navidrome right beside it.
+
         Args:
             which: "this" for the song playing, "last" for the one before it; anything else is "this".
             needs_song: False when no song is wanted, as for making an empty playlist.
@@ -1083,7 +1087,11 @@ class ActionExecutor:
         offline = self._music_offline()
         if offline:
             return None, None, offline
-        player = self._song_player()
+        if needs_song:
+            player = self._song_player()
+        else:
+            player = next((each for each in [self.music] + self._others_in_room()
+                           if getattr(each, "name", None) == "Navidrome"), None)
         if getattr(player, "name", None) != "Navidrome":
             return None, None, {"success": False, "message": "Changing playlists only works with Navidrome."}
         if not needs_song:
