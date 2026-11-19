@@ -131,6 +131,9 @@ RATE_LIMITED = ("rateLimitExceeded", "userRateLimitExceeded")
 # for one it has forgotten, a 410 for one deleted. Said as that, and nothing more is sent.
 EVENT_GONE = (404, 410)
 
+# The most days named when some deleted on their own came back - "Tuesday, Wednesday, Thursday and 2 more".
+MOST_DAYS_SAID = 3
+
 # What's copied of an event removed to put it back, when Google won't set it back to
 # confirmed: what the user sees of it. Not its id, its guests or the series it was in - a
 # copy is an event of its own, and nobody is asked to it again.
@@ -1040,13 +1043,15 @@ class GoogleCalendar:
             today: Today's date.
 
         Returns:
-            What to say, and the undo - which puts the series back as it was.
+            What to say, and the undo - which puts the series back as it was, with the times
+            of it deleted on their own deleted again.
 
         Raises:
-            The same as _get and _send_once, and ValueError if the series has no rules.
+            The same as _cancelled_from and _send_once, and ValueError if the series has no rules.
         """
         summary = found["summary"]
-        series_url = _event_url(found["calendar_id"], found["recurring_id"])
+        calendar_id = found["calendar_id"]
+        series_url = _event_url(calendar_id, found["recurring_id"])
         series = self._get(series_url, {})
         rules = series.get("recurrence")
         if not isinstance(rules, list) or not all(isinstance(rule, str) for rule in rules):
@@ -1055,15 +1060,26 @@ class GoogleCalendar:
         # been moved to since.
         this = _google_when(found["event"].get("originalStartTime") or found["event"]["start"])
         on = f"from {spoken_day(_day_of(found), today)} on"
+        # Read before anything is written: Google forgets the times deleted on their own once the series
+        # ends before them, so the undo has to delete them again.
+        cancelled = self._cancelled_from(series_url, this)
         if this == _google_when(series["start"]):
             self._send_once("DELETE", series_url)
-            copy = {**_copy(series), "recurrence": rules}
-            undo = _undo(summary, lambda: self._confirm_or_copy(series_url, found["calendar_id"], copy),
-                         f"Put {summary} back {on}.", f"I can't tell whether {summary} was put back.")
+            # A copy added in its place is a series of its own, so it leaves those times out itself.
+            copy = {**_copy(series), "recurrence": rules + _exdates(cancelled, series["start"])}
+
+            def put_back():
+                # Only the series itself has those times to delete again.
+                if self._confirm_or_copy(series_url, calendar_id, copy):
+                    return self._delete_again(calendar_id, cancelled, today)
+                return None
         else:
             self._send_once("PATCH", series_url, {"recurrence": _cut_rules(rules, this)})
-            undo = _undo(summary, lambda: self._send_once("PATCH", series_url, {"recurrence": rules}),
-                         f"Put {summary} back {on}.", f"I can't tell whether {summary} was put back.")
+
+            def put_back():
+                self._send_once("PATCH", series_url, {"recurrence": rules})
+                return self._delete_again(calendar_id, cancelled, today)
+        undo = _undo(summary, put_back, f"Put {summary} back {on}.", f"I can't tell whether {summary} was put back.")
         return f"Removed {summary} {on}.", undo
 
     def _confirm_or_copy(self, url: str, calendar_id: str, copy: Dict):
@@ -1076,6 +1092,9 @@ class GoogleCalendar:
             calendar_id: Its calendar.
             copy: What's added if Google won't set it back - see COPIED.
 
+        Returns:
+            Whether the event itself is back - not a copy of it, which has an id of its own.
+
         Raises:
             The same as _send_once.
         """
@@ -1087,6 +1106,8 @@ class GoogleCalendar:
                 raise
             logger.info(f"Google wouldn't set an event back to confirmed ({e.response.status_code}), so it's copied")
             self._insert(calendar_id, copy)
+            return False
+        return True
 
     def change(self, search: str, day: Optional[date] = None, at: Optional[str] = None, start: Optional[str] = None,
                end: Optional[str] = None, summary: Optional[str] = None, following: bool = False,
@@ -1248,11 +1269,15 @@ class GoogleCalendar:
             if isinstance(attendees, list) and any(not (isinstance(each, dict) and each.get("self") is True)
                                                    for each in attendees):
                 return {"success": False, "message": HAS_GUESTS}
+            # Read before anything is written: Google forgets the times deleted on their own once the old
+            # series ends before them, and the new one starts without them, so each is left out of it.
+            cancelled = self._cancelled_from(series_url, this)
             # A COUNT counts from the series' first time, so the new series' is what was left of it.
             counted = any(re.search(r"[:;]COUNT=", rule, re.IGNORECASE) for rule in rules
                           if rule.upper().startswith("RRULE:"))
             new_series = {**_copy(series), "start": moved[0], "end": moved[1],
-                          "recurrence": _rules_left(rules, self._times_before(series_url, this) if counted else 0)}
+                          "recurrence": _rules_left(rules, self._times_before(series_url, this) if counted else 0)
+                          + _exdates(cancelled, moved[0])}
             if new_name:
                 new_series["summary"] = new_name
             self._send_once("PATCH", series_url, {"recurrence": _cut_rules(rules, this)})
@@ -1269,13 +1294,19 @@ class GoogleCalendar:
             new_id = self._insert(found["calendar_id"], new_series)
         except _NotSure as e:
             logger.warning(f"Couldn't tell whether Google added a repeating event's new series: {e}")
-            self._rules_back(series_url, rules)
+            if self._rules_back(series_url, rules):
+                # The user is told to check Google Calendar anyway, so which of them came back isn't said.
+                self._delete_again(found["calendar_id"], cancelled, today)
             return {"success": False, "message": f"I can't tell whether the new {summary} was added, so check Google "
                                                  "Calendar."}
         except READ_FAILURES as e:
             status = getattr(getattr(e, "response", None), "status_code", None)
             logger.error(f"Couldn't add a repeating event's new series: {type(e).__name__}{f' {status}' if status else ''}")
             if self._rules_back(series_url, rules):
+                came_back = self._delete_again(found["calendar_id"], cancelled, today)
+                if came_back:
+                    return {"success": False, "message": f"I couldn't change them, and I've put {summary} back, but "
+                                                         f"{came_back}."}
                 return {"success": False, "message": f"I couldn't change them, so I've left {summary} as it was."}
             return {"success": False, "message": f"I couldn't change them, and I can't be sure {summary} is as it was, "
                                                  "so check Google Calendar."}
@@ -1297,6 +1328,7 @@ class GoogleCalendar:
                 # The new series is off, but the old one is still cut short.
                 raise _NotSure("Google wouldn't put it back", f"the old series not put back: {type(e).__name__}") \
                     from e
+            return self._delete_again(found["calendar_id"], cancelled, today)
 
         return {"success": True, "message": message,
                 "undo": _undo(summary, put_back, f"Put {summary} back as it was.",
@@ -1322,6 +1354,74 @@ class GoogleCalendar:
         listed = self._pages(f"{series_url}/instances",
                              {"timeMax": until.isoformat(), "showDeleted": "true", "maxResults": EVENTS_PAGE})
         return sum(1 for each in listed if _sort_key(_google_when(each.get("originalStartTime") or each["start"])) < until)
+
+    def _cancelled_from(self, series_url: str, this: Union[date, datetime]) -> List[Tuple[str, Union[date, datetime]]]:
+        """
+        The times of a repeating event deleted on their own, from one of its times on - for a
+        cut of its series at that time, after which Google forgets them, so that putting the
+        series back doesn't bring them back deleted. Google keeps each as a cancelled instance
+        of the series, by an id of its own.
+
+        Args:
+            series_url: The series' address.
+            this: When the time the series is cut at was meant to be, as the series' start is given.
+
+        Returns:
+            The id of each, and when it was meant to be, as the series' start is given.
+
+        Raises:
+            The same as _pages, and KeyError, ValueError or TypeError for a time that can't be read.
+        """
+        since = _sort_key(this)
+        listed = self._pages(f"{series_url}/instances",
+                             {"timeMin": since.isoformat(), "showDeleted": "true", "maxResults": EVENTS_PAGE})
+        cancelled = []
+        for each in listed:
+            if each.get("status") != "cancelled":
+                continue
+            meant = _google_when(each.get("originalStartTime") or each["start"])
+            # Google's timeMin is a bound on when an event ends, so one meant just before, which is
+            # still going on at this one, could be listed.
+            if _sort_key(meant) >= since:
+                if not isinstance(each["id"], str):
+                    raise ValueError("A time's id isn't text")
+                cancelled.append((each["id"], meant))
+        return cancelled
+
+    def _delete_again(self, calendar_id: str, cancelled: List[Tuple[str, Union[date, datetime]]],
+                      today: date) -> Optional[str]:
+        """
+        Deletes each time of a repeating event once more, once its series is back - those
+        deleted on their own before it was cut, which Google doesn't keep deleted. Each is
+        sent once, and one that can't be doesn't stop the rest.
+
+        Args:
+            calendar_id: The series' calendar.
+            cancelled: Each one's id and when it was meant to be, as _cancelled_from gives them.
+            today: Today's date.
+
+        Returns:
+            None if each is deleted - or was gone already - else what to say of those which
+            came back, for after "but": "Tuesday's time came back - remove it in Google Calendar".
+        """
+        back = []
+        for instance_id, meant in cancelled:
+            try:
+                self._send_once("DELETE", _event_url(calendar_id, instance_id))
+            except _NotSure as e:
+                logger.warning(f"Couldn't tell whether Google deleted a time of a repeating event again: {e}")
+                back.append(meant)
+            except READ_FAILURES as e:
+                # One gone already is as it's wanted.
+                if not _gone(e):
+                    status = getattr(getattr(e, "response", None), "status_code", None)
+                    logger.error(f"Couldn't delete a time of a repeating event again: "
+                                 f"{type(e).__name__}{f' {status}' if status else ''}")
+                    back.append(meant)
+        if not back:
+            return None
+        return _still_back([meant.astimezone().date() if isinstance(meant, datetime) else meant
+                            for meant in back], today)
 
     def _rules_back(self, series_url: str, rules: List[str]) -> bool:
         """
@@ -1639,7 +1739,9 @@ def _undo(summary: str, write: Callable[[], None], done: str, unclear: str) -> C
 
     Args:
         summary: The event's name, e.g. "Dentist".
-        write: Takes it back, raising as _send_once does.
+        write: Takes it back, raising as _send_once does. If it's taken back with something
+            left it gives what to say of that after "but", as a str, as _delete_again does -
+            anything else it gives is left unread.
         done: What's said once it's taken back, e.g. "Put Dentist back, Thursday at 3 PM.".
         unclear: What's said when Google's answer doesn't say whether it was.
 
@@ -1649,7 +1751,7 @@ def _undo(summary: str, write: Callable[[], None], done: str, unclear: str) -> C
     """
     def undo() -> Dict:
         try:
-            write()
+            left = write()
         except _NotSure as e:
             logger.warning(f"Couldn't tell whether Google took a change back: {e}")
             return {"success": False, "message": unclear}
@@ -1658,6 +1760,10 @@ def _undo(summary: str, write: Callable[[], None], done: str, unclear: str) -> C
                 logger.info("An event to take a change back on was gone from Google's calendar")
                 return {"success": False, "message": f"{summary} was already gone."}
             return _not_changed(e)
+        # A series back with a time of it that came back too is said as that - not as all as it was.
+        if isinstance(left, str):
+            logger.warning("Took a change to Google's calendar back, but some deleted times came back")
+            return {"success": False, "message": f"{done.rstrip('.')}, but {left}."}
         logger.info("Took a change to Google's calendar back")
         return {"success": True, "message": done}
 
@@ -1741,6 +1847,50 @@ def _rules_left(rules: List[str], before: int) -> List[str]:
             rule = rule[:len("RRULE:")] + ";".join(parts)
         left.append(rule)
     return left
+
+
+def _exdates(cancelled: List[Tuple[str, Union[date, datetime]]], start: Dict) -> List[str]:
+    """
+    EXDATE lines leaving times of a repeating event out of a series of its own - for the times
+    deleted on their own that a new series from one of its times would otherwise have again.
+
+    Args:
+        cancelled: Each one's id and when it was meant to be, as _cancelled_from gives them.
+        start: The new series' start, as Google takes it - {"date"} or {"dateTime"}.
+
+    Returns:
+        One line each, in the form Google gives a series' own start: for a series all day,
+        "EXDATE;VALUE=DATE:20261201", else the day at the series' time of day in UTC -
+        "EXDATE:20261201T190000Z" - so a series at 7 PM has it at 6 PM UTC once the clocks go forward.
+    """
+    lines = []
+    for _, meant in cancelled:
+        day = meant.astimezone().date() if isinstance(meant, datetime) else meant
+        if "date" in start:
+            lines.append(f"EXDATE;VALUE=DATE:{day.strftime('%Y%m%d')}")
+        else:
+            at = datetime.combine(day, _google_when(start).astimezone().time()).astimezone(timezone.utc)
+            lines.append(f"EXDATE:{at.strftime('%Y%m%dT%H%M%SZ')}")
+    return lines
+
+
+def _still_back(days: List[date], today: date) -> str:
+    """
+    What's said of times of a repeating event deleted on their own which came back - after
+    "but": "Tuesday's time came back - remove it in Google Calendar".
+
+    Args:
+        days: The days they're on.
+        today: Today's date.
+
+    Returns:
+        The days, as many as MOST_DAYS_SAID and then how many more.
+    """
+    said = [spoken_day(day, today) for day in sorted(days)]
+    if len(said) == 1:
+        return f"{said[0]}'s time came back - remove it in Google Calendar"
+    named = said[:MOST_DAYS_SAID] + ([f"{len(said) - MOST_DAYS_SAID} more"] if len(said) > MOST_DAYS_SAID else [])
+    return f"these times came back: {', '.join(named[:-1])} and {named[-1]} - remove them in Google Calendar"
 
 
 def _change_failed(error: Exception, summary: str) -> Dict:
