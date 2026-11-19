@@ -207,10 +207,12 @@ function page({ state = { ...STATE, settings: SETTINGS }, saved = { success: tru
   };
   const answers = { state };
   const answer = (body) => ({ ok: true, status: 200, json: async () => body, text: async () => "" });
+  // Each reload the page asks for, with how many listeners would ask before leaving as it does.
+  const reloads = [];
   const context = vm.createContext({
     document,
     window,
-    location: { hash: "", pathname: "/settings", search: "" },
+    location: { hash: "", pathname: "/settings", search: "", reload: () => reloads.push((windowListeners.beforeunload || []).length) },
     history: { state: null, pushState() {}, replaceState() {}, back() {} },
     setTimeout,
     clearTimeout,
@@ -226,6 +228,7 @@ function page({ state = { ...STATE, settings: SETTINGS }, saved = { success: tru
     async fetch(path, options) {
       if (path === "/api/login-state") return answer({ route: "direct", logged_in: true, password_set: true, page: "one" });
       if (path === "/api/state") return answer(answers.state);
+      if (path === "/api/logout") return answer({ success: true, message: "Logged out." });
       if (path === "/api/settings") {
         posted.push(options.body);
         return answer(saved);
@@ -243,6 +246,7 @@ function page({ state = { ...STATE, settings: SETTINGS }, saved = { success: tru
     node,
     answers,
     posted,
+    reloads,
     block: (id) => blocks.get(id),
     // The headings in a block, as one string.
     headings: (id) => descendants(blocks.get(id)).filter((one) => one.tag === "h3").map((one) => one.textContent).join(","),
@@ -423,6 +427,15 @@ test("leaving the page is checked with the browser while anything is unsaved, an
   assert.equal(shown.listening("beforeunload"), 1);
   await shown.submit();
   assert.equal(shown.listening("beforeunload"), 0);
+});
+
+test("Log out reloads at once with something unsaved, the browser not asked first", async () => {
+  const shown = page();
+  await arrived(shown);
+  shown.typed("football.kickoff_minutes", "20");
+  assert.equal(shown.listening("beforeunload"), 1);
+  await shown.context.logOut();
+  assert.equal(shown.reloads.join(","), "0");
 });
 
 test("a save which hides the bar puts the focus on the open section's heading, or the search box on the list", async () => {

@@ -221,6 +221,7 @@ const LABELS = {
   "journeys.buffer_minutes": "Minutes to spare when working out when to leave",
   "web_search.enabled": "Search the web when asked to",
   "music.player": "What plays the music",
+  "wrapped.enabled": "Make a Wrapped of your listening",
 };
 const labelOf = (key) => LABELS[key] || assert.fail(`No label for ${key}: copy it from EDITABLE`);
 
@@ -660,7 +661,7 @@ function withWords(shown) {
   const microphone = own("satellites", "li", "");
   const mute = Object.assign(new Node("label"), { htmlFor: "mute" });
   mute.textContent = "Mute the microphone";
-  const muteControl = Object.assign(new Node("input"), { id: "mute" });
+  const muteControl = Object.assign(new Node("input"), { id: "mute", type: "checkbox" });
   microphone.append(mute, muteControl);
   return {
     heading: own("status", "h3", "Recent problems"),
@@ -669,7 +670,7 @@ function withWords(shown) {
     muteControl,
     loose: own("satellites", "label", "Loose label", { htmlFor: "" }),
     add: own("satellites", "button", "Add a satellite"),
-    placeholder: own("satellites", "input", "", { placeholder: "Its Pi's machine name, e.g. bedroom" }),
+    placeholder: own("satellites", "input", "", { type: "text", placeholder: "Its Pi's machine name, e.g. bedroom" }),
     alarm: own("clock", "button", "Add alarm"),
     empty: own("clock", "button", ""),
     hiddenOne: Object.assign(own("music", "button", "Playing hidden"), { hidden: true }),
@@ -792,15 +793,62 @@ test("a button with no words of its own is found by its accessible name", async 
   assert.equal(`${shown.rows().join(",")}: ${shown.hits().map((one) => one.textContent).join("|")}`, "music: Next song");
 });
 
-test("a found setting is marked by its field, and the focus is on its input", async () => {
-  const shown = page({ state: { ...STATE, settings: QUIET } });
+test("a found setting is marked by its field, and a switch takes the focus", async () => {
+  const shown = page({ state: { ...STATE, settings: [yesNo("web_search.enabled", true)] } });
   await shown.loadAll();
-  shown.type("quiet hours end");
+  shown.type("search the web");
   await shown.click(shown.hits()[0]);
-  const input = shown.node("setting-ntfy.quiet_until");
+  const input = shown.node("setting-web_search.enabled");
+  assert.equal(input.type, "checkbox");
   assert.equal(input.closest(".field").classes.has("found"), true);
   assert.equal(input.classes.has("found"), false);
   assert.equal(shown.focused() === input, true);
+});
+
+test("a found field which is typed into is marked but not focused, so no phone's keyboard covers it", async () => {
+  const shown = page({ state: { ...STATE, settings: QUIET } });
+  await shown.loadAll();
+  const words = withWords(shown);
+  // A setting's time field: the focus stays on the section's heading, where opening it put it.
+  shown.type("quiet hours end");
+  await shown.click(shown.hits()[0]);
+  const input = shown.node("setting-ntfy.quiet_until");
+  assert.equal(input.type, "time");
+  assert.equal(input.closest(".field").classes.has("found"), true);
+  assert.equal(shown.focused() === shown.node("notifications-title"), true);
+  // A text box found by its placeholder, the same.
+  shown.type("machine name");
+  await shown.click(shown.hits()[0]);
+  assert.equal(words.placeholder.classes.has("found"), true);
+  assert.equal(shown.focused() === shown.node("satellites-title"), true);
+});
+
+test("a found select or button takes the focus", async () => {
+  const shown = page();
+  await shown.loadAll();
+  const words = withWords(shown);
+  const label = Object.assign(new Node("label"), { htmlFor: "weather-entity" });
+  label.textContent = "Weather from";
+  const select = Object.assign(new Node("select"), { id: "weather-entity", type: "select-one" });
+  shown.node("section-calendars").append(label, select);
+  shown.type("weather from");
+  await shown.click(shown.hits()[0]);
+  assert.equal(shown.focused() === select, true);
+  shown.type("add alarm");
+  await shown.click(shown.hits()[0]);
+  assert.equal(shown.focused() === words.alarm, true);
+});
+
+test("a found sub-heading in a section's settings marks itself, not the panel it is in", async () => {
+  const shown = page({ state: { ...STATE, settings: [yesNo("wrapped.enabled", true), number("music.player", 1)] } });
+  await shown.loadAll();
+  shown.type("wrapped");
+  const hit = shown.hits().find((one) => one.textContent === "Wrapped");
+  await shown.click(hit);
+  const heading = descendants(shown.block("music")).find((one) => one.tag === "h3" && one.textContent === "Wrapped");
+  assert.equal(heading.classes.has("found"), true);
+  const panel = descendants(shown.block("music")).find((one) => one.classes.has("panel") && one.classes.has("settings"));
+  assert.equal(panel.classes.has("found"), false);
 });
 
 test("Enter in the search box lets go of it, so a phone's keyboard closes over the results", async () => {

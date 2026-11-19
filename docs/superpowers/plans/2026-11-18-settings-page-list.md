@@ -47,7 +47,7 @@ Sub-headings inside a section which holds more than one of the old groups: Music
   clock: { timers: 0, reminders: 1, alarms: 1 },
   lights: { on: 2, total: 5 },
   batteries: [{ name: "Tablet", percent: 14, low: true }],
-  displays: { connected: 1, total: 1 },
+  displays: { total: 1 },             // changed during the build
   journeys: { requests: 21, cap: 3000 },
   football: { teams: 2 },
   google: "in", spotify: "off",      // "in", "out" (set up but needs signing in to) or "off" (not set up)
@@ -65,7 +65,7 @@ Sub-headings inside a section which holds more than one of the old groups: Music
 - `clock`: the non-zero counts joined with a comma and a space, in the order timers, reminders, alarms: `1 timer`, `2 reminders`, `1 alarm`; all zero `Nothing set`.
 - `devices`: `All off`, `1 light on`, `3 lights on`; with `total` 0 `No lights`.
 - `batteries`: the lowest, `Tablet at 14%`, marked as a warning when its `low` is true; none `None to show`.
-- `displays`: `1 connected`; with `total` 0 `None added`.
+- `displays`: `1 clock display`, `2 clock displays`; with `total` 0 `None added`. (Changed during the build.)
 - `journeys`: `21 of 3,000 asks used this month` (the cap with thousands' commas).
 - `football`: `No teams followed`, `1 team followed`, `2 teams followed`.
 - `calendars`: `Signed in to Google`; `Sign in to Google` marked as a warning; `Google isn't set up`.
@@ -81,7 +81,7 @@ Sub-headings inside a section which holds more than one of the old groups: Music
 **What needs attention**, in this order, each `{ section, text }`:
 
 1. `restart` true: `status`, `Nova needs a restart to use what's been saved`.
-2. `settingsProblem` not empty: `else`, the problem's own words.
+2. `settingsProblem` not empty: `else`, `Nova can't read its saved settings`. (Changed during the build.)
 3. The default satellite not connected: `satellites`, `The bedroom satellite isn't connected`.
 4. Each battery whose `low` is true: `batteries`, `Tablet is at 14%`.
 5. `google` is `"out"`: `calendars`, `Sign in to Google`.

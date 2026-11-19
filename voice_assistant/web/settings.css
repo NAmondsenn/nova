@@ -432,10 +432,10 @@ body:not([data-open]) .board > #section-status { display: block; }
   font-size: 14px;
 }
 
-/* What a search sent you to - the field, row or panel it is in - marked for a moment: the
+/* What a search sent you to - the field or row it is in, or itself - marked for a moment: the
    highlight fades over the time it is kept, or, with motion off, stays until it goes. Inset, so no
-   panel's edge cuts it off, and all of it shadow, laid over what is there: a panel keeps its glass
-   under it, rather than lose it for the two seconds. */
+   panel's edge cuts it off, and all of it shadow, laid over what is there: a field which is a panel
+   keeps its glass under it, rather than lose it for the two seconds. */
 .found {
   border-radius: var(--field-round);
   box-shadow: inset 0 0 0 1px rgba(243, 214, 160, 0.5), inset 0 0 0 100vmax rgba(243, 214, 160, 0.14);

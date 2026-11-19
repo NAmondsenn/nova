@@ -676,6 +676,20 @@ function unlock() {
   for (const run of runners) run();
 }
 
+// Logs this device out, and reloads the page rather than only locking it, so nothing the page
+// showed stays in it - Log out is for a shared or lost device, whose browser someone else might
+// look into. At once, with nothing asked first: what wasn't saved goes with the login, and a
+// "Stay" would leave a logged-out page showing.
+async function logOut() {
+  const result = await change("/api/logout", {}, async () => {});
+  if (!result.success) {
+    await checkLogin();
+    return;
+  }
+  askBeforeLeaving(false);
+  location.reload();
+}
+
 // Sends what was typed, which is gone from the field as it's sent - the field is the
 // only place it's ever kept - and shows Nova's answer if it's refused.
 async function logIn(event) {
@@ -3260,14 +3274,16 @@ function searchEntries() {
 let marked = null;
 let markedTimer = null;
 
-// What is marked for a hit: the field, row or panel it is in - a mark on a switch would paint over
-// the switch's own look - or the hit itself, in none.
-const MARKED_BY = ".field, li, .panel";
+// What is marked for a hit: the field or row it is in - a mark on a switch would paint over the
+// switch's own look - or the hit itself, in neither, as a heading is. Not a panel, which can be
+// taller than a phone's screen, and centring it could leave the hit out of sight.
+const MARKED_BY = ".field, li";
 
 // Opens the section a hit is in, with what holds it scrolled to the middle of the screen and marked
 // for a moment, and the focus on the hit itself, so a keyboard or a screen reader is at what was
-// looked for. A hit whose element has since been drawn again isn't in the page, and only the
-// section is opened.
+// looked for - unless it is typed into, whose focus would bring up a phone's keyboard over what
+// was looked for: the focus is then left where opening the section put it. A hit whose element
+// has since been drawn again isn't in the page, and only the section is opened.
 function openFound(id, target) {
   openSection(id);
   if (!target || target.isConnected === false) return;
@@ -3281,7 +3297,7 @@ function openFound(id, target) {
     shown.classList.remove("found");
     if (marked === shown) marked = null;
   }, FOUND_FOR);
-  target.focus({ preventScroll: true });
+  if (!TYPED.has(target.type)) target.focus({ preventScroll: true });
 }
 
 // A smaller row under a section's own, for a setting or control found in it.
@@ -3690,13 +3706,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   document.getElementById("login").addEventListener("submit", logIn);
-  // Reloaded rather than only locked, so nothing the page showed stays in it - Log out
-  // is for a shared or lost device, whose browser someone else might look into.
-  document.getElementById("log-out").addEventListener("click", async () => {
-    const result = await change("/api/logout", {}, async () => {});
-    if (result.success) location.reload();
-    else await checkLogin();
-  });
+  document.getElementById("log-out").addEventListener("click", logOut);
   document.getElementById("log-out-everywhere").addEventListener("click", () => {
     if (confirm("Log out every device which logged in with the page password?")) {
       change("/api/logout-everywhere", {}, checkLogin);
