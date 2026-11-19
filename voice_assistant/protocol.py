@@ -39,6 +39,8 @@ and what the brain sends a satellite:
     alarms  {"entries": [{"id": ..., "due": ..., "kind": ..., "sound": ...}]}
     phrase  {"rate": ...}  (payload)
     away_settled  (once the brain has saved what away said)
+    quiet  {"on": ...}  (Nova has started, or stopped, speaking on another satellite, so
+        ignore the wake word meanwhile - see docs/decisions/0029)
     restart
 
 The handshake comes first, and proves the satellite's password to the brain and the

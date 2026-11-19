@@ -69,6 +69,14 @@ PROGRESS_EVERY = 1.0
 # nothing happens - the microphone is closed then, and is no other sign of it.
 PRESS_WAIT = 1.0
 
+# While Nova speaks on another satellite, this one ignores the wake word - see
+# docs/decisions/0029. Never for longer than QUIET_MOST seconds without being told again,
+# so a brain which goes before saying it has stopped can't leave it deaf, and for
+# QUIET_AFTER seconds after it's told the other has stopped, for the last words still
+# leaving that satellite's speakers.
+QUIET_MOST = 60
+QUIET_AFTER = 0.5
+
 # The sound a press plays, from the satellite itself and straight away, whatever the
 # brain's setting for its own listening sound.
 PRESS_SOUND = "listening.wav"
@@ -293,6 +301,8 @@ class Satellite:
         # A press waiting for the main loop, which owns the microphone and so starts the
         # recording - set, with the lock held, by a press while nothing is recording.
         self._press_pending = False
+        # Until when, by time.monotonic(), the wake word is ignored - 0 for not at all.
+        self._quiet_until = 0.0
         # Set to wake the main loop from waiting for a press: by a press, by the brain
         # asking to hear a follow-up, and by stop().
         self._nudged = threading.Event()
@@ -315,6 +325,7 @@ class Satellite:
             "silence": lambda message, payload: self.speaker.silence(message["kind"]),
             "allow": self._allow,
             "state": self._take_state,
+            "quiet": self._take_quiet,
             "alarms": lambda message, payload: self.alarms.replace(message["entries"]),
             "phrase": lambda message, payload: self.phrase.replace(payload, message["rate"]),
             "away_settled": self._away_settled,
@@ -405,6 +416,10 @@ class Satellite:
                     continue
                 heard = self.wake.listen_once(until=self._interrupted)
                 self._exit_if_asked()
+                if heard is not None and time.monotonic() < self._quiet_until:
+                    # Most likely Nova's own voice, from another satellite's speakers.
+                    logger.info("Heard the wake word while Nova speaks on another satellite, so it's ignored")
+                    continue
                 if heard is not None:
                     self._keep_clip(heard)
                     heard_at = self.wake.heard_at
@@ -956,12 +971,26 @@ class Satellite:
                 self._handing_over = report
                 self.link.expect("away_settled", SETTLE_WAIT)
 
+    def _take_quiet(self, message: Dict, payload: bytes):
+        """
+        The brain says Nova has started, or stopped, speaking on another satellite, so
+        this one ignores the wake word meanwhile - see QUIET_MOST and QUIET_AFTER. A press
+        is deliberate, so it still works.
+        """
+        now = time.monotonic()
+        if message.get("on") is True:
+            self._quiet_until = now + QUIET_MOST
+        else:
+            self._quiet_until = min(self._quiet_until, now + QUIET_AFTER)
+
     def _forget_the_brain(self):
         """
         Stops what the brain was playing, which nothing will now come to finish or
         stop - and says the brain can't be reached, if it went with the user waiting
         for its answer.
         """
+        # Nothing is left to say the other satellite has stopped speaking.
+        self._quiet_until = 0.0
         with self._lock:
             playing, self._playing = list(self._playing.values()), {}
             # Nobody is left to hear a follow-up.

@@ -64,6 +64,7 @@ from voice_assistant.remote import RemoteSatellite
 from voice_assistant.routines import Routines
 from voice_assistant.satellite_link import SOCKET_TIMEOUT, Stream
 from voice_assistant.satellite_passwords import SatellitePasswords, name_problem
+from voice_assistant.quiet_others import QuietOthers
 from voice_assistant.satellite_rooms import SatelliteRooms
 from voice_assistant.session import Session
 from voice_assistant.settings_page import SettingsPage
@@ -273,6 +274,8 @@ class Brain:
         # Home Assistant - which outlasts its connection. Made before any session, as
         # each says its room to it.
         self.rooms = SatelliteRooms(os.path.join(paths.DATA_DIR, "satellite_rooms.json"))
+        # Which satellites ignore the wake word while Nova speaks on another - see _quiet_others.
+        self.quiet_others = QuietOthers()
         # Each satellite's session, by its name, for as long as it's connected.
         self.sessions: Dict[str, Session] = {}
         # Guards sessions and the other notes below. Only ever held for a moment, and
@@ -1220,7 +1223,28 @@ class Brain:
             self._let_go(session)
             self._forget(session)
             return None
+        satellite.speaker.on_speech = lambda speaking: self._quiet_others(name, speaking)
+        # So one which connects while another is speaking is quiet at once.
+        self._quiet_others()
         return session
+
+    def _quiet_others(self, satellite: Optional[str] = None, speaking: Optional[bool] = None):
+        """
+        Tells each satellite whether to ignore the wake word, as Nova starts or stops
+        speaking on one, or as one joins or goes - see quiet_others.py. Nova's voice from
+        one satellite's speakers reaches the others' microphones, and "I'm Nova" woke the
+        Pi from the PC's on 18 November.
+
+        Args:
+            satellite: The one which started or stopped speaking - None to bring every
+                connected one up to date.
+            speaking: Whether it's speaking now.
+        """
+        connected = [session.satellite.name for session in self.connected_sessions()]
+        for name, quiet in self.quiet_others.update(connected, satellite, speaking):
+            session = self.session_for(name)
+            if session is not None:
+                session.satellite.send("quiet", on=quiet)
 
     def _removed(self, name: str, password: Optional[str] = None) -> bool:
         """
@@ -1305,6 +1329,7 @@ class Brain:
             del self.sessions[name]
             self._caught_up.discard(name)
         self._satellites_changed()
+        self._quiet_others()
 
     def _give_out_orphans(self):
         """

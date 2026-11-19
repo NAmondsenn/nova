@@ -2122,3 +2122,64 @@ def test_wake_word_satellite_hello_is_unchanged(brain, make):
     make()
     assert wait_for(lambda: brain.hellos)
     assert brain.hellos[0]["push_to_talk"] is False
+
+
+def quiet_until_said(brain, made, on):
+    brain.say("quiet", on=on)
+    if on:
+        assert wait_for(lambda: made._quiet_until > time.monotonic())
+
+
+def test_the_wake_word_is_ignored_while_nova_speaks_on_another_satellite(brain, make):
+    made = make()
+    assert wait_for(lambda: connected(made) and made.wake.listening)
+    brain.say("play_stream", id="music-1", rate=44100, channels=2, volume=0.5, kind="music", paused=False)
+    assert wait_for(lambda: made.speaker.streams())
+    quiet_until_said(brain, made, True)
+    made.wake.say()
+    # Heard, and let go: no wake for the brain, and nothing here stopped or paused.
+    assert wait_for(lambda: made.wake.listening)
+    time.sleep(0.2)
+    assert brain.messages("wake") == []
+    assert not made.speaker.streams()[0].paused
+
+
+def test_the_wake_word_works_again_just_after_the_other_satellite_stops(brain, make, monkeypatch):
+    monkeypatch.setattr(satellite, "QUIET_AFTER", 0.2)
+    made = make()
+    assert wait_for(lambda: connected(made) and made.wake.listening)
+    quiet_until_said(brain, made, True)
+    brain.say("quiet", on=False)
+    # Still quiet for a moment, for the last words still leaving the other's speakers.
+    assert wait_for(lambda: made._quiet_until <= time.monotonic() + 0.2)
+    time.sleep(0.3)
+    made.wake.say()
+    assert wait_for(lambda: brain.messages("wake"))
+    brain.say("stop_listening")
+
+
+def test_being_quiet_ends_by_itself_if_never_lifted(brain, make, monkeypatch):
+    monkeypatch.setattr(satellite, "QUIET_MOST", 0.3)
+    made = make()
+    assert wait_for(lambda: connected(made) and made.wake.listening)
+    quiet_until_said(brain, made, True)
+    time.sleep(0.4)
+    made.wake.say()
+    assert wait_for(lambda: brain.messages("wake"))
+    brain.say("stop_listening")
+
+
+def test_losing_the_brain_ends_being_quiet(brain, make):
+    made = make()
+    assert wait_for(lambda: connected(made) and made.wake.listening)
+    quiet_until_said(brain, made, True)
+    brain.drop()
+    assert wait_for(lambda: made._quiet_until == 0)
+
+
+def test_a_press_still_works_while_nova_speaks_on_another_satellite(brain, make):
+    made = pressable(brain, make)
+    quiet_until_said(brain, made, True)
+    made._pressed()
+    assert wait_for(lambda: brain.messages("wake"))
+    brain.say("stop_listening")
