@@ -2479,6 +2479,55 @@ def test_a_date_alone_keeps_a_timed_events_time(for_changing):
                                                  "end": {"dateTime": "2026-10-29T10:00:00+00:00"}}
 
 
+def test_a_time_alone_is_on_the_events_own_day(for_changing):
+    # "Move the dentist to 5": Claude has no day to give, so the time alone is on the one found.
+    calendar = for_changing(personal=[DENTIST_THURSDAY], answers={f"PATCH {DENTIST_URL}": [CHANGED]})
+    assert _said(calendar.change("dentist", start="17:00", today=NOVEMBER_21)) == {
+        "success": True, "message": "Moved Dentist to Thursday at 5 PM."}
+    assert calendar._session.sent == [_write("PATCH", DENTIST_URL, {
+        "start": {"dateTime": "2026-11-26T17:00:00+00:00"}, "end": {"dateTime": "2026-11-26T18:00:00+00:00"}})]
+
+    # An end given as a time alone keeps that day too - after a start of a time alone, or of a day.
+    for start in ("17:00", "2026-11-26 17:00", "2026-11-26"):
+        calendar = for_changing(personal=[DENTIST_THURSDAY], answers={f"PATCH {DENTIST_URL}": [CHANGED]})
+        calendar.change("dentist", start=start, end="18:30", today=NOVEMBER_21)
+        assert calendar._session.sent[0]["json"]["end"] == {"dateTime": "2026-11-26T18:30:00+00:00"}, start
+
+    # One all day is given the time on its own day, and lasts an hour.
+    holiday = _event_url("calendar-personal", "made-up-holiday")
+    calendar = for_changing(personal=[_own("Holiday", "2026-11-22", "2026-11-23", "made-up-holiday")],
+                            answers={f"PATCH {holiday}": [CHANGED]})
+    calendar.change("holiday", start="10:00", today=NOVEMBER_21)
+    assert calendar._session.sent == [_write("PATCH", holiday, {
+        "start": {"date": None, "dateTime": "2026-11-22T10:00:00+00:00"},
+        "end": {"date": None, "dateTime": "2026-11-22T11:00:00+00:00"}})]
+
+    # A time which isn't one isn't looked for, and an end with no start is no new time, as before.
+    calendar = for_changing(personal=[DENTIST_THURSDAY])
+    for start, end in (("25:00", None), ("17:60", None), ("17:00", "later"), ("5pm", None)):
+        assert calendar.change("dentist", start=start, end=end, today=NOVEMBER_21) == {
+            "success": False, "message": "I didn't catch when that is."}, (start, end)
+    assert calendar.change("dentist", end="18:30", summary="Dentist check-up", today=NOVEMBER_21) == {
+        "success": False, "message": "I didn't catch when that is."}
+    assert calendar._session.asked == [] and calendar._session.sent == []
+    assert calendar.change("dentist", start="18:00", end="17:00", today=NOVEMBER_21) == {
+        "success": False, "message": "That ends before it starts."}
+    assert calendar._session.sent == []
+
+
+def test_a_time_alone_for_a_day_gone_isnt_moved_to(for_changing):
+    # An event on a day before today - looked for there by its day - is gone, as a date said is.
+    gone = _own("Dentist", "2026-11-19T15:00:00Z", "2026-11-19T16:00:00Z", "made-up-dentist")
+    calendar = for_changing(personal=[gone])
+    assert calendar.change("dentist", day=date(2026, 11, 19), start="17:00", today=NOVEMBER_21) == GONE
+    assert calendar._session.sent == []
+
+    # Earlier today is fine, as it is for a date.
+    earlier = _own("Dentist", "2026-11-21T09:00:00Z", "2026-11-21T10:00:00Z", "made-up-dentist")
+    calendar = for_changing(personal=[earlier], answers={f"PATCH {DENTIST_URL}": [CHANGED]})
+    assert _said(calendar.change("dentist", start="08:00", today=NOVEMBER_21))["success"]
+
+
 def test_an_event_is_renamed(for_changing):
     calendar = for_changing(personal=[DENTIST_THURSDAY], answers={f"PATCH {DENTIST_URL}": [CHANGED]})
     assert _said(calendar.change("dentist", summary=" Dentist check-up ", today=NOVEMBER_21)) == {
@@ -2598,7 +2647,9 @@ def test_from_the_first_one_on_changes_the_series_itself(for_changing):
             ({"summary": "Gym class"}, {"summary": "Gym class"}, {"summary": "Gym"},
              "Renamed Gym to Gym class from Tuesday on."),
             ({"start": "2026-11-24 19:00", "summary": "Gym class"}, {**moved, "summary": "Gym class"},
-             {**old, "summary": "Gym"}, "Moved Gym to 7 PM from Tuesday on and renamed it Gym class.")):
+             {**old, "summary": "Gym"}, "Moved Gym to 7 PM from Tuesday on and renamed it Gym class."),
+            # A time alone - on that Tuesday, which is all Claude knows of the day.
+            ({"start": "19:00"}, moved, old, "Moved Gym to 7 PM from Tuesday on.")):
         calendar = for_changing(personal=[GYM_24TH, GYM_1ST], answers={GYM_URL: [first],
                                                                        f"PATCH {GYM_URL}": [first, first]})
         reply = calendar.change("gym", following=True, today=NOVEMBER_21, **asked)
@@ -2648,6 +2699,22 @@ def test_from_this_one_on_splits_the_series_with_the_times_left(for_changing):
             "summary": "Gym class", "start": {"dateTime": "2026-11-24T18:00:00+00:00", "timeZone": "Europe/London"},
             "end": {"dateTime": "2026-11-24T19:00:00+00:00", "timeZone": "Europe/London"}, "recurrence": rules})]
     assert instances not in [url for url, _ in calendar._session.asked]
+
+
+def test_from_this_one_on_with_a_time_alone_splits_at_the_next_time(for_changing):
+    # "Move my gym to 7 from now on": no day is said, so none is guessed - it's the next gym's own, the 24th.
+    calendar = for_changing(**_splitting(**{f"PATCH {GYM_URL}": [GYM]}))
+    reply = calendar.change("gym", start="19:00", following=True, today=date(2026, 11, 23))
+    assert _said(reply) == {"success": True, "message": "Moved Gym to 7 PM from tomorrow on."}
+    assert [each["method"] for each in calendar._session.sent] == ["PATCH", "POST"]
+    assert calendar._session.sent[0]["json"] == CUT_AT_THE_24TH
+    assert calendar._session.sent[1]["json"]["start"] == {"dateTime": "2026-11-24T19:00:00+00:00",
+                                                          "timeZone": "Europe/London"}
+    # Its end too, as a time alone.
+    calendar = for_changing(**_splitting(**{f"PATCH {GYM_URL}": [GYM]}))
+    calendar.change("gym", start="19:00", end="20:30", following=True, today=NOVEMBER_21)
+    assert calendar._session.sent[1]["json"]["end"] == {"dateTime": "2026-11-24T20:30:00+00:00",
+                                                        "timeZone": "Europe/London"}
 
 
 def test_a_split_that_fails_puts_the_old_series_back(for_changing):

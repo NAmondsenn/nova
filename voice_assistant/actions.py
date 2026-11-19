@@ -1686,10 +1686,12 @@ class ActionExecutor:
         "Move or rename an event on the user's Google calendar, for 'move the dentist to Friday at 4', 'push my "
         "shift back an hour' or 'call my Tuesday meeting Planning'. Give search, and the day and time only when "
         "the user said them, for the event as it is now. new_start and new_end are local 'YYYY-MM-DD HH:MM', "
-        "or 'YYYY-MM-DD' for all day; leave out whatever isn't changing. Give following only for 'all of them', "
-        "'every week' or 'from now on' - it changes only that one and the ones after it, never earlier ones. "
-        "What was done is said for you, so just reply 'Okay.' When Nova lists several and asks which, call "
-        "again with the day, time or calendar the user picks.",
+        "'YYYY-MM-DD' for the day alone, which keeps its time, or 'HH:MM' for the time alone, which keeps its day. "
+        "When only the time changes, give the time alone - never guess a day - and always with following unless "
+        "the user named a new day. Leave out whatever isn't changing. Give following only for 'all of them', "
+        "'every week' or 'from now on' - it changes only that one and the ones after it, never earlier ones, and "
+        "only their time, not their days. What was done is said for you, so just reply 'Okay.' When Nova lists "
+        "several and asks which, call again with the day, time or calendar the user picks.",
         needs="calendar",
         required=["search"],
         search={"type": "string", "description": "A word from the event's name as it'd be written on the "
@@ -1699,9 +1701,11 @@ class ActionExecutor:
                                               "YYYY-MM-DD, worked out from today's date."},
         time={"type": "string", "description": "Only when the user said what time, for the event as it is now: "
                                                "HH:MM, 24-hour."},
-        new_start={"type": "string", "description": "When it should start, worked out from today's date."},
+        new_start={"type": "string", "description": "When it should start: 'YYYY-MM-DD HH:MM' worked out from "
+                                                    "today's date, 'YYYY-MM-DD' for a day alone, or 'HH:MM' for a "
+                                                    "time alone."},
         new_end={"type": "string", "description": "When it should end, only when the user said - an end day is "
-                                                  "included."},
+                                                  "included, and 'HH:MM' alone is on the start's day."},
         new_name={"type": "string", "description": "What it should be called, as it'd be written on the "
                                                    "calendar, e.g. 'Planning'."},
         following={"type": "boolean", "description": "True only for 'all of them', 'every week' or 'from now "

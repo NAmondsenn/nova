@@ -1095,17 +1095,19 @@ class GoogleCalendar:
         Friday at 4" or "rename it to dentist check-up" - straight away, and said back so a
         mistake is heard, and undone by "undo that". Only that day's of a repeating event, unless
         following: then from that one on, as Google Calendar's "this and following events" does,
-        so the times before it stay - and then only its time of day can move, not its day. It's
-        sent once, never again by itself.
+        so the times before it stay - and then only its time of day can move, not its day, which
+        a time alone is: it's on the day of the one found. It's sent once, never again by itself.
 
         Args:
             search: A word or two from its name, e.g. "dentist".
             day: The day it's on, if the user said - else it's looked for from today.
             at: The time it starts, "HH:MM", if the user said.
-            start: When it's to start, local - "YYYY-MM-DD HH:MM", or "YYYY-MM-DD" for the day
-                alone, which keeps the time it's at, or keeps one all day all day. None to leave it.
-            end: When it's to end, the same way - an end day is included. None for the length it
-                had, or DEFAULT_LENGTH for one all day given a time.
+            start: When it's to start, local - "YYYY-MM-DD HH:MM", "YYYY-MM-DD" for the day
+                alone, which keeps the time it's at, or keeps one all day all day, or "HH:MM"
+                for the time alone, which is on the day it's on. None to leave it.
+            end: When it's to end, the same way - an end day is included, and a time alone
+                is on the start's day. None for the length it had, or DEFAULT_LENGTH for one
+                all day given a time.
             summary: What it's to be called, or None to leave its name.
             following: Whether to change it from this one on, for "all of them" or "every week".
             calendar: The calendar it's on, if the user named one - "work" is Work.
@@ -1123,16 +1125,24 @@ class GoogleCalendar:
             return {"success": False, "message": "I didn't catch what to change."}
         first = last = None
         if start is not None or end is not None:
-            first, last = _when_said(start), _when_said(end) if end is not None else None
+            first, last = _time_said(start), _time_said(end) if end is not None else None
             if first is None or (end is not None and last is None):
                 return {"success": False, "message": "I didn't catch when that is."}
             # As adding: earlier today is fine, but a day gone is most likely the week or the
-            # year misheard.
-            if (first.date() if isinstance(first, datetime) else first) < today:
+            # year misheard. A time alone has no day yet - see below.
+            if not isinstance(first, day_time) and (first.date() if isinstance(first, datetime) else first) < today:
                 return {"success": False, "message": DAY_GONE}
         found = self._to_change(search, day, at, following, today, now, calendar)
         if isinstance(found, str):
             return {"success": False, "message": found}
+        # A time alone - "move the dentist to 5" - is on the event's own day, which the user needn't
+        # say and Claude can't know, then checked as a day said is. An end alone is on its start's.
+        if isinstance(first, day_time):
+            first = datetime.combine(_day_of(found), first).astimezone()
+            if first.date() < today:
+                return {"success": False, "message": DAY_GONE}
+        if isinstance(last, day_time):
+            last = datetime.combine(first.date() if isinstance(first, datetime) else first, last).astimezone()
         try:
             times = _moved_times(first, last, found) if first is not None else None
         except READ_FAILURES as e:
@@ -1847,6 +1857,18 @@ def _when_said(when: str) -> Union[date, datetime, None]:
         return datetime.fromisoformat(when).astimezone()
     except ValueError:
         return None
+
+
+def _time_said(when: Optional[str]) -> Union[date, datetime, day_time, None]:
+    """
+    As _when_said, or a time of day alone - "17:00" - as a time, for the event's own day, which
+    is only known once it's found.
+    """
+    clock = AT_GIVEN.fullmatch(when.strip()) if isinstance(when, str) else None
+    if clock is None:
+        return _when_said(when)
+    hour, minute = int(clock.group(1)), int(clock.group(2))
+    return day_time(hour, minute) if hour <= 23 and minute <= 59 else None
 
 
 def _event_times(start: str, end: Optional[str], all_day: Optional[bool]) -> Union[str, Tuple[Dict, Dict]]:

@@ -547,6 +547,19 @@ def test_change_calendar_event_passes_the_new_times_and_name():
     assert calendar.asked == [("change", "dentist", None, None, None, None, "Check-up", False, None)]
 
 
+def test_the_change_tool_says_how_a_day_alone_or_a_time_alone_is_given():
+    offered = {schema["name"]: schema for schema in ActionExecutor(calendar=RecordingChangeCalendar()).tool_schemas()}
+    description = offered["change_calendar_event"]["description"]
+    # A day alone keeps the time - it isn't "all day" for a timed event - and a time alone keeps the day,
+    # given with following unless the user named a new day.
+    assert "for all day" not in description
+    for words in ("'YYYY-MM-DD' for the day alone", "keeps its time", "'HH:MM' for the time alone", "keeps its day",
+                  "always with following unless the user named a new day"):
+        assert words in description, words
+    # Adding is another matter: there a date alone is all day.
+    assert "for all day" in offered["add_to_calendar"]["description"]
+
+
 def test_an_unreadable_day_is_said():
     calendar = RecordingChangeCalendar()
     executor = ActionExecutor(calendar=calendar)
