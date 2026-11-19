@@ -37,6 +37,7 @@ from voice_assistant.speaker import BLOCK_SECONDS, Playback, Speaker
 from voice_assistant.timeline import Timeline
 from voice_assistant.wake_clips import WakeClips, clip_start
 from voice_assistant.wake_word import WakeWordDetector
+from voice_assistant.windows_media import UNCHANGED, WindowsMedia
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +265,14 @@ class Satellite:
             self.wake.set_muted(self.state.muted)
         self._check_voice_at(self.state.voice_check)
 
+        # Nova's music in Windows' media controls, whose buttons go to the brain - only on
+        # a push-to-talk satellite, which only the PC is, and only where winrt can be had,
+        # else None and the hello says there are none. See docs/decisions/0030.
+        self.media: Optional[WindowsMedia] = None
+        if self.push_to_talk:
+            media = WindowsMedia(self._media_pressed)
+            self.media = media if media.available else None
+
         # Made in run(), once it's known whether the last run stopped properly.
         self.link: Optional[SatelliteLink] = None
         # Made there too, if this satellite is pressed.
@@ -326,6 +335,7 @@ class Satellite:
             "allow": self._allow,
             "state": self._take_state,
             "quiet": self._take_quiet,
+            "now_playing": self._take_now_playing,
             "alarms": lambda message, payload: self.alarms.replace(message["entries"]),
             "phrase": lambda message, payload: self.phrase.replace(payload, message["rate"]),
             "away_settled": self._away_settled,
@@ -352,7 +362,8 @@ class Satellite:
                 self.press_listener.start()
             self.link = SatelliteLink(self.address, self.name, self.hostname, self.password, self.sample_rate,
                                       self._note_start(), self._on_message, self._on_connected,
-                                      speaker=self.spotify_speaker, push_to_talk=self.push_to_talk)
+                                      speaker=self.spotify_speaker, push_to_talk=self.push_to_talk,
+                                      media_controls=self.media is not None)
             self.link.start()
             threading.Thread(target=self._ring_when_due, daemon=True, name="fallback").start()
             logger.info(f"Satellite '{self.name}' ready, for its brain at {self.address}")
@@ -983,6 +994,33 @@ class Satellite:
         else:
             self._quiet_until = min(self._quiet_until, now + QUIET_AFTER)
 
+    def _take_now_playing(self, message: Dict, payload: bytes):
+        """
+        The brain says what this satellite's music is doing, for Windows' media controls
+        to show: the cover with it only when it's a new one, as the payload, or none now.
+        """
+        if self.media is None:
+            return
+        state = message.get("state")
+        if state not in ("playing", "paused", "stopped"):
+            logger.warning(f"The brain sent a now_playing which isn't playing, paused or stopped: "
+                           f"{ascii(state)[:40]}")
+            return
+        names = [message.get(name) for name in ("track", "artist", "album")]
+        names = [name if isinstance(name, str) else "" for name in names]
+        if "cover" not in message:
+            cover = UNCHANGED
+        else:
+            cover = payload if message["cover"] is True and payload else None
+        self.media.show(state, *names, cover=cover)
+
+    def _media_pressed(self, action: str):
+        """A button of Windows' media controls, on a thread of Windows': passed on to the brain to act on."""
+        logger.info(f"Media button: {action}")
+        link = self.link
+        if link is None or not link.send("media", action=action):
+            logger.info("The brain can't be reached, so the media button does nothing")
+
     def _forget_the_brain(self):
         """
         Stops what the brain was playing, which nothing will now come to finish or
@@ -991,6 +1029,9 @@ class Satellite:
         """
         # Nothing is left to say the other satellite has stopped speaking.
         self._quiet_until = 0.0
+        # Nor to play the music, which stops below with the rest.
+        if self.media is not None:
+            self.media.show("stopped", "", "", "")
         with self._lock:
             playing, self._playing = list(self._playing.values()), {}
             # Nobody is left to hear a follow-up.
@@ -1056,6 +1097,8 @@ class Satellite:
             self.press_listener.close()
         if self.link is not None:
             self.link.stop()
+        if self.media is not None:
+            self.media.close()
         self.ringer.quiet()
         with self._lock:
             self._save_timeline()

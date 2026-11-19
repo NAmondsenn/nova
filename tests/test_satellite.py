@@ -26,6 +26,7 @@ from voice_assistant import fallback, paths, protocol, satellite_link, wake_clip
 from voice_assistant.fallback import AlarmCopy, Phrase, StateCopy
 from voice_assistant.press import PressListener
 from voice_assistant.wake_clips import WakeClips
+from voice_assistant.windows_media import UNCHANGED
 
 PASSWORD = "the-bedroom-satellites-password"
 RATE = 16000
@@ -2183,3 +2184,123 @@ def test_a_press_still_works_while_nova_speaks_on_another_satellite(brain, make)
     made._pressed()
     assert wait_for(lambda: brain.messages("wake"))
     brain.say("stop_listening")
+
+
+# Windows' media controls - see docs/decisions/0030
+
+class FakeWindowsMedia:
+    """Stands in for WindowsMedia, keeping what it was asked to show - available unless the test says not."""
+
+    available = True
+    made = []
+
+    def __init__(self, on_button):
+        self.on_button = on_button
+        self.shown = []
+        self.closed = False
+        FakeWindowsMedia.made.append(self)
+
+    def show(self, state, track, artist, album, cover=UNCHANGED):
+        self.shown.append((state, track, artist, album, "unchanged" if cover is UNCHANGED else cover))
+
+    def close(self):
+        self.closed = True
+
+
+class Unavailable(FakeWindowsMedia):
+    available = False
+
+
+@pytest.fixture
+def windows(monkeypatch):
+    """Has satellites make a fake WindowsMedia, and gives the list of those made."""
+    FakeWindowsMedia.made = []
+    monkeypatch.setattr(satellite, "WindowsMedia", FakeWindowsMedia)
+    return FakeWindowsMedia.made
+
+
+def test_a_push_to_talk_satellite_with_media_controls_says_so(brain, make, windows):
+    made = pressable(brain, make)
+    assert made.media is windows[0]
+    assert brain.hellos[0]["media_controls"] is True
+
+
+def test_without_media_controls_available_the_hello_says_none(brain, make, monkeypatch):
+    monkeypatch.setattr(satellite, "WindowsMedia", Unavailable)
+    made = pressable(brain, make)
+    assert made.media is None
+    assert brain.hellos[0]["media_controls"] is False
+    # And what the brain says plays is let go.
+    brain.say("now_playing", state="playing", track="Song", artist="Band", album="Album")
+    brain.say("ping")
+    time.sleep(0.2)
+    assert connected(made)
+
+
+def test_a_wake_word_satellite_never_makes_media_controls(brain, make, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise AssertionError("Made for a wake word satellite")
+
+    monkeypatch.setattr(satellite, "WindowsMedia", refuse)
+    made = make()
+    assert wait_for(lambda: connected(made))
+    assert made.media is None
+    assert brain.hellos[0]["media_controls"] is False
+
+
+def test_what_the_brain_says_plays_is_shown_with_the_cover_only_when_it_changes(brain, make, windows):
+    made = pressable(brain, make)
+    brain.say("now_playing", b"jpeg", state="playing", track="Song", artist="Band", album="Album", cover=True)
+    brain.say("now_playing", state="paused", track="Song", artist="Band", album="Album")
+    brain.say("now_playing", state="playing", track="Bare", artist="Band", album="Album", cover=False)
+    brain.say("now_playing", state="stopped", track="", artist="", album="")
+    assert wait_for(lambda: len(made.media.shown) == 4)
+    assert made.media.shown == [("playing", "Song", "Band", "Album", b"jpeg"),
+                                ("paused", "Song", "Band", "Album", "unchanged"),
+                                ("playing", "Bare", "Band", "Album", None),
+                                ("stopped", "", "", "", "unchanged")]
+
+
+def test_a_now_playing_which_makes_no_sense_is_let_go(brain, make, windows, caplog):
+    made = pressable(brain, make)
+    with caplog.at_level(logging.WARNING):
+        brain.say("now_playing", state="rewinding", track="Song", artist="Band", album="Album")
+        brain.say("now_playing", track="Song")
+        # Names which aren't text are shown as nothing.
+        brain.say("now_playing", state="paused", track=7, artist=None, album=["x"])
+        assert wait_for(lambda: made.media.shown)
+    assert made.media.shown == [("paused", "", "", "", "unchanged")]
+    assert len([record for record in caplog.records if "now_playing" in record.getMessage()]) == 2
+
+
+@pytest.mark.parametrize("action", ["play", "pause", "next", "previous"])
+def test_a_button_of_windows_media_controls_goes_to_the_brain(brain, make, windows, action):
+    made = pressable(brain, make)
+    made.media.on_button(action)
+    assert wait_for(lambda: brain.messages("media"))
+    assert brain.messages("media") == [{"type": "media", "action": action}]
+
+
+def test_a_button_with_no_brain_goes_nowhere(brain, make, windows):
+    made = pressable(brain, make)
+    brain.drop()
+    assert wait_for(lambda: not connected(made))
+    made.media.on_button("pause")
+    assert brain.messages("media") == []
+
+
+def test_losing_the_brain_clears_the_media_controls(brain, make, windows):
+    # The music stops with it, as nothing more of it arrives.
+    made = pressable(brain, make)
+    brain.say("now_playing", state="playing", track="Song", artist="Band", album="Album")
+    assert wait_for(lambda: made.media.shown)
+    brain.drop()
+    assert wait_for(lambda: made.media.shown[-1][0] == "stopped")
+
+
+def test_the_media_controls_are_closed_with_the_satellite(brain, make, windows):
+    made = pressable(brain, make)
+    media = made.media
+    made.stop()
+    assert wait_for(lambda: made.exited)
+    assert media.closed
