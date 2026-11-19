@@ -145,6 +145,18 @@ def test_whats_playing_is_shown_with_every_button_on_each_set_on_a_line_of_its_o
     assert len({line for _, _, line in flags}) == 4
 
 
+def test_the_controls_are_switched_on_before_the_display_is_updated_as_on_the_pc(media, winrt):
+    # The order the test on 19 November proved: on, then the buttons, then what's shown
+    # and whether it plays.
+    media.show("playing", "Song", "Band", "Album")
+    keys = [key for key, _, _ in winrt.log]
+    switched_on = [index for index, (key, value, _) in enumerate(winrt.log)
+                   if (key == "smtc.is_enabled" and value is True) or key in BUTTON_FLAGS]
+    assert [keys[index] for index in switched_on] == ["smtc.is_enabled", *BUTTON_FLAGS]
+    assert max(switched_on) < keys.index("updater.type")
+    assert max(switched_on) < keys.index("update()") < keys.index("smtc.playback_status")
+
+
 def test_paused_it_says_so(media, winrt):
     media.show("playing", "Song", "Band", "Album")
     media.show("paused", "Song", "Band", "Album")
@@ -280,3 +292,19 @@ def test_on_windows_without_winrt_it_is_unavailable(monkeypatch, caplog):
         made = WindowsMedia(lambda action: None)
     assert not made.available
     assert any("winrt" in record.getMessage() for record in caplog.records)
+
+
+def test_covers_which_keep_failing_are_logged_once_until_one_works(media, winrt, caplog):
+    def cover_warnings():
+        return len([record for record in caplog.records if "cover" in record.getMessage()])
+
+    winrt.failing = "thumbnail"
+    with caplog.at_level(logging.WARNING):
+        media.show("playing", "One", "Band", "Album", cover=b"one")
+        media.show("playing", "Two", "Band", "Album", cover=b"two")
+        assert cover_warnings() == 1
+        winrt.failing = None
+        media.show("playing", "Three", "Band", "Album", cover=b"three")
+        winrt.failing = "thumbnail"
+        media.show("playing", "Four", "Band", "Album", cover=b"four")
+        assert cover_warnings() == 2

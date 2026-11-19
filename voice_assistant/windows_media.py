@@ -120,8 +120,10 @@ class WindowsMedia:
         self._token = None
         # Whether the controls are switched on, showing music.
         self._enabled = False
-        # Whether the last show failed, so a display which keeps failing is logged once.
+        # Whether the last show failed, so a display which keeps failing is logged once -
+        # and likewise the last cover.
         self._failing = False
+        self._cover_failing = False
         if self._backend is None:
             return
         try:
@@ -193,6 +195,17 @@ class WindowsMedia:
     def _show(self, state: str, track: str, artist: str, album: str, cover):
         """Shows the music, and switches the controls on if they're off. Called with the lock held."""
         backend, controls = self._backend, self._controls
+        # Switched on first, then the display and the status, the order the test on the PC
+        # on 19 November proved.
+        if not self._enabled:
+            controls.is_enabled = True
+            # Each on a line of its own: set together in one chained line, Windows left
+            # next and previous off without an error (docs/decisions/0030).
+            controls.is_play_enabled = True
+            controls.is_pause_enabled = True
+            controls.is_next_enabled = True
+            controls.is_previous_enabled = True
+            self._enabled = True
         updater = controls.display_updater
         # Each time, as clearing forgets it.
         updater.type = backend.MediaPlaybackType.MUSIC
@@ -206,25 +219,23 @@ class WindowsMedia:
         playing = state == "playing"
         controls.playback_status = (backend.MediaPlaybackStatus.PLAYING if playing
                                     else backend.MediaPlaybackStatus.PAUSED)
-        if not self._enabled:
-            controls.is_enabled = True
-            # Each on a line of its own: set together in one chained line, Windows left
-            # next and previous off without an error (docs/decisions/0030).
-            controls.is_play_enabled = True
-            controls.is_pause_enabled = True
-            controls.is_next_enabled = True
-            controls.is_previous_enabled = True
-            self._enabled = True
 
     def _thumbnail(self, cover: Optional[bytes]):
-        """The cover for the display, or None for none - also when it can't be made, which is logged."""
+        """
+        The cover for the display, or None for none - also when it can't be made, which is
+        logged once until a cover can be made again.
+        """
         if not cover:
             return None
         try:
-            return self._backend.thumbnail(cover)
+            thumbnail = self._backend.thumbnail(cover)
         except Exception as e:
-            logger.warning(f"Couldn't show the cover in Windows' media controls: {e}")
+            if not self._cover_failing:
+                logger.warning(f"Couldn't show the cover in Windows' media controls: {e}")
+            self._cover_failing = True
             return None
+        self._cover_failing = False
+        return thumbnail
 
     def _clear(self):
         """Clears what's shown and switches the controls off, if they're on. Called with the lock held."""
