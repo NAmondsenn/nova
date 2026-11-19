@@ -1,8 +1,8 @@
-# 0030: Music that moves between satellites, and notes on the computer
+# 0032: Music that moves between satellites, and notes on the computer
 
 19 November 2026 · Asked for by the user, built without questions at his word ("just get going") · Design: [the spec](../superpowers/specs/2026-11-19-music-moves-and-notes-design.md)
 
-Numbered 0030 as 0029 is another branch's (quiet-others, not pushed yet), so this is renumbered at the merge if that goes the other way round.
+Numbered 0032: 0029 (quiet while another speaks), 0030 (changing playlists and the calendar) and 0031 (Windows' media controls) are all published, and this was first numbered 0030 while 0029 was another branch's.
 
 **Context.** The user moves between the Pi and the PC in the bedroom, and the Mac is to come. He asked for the music to follow him ("play it on my Pi or change this to the PC") without starting again, and for something said at a computer to land there as a file he can open ("the PC and Mac satellite, when it's made, can create notes and it saves it to that device's downloads folder"). Both need what 0006 and 0026 did not: Nova has to know which satellite is which machine, in words he'd say. He chose "just get going" over questions, so every call below that is not in his words is mine, listed under "The calls" for him to overturn.
 
@@ -41,4 +41,4 @@ Numbered 0030 as 0029 is another branch's (quiet-others, not pushed yet), so thi
 - The Windows lookup of the Downloads folder (`SHGetKnownFolderPath` through ctypes) has never run on real Windows: a test replaces it. It falls back to `%USERPROFILE%\Downloads`, and any failure there means no notes rather than a crash, but only the PC can say it works (a live check).
 - A long "write me notes on ..." shares Claude's 1,024-token reply limit with its thinking, so a note of about 400 words may not fit. When it does not, the log says Claude stopped short (or gave no reply), nothing is saved, and Nova says "Sorry, that didn't work. Try asking again." Tests cannot say how often that happens (a live check).
 
-**Setting it up (his named jobs).** Merge `music-and-notes` and deploy the brain; update the Pi (so it says it is a Pi) and the PC with `scripts/deploy_pc.sh` (so it says it saves notes). Until a satellite is updated it is still found by its own name or a name on the page, and it gets no notes tool. Then his checks, in the release checklist's section 34 onwards: music from the Pi to the PC and back mid-song, new music on the other satellite, the PC asleep, "the computer" with page names, a note at the PC, and the page's "Also called" box.
+**Setting it up (his named jobs).** Merge `music-and-notes` and deploy the brain; update the Pi (so it says it is a Pi) and the PC with `scripts/deploy_pc.sh` (so it says it saves notes). Until a satellite is updated it is still found by its own name or a name on the page, and it gets no notes tool. Then his checks, in the release checklist's section 35 onwards: music from the Pi to the PC and back mid-song, new music on the other satellite, the PC asleep, "the computer" with page names, a note at the PC, and the page's "Also called" box.

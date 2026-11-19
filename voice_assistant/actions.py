@@ -36,6 +36,7 @@ from voice_assistant.google_calendar import named_by_address
 from voice_assistant.home_assistant import CANT_REACH, HomeAssistant, NotAllowed
 from voice_assistant.lists import NO_ANSWER, names_list
 from voice_assistant.navidrome import NavidromeError, NavidromeLibrary
+from voice_assistant.undo import LastChange
 
 # Logger setup
 logger = logging.getLogger(__name__)
@@ -273,7 +274,7 @@ def bare_acknowledgement(text: str) -> bool:
 
 
 def tool(description: str, needs: Union[str, Tuple[str, ...], None] = None, required: Sequence[str] = (),
-         for_model: bool = True, reads: bool = False, private: bool = False,
+         for_model: bool = True, reads: bool = False, private: bool = False, changes: bool = True,
          **parameters: Dict[str, Any]) -> Callable:
     """
     Declares an ActionExecutor method as a tool the model can call.
@@ -292,6 +293,12 @@ def tool(description: str, needs: Union[str, Tuple[str, ...], None] = None, requ
             answer goes back to the model rather than being said - see read_tools.
         private: Whether what it says is the user's alone, never to be in the model's
             history - see private_tools.
+        changes: Whether running it changes anything, so that once it has worked it's the
+            last thing Nova did, and "undo that" leaves the playlist or calendar change
+            before it alone - see ActionExecutor._keep_or_note. False for one which only
+            says something, e.g. what's on the calendar. A tool which reads never counts,
+            whatever this says. True when in doubt: one which isn't declared false only
+            ever stops an undo, never undoes the wrong thing.
         parameters: Each parameter's JSON schema, by name - the method's own
             keyword arguments, which it's called with.
 
@@ -300,9 +307,21 @@ def tool(description: str, needs: Union[str, Tuple[str, ...], None] = None, requ
     """
     def declare(method: Callable) -> Callable:
         method.tool = {"description": description, "needs": needs, "required": list(required),
-                       "for_model": for_model, "reads": reads, "private": private, "parameters": parameters}
+                       "for_model": for_model, "reads": reads, "private": private, "changes": changes,
+                       "parameters": parameters}
         return method
     return declare
+
+
+# Which song a playlist tool is about, the same for each of them.
+SONG_PARAMETER = {
+    "type": "string",
+    "enum": ["this", "last"],
+    "description": (
+        "'this' (the default) for the song playing, 'last' for the one before it - the song which "
+        "played just before, or has just ended. Only 'last' if the user says last, previous or before."
+    ),
+}
 
 
 def _things(items: Any) -> List[str]:
@@ -318,9 +337,9 @@ class ActionExecutor:
     def __init__(self, music=None, clock=None, volume=None, weather=None, home=None, memory=None, ntfy=None,
                  satellite: Optional[str] = None, batteries=None, lists=None, pc=None, calendar=None,
                  downloads=None, football=None, listening=None, wrapped=None, config=None, new_music=None,
-                 journeys=None, ring_on: Callable[[str], str] = lambda name: name,
+                 journeys=None, playlist_changes=None, ring_on: Callable[[str], str] = lambda name: name,
                  room_of: Callable[[str], List[str]] = lambda name: [name],
-                 room_players: Optional[Callable[[], List]] = None,
+                 room_players: Optional[Callable[[], List]] = None, last_change: Optional[LastChange] = None,
                  mover: Optional[Callable[[str], Dict]] = None,
                  elsewhere: Optional[Callable[[str], Tuple[Optional["ActionExecutor"], Optional[str]]]] = None,
                  spoken_name: Callable[[str], str] = lambda name: name,
@@ -360,6 +379,9 @@ class ActionExecutor:
                 if there isn't one - find_new_music plays that one by its id when it has it.
             journeys: Journeys, for how long a journey takes and when to leave for it, or None if
                 Home Assistant isn't set up.
+            playlist_changes: PlaylistChanges, which adds the song playing to playlists, takes it off,
+                makes playlists and likes songs by its rules, or None if there isn't one - the brain
+                always has one, so each playlist tool says it isn't set up only without it.
             ring_on: Given the satellite the user is talking to, the one a timer or alarm set
                 there rings on - itself, unless it's a push-to-talk satellite, which hands
                 them to an always-on one.
@@ -369,6 +391,8 @@ class ActionExecutor:
             room_players: Gives the music players of the satellites in the user's room
                 which are connected, this one's first - or None for this one's alone.
                 Pausing, resuming and the music's volume act on the room's music.
+            last_change: The LastChange "undo that" takes from, which the brain gives every satellite's
+                executor so there's one for the whole house, or None for one of its own.
             mover: Moves the music to the satellite the words name, e.g. "the PC" - given them,
                 gives what the brain says of it - or None if the music can't be moved from here.
             elsewhere: Given the words for a satellite, gives the executor of that satellite -
@@ -403,6 +427,7 @@ class ActionExecutor:
         self.config = config
         self.new_music = new_music
         self.journeys = journeys
+        self.playlist_changes = playlist_changes
         self.ring_on = ring_on
         self.room_of = room_of
         self.room_players = room_players or (lambda: [self.music])
@@ -414,6 +439,10 @@ class ActionExecutor:
         # What was last asked, and what the assistant said - or the last alert, and
         # all of it - for "send that to my phone". Kept up to date by the Conversation.
         self.last_answer: Optional[Tuple[str, str]] = None
+        # The last playlist or calendar change, for "undo that" - see _keep_or_note. Shared by every
+        # satellite when the brain gives it: with the PC and the Pi in one room, "cancel the dentist" at
+        # one and "add milk" at the other would otherwise leave "undo that" at the first putting it back.
+        self.last_change = last_change if last_change is not None else LastChange()
 
     def _ring_on_satellite(self) -> Optional[str]:
         """Returns the satellite a timer or alarm set now rings on - None if the user isn't at one in particular."""
@@ -537,7 +566,41 @@ class ActionExecutor:
         accepted = list(inspect.signature(method).parameters)[1:]
         params = {name: value for name, value in action.params.items() if name in accepted}
         reply = method(self, **params)
+        self._keep_or_note(action.tool, method, reply)
         return reply if isinstance(reply, ActionResult) else ActionResult.from_reply(reply)
+
+    def _keep_or_note(self, name: str, method: Callable, reply: Union[Dict, ActionResult]) -> None:
+        """
+        Keeps a change which has just been made for "undo that", or notes that something
+        else was done since the last one - "undo that" only reaches a change which was
+        the last thing done, so it never takes back the dentist when "that" was the milk.
+
+        A change says how to take it back with an "undo" in its reply, which only a success
+        has. A failure changed nothing, so it leaves the slot as it was - "add this to Gym"
+        refused leaves the add before it undoable - and so does a tool which doesn't change
+        anything, however it says what it found: "what's on Thursday?" after "cancel the
+        dentist" leaves that undoable. A tool may answer with an ActionResult of its own,
+        whose ok counts as success but which can't carry an undo.
+
+        Args:
+            name: The tool's name.
+            method: The tool.
+            reply: What it answered.
+        """
+        # Undoing touches nothing more: taking the change emptied the slot if it worked, and a
+        # refusal - "I've left it" - leaves it as it was, to be said the same again.
+        if name == "undo_last_change":
+            return
+        if isinstance(reply, ActionResult):
+            succeeded, undo = reply.ok, None
+        else:
+            succeeded, undo = bool(reply.get("success")), reply.get("undo")
+        if not succeeded:
+            return
+        if callable(undo):
+            self.last_change.keep(undo)
+        elif method.tool["changes"] and not method.tool["reads"]:
+            self.last_change.note_other()
 
     # Music
 
@@ -578,6 +641,16 @@ class ActionExecutor:
         if not others or self._has_paused_music(self.music):
             return self.music
         return next((player for player in others if self._has_paused_music(player)), self.music)
+
+    def _song_player(self):
+        """
+        The music player whose song a playlist change is about: the first in the user's room which is
+        playing, as pausing acts on it - else the one a bare "play" would carry on, which has music paused,
+        whoever paused it - else this one.
+        """
+        playing = next((player for player in [self.music] + self._others_in_room() if player and player.was_playing()),
+                       None)
+        return playing or self._resumes()
 
     @staticmethod
     def _has_paused_music(player) -> bool:
@@ -986,6 +1059,124 @@ class ActionExecutor:
             # It's playing where he asked, so this isn't a failure to say.
             logger.warning(f"Couldn't pause the music in the room: {e}")
 
+    # Playlists and liked songs - see playlist_changes.py
+
+    def _song_to_change(self, which: Optional[str],
+                        needs_song: bool = True) -> Tuple[Any, Optional[Dict], Optional[Dict]]:
+        """
+        The music player a playlist change is about, and the song on it - or why there isn't one to change.
+
+        The player is the first of the room's playing, as pausing is - else the room's paused one, as a bare
+        "play" carries on, for a song paused is the one playing, whoever paused it - so what's changed is the
+        song which is heard, and Navidrome is checked on it, not on this satellite's own player, which in a
+        room may be another. Only Navidrome has playlists Nova can change.
+
+        Args:
+            which: "this" for the song playing, "last" for the one before it; anything else is "this".
+            needs_song: False when no song is wanted, as for making an empty playlist.
+
+        Returns:
+            The player, the song (None unless one is wanted) and None - or None, None and what to say instead.
+        """
+        if self.playlist_changes is None:
+            return None, None, {"success": False, "message": "Changing playlists isn't set up."}
+        offline = self._music_offline()
+        if offline:
+            return None, None, offline
+        player = self._song_player()
+        if getattr(player, "name", None) != "Navidrome":
+            return None, None, {"success": False, "message": "Changing playlists only works with Navidrome."}
+        if not needs_song:
+            return player, None, None
+        last = which == "last"
+        song = player.song_at("last" if last else "this")
+        if song is None:
+            nothing = "There isn't a last song." if last else "Nothing's playing."
+            return None, None, {"success": False, "message": nothing}
+        return player, song, None
+
+    @tool(
+        "Put the song playing on one or more of the user's playlists, for 'add this to Gym', 'put this on my car "
+        "playlist and chill' or 'add the last song to Gym'. Pass each playlist name roughly as the user said it: it's "
+        "matched loosely. 'liked songs' may be passed as a name, for 'add this to my liked songs'. Never make a "
+        "playlist unless the user says new or make: if they haven't got the one they named, this offers to make it "
+        "itself, so never call make_playlist for 'add this to X'. What was done is said for you, so just reply "
+        "'Okay.'",
+        needs="music",
+        playlists={
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "The playlists, each as the user said it, e.g. ['gym', 'car'] - or 'liked songs'.",
+        },
+        song=SONG_PARAMETER,
+    )
+    def add_to_playlists(self, playlists: Optional[List[str]] = None, song: Optional[str] = None):
+        player, found, refusal = self._song_to_change(song)
+        return refusal or self.playlist_changes.add(player, found, _things(playlists))
+
+    @tool(
+        "Take the song playing off one or more of the user's playlists, for 'take this off Gym', 'remove this from "
+        "my car playlist' or 'take the last song off chill'. Pass each playlist name roughly as the user said it: it's "
+        "matched loosely. 'liked songs' may be passed as a name, which unlikes the song. What was done is said for "
+        "you, so just reply 'Okay.'",
+        needs="music",
+        playlists={
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "The playlists, each as the user said it, e.g. ['gym', 'car'] - or 'liked songs'.",
+        },
+        song=SONG_PARAMETER,
+    )
+    def take_off_playlists(self, playlists: Optional[List[str]] = None, song: Optional[str] = None):
+        player, found, refusal = self._song_to_change(song)
+        return refusal or self.playlist_changes.remove(player, found, _things(playlists))
+
+    @tool(
+        "Make a new playlist, only for 'make a playlist called X' or 'add this to a new playlist called X' - for "
+        "that, with_song is true. For 'add this to X' with no 'new' or 'make', use add_to_playlists, which offers to "
+        "make X if there isn't one. What was done is said for you, so just reply 'Okay.'",
+        needs="music",
+        name={"type": "string", "description": "The playlist's name, as the user said it."},
+        with_song={
+            "type": "boolean",
+            "description": "True to put the song playing on it, for 'add this to a new playlist'. Leave out for an "
+                           "empty one.",
+        },
+        song=SONG_PARAMETER,
+    )
+    def make_playlist(self, name: Optional[str] = None, with_song: Optional[bool] = None,
+                      song: Optional[str] = None):
+        player, found, refusal = self._song_to_change(song, needs_song=bool(with_song))
+        return refusal or self.playlist_changes.make(player, name or "", found)
+
+    @tool(
+        "Like the song playing, or unlike it, for 'like this', 'like the last song' or 'unlike this'. What was done "
+        "is said for you, so just reply 'Okay.'",
+        needs="music",
+        like={"type": "boolean", "description": "True (the default) to like it, False to unlike it."},
+        song=SONG_PARAMETER,
+    )
+    def like_song(self, like: Optional[bool] = None, song: Optional[str] = None):
+        player, found, refusal = self._song_to_change(song)
+        return refusal or self.playlist_changes.like(player, found, True if like is None else bool(like))
+
+    # Only ever run by the conversation, on the user's yes to add_to_playlists' "Want me to make it?" - so Claude,
+    # which isn't offered it, can't make a playlist the user didn't say new or make for. It makes it with the song
+    # which was asked about, carried in the offer, and never the one playing by the time of the yes.
+    @tool(
+        "Make the playlist which was offered, once the user has said yes.",
+        needs="music",
+        for_model=False,
+        name={"type": "string", "description": "The playlist to make, as the user said it."},
+        song={"type": "object", "description": "The song to put on it - its id, title and artist."},
+    )
+    def make_offered_playlist(self, name: Optional[str] = None, song: Optional[Dict] = None):
+        player, _, refusal = self._song_to_change(None, needs_song=False)
+        if refusal:
+            return refusal
+        wanted = song if isinstance(song, dict) and song.get("id") else None
+        return self.playlist_changes.make(player, name or "", wanted)
+
     # Timers, reminders and alarms
 
     @tool(
@@ -1049,7 +1240,7 @@ class ActionExecutor:
     def name_reminder(self, label: Optional[str] = None):
         return self.clock.name_pending_reminder(label)
 
-    @tool("Report which timers are running and how long is left on each.", needs="clock")
+    @tool("Report which timers are running and how long is left on each.", needs="clock", changes=False)
     def list_timers(self):
         return self.clock.list_timers()
 
@@ -1134,7 +1325,8 @@ class ActionExecutor:
         ring = self._ring_on_satellite()
         return self._say_where_it_rings(self.clock.set_alarm(hour, minute, repeat or None, satellite=ring), ring)
 
-    @tool("Report which alarms are set, for 'what alarms do I have' or 'list my alarms'.", needs="clock")
+    @tool("Report which alarms are set, for 'what alarms do I have' or 'list my alarms'.", needs="clock",
+          changes=False)
     def list_alarms(self):
         return self.clock.list_alarms()
 
@@ -1142,6 +1334,7 @@ class ActionExecutor:
         "Report how long until the next alarm, for 'how long until my alarm' or "
         "'when's my next alarm'.",
         needs="clock",
+        changes=False,
     )
     def next_alarm(self):
         return self.clock.next_alarm()
@@ -1321,6 +1514,7 @@ class ActionExecutor:
         "need a coat?' or 'will it rain later?'. The forecast it returns is what gets "
         "spoken, so just reply 'Okay.'",
         needs="weather",
+        changes=False,
         day={
             "type": "string",
             "enum": ["today", "tomorrow"],
@@ -1578,6 +1772,7 @@ class ActionExecutor:
         "dentist soon?' - give what to search for, and today as the first day, rather "
         "than reading whole days. What's on is read out to the user, so just reply 'Okay.'",
         needs="calendar",
+        changes=False,
         required=["start"],
         start={"type": "string", "description": "The first day, as YYYY-MM-DD."},
         days={"type": "integer", "description": "How many days from it, 1 to 14. Leave out for one day."},
@@ -1602,6 +1797,7 @@ class ActionExecutor:
         "for 'next'), and how many days, or for 'next', how many times. The times are read "
         "out to the user, so just reply 'Okay.'",
         needs="calendar",
+        changes=False,
         required=["activity", "start"],
         activity={
             "type": "string",
@@ -1641,6 +1837,94 @@ class ActionExecutor:
     def add_to_calendar(self, summary: Optional[str] = None, start: Optional[str] = None, end: Optional[str] = None,
                         all_day: Optional[bool] = None, calendar: Optional[str] = None):
         return self.calendar.add(summary or "", start or "", end=end, all_day=all_day, calendar=calendar)
+
+    @tool(
+        "Remove an event from the user's Google calendar, for 'cancel the dentist', 'take the gym off my "
+        "calendar on Friday' or 'get rid of my yoga classes'. Give search, and the day and time only when the "
+        "user said them. Give following only for 'all of them', 'every week' or 'from now on' - it removes "
+        "only that one and the ones after it, never earlier ones. What was done is said for you, so just reply "
+        "'Okay.' When Nova lists several and asks which, call again with the day, time or calendar the user "
+        "picks.",
+        needs="calendar",
+        required=["search"],
+        search={"type": "string", "description": "A word from the event's name as it'd be written on the "
+                                                 "calendar, e.g. 'dentist' or 'yoga' - putting right anything "
+                                                 "clearly misheard."},
+        day={"type": "string", "description": "Only when the user said which day, for the event as it is now: "
+                                              "YYYY-MM-DD, worked out from today's date."},
+        time={"type": "string", "description": "Only when the user said what time, for the event as it is now: "
+                                               "HH:MM, 24-hour."},
+        following={"type": "boolean", "description": "True only for 'all of them', 'every week' or 'from now "
+                                                     "on'. Leave out for just the one."},
+        calendar={"type": "string", "description": "The calendar the user named, as they said it, only when they "
+                                                   "named one or Nova asked which."},
+    )
+    def remove_from_calendar(self, search: Optional[str] = None, day: Optional[str] = None,
+                             time: Optional[str] = None, following: Optional[bool] = None,
+                             calendar: Optional[str] = None):
+        return self._calendar_event(self.calendar.remove, day, search=search or "", at=time,
+                                    following=following is True, calendar=calendar)
+
+    @tool(
+        "Move or rename an event on the user's Google calendar, for 'move the dentist to Friday at 4', 'push my "
+        "shift back an hour' or 'call my Tuesday meeting Planning'. Give search, and the day and time only when "
+        "the user said them, for the event as it is now. new_start and new_end are local 'YYYY-MM-DD HH:MM', "
+        "'YYYY-MM-DD' for the day alone, which keeps its time, or 'HH:MM' for the time alone, which keeps its day. "
+        "When only the time changes, give the time alone - never guess a day - and with following, always the "
+        "time alone unless the user named a new day. Leave out whatever isn't changing. Give following only for 'all of them', "
+        "'every week' or 'from now on' - it changes only that one and the ones after it, never earlier ones, and "
+        "only their time, not their days. What was done is said for you, so just reply 'Okay.' When Nova lists "
+        "several and asks which, call again with the day, time or calendar the user picks.",
+        needs="calendar",
+        required=["search"],
+        search={"type": "string", "description": "A word from the event's name as it'd be written on the "
+                                                 "calendar, e.g. 'dentist' or 'yoga' - putting right anything "
+                                                 "clearly misheard."},
+        day={"type": "string", "description": "Only when the user said which day, for the event as it is now: "
+                                              "YYYY-MM-DD, worked out from today's date."},
+        time={"type": "string", "description": "Only when the user said what time, for the event as it is now: "
+                                               "HH:MM, 24-hour."},
+        new_start={"type": "string", "description": "When it should start: 'YYYY-MM-DD HH:MM' worked out from "
+                                                    "today's date, 'YYYY-MM-DD' for a day alone, or 'HH:MM' for a "
+                                                    "time alone."},
+        new_end={"type": "string", "description": "When it should end, only when the user said - an end day is "
+                                                  "included, and 'HH:MM' alone is on the start's day."},
+        new_name={"type": "string", "description": "What it should be called, as it'd be written on the "
+                                                   "calendar, e.g. 'Planning'."},
+        following={"type": "boolean", "description": "True only for 'all of them', 'every week' or 'from now "
+                                                     "on'. Leave out for just the one."},
+        calendar={"type": "string", "description": "The calendar the user named, as they said it, only when they "
+                                                   "named one or Nova asked which."},
+    )
+    def change_calendar_event(self, search: Optional[str] = None, day: Optional[str] = None,
+                              time: Optional[str] = None, new_start: Optional[str] = None,
+                              new_end: Optional[str] = None, new_name: Optional[str] = None,
+                              following: Optional[bool] = None, calendar: Optional[str] = None):
+        return self._calendar_event(self.calendar.change, day, search=search or "", at=time, start=new_start,
+                                    end=new_end, summary=new_name, following=following is True,
+                                    calendar=calendar)
+
+    @staticmethod
+    def _calendar_event(act, day: Optional[str], **asked) -> Dict:
+        """
+        Removes or changes an event on the day the model gave, if it gave one which can be read.
+
+        Args:
+            act: The calendar's remove or change.
+            day: The event's day as the model gave it, 'YYYY-MM-DD', or None for the user not
+                having said one.
+            **asked: The rest of what to pass on.
+
+        Returns:
+            What the calendar said, or that the day wasn't caught.
+        """
+        when = None
+        if day:
+            try:
+                when = date.fromisoformat(day)
+            except (TypeError, ValueError):
+                return {"success": False, "message": "I didn't catch which day you meant."}
+        return act(day=when, **asked)
 
     @staticmethod
     def _calendar_days(start: Optional[str], days: Optional[int], read) -> Dict:
@@ -1723,6 +2007,7 @@ class ActionExecutor:
     @tool(
         "Read a list.",
         needs="lists",
+        changes=False,
         for_model=False,
         list={"type": "string", "description": "The list, as the user said it, or left out for the main one."},
     )
@@ -1851,6 +2136,7 @@ class ActionExecutor:
         "Say what you remember about the user, for 'what do you know about me?' or "
         "'what have I told you?'. It's read out for you, so just reply 'Okay.'",
         needs="memory",
+        changes=False,
     )
     def list_memories(self):
         return self.memory.describe()
@@ -1863,6 +2149,7 @@ class ActionExecutor:
         "Give the device as the user said it, or leave it out for all of them. It's read out "
         "for you, so just reply 'Okay.'",
         needs="batteries",
+        changes=False,
         device={
             "type": "string",
             "description": ("Which device, as the user said it, e.g. 'mac', 'phone', 'tablet' or "
@@ -2174,6 +2461,21 @@ class ActionExecutor:
         "Read out the whole of the last notification, for 'tell me more' or 'what was that "
         "about?' just after one was said. It's read out for you, so just reply 'Okay.'",
         needs="ntfy",
+        changes=False,
     )
     def tell_me_more(self):
         return self.ntfy.tell_more()
+
+    # Undoing
+
+    @tool(
+        "Undo the last playlist or calendar change you made - adding, removing, moving or renaming, a new "
+        "playlist, or a like - for 'undo that', 'put it back' or 'take that back'. It only reaches that change "
+        "while it's the last thing done. What it did is said for you, so just reply 'Okay.'",
+        needs=None,
+    )
+    def undo_last_change(self):
+        taken = self.last_change.take()
+        if isinstance(taken, str):
+            return {"success": False, "message": taken}
+        return taken()

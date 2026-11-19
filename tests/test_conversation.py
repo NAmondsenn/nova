@@ -20,6 +20,7 @@ from voice_assistant.ha_registry import Entry, Snapshot
 from voice_assistant.intents import LocalIntents
 from voice_assistant.llm import LLMHandler
 from voice_assistant.pc import PCPower
+from voice_assistant.playlist_changes import PlaylistChanges
 from voice_assistant.timeline import Timeline
 
 
@@ -1286,3 +1287,61 @@ def test_the_done_chime_is_switched_off_straight_away():
     assert conversation.handle("pause").sounds == [("success_chime.wav", "general")]
     chime[0] = False
     assert conversation.handle("pause").sounds == []
+
+
+# Making the playlist offered for "add this to Jim"
+
+class PlaylistNavidrome:
+    """
+    Stands in for NavidromePlayer, which has a song playing, before it another, and no playlists, noting
+    what's made, what's put on one and what's deleted.
+    """
+
+    name = "Navidrome"
+    needs_internet = False
+
+    def __init__(self):
+        self.songs = {"this": {"id": "s1", "title": "Endless", "artist": "Made Up Band"}, "last": None}
+        self.made, self.added, self.deleted = [], [], []
+
+    def song_at(self, which):
+        return self.songs[which]
+
+    def was_playing(self):
+        return True
+
+    def all_playlists(self):
+        return []
+
+    def make_playlist(self, name):
+        self.made.append(name)
+        return "p1"
+
+    def add_songs(self, playlist_id, song_ids):
+        self.added.append((playlist_id, song_ids))
+
+    def delete_playlist(self, playlist_id):
+        self.deleted.append(playlist_id)
+
+
+def test_a_yes_to_making_the_playlist_is_kept_for_undo():
+    # Review Focus 4: a change made on a yes is the last thing done, so "undo that" takes it back.
+    navidrome = PlaylistNavidrome()
+    actions = ActionExecutor(music=navidrome, playlist_changes=PlaylistChanges(lambda: None, lambda: None))
+    add = Action("add_to_playlists", {"playlists": ["Jim"]}, from_model=True)
+    llm = FakeLLM(_answer("Okay.", add), _answer("Okay.", Action("undo_last_change", from_model=True)))
+    conversation = _conversation(llm=llm, actions=actions)
+
+    reply = conversation.handle("add this to Jim")
+    assert (reply.say, reply.listen_again) == ("You haven't got a playlist called Jim. Want me to make it?", True)
+    assert navidrome.made == []
+
+    # The next song started before the yes: Jim is still made with the one which was asked about.
+    navidrome.songs["this"] = {"id": "s2", "title": "Another", "artist": "Made Up Band"}
+    reply = conversation.handle("yes", follow_up=True)
+    assert reply.say == "Made Jim with Endless on it."
+    assert navidrome.made == ["Jim"] and navidrome.added == [("p1", ["s1"])]
+    assert llm.asked == ["add this to Jim"]
+
+    assert conversation.handle("undo that").say == "Deleted Jim."
+    assert navidrome.deleted == ["p1"]

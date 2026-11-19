@@ -180,7 +180,8 @@ class SatelliteLink:
     def __init__(self, address: str, name: str, hostname: str, password: str, sample_rate: int,
                  unclean: bool, on_message: Callable[[Dict, bytes], None],
                  on_connected: Callable[[bool], None], speaker: Optional[str] = None,
-                 push_to_talk: bool = False, machine: Optional[str] = None, saves_notes: bool = False):
+                 push_to_talk: bool = False, machine: Optional[str] = None, saves_notes: bool = False,
+                 media_controls: bool = False):
         """
         Args:
             address: The brain's "name:port" on the tailnet, or "[address]:port" for an
@@ -200,6 +201,8 @@ class SatelliteLink:
             machine: What kind of computer it runs on, e.g. "pc" - said in every hello,
                 or left out if None.
             saves_notes: Whether it saves notes in a Downloads folder, said in every hello.
+            media_controls: Whether this satellite shows its music in Windows' media
+                controls, said in every hello.
 
         Raises:
             ConfigError: The address can't be one.
@@ -213,6 +216,7 @@ class SatelliteLink:
         self.push_to_talk = push_to_talk
         self.machine = machine
         self.saves_notes = saves_notes
+        self.media_controls = media_controls
         self._unclean = unclean
         self._on_message = on_message
         self._on_connected = on_connected
@@ -346,7 +350,7 @@ class SatelliteLink:
         stream = Stream(sock)
         try:
             greet(stream, self.name, self.hostname, self.password, self.sample_rate, self._unclean,
-                  self.speaker, self.push_to_talk, self.machine, self.saves_notes)
+                  self.speaker, self.push_to_talk, self.machine, self.saves_notes, self.media_controls)
         except BaseException:
             sock.close()
             raise

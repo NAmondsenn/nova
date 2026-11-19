@@ -2,8 +2,8 @@
 Launcher Test
 Checks the PC's launcher waits longer each time the satellite fails quickly, goes back
 to the shortest wait after a run which lasted, forgets the last logon's running mark,
-keeps what the satellite writes to stderr, to about 2 MB, and that the settings install.ps1 writes for
-the PC are ones Nova accepts.
+keeps what the satellite writes to stderr, to about 2 MB, lets only one launcher run, and that the
+settings install.ps1 writes for the PC are ones Nova accepts.
 """
 
 import importlib.machinery
@@ -99,6 +99,9 @@ def launched(tmp_path, monkeypatch):
             launcher.main()
         return starts
 
+    # For a test to fake Windows' kernel32 by, and to see how many starts there were.
+    run.launcher = launcher
+    run.starts = starts
     yield run, data
     for name in ("launcher", "satellite-stderr"):
         for handler in list(logging.getLogger(name).handlers):
@@ -175,3 +178,60 @@ def test_the_settings_install_writes_are_ones_nova_accepts(tmp_path):
     assert section("backend")["satellite"] == "pc"
     assert section("satellite")["trigger"] == "push_to_talk"
     assert section("audio")["echo_cancellation"] is False
+
+
+class FakeKernel32:
+    """Stands in for Windows' kernel32: makes a named mutex, saying whether one of that name was already there."""
+
+    def __init__(self, already=False, handle=4242):
+        self.already = already
+        self.handle = handle
+        self.made = []
+
+    def CreateMutexW(self, security, owned, name):
+        self.made.append((security, owned, name))
+        return self.handle
+
+    def GetLastError(self):
+        return 183 if self.already else 0
+
+
+def test_a_second_launcher_exits_without_starting_a_satellite(launched, caplog):
+    # As opening the Nova shortcut from the Start menu would make, while the logon's runs.
+    run, data = launched
+    kernel32 = FakeKernel32(already=True)
+    run.launcher._kernel32 = lambda: kernel32
+    (data / "logs").mkdir(parents=True)
+    # The running satellite's mark, which isn't this launcher's to take away.
+    (data / "running").write_text("{}")
+    run.launcher.main()
+    assert run.starts == []
+    assert (data / "running").exists()
+    assert "already running" in (data / "logs" / "launcher.log").read_text()
+    assert kernel32.made == [(None, False, "Local\\NovaSatelliteLauncher")]
+
+
+def test_the_first_launcher_keeps_its_mutex_and_carries_on(launched):
+    run, data = launched
+    kernel32 = FakeKernel32()
+    run.launcher._kernel32 = lambda: kernel32
+    starts = run()
+    assert len(starts) == 2
+    assert kernel32.made == [(None, False, "Local\\NovaSatelliteLauncher")]
+    # Kept for as long as the launcher runs, so the next one finds it.
+    assert run.launcher._mutex == 4242
+
+
+def test_a_mutex_which_cant_be_made_still_starts_the_satellite(launched):
+    # Better two launchers than none.
+    run, data = launched
+    run.launcher._kernel32 = lambda: FakeKernel32(handle=None)
+    assert len(run()) == 2
+    assert "Couldn't" in (data / "logs" / "launcher.log").read_text()
+
+
+def test_off_windows_there_is_no_mutex_and_the_launcher_carries_on(launched):
+    # As on the Pi, where the tests run: there's no kernel32.
+    run, data = launched
+    assert run.launcher._kernel32() is None
+    assert len(run()) == 2

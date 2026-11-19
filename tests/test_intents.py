@@ -722,6 +722,29 @@ def test_a_thing_is_only_left_to_claude_when_it_points_back(text, item):
     assert _actions(text) == expected
 
 
+@pytest.mark.parametrize("text", [
+    "Add the last song to Gym.", "Take the song before off car.", "Add this song to gym.",
+    "Add the previous track to my gym list.", "Put the last song on my car playlist.",
+    "Add the song before that to chill.", "Take the last track off my gym list.", "Add the last song to my playlist.",
+    # Said by what it is doing or where it is, not as a song.
+    "Add what's playing to Gym.", "Add what is playing to Gym.", "Add the one playing to Gym.",
+    "Add the one before to Gym.", "Take the one before off Gym.",
+])
+def test_a_song_pointed_at_is_never_put_on_a_to_do_list(text):
+    # A song isn't a thing for a list: it's Claude's, which has the playlists.
+    assert _actions(text) is None
+
+
+def test_a_thing_is_still_a_lists_if_its_only_like_a_song():
+    assert _actions("Add milk to my shopping list.") == [Action("add_to_list", {
+        "item": "milk", "list": "my shopping list", "command": "add milk to my shopping list"})]
+    # A song's name isn't a pointer at the song, and nor is a song which isn't the one playing.
+    for item in ("a new song", "the song of the summer", "track pants"):
+        assert _actions(f"Add {item} to my wish list.") == [Action("add_to_list", {
+            "item": item, "list": "my wish list", "command": f"add {item} to my wish list"})]
+    assert _actions("Take the milk off my shopping list.") is not None
+
+
 # The PC - see pc.py
 
 @pytest.mark.parametrize("text, action", [

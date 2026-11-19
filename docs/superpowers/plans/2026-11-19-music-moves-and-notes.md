@@ -195,9 +195,9 @@ Page test: the Satellites row shows "Raspberry Pi", "PC" or "Mac" for those mach
 ### Task 8: The record
 
 **Files:**
-- Create: `docs/decisions/0030-music-that-moves-and-notes-on-the-computer.md`
+- Create: `docs/decisions/0032-music-that-moves-and-notes-on-the-computer.md`
 - Modify: `docs/release-checklist.md` (a new numbered hand-check section), `README.md` (the features list, one line each)
 
-- [ ] **Step 1: Write the decision record** in the shape of 0026 (Context, Decision, The calls, Not done), from the spec and the commits; it notes that 0029 is another branch's.
+- [ ] **Step 1: Write the decision record** in the shape of 0026 (Context, Decision, The calls, Not done), from the spec and the commits; it first noted that 0029 was another branch's, and at the merge it was renumbered 0032.
 - [ ] **Step 2: Add the hand checks:** move music Pi → PC and back mid-song (same place, same queue, the source silent); "play Drake on the PC" from the Pi; moving to the PC while it's asleep; "computer" with page names; a note at the PC (file in Downloads, opens in Notepad, CRLF), a second with the same title, "add milk to my notes" still the list; the page's "Also called" box.
-- [ ] **Step 3: Commit** — "Record decision 0030 and its hand checks"
+- [ ] **Step 3: Commit** — "Record decision 0030 and its hand checks" (renumbered 0032 at the merge)

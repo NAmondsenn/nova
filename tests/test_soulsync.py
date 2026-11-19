@@ -12,8 +12,9 @@ import pytest
 import requests
 
 from voice_assistant import network
-from voice_assistant.soulsync import (MCP_TIMEOUT, PICTURE_MOST, REQUEST_TIMEOUT, SEARCH_TIMEOUT, AlbumRequest,
-                                      SongRequest, SoulSync, SoulSyncAdmin, SoulSyncError, pick_album, pick_track)
+from voice_assistant.soulsync import (KEY_REFUSED, MCP_TIMEOUT, PICTURE_MOST, REQUEST_TIMEOUT, SEARCH_TIMEOUT,
+                                      AlbumRequest, SongRequest, SoulSync, SoulSyncAdmin, SoulSyncError, pick_album,
+                                      pick_track)
 
 URL = "http://soulsync.local:8008"
 RECORDED_TRACK_COUNT = 11
@@ -127,6 +128,9 @@ class FakeSoulSync:
         # Each DELETE as (address, anything sent with it, headers), and what each address answers.
         self.deleted = []
         self.removals = {}
+        # Each PATCH as (address, body, headers), and what each address answers.
+        self.patched = []
+        self.patches = {}
 
     def get(self, url, params=None, timeout=None, stream=False, allow_redirects=True):
         self.timeouts.append(timeout)
@@ -143,6 +147,13 @@ class FakeSoulSync:
             raise self.fail
         self.deleted.append((url, more, dict(self.headers)))
         return FakeResponse(*self.removals.get(url, (404, {"success": False, "error": {"code": "NOT_FOUND"}})))
+
+    def patch(self, url, json=None, timeout=None):
+        self.timeouts.append(timeout)
+        if self.fail:
+            raise self.fail
+        self.patched.append((url, copy.deepcopy(json), dict(self.headers)))
+        return FakeResponse(*self.patches.get(url, (200, {"success": True})))
 
     def post(self, url, json=None, timeout=None):
         self.timeouts.append(timeout)
@@ -1058,3 +1069,106 @@ def test_unfollow_removes_the_row_by_one_of_its_provider_ids(soulsync, http):
     http.answers[WATCH_REMOVE] = (500, {"success": False, "error": "Failed to remove artist from watchlist"})
     with pytest.raises(SoulSyncError):
         soulsync.unfollow(_watched_row(8, "Made Up Artist", deezer_artist_id="1002"))
+
+
+# The playlists SoulSync remakes and mirrors, which Nova leaves alone or switches to append only before adding
+
+REMADE = f"{URL}/api/personalized/playlists"
+MIRRORS = f"{URL}/api/mirrored-playlists"
+MIRROR_PREFERENCES = f"{URL}/api/mirrored-playlists/3/preferences"
+BEARER = {"Authorization": "Bearer the-key"}
+
+
+def _mirror(mirror_id, name, server_id=None, mode=None, **more):
+    """A mirror as GET /api/mirrored-playlists lists it, with a few of its many other keys."""
+    return {"id": mirror_id, "source": "spotify", "source_playlist_id": f"src-{mirror_id}", "name": f"{name} (source)",
+            "track_count": 12, "server_playlist_id": server_id, "sync_name": name, "sync_mode": mode, **more}
+
+
+def test_the_playlists_soulsync_remakes_are_named(soulsync, http):
+    http.pages[REMADE] = FakeResponse(200, {"playlists": [
+        {"id": "daily_mix_1", "kind": "daily_mix", "variant": "1", "name": "Daily Mix 1", "track_count": 50},
+        {"name": "Hidden Gems"}]})
+    assert soulsync.remade_playlists() == ["Daily Mix 1", "Hidden Gems"]
+    assert http.fetched == [(REMADE, {}, BEARER, {"stream": False, "redirects": True})]
+    assert http.timeouts == [REQUEST_TIMEOUT]
+
+
+def test_the_mirrors_say_which_navidrome_playlist_each_writes(soulsync, http):
+    http.pages[MIRRORS] = FakeResponse(200, [_mirror(3, "Gym", "p1"), _mirror(4, "Road Trip", None, "append")])
+    assert soulsync.mirrors() == [{"id": 3, "server_playlist_id": "p1", "sync_name": "Gym", "sync_mode": None},
+                                  {"id": 4, "server_playlist_id": None, "sync_name": "Road Trip",
+                                   "sync_mode": "append"}]
+    assert http.fetched == [(MIRRORS, {}, BEARER, {"stream": False, "redirects": True})]
+    assert http.timeouts == [REQUEST_TIMEOUT]
+
+
+def test_no_mirrors_is_an_empty_list(soulsync, http):
+    http.pages[MIRRORS] = FakeResponse(200, [])
+    assert soulsync.mirrors() == []
+
+
+def test_a_mirror_is_switched_to_append_only(soulsync, http):
+    soulsync.set_append(3)
+    assert http.patched == [(MIRROR_PREFERENCES, {"sync_mode": "append"}, BEARER)]
+    assert http.timeouts == [REQUEST_TIMEOUT]
+
+
+@pytest.mark.parametrize("answer", [(204, None), (200, {}), (200, {"success": True, "message": "Updated"})])
+def test_an_append_answered_with_any_2xx_is_done(soulsync, http, answer):
+    # The shape of its answer isn't known, so only an error in it, or a status, is taken for failing.
+    http.patches[MIRROR_PREFERENCES] = answer
+    soulsync.set_append(3)
+    assert len(http.patched) == 1
+
+
+@pytest.mark.parametrize("answer", [(500, {"success": False, "error": "made up"}), (404, None),
+                                    (200, {"success": False, "error": "Mirrored playlist not found"})])
+def test_an_append_which_failed_is_an_error(soulsync, http, answer):
+    http.patches[MIRROR_PREFERENCES] = answer
+    with pytest.raises(SoulSyncError):
+        soulsync.set_append(3)
+
+
+def test_a_refused_key_or_an_odd_answer_is_an_error(soulsync, http):
+    http.pages[REMADE] = FakeResponse(401, NO_KEY[1])
+    http.pages[MIRRORS] = FakeResponse(401, NO_KEY[1])
+    http.patches[MIRROR_PREFERENCES] = NO_KEY
+    for ask in (soulsync.remade_playlists, soulsync.mirrors, lambda: soulsync.set_append(3)):
+        with pytest.raises(SoulSyncError) as error:
+            ask()
+        assert error.value.reason == KEY_REFUSED
+
+    # A key it won't let read is the same key to check, even with no JSON to say so.
+    http.pages[MIRRORS] = FakeResponse(403, None)
+    with pytest.raises(SoulSyncError) as error:
+        soulsync.mirrors()
+    assert error.value.reason == KEY_REFUSED
+
+    # A dict where the list of mirrors should be, and a list, or a dict with no playlists, where the other is.
+    http.pages[MIRRORS] = FakeResponse(200, {"mirrors": []})
+    with pytest.raises(SoulSyncError):
+        soulsync.mirrors()
+    for odd in ([], {"success": True}, {"playlists": "Daily Mix 1"}):
+        http.pages[REMADE] = FakeResponse(200, odd)
+        with pytest.raises(SoulSyncError):
+            soulsync.remade_playlists()
+
+
+@pytest.mark.parametrize("answer", [FakeResponse(500, [_mirror(3, "Gym")]), FakeResponse(200, None),
+                                    FakeResponse(200, {"success": False, "error": "made up"}),
+                                    # A row which isn't a mirror, or has no id to switch it by.
+                                    FakeResponse(200, [_mirror(3, "Gym"), "not a mirror"]),
+                                    FakeResponse(200, [{"sync_name": "Gym", "sync_mode": None}])])
+def test_mirrors_which_cant_be_read_as_a_list_of_mirrors_are_an_error(soulsync, http, answer):
+    http.pages[MIRRORS] = answer
+    with pytest.raises(SoulSyncError):
+        soulsync.mirrors()
+
+
+def test_soulsync_out_of_reach_is_an_error_for_each(soulsync, http, caplog):
+    http.fail = requests.ConnectionError("Authorization: Bearer the-key")
+    for ask in (soulsync.remade_playlists, soulsync.mirrors, lambda: soulsync.set_append(3)):
+        with pytest.raises(SoulSyncError) as error:
+            ask()
+        assert error.value.reason == "SoulSync isn't answering." and "the-key" not in caplog.text

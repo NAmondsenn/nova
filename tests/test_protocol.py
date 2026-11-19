@@ -112,7 +112,8 @@ def test_the_handshake_admits_a_satellite_which_knows_its_password():
 
     assert outcome["brain"] == {"name": "bedroom", "hostname": "home-assistant",
                                 "sample_rate": 48000, "unclean": False, "speaker": None,
-                                "push_to_talk": False, "machine": None, "saves_notes": False}
+                                "push_to_talk": False, "machine": None, "saves_notes": False,
+                                "media_controls": False}
     assert outcome["satellite"] is None
     assert sent == ["challenge", "ready"]
 
@@ -236,6 +237,33 @@ def test_a_hello_whose_push_to_talk_isnt_true_or_false_is_refused(said):
             closing.close()
 
 
+def test_hello_says_media_controls_only_when_there_are_some():
+    assert _hello_sent(media_controls=True)["media_controls"] is True
+    assert "media_controls" not in _hello_sent()
+    assert "media_controls" not in _hello_sent(media_controls=False)
+
+
+def test_admit_reads_media_controls():
+    assert _admitted(media_controls=True)["media_controls"] is True
+    assert _admitted()["media_controls"] is False
+    assert _admitted(media_controls=False)["media_controls"] is False
+
+
+@pytest.mark.parametrize("said", ["yes", 1, 0, None, ["x"]], ids=["text", "one", "zero", "null", "list"])
+def test_a_hello_whose_media_controls_isnt_true_or_false_is_refused(said):
+    near, far = socket.socketpair()
+    far.settimeout(1)
+    satellite_stream, brain_stream = near.makefile("rwb"), far.makefile("rwb")
+    try:
+        protocol.send(satellite_stream, "hello", name="bedroom", hostname="h", sample_rate=48000,
+                      unclean=False, nonce="0" * 32, media_controls=said)
+        with pytest.raises(protocol.ProtocolError):
+            protocol.admit(brain_stream, {"bedroom": PASSWORD}.get)
+    finally:
+        for closing in (brain_stream, satellite_stream, near, far):
+            closing.close()
+
+
 @pytest.mark.parametrize("nonce", ["z" * 32, "0" * 31 + "g", " " * 32, "0x" + "0" * 30, "\u0660" * 32, "0" * 31, "0" * 33],
                          ids=["letters", "one letter", "spaces", "0x", "arabic-indic digits", "short", "long"])
 def test_a_hello_whose_nonce_isnt_32_hex_digits_is_refused(nonce):
@@ -267,7 +295,8 @@ def test_a_hello_without_a_speaker_still_connects():
     for speaker in ("x" * 200, 7, "", None, True, ["Bedroom Pi"], "Bedroom\nPi", "Bedroom\x00Pi"):
         assert _admitted(speaker=speaker) == {"name": "bedroom", "hostname": "h", "sample_rate": 48000,
                                               "unclean": False, "speaker": None, "push_to_talk": False,
-                                              "machine": None, "saves_notes": False}
+                                              "machine": None, "saves_notes": False,
+                                              "media_controls": False}
     # Up to 64 characters, of any language.
     assert _admitted(speaker="x" * 64)["speaker"] == "x" * 64
     assert _admitted(speaker="Cuisine de Zoë")["speaker"] == "Cuisine de Zoë"

@@ -5,6 +5,7 @@ temporary folder) and a fake Spotify controller, so nothing plays or goes online
 """
 
 import time
+from datetime import date
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,8 @@ from voice_assistant import volume as volume_module
 from voice_assistant.actions import NOT_A_COMMAND, Action, ActionExecutor, ActionResult, confirm
 from voice_assistant.batteries import Battery
 from voice_assistant.downloads import ON_ITS_WAY, Downloads, Wanted
+from voice_assistant.undo import (NOTHING_TO_UNDO, SOMETHING_ELSE_SINCE, TOO_LATE, UNDO_CHANGE_KEPT,
+                                   LastChange)
 from voice_assistant.volume import VolumeControl
 
 
@@ -816,6 +819,303 @@ def test_add_to_calendar_is_only_offered_once_google_is_set_up():
                                                          "calendar": "work"}, from_model=True))
     assert calendar.asked == ("Shift", "2026-10-31 09:00", None, None, "work")
     assert (result.ok, result.say) == (True, "Added Shift to Work, Saturday the 31st at 9 AM.")
+
+
+# Removing, moving and renaming calendar events
+
+class RecordingChangeCalendar:
+    """A calendar which records what remove and change were asked, and answers with an undo."""
+
+    def __init__(self):
+        self.asked = []
+        self.undone = 0
+
+    def activity_calendars(self):
+        return {}
+
+    def remove(self, search, day=None, at=None, following=False, calendar=None, today=None, now=None):
+        self.asked.append(("remove", search, day, at, following, calendar))
+        return {"success": True, "message": "Removed Dentist.", "undo": self._undo}
+
+    def change(self, search, day=None, at=None, start=None, end=None, summary=None, following=False, calendar=None,
+               today=None, now=None):
+        self.asked.append(("change", search, day, at, start, end, summary, following, calendar))
+        return {"success": True, "message": "Moved Dentist.", "undo": self._undo}
+
+    def _undo(self):
+        self.undone += 1
+        return {"success": True, "message": "Undone."}
+
+
+def test_remove_from_calendar_passes_the_day_time_and_from_this_one_on():
+    calendar = RecordingChangeCalendar()
+    executor = ActionExecutor(calendar=calendar)
+    offered = {schema["name"]: schema for schema in executor.tool_schemas()}
+    assert offered["remove_from_calendar"]["input_schema"]["required"] == ["search"]
+    assert set(offered["remove_from_calendar"]["input_schema"]["properties"]) == {
+        "search", "day", "time", "following", "calendar"}
+
+    result = executor.execute(Action("remove_from_calendar", {
+        "search": "yoga", "day": "2026-11-26", "time": "18:30", "following": True, "calendar": "work"},
+        from_model=True))
+    assert calendar.asked == [("remove", "yoga", date(2026, 11, 26), "18:30", True, "work")]
+    assert (result.ok, result.say) == (True, "Removed Dentist.")
+
+    # Only what the user said is passed, and "from this one on" isn't assumed.
+    calendar.asked.clear()
+    executor.execute(Action("remove_from_calendar", {"search": "dentist", "following": None}, from_model=True))
+    assert calendar.asked == [("remove", "dentist", None, None, False, None)]
+
+
+def test_change_calendar_event_passes_the_new_times_and_name():
+    calendar = RecordingChangeCalendar()
+    executor = ActionExecutor(calendar=calendar)
+    offered = {schema["name"]: schema for schema in executor.tool_schemas()}
+    assert offered["change_calendar_event"]["input_schema"]["required"] == ["search"]
+    assert set(offered["change_calendar_event"]["input_schema"]["properties"]) == {
+        "search", "day", "time", "new_start", "new_end", "new_name", "following", "calendar"}
+
+    result = executor.execute(Action("change_calendar_event", {
+        "search": "dentist", "day": "2026-11-26", "time": "15:00", "new_start": "2026-11-27 16:00",
+        "new_end": "2026-11-27 17:00", "new_name": "Check-up", "following": True, "calendar": "personal"},
+        from_model=True))
+    assert calendar.asked == [("change", "dentist", date(2026, 11, 26), "15:00", "2026-11-27 16:00",
+                               "2026-11-27 17:00", "Check-up", True, "personal")]
+    assert (result.ok, result.say) == (True, "Moved Dentist.")
+
+    calendar.asked.clear()
+    executor.execute(Action("change_calendar_event", {"search": "dentist", "new_name": "Check-up"}, from_model=True))
+    assert calendar.asked == [("change", "dentist", None, None, None, None, "Check-up", False, None)]
+
+
+def test_the_change_tool_says_how_a_day_alone_or_a_time_alone_is_given():
+    offered = {schema["name"]: schema for schema in ActionExecutor(calendar=RecordingChangeCalendar()).tool_schemas()}
+    description = offered["change_calendar_event"]["description"]
+    # A day alone keeps the time - it isn't "all day" for a timed event - and a time alone keeps the day,
+    # and with following always the time alone unless the user named a new day.
+    assert "for all day" not in description
+    for words in ("'YYYY-MM-DD' for the day alone", "keeps its time", "'HH:MM' for the time alone", "keeps its day",
+                  "with following, always the time alone unless the user named a new day"):
+        assert words in description, words
+    # Read as "always pass following", it would change a whole series when one day was meant.
+    assert "always with following" not in description
+    # Adding is another matter: there a date alone is all day.
+    assert "for all day" in offered["add_to_calendar"]["description"]
+
+
+def test_an_unreadable_day_is_said():
+    calendar = RecordingChangeCalendar()
+    executor = ActionExecutor(calendar=calendar)
+    for tool in ("remove_from_calendar", "change_calendar_event"):
+        result = executor.execute(Action(tool, {"search": "dentist", "day": "Thursday"}, from_model=True))
+        assert (result.ok, result.say) == (False, "I didn't catch which day you meant."), tool
+    assert calendar.asked == []
+
+
+def test_a_calendar_change_is_kept_for_undo():
+    calendar = RecordingChangeCalendar()
+    executor = ActionExecutor(calendar=calendar)
+    assert executor.execute(Action("remove_from_calendar", {"search": "dentist"}, from_model=True)).ok
+    assert calendar.undone == 0
+    assert executor.execute(Action("undo_last_change")).say == "Undone."
+    assert calendar.undone == 1
+
+    assert executor.execute(Action("change_calendar_event", {"search": "dentist", "new_name": "Check-up"},
+                                   from_model=True)).ok
+    assert executor.execute(Action("undo_last_change")).say == "Undone."
+    assert calendar.undone == 2
+
+
+def test_the_calendar_change_tools_say_so_when_the_calendar_isnt_set_up():
+    executor = ActionExecutor()
+    offered = [schema["name"] for schema in executor.tool_schemas()]
+    assert "remove_from_calendar" not in offered and "change_calendar_event" not in offered
+    for tool in ("remove_from_calendar", "change_calendar_event"):
+        result = executor.execute(Action(tool, {"search": "dentist"}))
+        assert (result.ok, result.say) == (False, "The calendar isn't set up yet."), tool
+
+
+# "Undo that"
+
+class ChangingCalendar:
+    """A calendar whose add works, leaving a way to undo it, until it's made to fail."""
+
+    def __init__(self):
+        self.works = True
+        self.undone = 0
+
+    def activity_calendars(self):
+        return {}
+
+    def agenda(self, first, days):
+        return {"success": True, "message": "You've got nothing on."}
+
+    def add(self, summary, start, end=None, all_day=None, calendar=None):
+        if not self.works:
+            return {"success": False, "message": "I couldn't add that."}
+        return {"success": True, "message": "Added.", "undo": self._undo}
+
+    def _undo(self):
+        self.undone += 1
+        return {"success": True, "message": "Undone."}
+
+
+DENTIST = Action("add_to_calendar", {"summary": "Dentist", "start": "2026-11-26 15:00"})
+UNDO_THAT = Action("undo_last_change")
+
+
+def test_undo_that_runs_the_last_changes_undo_and_says_what_it_says():
+    calendar = ChangingCalendar()
+    executor = ActionExecutor(calendar=calendar)
+    assert executor.execute(DENTIST).say == "Added."
+    assert calendar.undone == 0
+
+    result = executor.execute(UNDO_THAT)
+    assert (result.ok, result.say) == (True, "Undone.")
+    assert calendar.undone == 1
+
+    # Kept for one undo, and an undo can't itself be undone.
+    result = executor.execute(UNDO_THAT)
+    assert (result.ok, result.say) == (False, NOTHING_TO_UNDO)
+    assert calendar.undone == 1
+
+
+def test_undo_that_is_always_offered_and_says_what_it_reverses():
+    offered = {schema["name"]: schema for schema in ActionExecutor().tool_schemas()}
+    description = offered["undo_last_change"]["description"]
+    for words in ("playlist or calendar change", "undo that", "put it back", "take that back"):
+        assert words in description
+    assert ActionExecutor().execute(UNDO_THAT).say == NOTHING_TO_UNDO
+
+
+def test_undo_that_after_ten_minutes_is_too_late():
+    now = [1000.0]
+    calendar = ChangingCalendar()
+    executor = ActionExecutor(calendar=calendar)
+    executor.last_change = LastChange(clock=lambda: now[0])
+    executor.execute(DENTIST)
+    now[0] += UNDO_CHANGE_KEPT + 1
+    result = executor.execute(UNDO_THAT)
+    assert (result.ok, result.say) == (False, TOO_LATE)
+    assert calendar.undone == 0
+
+
+def test_another_action_since_means_undo_leaves_the_change():
+    calendar = ChangingCalendar()
+    executor = ActionExecutor(calendar=calendar, clock=RecordingClock())
+    executor.execute(DENTIST)
+    assert executor.execute(Action("set_timer", {"duration_seconds": 600})).ok
+
+    result = executor.execute(UNDO_THAT)
+    assert (result.ok, result.say) == (False, SOMETHING_ELSE_SINCE)
+    assert calendar.undone == 0
+
+
+def test_one_slot_shared_by_two_satellites_is_taken_over_by_whatever_either_does():
+    # The PC and the Pi in one room: "cancel the dentist" on one, a timer on the other, and "undo that" on the
+    # first mustn't put the dentist back, as the timer was the last thing done in the house.
+    shared = LastChange()
+    calendar = ChangingCalendar()
+    first = ActionExecutor(calendar=calendar, last_change=shared)
+    second = ActionExecutor(clock=RecordingClock(), last_change=shared)
+    assert first.last_change is second.last_change is shared
+    first.execute(DENTIST)
+    assert second.execute(Action("set_timer", {"duration_seconds": 600})).ok
+
+    result = first.execute(UNDO_THAT)
+    assert (result.ok, result.say) == (False, SOMETHING_ELSE_SINCE)
+    assert calendar.undone == 0
+
+    # And a change on the other satellite is the one "undo that" takes back, wherever it's said.
+    first.execute(DENTIST)
+    assert second.execute(UNDO_THAT).say == "Undone."
+    assert calendar.undone == 1
+
+    # With no slot given, each has one of its own, as every builder had before.
+    assert ActionExecutor().last_change is not ActionExecutor().last_change
+
+
+def test_an_action_which_answers_with_a_result_of_its_own_counts_as_another_action():
+    class QuietClock:
+        def dismiss(self, satellite=None):
+            return ActionResult(True, "Okay.", confirm="chime")
+
+    calendar = ChangingCalendar()
+    executor = ActionExecutor(calendar=calendar, clock=QuietClock())
+    executor.execute(DENTIST)
+    assert executor.execute(Action("dismiss_timer")).ok
+    assert executor.execute(UNDO_THAT).say == SOMETHING_ELSE_SINCE
+    assert calendar.undone == 0
+
+
+def test_a_calendar_read_or_the_timers_listed_since_leave_the_change_undoable():
+    # Neither is read back to the model, but neither changes anything - "what's on Thursday?"
+    # after a change isn't a reason to refuse "undo that".
+    class ListingClock:
+        def list_timers(self):
+            return {"success": True, "message": "You don't have any timers running."}
+
+    calendar = ChangingCalendar()
+    executor = ActionExecutor(calendar=calendar, clock=ListingClock())
+    executor.execute(DENTIST)
+    assert executor.execute(Action("get_calendar", {"start": "2026-11-26"})).say == "You've got nothing on."
+    assert executor.execute(Action("list_timers")).ok
+
+    result = executor.execute(UNDO_THAT)
+    assert (result.ok, result.say) == (True, "Undone.")
+    assert calendar.undone == 1
+
+
+def test_the_tools_which_only_say_something_are_declared_so():
+    # Declared one by one, as a tool which says something but also changes a little - which
+    # clears what was missed, or marks notifications heard, or pauses the music - must count.
+    tools = ActionExecutor.tools()
+    for name in ("get_calendar", "get_activity", "get_weather", "list_timers", "list_alarms", "next_alarm",
+                 "read_list", "list_memories", "get_batteries", "tell_me_more"):
+        assert tools[name].tool["changes"] is False, name
+    for name in ("control_playback", "check_missed", "read_notifications", "manage_list", "journey",
+                 "find_device", "set_timer", "add_to_calendar", "undo_last_change"):
+        assert tools[name].tool["changes"] is True, name
+
+
+def test_a_failed_action_or_a_read_since_leaves_the_change_undoable():
+    calendar = ChangingCalendar()
+    home = SimpleNamespace(status=lambda about: {"success": True, "message": "The sun sets at 4."})
+    executor = ActionExecutor(calendar=calendar, home=home)
+    executor.execute(DENTIST)
+
+    # A change which didn't work, whatever the tool.
+    calendar.works = False
+    assert executor.execute(DENTIST).ok is False
+    assert executor.execute(Action("get_calendar", {"start": "Thursday"})).ok is False
+    assert executor.execute(Action("play_netflix")).ok is False
+    # Something Home Assistant is only read from, to answer from.
+    assert executor.execute(Action("home_status", {"about": "sunset"})).ok
+
+    result = executor.execute(UNDO_THAT)
+    assert (result.ok, result.say) == (True, "Undone.")
+    assert calendar.undone == 1
+
+
+def test_a_change_which_failed_leaves_nothing_to_undo():
+    calendar = ChangingCalendar()
+    calendar.works = False
+    executor = ActionExecutor(calendar=calendar)
+    assert executor.execute(DENTIST).ok is False
+    assert executor.execute(UNDO_THAT).say == NOTHING_TO_UNDO
+
+
+def test_a_change_which_says_it_failed_is_never_kept():
+    # Even with an undo in its reply, which a failure shouldn't have.
+    class OddCalendar(ChangingCalendar):
+        def add(self, summary, start, end=None, all_day=None, calendar=None):
+            return {"success": False, "message": "No.", "undo": self._undo}
+
+    calendar = OddCalendar()
+    executor = ActionExecutor(calendar=calendar)
+    executor.execute(DENTIST)
+    assert executor.execute(UNDO_THAT).say == NOTHING_TO_UNDO
+    assert calendar.undone == 0
 
 
 def test_without_home_assistant_the_lights_say_so():
@@ -2611,3 +2911,275 @@ def test_a_notes_text_is_only_logged_as_its_length():
     assert Action("save_note", {"text": 5}).for_log().params == {"text": "<not logged>"}
     other = Action("set_timer", {"label": "Take the bins out", "text": "kept"})
     assert other.for_log() is other
+
+
+# Playlists and liked songs - see playlist_changes.py
+
+ENDLESS = {"id": "s1", "title": "Endless", "artist": "Made Up Band"}
+BEFORE = {"id": "s0", "title": "Before", "artist": "Made Up Band"}
+
+
+class SongPlayer:
+    """
+    Stands in for NavidromePlayer with a song playing and the one before it, noting each time a song is read.
+    A name other than Navidrome makes it another service's.
+    """
+
+    needs_internet = False
+
+    def __init__(self, this=ENDLESS, last=BEFORE, name="Navidrome", playing=True):
+        self.name = name
+        self.songs = {"this": this, "last": last}
+        self.playing = playing
+        self.read = []
+
+    def song_at(self, which):
+        self.read.append(which)
+        return self.songs[which]
+
+    def was_playing(self):
+        return self.playing
+
+    def now_playing(self):
+        song = self.songs["this"]
+        return None if song is None else {"track": song["title"], "playing": self.playing}
+
+
+class RecordingPlaylistChanges:
+    """Stands in for PlaylistChanges, noting each call as (what, library, ...) and answering with the reply given."""
+
+    def __init__(self, reply=None):
+        self.reply = reply or {"success": True, "message": "Done."}
+        self.calls = []
+
+    def add(self, library, song, names):
+        self.calls.append(("add", library, song, names))
+        return dict(self.reply)
+
+    def remove(self, library, song, names):
+        self.calls.append(("remove", library, song, names))
+        return dict(self.reply)
+
+    def make(self, library, name, song):
+        self.calls.append(("make", library, name, song))
+        return dict(self.reply)
+
+    def like(self, library, song, liked):
+        self.calls.append(("like", library, song, liked))
+        return dict(self.reply)
+
+
+# What Claude calls for each of the four, bar which song.
+PLAYLIST_ACTIONS = [
+    Action("add_to_playlists", {"playlists": ["Gym", "Car"]}, from_model=True),
+    Action("take_off_playlists", {"playlists": ["Gym"]}, from_model=True),
+    Action("make_playlist", {"name": "Chill", "with_song": True}, from_model=True),
+    Action("like_song", {}, from_model=True),
+]
+
+
+def test_add_this_to_playlists_gives_the_song_playing_and_the_names(make_executor):
+    player = SongPlayer()
+    changes = RecordingPlaylistChanges({"success": True, "message": "Added Endless to Gym and Car."})
+    executor = make_executor(player, playlist_changes=changes)
+    result = executor.execute(PLAYLIST_ACTIONS[0])
+    assert (result.ok, result.say) == (True, "Added Endless to Gym and Car.")
+    # The player itself is the library, and the song is the one at the queue's place unless "last" is said.
+    assert changes.calls == [("add", player, ENDLESS, ["Gym", "Car"])]
+    assert player.read == ["this"]
+
+
+def test_each_tool_gives_what_it_changes_the_song_and_what_was_said(make_executor):
+    player, changes = SongPlayer(), RecordingPlaylistChanges()
+    executor = make_executor(player, playlist_changes=changes)
+    for action in PLAYLIST_ACTIONS:
+        assert executor.execute(action).ok
+    # Making one with the song on it, or not, and liking being what's wanted unless unliking is said.
+    executor.execute(Action("make_playlist", {"name": "Empty"}, from_model=True))
+    executor.execute(Action("like_song", {"like": False}, from_model=True))
+    assert changes.calls == [("add", player, ENDLESS, ["Gym", "Car"]), ("remove", player, ENDLESS, ["Gym"]),
+                             ("make", player, "Chill", ENDLESS), ("like", player, ENDLESS, True),
+                             ("make", player, "Empty", None), ("like", player, ENDLESS, False)]
+
+
+def test_the_last_song_is_the_one_before(make_executor):
+    player, changes = SongPlayer(), RecordingPlaylistChanges()
+    executor = make_executor(player, playlist_changes=changes)
+    executor.execute(Action("add_to_playlists", {"playlists": ["Gym"], "song": "last"}, from_model=True))
+    executor.execute(Action("take_off_playlists", {"playlists": ["Gym"], "song": "last"}, from_model=True))
+    executor.execute(Action("make_playlist", {"name": "Chill", "with_song": True, "song": "last"}, from_model=True))
+    executor.execute(Action("like_song", {"song": "last"}, from_model=True))
+    assert [call[2] if call[0] != "make" else call[3] for call in changes.calls] == [BEFORE] * 4
+    assert player.read == ["last"] * 4
+    # Anything else Claude says is this one.
+    executor.execute(Action("like_song", {"song": "the one before"}, from_model=True))
+    assert player.read[-1] == "this"
+
+
+def test_nothing_playing_or_no_last_song_says_so(make_executor):
+    player, changes = SongPlayer(this=None, last=None), RecordingPlaylistChanges()
+    executor = make_executor(player, playlist_changes=changes)
+    for action in PLAYLIST_ACTIONS:
+        result = executor.execute(action)
+        assert (result.ok, result.say) == (False, "Nothing's playing."), action.tool
+    for action in PLAYLIST_ACTIONS:
+        last = Action(action.tool, {**action.params, "song": "last"}, from_model=True)
+        result = executor.execute(last)
+        assert (result.ok, result.say) == (False, "There isn't a last song."), action.tool
+    assert changes.calls == []
+    # A playlist made empty asks nothing of a song.
+    assert executor.execute(Action("make_playlist", {"name": "Chill"}, from_model=True)).ok
+    assert changes.calls == [("make", player, "Chill", None)]
+
+
+def test_playlists_on_spotify_say_they_need_navidrome(make_executor):
+    player, changes = SongPlayer(name="Spotify"), RecordingPlaylistChanges()
+    executor = make_executor(player, playlist_changes=changes)
+    for action in PLAYLIST_ACTIONS + [Action("make_playlist", {"name": "Chill"}, from_model=True),
+                                      Action("make_offered_playlist", {"name": "Jim", "song": ENDLESS})]:
+        result = executor.execute(action)
+        assert (result.ok, result.say) == (False, "Changing playlists only works with Navidrome."), action.tool
+    assert changes.calls == [] and player.read == []
+
+
+def test_navidrome_is_checked_on_the_player_whose_song_is_used(make_executor):
+    # In a room, the music heard is the first player playing - which may not be this satellite's own.
+    here, there = SongPlayer(name="Spotify", playing=False), SongPlayer(playing=True)
+    changes = RecordingPlaylistChanges()
+    executor = make_executor(here, playlist_changes=changes, room_players=lambda: [here, there])
+    assert executor.execute(Action("like_song", {}, from_model=True)).ok
+    assert changes.calls == [("like", there, ENDLESS, True)]
+    assert here.read == [] and there.read == ["this"]
+
+    # And the other way round: this satellite's Navidrome isn't what's playing.
+    here, there = SongPlayer(playing=False), SongPlayer(name="Spotify", playing=True)
+    changes = RecordingPlaylistChanges()
+    executor = make_executor(here, playlist_changes=changes, room_players=lambda: [here, there])
+    result = executor.execute(Action("like_song", {}, from_model=True))
+    assert (result.ok, result.say) == (False, "Changing playlists only works with Navidrome.")
+    assert changes.calls == []
+
+
+def test_a_song_paused_on_another_satellite_in_the_room_is_the_one_changed(make_executor):
+    # "Playing or paused, whoever paused it": paused on the other satellite, with nothing on this one.
+    here, there = SongPlayer(this=None, last=None, playing=False), SongPlayer(playing=False)
+    changes = RecordingPlaylistChanges()
+    executor = make_executor(here, playlist_changes=changes, room_players=lambda: [here, there])
+    assert executor.execute(Action("add_to_playlists", {"playlists": ["Gym"]}, from_model=True)).ok
+    assert changes.calls == [("add", there, ENDLESS, ["Gym"])]
+    assert here.read == [] and there.read == ["this"]
+
+    # Music playing in the room is still the one heard before one paused, and this satellite's own
+    # paused music is this one's, as a bare "play" carries it on.
+    here, there = SongPlayer(playing=False), SongPlayer(this=BEFORE, last=ENDLESS, playing=True)
+    changes = RecordingPlaylistChanges()
+    executor = make_executor(here, playlist_changes=changes, room_players=lambda: [here, there])
+    executor.execute(Action("like_song", {}, from_model=True))
+    assert changes.calls == [("like", there, BEFORE, True)]
+    here, there = SongPlayer(playing=False), SongPlayer(this=BEFORE, last=ENDLESS, playing=False)
+    changes = RecordingPlaylistChanges()
+    executor = make_executor(here, playlist_changes=changes, room_players=lambda: [here, there])
+    executor.execute(Action("like_song", {}, from_model=True))
+    assert changes.calls == [("like", here, ENDLESS, True)]
+
+
+def test_without_playlist_changes_set_up_each_tool_says_so(make_executor):
+    player = SongPlayer()
+    executor = make_executor(player)
+    for action in PLAYLIST_ACTIONS:
+        result = executor.execute(action)
+        assert (result.ok, result.say) == (False, "Changing playlists isn't set up."), action.tool
+    result = executor.execute(Action("make_offered_playlist", {"name": "Jim", "song": ENDLESS}))
+    assert (result.ok, result.say) == (False, "Changing playlists isn't set up.")
+    assert player.read == []
+
+
+def test_with_no_music_the_playlist_tools_say_so_and_are_not_offered(make_executor):
+    executor = make_executor(playlist_changes=RecordingPlaylistChanges())
+    assert not {"add_to_playlists", "take_off_playlists", "make_playlist", "like_song"} & {
+        schema["name"] for schema in executor.tool_schemas()}
+    assert executor.execute(Action("like_song", {}, from_model=True)).say == "The music isn't available right now."
+
+
+def test_playlists_offline_say_so_without_asking(make_executor, monkeypatch):
+    from voice_assistant import actions as actions_module
+    monkeypatch.setattr(actions_module.network, "online", lambda: False)
+    player, changes = SongPlayer(), RecordingPlaylistChanges()
+    player.needs_internet = True
+    executor = make_executor(player, playlist_changes=changes)
+    result = executor.execute(Action("like_song", {}, from_model=True))
+    assert (result.ok, result.say) == (False, "Navidrome needs the internet, and I can't reach it right now.")
+    assert changes.calls == [] and player.read == []
+
+
+def test_the_offered_playlist_is_made_with_the_song_asked_about_not_the_one_playing_now(make_executor):
+    # "Add this to Jim" offered to make Jim; the next song started before the yes. Review Focus 1.
+    player, changes = SongPlayer(this=BEFORE, last=ENDLESS), RecordingPlaylistChanges(
+        {"success": True, "message": "Made Jim with Endless on it."})
+    executor = make_executor(player, playlist_changes=changes)
+    result = executor.execute(Action("make_offered_playlist", {"name": "Jim", "song": ENDLESS}))
+    assert (result.ok, result.say) == (True, "Made Jim with Endless on it.")
+    assert changes.calls == [("make", player, "Jim", ENDLESS)]
+    assert player.read == []
+
+
+def test_the_offer_carried_by_a_reply_reaches_the_result_to_be_run_on_a_yes(make_executor):
+    offer = Action("make_offered_playlist", {"name": "Jim", "song": ENDLESS})
+    changes = RecordingPlaylistChanges({"success": True, "ask_first": offer,
+                                        "message": "You haven't got a playlist called Jim. Want me to make it?"})
+    executor = make_executor(SongPlayer(), playlist_changes=changes)
+    result = executor.execute(Action("add_to_playlists", {"playlists": ["Jim"]}, from_model=True))
+    assert result.ok and result.ask_first is offer
+
+
+def test_the_offer_is_never_offered_to_claude(make_executor):
+    player, changes = SongPlayer(), RecordingPlaylistChanges()
+    executor = make_executor(player, playlist_changes=changes)
+    offered = {schema["name"] for schema in executor.tool_schemas()}
+    assert "make_offered_playlist" not in offered
+    assert {"add_to_playlists", "take_off_playlists", "make_playlist", "like_song"} <= offered
+    # Nor can it run it by name.
+    result = executor.execute(Action("make_offered_playlist", {"name": "Jim", "song": ENDLESS}, from_model=True))
+    assert result.ok is False and changes.calls == []
+
+
+def test_an_offer_without_a_song_to_put_on_it_makes_an_empty_playlist_rather_than_failing(make_executor):
+    player, changes = SongPlayer(), RecordingPlaylistChanges()
+    executor = make_executor(player, playlist_changes=changes)
+    executor.execute(Action("make_offered_playlist", {"name": "Jim"}))
+    executor.execute(Action("make_offered_playlist", {"name": "Jim", "song": {"title": "No id"}}))
+    assert changes.calls == [("make", player, "Jim", None)] * 2
+
+
+def test_the_playlist_tools_are_described_for_claude(make_executor):
+    executor = make_executor(SongPlayer(), playlist_changes=object())
+    offered = {schema["name"]: schema for schema in executor.tool_schemas()}
+    properties = {name: offered[name]["input_schema"]["properties"] for name in offered if name in (
+        "add_to_playlists", "take_off_playlists", "make_playlist", "like_song")}
+    assert set(properties["add_to_playlists"]) == set(properties["take_off_playlists"]) == {"playlists", "song"}
+    assert properties["add_to_playlists"]["playlists"]["type"] == "array"
+    assert set(properties["make_playlist"]) == {"name", "with_song", "song"}
+    assert set(properties["like_song"]) == {"like", "song"}
+    for each in properties.values():
+        assert each["song"]["enum"] == ["this", "last"]
+    for name in ("add_to_playlists", "take_off_playlists", "make_playlist", "like_song"):
+        assert "just reply 'Okay.'" in offered[name]["description"], name
+        assert offered[name]["input_schema"].get("required", []) == [], name
+    assert "liked songs" in offered["add_to_playlists"]["description"]
+    assert "Never make a playlist unless the user says new or make" in offered["add_to_playlists"]["description"]
+    assert "make a playlist called" in offered["make_playlist"]["description"]
+    assert "add this to a new playlist called" in offered["make_playlist"]["description"]
+
+
+def test_the_playlist_tools_change_things_so_a_later_undo_reaches_only_the_last(make_executor):
+    tools = ActionExecutor.tools()
+    for name in ("add_to_playlists", "take_off_playlists", "make_playlist", "like_song", "make_offered_playlist"):
+        assert tools[name].tool["changes"] is True and tools[name].tool["needs"] == "music", name
+    assert tools["make_offered_playlist"].tool["for_model"] is False
+
+    undone = []
+    changes = RecordingPlaylistChanges({"success": True, "message": "Added.", "undo": lambda: (
+        undone.append(1) or {"success": True, "message": "Took it back."})})
+    executor = make_executor(SongPlayer(), playlist_changes=changes)
+    executor.execute(Action("add_to_playlists", {"playlists": ["Gym"]}, from_model=True))
+    assert executor.execute(UNDO_THAT).say == "Took it back." and undone == [1]

@@ -19,7 +19,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
@@ -59,8 +59,13 @@ class FakeGoogle:
     """
     Stands in for a requests.Session, answering each address from a list of answers
     and noting every request - an answer can be an exception, to be raised instead,
-    and an answer that isn't a FakeResponse is a 200 with it as the body.
+    and an answer that isn't a FakeResponse is a 200 with it as the body. A write is
+    answered by its "METHOD address" - "DELETE https://..." - and a POST by its
+    address alone too.
     """
+
+    # Every FakeGoogle made in a test, for the tells_nobody fixture to check after it.
+    _made = []
 
     def __init__(self, **answers):
         self.answers = {address: list(each) for address, each in answers.items()}
@@ -69,14 +74,30 @@ class FakeGoogle:
         self.fetched = []
         # Each POST, as it was sent.
         self.posted = []
+        # Each write to Google - an event added, changed or deleted - as {"method", "url", "params", "json"}.
+        self.sent = []
+        FakeGoogle._made.append(self)
 
     def post(self, url, data=None, json=None, headers=None, timeout=None, **kwargs):
-        # Nova only ever posts for a token or a new event - see test_nova_never_changes_or_deletes_an_event.
-        if url != google_calendar.TOKEN and not url.endswith("/events"):
+        # Nova only ever posts for a token - every write to an event goes through request, see
+        # test_every_write_to_google_is_sent_once_and_tells_nobody.
+        if url != google_calendar.TOKEN:
             raise AssertionError(f"Nothing should be posted to {url}")
         self.asked.append((url, dict(data or json or {})))
         self.posted.append({"url": url, "json": json, "headers": dict(headers or {}), "timeout": timeout})
         return self._answer(url)
+
+    def request(self, method, url, params=None, json=None, headers=None, timeout=None, **kwargs):
+        self.sent.append({"method": method, "url": url, "params": params, "json": json})
+        if method == "POST":
+            self.asked.append((url, dict(json or {})))
+            self.posted.append({"url": url, "json": json, "headers": dict(headers or {}), "timeout": timeout})
+        address = f"{method} {url}"
+        if address not in self.answers and method == "POST":
+            address = url
+        if address not in self.answers:
+            raise AssertionError(f"Nothing should be sent: {method} {url}")
+        return self._answer(address)
 
     def get(self, url, params=None, headers=None, timeout=None, **kwargs):
         if url not in self.answers:
@@ -90,6 +111,19 @@ class FakeGoogle:
         if isinstance(answer, Exception):
             raise answer
         return answer if isinstance(answer, FakeResponse) else FakeResponse(200, answer)
+
+
+@pytest.fixture(autouse=True)
+def tells_nobody():
+    """
+    Checks, after every test here, that each write any FakeGoogle was sent told nobody -
+    Google's sendUpdates=none - so no guest of an event is ever emailed about a change.
+    """
+    FakeGoogle._made = []
+    yield
+    for google in FakeGoogle._made:
+        for sent in google.sent:
+            assert sent["params"] == {"sendUpdates": "none"}, f"{sent['method']} {sent['url']}"
 
 
 def _token_answer(access=ACCESS_TOKEN, expires_in=3600, refresh=REFRESH_TOKEN):
@@ -1562,10 +1596,15 @@ def _added(calendar):
     return [(posted["url"][len(prefix):-len("/events")], posted["json"]) for posted in calendar._session.posted]
 
 
+def _said(reply):
+    """A reply as it's said - without the "undo" a change has."""
+    return {key: value for key, value in reply.items() if key != "undo"}
+
+
 def test_a_new_event_goes_to_the_primary_calendar_and_lasts_an_hour(for_adding):
     calendar = for_adding()
 
-    assert calendar.add("Dentist", "2026-10-29 15:00", today=SATURDAY) == {
+    assert _said(calendar.add("Dentist", "2026-10-29 15:00", today=SATURDAY)) == {
         "success": True, "message": "Added Dentist, Thursday the 29th at 3 PM."}
     # The clocks went back on the 25th, so the 29th is on GMT.
     assert _added(calendar) == [("calendar-personal", {"summary": "Dentist",
@@ -1586,7 +1625,7 @@ def test_a_new_event_goes_to_the_primary_calendar_and_lasts_an_hour(for_adding):
 
 def test_with_no_time_its_all_day(for_adding):
     calendar = for_adding()
-    assert calendar.add("Holiday", "2026-10-30", today=SATURDAY) == {
+    assert _said(calendar.add("Holiday", "2026-10-30", today=SATURDAY)) == {
         "success": True, "message": "Added Holiday, Friday the 30th, all day."}
     assert _added(calendar)[0][1] == {"summary": "Holiday", "start": {"date": "2026-10-30"},
                                       "end": {"date": "2026-10-31"}}
@@ -1618,7 +1657,7 @@ def test_a_time_that_cant_be_read_or_ends_first_isnt_added(for_adding):
 def test_a_calendar_named_is_used(for_adding):
     for named in ("work", "Work", "shifts"):
         calendar = for_adding()
-        assert calendar.add("Shift", "2026-10-31 09:00", calendar=named, today=SATURDAY) == {
+        assert _said(calendar.add("Shift", "2026-10-31 09:00", calendar=named, today=SATURDAY)) == {
             "success": True, "message": "Added Shift to Work, Saturday the 31st at 9 AM."}, named
         assert [calendar_id for calendar_id, _ in _added(calendar)] == ["calendar-work"]
 
@@ -1828,12 +1867,1014 @@ def test_adding_without_google_says_why(for_adding, monkeypatch, token_file):
     assert calendar._session.posted == []
 
 
-def test_nova_never_changes_or_deletes_an_event():
-    # FakeGoogle can only GET, and POST to the token address or an events list, so no test
-    # in this file has Nova do anything else to Google.
-    assert {name for name in vars(FakeGoogle) if not name.startswith("_")} == {"get", "post"}
+def test_an_event_added_can_be_taken_back_off(for_adding):
+    calendar = for_adding()
+    calendar._session.answers[f"DELETE {_event_url('calendar-personal', 'made-up-event')}"] = [DELETED]
+    reply = calendar.add("Dentist", "2026-10-29 15:00", today=SATURDAY)
+    assert callable(reply["undo"])
+    assert reply["undo"]() == {"success": True, "message": "Took Dentist back off your calendar."}
+    # By the id Google gave the event it added, on the calendar it was added to.
+    assert calendar._session.sent[-1] == _write("DELETE", _event_url("calendar-personal", "made-up-event"))
+
+    # Sent once, and an answer that doesn't say whether it went is said as that.
+    calendar._session.answers[f"DELETE {_event_url('calendar-work', 'made-up-event')}"] = [
+        requests.ReadTimeout("Read timed out."), DELETED]
+    reply = calendar.add("Shift", "2026-10-31 09:00", calendar="work", today=SATURDAY)
+    assert reply["undo"]() == {"success": False, "message": "I can't tell whether Shift was taken off."}
+    assert [(sent["method"], sent["url"]) for sent in calendar._session.sent[2:]] == [
+        ("POST", _events_url("calendar-work")), ("DELETE", _event_url("calendar-work", "made-up-event"))]
+
+
+def test_every_write_to_google_is_sent_once_and_tells_nobody():
+    # Adding, removing and putting back all go through _send_once, the one request that writes
+    # to Google - sent once, with sendUpdates=none, which the tells_nobody fixture checks of
+    # every write in this file's tests.
     source = inspect.getsource(google_calendar)
-    assert not re.search(r"\b(PATCH|PUT|DELETE)\b", source)
-    assert not re.search(r"\.(patch|put|delete|request)\(", source)
-    # The token, and an event added - nothing else is posted.
-    assert source.count(".post(") == 2
+    assert source.count(".request(") == 1 and ".request(" in inspect.getsource(GoogleCalendar._send_once)
+    # The only thing posted otherwise is for a token.
+    assert source.count(".post(") == 1 and ".post(" in inspect.getsource(GoogleSignIn._ask_for_token)
+    assert not re.search(r"\.(patch|put|delete)\(", source)
+    assert {name for name in vars(FakeGoogle) if not name.startswith("_")} == {"get", "post", "request"}
+
+
+# Changing what's on the calendar
+
+# Asked on Saturday the 21st of November 2026 - on GMT, which Google gives in London with a Z.
+NOVEMBER_21 = date(2026, 11, 21)
+THURSDAY = date(2026, 11, 26)
+
+# Google's answer to a delete: a 204, with nothing in it.
+DELETED = FakeResponse(204, None)
+
+
+def _event_url(calendar_id, event_id):
+    return f"{_events_url(calendar_id)}/{quote(event_id, safe='')}"
+
+
+def _write(method, url, json=None):
+    """A write as FakeGoogle notes it - telling nobody, as every write does."""
+    return {"method": method, "url": url, "params": {"sendUpdates": "none"}, "json": json}
+
+
+def _own(summary, start, end, event_id, calendar_id="calendar-personal", **more):
+    """One of the user's own events, as events.list gives it - organised by the calendar it's on."""
+    return _google_event(summary, start, end, id=event_id, organizer={"email": calendar_id, "self": True}, **more)
+
+
+def _occurrence(summary, series_id, start, end, meant=None):
+    """
+    One time a repeating event is on, as events.list gives it with singleEvents: an id of its
+    own - its series' and the time it was meant to be, in UTC - its series' id, and that time.
+    """
+    meant = meant or start
+    stamp = meant.replace("-", "") if len(meant) == 10 else \
+        datetime.fromisoformat(meant).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return _own(summary, start, end, f"{series_id}_{stamp}", recurringEventId=series_id, originalStartTime=_when(meant))
+
+
+def _series(summary, series_id, start, end, *rules, **more):
+    """A repeating event itself, as events.get gives it - its first time, and its rules."""
+    return _own(summary, start, end, series_id, recurrence=list(rules), **more)
+
+
+# Gym every Tuesday at 6 PM from the 3rd of November, ten times, but not the 10th.
+GYM_RULES = ["RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=10", "EXDATE;TZID=Europe/London:20261110T180000"]
+GYM = _series("Gym", "made-up-gym", "2026-11-03T18:00:00Z", "2026-11-03T19:00:00Z", *GYM_RULES)
+GYM_24TH = _occurrence("Gym", "made-up-gym", "2026-11-24T18:00:00Z", "2026-11-24T19:00:00Z")
+GYM_1ST = _occurrence("Gym", "made-up-gym", "2026-12-01T18:00:00Z", "2026-12-01T19:00:00Z")
+DENTIST_THURSDAY = _own("Dentist", "2026-11-26T15:00:00Z", "2026-11-26T16:00:00Z", "made-up-dentist")
+
+
+@pytest.fixture
+def for_changing(monkeypatch, tmp_path):
+    """
+    Makes GoogleCalendars to change events on: Personal, the user's own and primary, and Work,
+    which they own too - and Uni, shared with them, which Nova can only read. Each has the
+    events given, as events.list gives them with singleEvents, read reads times over; Google
+    answers anything else - a series read by its address, or a write by "METHOD address" -
+    from answers.
+    """
+    monkeypatch.setattr(google_calendar.network, "online", lambda: True)
+
+    def make(personal=(), work=(), uni=(), answers=None, reads=1):
+        entries = [_entry("calendar-personal", "Personal", primary=True), _entry("calendar-work", "Work"),
+                   _entry("calendar-uni", "Uni", access_role="reader")]
+        events = {"calendar-personal": personal, "calendar-work": work, "calendar-uni": uni}
+        google = FakeGoogle(**{LIST: [_calendar_list(*entries)],
+                               **{_events_url(calendar_id): [_events_page(*its_events)] * reads
+                                  for calendar_id, its_events in events.items()},
+                               **(answers or {})})
+        return GoogleCalendar(FakeSignIn(), _choices(tmp_path), session=google)
+
+    return make
+
+
+def test_an_event_is_removed_and_said_back(for_changing, caplog):
+    dentist = _event_url("calendar-personal", "made-up-dentist")
+    calendar = for_changing(personal=[DENTIST_THURSDAY], answers={f"DELETE {dentist}": [DELETED]})
+    with caplog.at_level(logging.INFO):
+        reply = calendar.remove("dentist", today=NOVEMBER_21)
+    assert _said(reply) == {"success": True, "message": "Removed Dentist, Thursday at 3 PM."}
+    assert callable(reply["undo"])
+    assert calendar._session.sent == [_write("DELETE", dentist)]
+    # Neither the calendar's id - for the primary, the user's email address - nor the event is logged.
+    assert caplog.records and not any("calendar-" in record.getMessage() or "Dentist" in record.getMessage()
+                                      for record in caplog.records)
+
+    # On the day given, and on Work, which the user owns too. One that doesn't repeat is just
+    # removed, from this one on or not.
+    shift = _own("Shift", "2026-11-26T09:00:00Z", "2026-11-26T17:00:00Z", "made-up-shift", calendar_id="calendar-work")
+    calendar = for_changing(work=[shift], answers={f"DELETE {_event_url('calendar-work', 'made-up-shift')}": [DELETED]})
+    assert _said(calendar.remove("shift", day=THURSDAY, following=True, today=NOVEMBER_21)) == {
+        "success": True, "message": "Removed Shift, Thursday at 9 AM."}
+    assert calendar._session.sent == [_write("DELETE", _event_url("calendar-work", "made-up-shift"))]
+
+    holiday = _own("Holiday", "2026-11-22", "2026-11-23", "made-up-holiday")
+    calendar = for_changing(personal=[holiday],
+                            answers={f"DELETE {_event_url('calendar-personal', 'made-up-holiday')}": [DELETED]})
+    assert _said(calendar.remove("holiday", today=NOVEMBER_21)) == {
+        "success": True, "message": "Removed Holiday, tomorrow, all day."}
+
+
+def test_several_matches_remove_nothing_and_ask_which(for_changing):
+    personal = [_own("Dentist", "2026-11-23T09:00:00Z", "2026-11-23T09:30:00Z", "made-up-dentist-1"), DENTIST_THURSDAY,
+                _own("Dentist check-up", "2026-12-01T11:30:00Z", "2026-12-01T12:00:00Z", "made-up-dentist-3")]
+    work = [_own("Dentist", "2026-11-27T11:30:00Z", "2026-11-27T12:00:00Z", "made-up-dentist-2",
+                 calendar_id="calendar-work")]
+    other_gym = _occurrence("Gym", "made-up-gym-class", "2026-11-26T18:00:00Z", "2026-11-26T19:00:00Z")
+    for asked, events, said in (
+            # On more than one calendar, each is named by its calendar too.
+            (("dentist", False), {"personal": personal, "work": work},
+             "I found 4: Dentist on Monday, at 9:00 AM, on Personal; Dentist on Thursday, at 3:00 PM, on Personal; "
+             "Dentist on Friday, at 11:30 AM, on Work; and 1 more. Which one?"),
+            (("dentist", False), {"personal": personal[:2]},
+             "I found 2: Dentist on Monday, at 9:00 AM; and Dentist on Thursday, at 3:00 PM. Which one?"),
+            # A repeating event's times are several, unless it's from this one on - and two series are
+            # several either way.
+            (("gym", False), {"personal": [GYM_24TH, GYM_1ST]},
+             "I found 2: Gym on Tuesday, at 6:00 PM; and Gym on Tuesday the 1st of December, at 6:00 PM. Which one?"),
+            (("gym", True), {"personal": [GYM_24TH, other_gym, GYM_1ST]},
+             "I found 3: Gym on Tuesday, at 6:00 PM; Gym on Thursday, at 6:00 PM; and Gym on Tuesday the 1st of "
+             "December, at 6:00 PM. Which one?")):
+        calendar = for_changing(**events)
+        search, following = asked
+        # Nothing changed, so there's nothing to undo.
+        assert calendar.remove(search, following=following, today=NOVEMBER_21) == {"success": False, "message": said}
+        assert calendar._session.sent == []
+
+
+def test_nothing_found_says_where_it_looked(for_changing):
+    calendar = for_changing(personal=[DENTIST_THURSDAY], reads=3)
+    assert calendar.remove("optician", day=THURSDAY, today=NOVEMBER_21) == {
+        "success": False, "message": "I can't find the optician on your calendar on Thursday."}
+    assert calendar.remove("optician", day=date(2026, 11, 22), today=NOVEMBER_21) == {
+        "success": False, "message": "I can't find the optician on your calendar tomorrow."}
+    assert calendar.remove("optician", today=NOVEMBER_21) == {
+        "success": False, "message": "I can't find the optician on your calendar."}
+    # On every calendar, the day given, else from today over the three months find looks over.
+    assert google_calendar.SEARCH_DAYS == 90
+    assert [calendar_id for calendar_id, _ in _read(calendar)] == \
+        ["calendar-personal", "calendar-work", "calendar-uni"] * 3
+    assert [(params["timeMin"], params["timeMax"]) for _, params in _read(calendar)] == \
+        [("2026-11-26T00:00:00+00:00", "2026-11-27T00:00:00+00:00")] * 3 + \
+        [("2026-11-22T00:00:00+00:00", "2026-11-23T00:00:00+00:00")] * 3 + \
+        [("2026-11-21T00:00:00+00:00", "2027-02-19T00:00:00+00:00")] * 3
+    # Nothing heard to look for isn't looked for.
+    assert calendar.remove("  ", today=NOVEMBER_21) == {
+        "success": False, "message": "I didn't catch which event you meant."}
+    assert len(_read(calendar)) == 9 and calendar._session.sent == []
+
+
+def test_a_time_picks_the_event_at_it(for_changing):
+    events = [_own("Dentist", "2026-11-26", "2026-11-27", "made-up-dentist-day"),
+              _own("Dentist", "2026-11-26T09:00:00Z", "2026-11-26T09:30:00Z", "made-up-dentist-9"),
+              _own("Dentist", "2026-11-26T15:00:00Z", "2026-11-26T15:30:00Z", "made-up-dentist-3"),
+              _own("Dentist", "2026-11-26T15:30:00Z", "2026-11-26T16:00:00Z", "made-up-dentist-half-3")]
+    # Exactly at the time given, else in its hour - "the 9 o'clock one" - and never one all day.
+    for at, removed, said in (("15:30", "made-up-dentist-half-3", "3:30 PM"), ("15:00", "made-up-dentist-3", "3 PM"),
+                              ("09:30", "made-up-dentist-9", "9 AM")):
+        url = _event_url("calendar-personal", removed)
+        calendar = for_changing(personal=events, answers={f"DELETE {url}": [DELETED]})
+        assert _said(calendar.remove("dentist", day=THURSDAY, at=at, today=NOVEMBER_21)) == {
+            "success": True, "message": f"Removed Dentist, Thursday at {said}."}, at
+        assert calendar._session.sent == [_write("DELETE", url)], at
+
+    calendar = for_changing(personal=events, reads=3)
+    assert calendar.remove("dentist", day=THURSDAY, at="15:45", today=NOVEMBER_21) == {"success": False, "message": (
+        "I found 2: Dentist on Thursday, at 3:00 PM; and Dentist on Thursday, at 3:30 PM. Which one?")}
+    assert calendar.remove("dentist", day=THURSDAY, at="12:00", today=NOVEMBER_21) == {
+        "success": False, "message": "I can't find the dentist on your calendar on Thursday."}
+    assert calendar.remove("dentist", day=THURSDAY, today=NOVEMBER_21)["message"] == (
+        "I found 4: Dentist on Thursday, all day; Dentist on Thursday, at 9:00 AM; Dentist on Thursday, at 3:00 PM; "
+        "and 1 more. Which one?")
+    # A time that can't be read isn't guessed at.
+    assert calendar.remove("dentist", day=THURSDAY, at="three", today=NOVEMBER_21) == {
+        "success": False, "message": "I didn't catch the time."}
+    assert calendar._session.sent == []
+
+
+def test_an_event_on_a_calendar_nova_cant_write_isnt_removed(for_changing):
+    lecture = _own("Lecture", "2026-11-26T11:00:00Z", "2026-11-26T12:00:00Z", "made-up-lecture",
+                   calendar_id="calendar-uni")
+    calendar = for_changing(uni=[lecture])
+    assert calendar.remove("lecture", today=NOVEMBER_21) == {
+        "success": False, "message": "I can't change that, Google only lets me change your own calendars."}
+    assert calendar._session.sent == []
+
+
+def test_an_invite_is_left_alone(for_changing):
+    # On the user's own calendar, but organised by someone else - changing it would tell them.
+    dinner = _google_event("Dinner", "2026-11-26T19:00:00Z", "2026-11-26T21:00:00Z", id="made-up-dinner",
+                           organizer={"email": "someone@example.com", "displayName": "Someone"})
+    for invite in (dinner, {**dinner, "organizer": {"email": "someone@example.com", "self": False}}):
+        calendar = for_changing(personal=[invite])
+        assert calendar.remove("dinner", today=NOVEMBER_21) == {
+            "success": False, "message": "That's an invite from someone else. Change it in Google Calendar."}
+        assert calendar._session.sent == []
+
+
+def test_one_day_of_a_repeating_event_is_removed_by_its_own_id(for_changing):
+    tuesday = _event_url("calendar-personal", GYM_24TH["id"])
+    calendar = for_changing(personal=[GYM_24TH], answers={f"DELETE {tuesday}": [DELETED], f"PATCH {tuesday}": [GYM_24TH]})
+    reply = calendar.remove("gym", day=date(2026, 11, 24), today=NOVEMBER_21)
+    assert _said(reply) == {"success": True, "message": "Removed Gym, Tuesday at 6 PM."}
+    # Its own id - its series' and its time - so Google removes that day only, and the series isn't read.
+    assert GYM_24TH["id"] == "made-up-gym_20261124T180000Z"
+    assert calendar._session.sent == [_write("DELETE", tuesday)]
+    assert _event_url("calendar-personal", "made-up-gym") not in [url for url, _ in calendar._session.asked]
+    # Put back the same way.
+    assert reply["undo"]() == {"success": True, "message": "Put Gym back, Tuesday at 6 PM."}
+    assert calendar._session.sent[-1] == _write("PATCH", tuesday, {"status": "confirmed"})
+
+
+def test_from_this_one_on_cuts_the_series_just_before_it(for_changing):
+    series = _event_url("calendar-personal", "made-up-gym")
+    calendar = for_changing(personal=[GYM_24TH, GYM_1ST], answers={series: [GYM], f"PATCH {series}": [GYM, GYM]})
+    reply = calendar.remove("gym", following=True, today=NOVEMBER_21)
+    assert _said(reply) == {"success": True, "message": "Removed Gym from Tuesday on."}
+    # From the earliest: ended a second before it, in UTC, so the times before it - and the day it
+    # skips - stay as they were.
+    assert calendar._session.sent == [_write("PATCH", series, {"recurrence": [
+        "RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261124T175959Z", "EXDATE;TZID=Europe/London:20261110T180000"]})]
+    # Undone, its rules are put back as they were.
+    assert reply["undo"]() == {"success": True, "message": "Put Gym back from Tuesday on."}
+    assert calendar._session.sent[-1] == _write("PATCH", series, {"recurrence": GYM_RULES})
+
+    # From the day given.
+    calendar = for_changing(personal=[GYM_1ST], answers={series: [GYM], f"PATCH {series}": [GYM]})
+    assert _said(calendar.remove("gym", day=date(2026, 12, 1), following=True, today=NOVEMBER_21)) == {
+        "success": True, "message": "Removed Gym from Tuesday the 1st of December on."}
+    assert calendar._session.sent[0]["json"]["recurrence"][0] == "RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261201T175959Z"
+
+
+def test_from_the_first_one_on_removes_the_whole_series(for_changing):
+    series = _event_url("calendar-personal", "made-up-gym")
+    first = _series("Gym", "made-up-gym", "2026-11-24T18:00:00+00:00", "2026-11-24T19:00:00+00:00", *GYM_RULES)
+    # The first time, moved to 7 that day - it's the first by when it was meant to be, which Google
+    # gives with a Z.
+    moved = _occurrence("Gym", "made-up-gym", "2026-11-24T19:00:00Z", "2026-11-24T20:00:00Z",
+                        meant="2026-11-24T18:00:00Z")
+    calendar = for_changing(personal=[moved, GYM_1ST],
+                            answers={series: [first], f"DELETE {series}": [DELETED], f"PATCH {series}": [first]})
+    reply = calendar.remove("gym", following=True, today=NOVEMBER_21)
+    assert _said(reply) == {"success": True, "message": "Removed Gym from Tuesday on."}
+    assert calendar._session.sent == [_write("DELETE", series)]
+    # Undone, the series is set back to confirmed.
+    assert reply["undo"]() == {"success": True, "message": "Put Gym back from Tuesday on."}
+    assert calendar._session.sent[-1] == _write("PATCH", series, {"status": "confirmed"})
+
+    # Or, when Google won't, a copy of it is added - with its rules.
+    calendar = for_changing(personal=[moved], answers={series: [first], f"DELETE {series}": [DELETED],
+                                                       f"PATCH {series}": [_refused(404, "notFound")],
+                                                       f"POST {_events_url('calendar-personal')}": [_inserted()]})
+    assert calendar.remove("gym", following=True, today=NOVEMBER_21)["undo"]() == {
+        "success": True, "message": "Put Gym back from Tuesday on."}
+    assert calendar._session.sent[-1] == _write("POST", _events_url("calendar-personal"), {
+        "summary": "Gym", "start": first["start"], "end": first["end"], "recurrence": GYM_RULES})
+
+
+def test_cut_rules_end_a_count_series_and_an_all_day_series_just_before():
+    cut = google_calendar._cut_rules
+    # Kept by COUNT, cut at a time on BST: 9 AM in London is 8 AM in UTC.
+    assert cut(["RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=10"], datetime(2026, 10, 20, 9, 0, tzinfo=LONDON)) == \
+        ["RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261020T075959Z"]
+    # On GMT, as Google gives it - and an UNTIL is replaced, wherever it was.
+    assert cut(["RRULE:FREQ=WEEKLY;UNTIL=20270101T000000Z;BYDAY=TU"], datetime.fromisoformat("2026-11-24T09:00:00Z")) \
+        == ["RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261124T085959Z"]
+    # Half past midnight on BST is the day before, in UTC.
+    assert cut(["RRULE:FREQ=DAILY;COUNT=30"], datetime(2026, 10, 20, 0, 30, tzinfo=LONDON)) == \
+        ["RRULE:FREQ=DAILY;UNTIL=20261019T232959Z"]
+    # An all-day series ends the day before, as a date.
+    assert cut(["RRULE:FREQ=YEARLY;COUNT=5"], date(2026, 11, 24)) == ["RRULE:FREQ=YEARLY;UNTIL=20261123"]
+    assert cut(["RRULE:FREQ=MONTHLY;BYMONTHDAY=1;COUNT=12"], date(2027, 1, 1)) == \
+        ["RRULE:FREQ=MONTHLY;BYMONTHDAY=1;UNTIL=20261231"]
+    # EXDATE and RDATE lines are kept as they are.
+    assert cut(["EXDATE;VALUE=DATE:20261117", "RRULE:FREQ=WEEKLY;COUNT=10", "RDATE;VALUE=DATE:20261119"],
+               date(2026, 11, 24)) == \
+        ["EXDATE;VALUE=DATE:20261117", "RRULE:FREQ=WEEKLY;UNTIL=20261123", "RDATE;VALUE=DATE:20261119"]
+
+
+@pytest.mark.parametrize("status", [404, 410])
+def test_an_event_already_gone_is_said_plainly(for_changing, status):
+    # Deleted on the phone meanwhile - Google's 404 for an event it's forgotten, 410 for one deleted.
+    gone = _refused(status, "notFound" if status == 404 else "deleted")
+    dentist = _event_url("calendar-personal", "made-up-dentist")
+    calendar = for_changing(personal=[DENTIST_THURSDAY], answers={f"DELETE {dentist}": [gone]})
+    assert calendar.remove("dentist", today=NOVEMBER_21) == {"success": False, "message": "Dentist was already gone."}
+    assert calendar._session.sent == [_write("DELETE", dentist)]
+
+    # From this one on: the series gone when it's read, deleted, or cut - and nothing else sent.
+    series = _event_url("calendar-personal", "made-up-gym")
+    first = _series("Gym", "made-up-gym", "2026-11-24T18:00:00Z", "2026-11-24T19:00:00Z", *GYM_RULES)
+    for answers, sent in (({series: [gone]}, []), ({series: [first], f"DELETE {series}": [gone]}, ["DELETE"]),
+                          ({series: [GYM], f"PATCH {series}": [gone]}, ["PATCH"])):
+        calendar = for_changing(personal=[GYM_24TH], answers=answers)
+        assert calendar.remove("gym", following=True, today=NOVEMBER_21) == {
+            "success": False, "message": "Gym was already gone."}
+        assert [each["method"] for each in calendar._session.sent] == sent
+
+    # Undoing: a series cut, then deleted on the phone.
+    calendar = for_changing(personal=[GYM_24TH], answers={series: [GYM], f"PATCH {series}": [GYM, gone]})
+    assert calendar.remove("gym", following=True, today=NOVEMBER_21)["undo"]() == {
+        "success": False, "message": "Gym was already gone."}
+    assert [each["method"] for each in calendar._session.sent] == ["PATCH", "PATCH"]
+    # And an event added, then deleted on the phone.
+    added = _event_url("calendar-personal", "made-up-event")
+    calendar = for_changing(answers={f"POST {_events_url('calendar-personal')}": [_inserted()], f"DELETE {added}": [gone]})
+    assert calendar.add("Dentist", "2026-11-26 15:00", today=NOVEMBER_21)["undo"]() == {
+        "success": False, "message": "Dentist was already gone."}
+    assert [(each["method"], each["url"]) for each in calendar._session.sent] == [
+        ("POST", _events_url("calendar-personal")), ("DELETE", added)]
+
+
+UNCLEAR = "I can't tell whether Dentist was removed."
+
+
+@pytest.mark.parametrize("answer, said, sends", [
+    # Sent, but whether it was removed can't be told - so it isn't sent again.
+    (requests.ReadTimeout("Read timed out."), UNCLEAR, 1),
+    (_refused(500, "backendError"), UNCLEAR, 1),
+    (FakeResponse(504, "Gateway Timeout"), UNCLEAR, 1),
+    (requests.ConnectionError(urllib3.exceptions.ProtocolError(
+        "Connection aborted.", ConnectionResetError(104, "Connection reset by peer"))), UNCLEAR, 1),
+    (requests.exceptions.ChunkedEncodingError("Connection broken: IncompleteRead"), UNCLEAR, 1),
+    (FakeResponse(200, "not an answer"), UNCLEAR, 1),
+    # Never sent, refused, or Google slowing Nova down - so certainly not removed.
+    (requests.ConnectTimeout("Connection timed out."), CANT_REACH_GOOGLE, 1),
+    (_refused(403), "Google wouldn't change that.", 1),
+    (_refused(429, "rateLimitExceeded"), CANT_REACH_GOOGLE, 1),
+    # Turned down unread, the access token is got afresh once.
+    (_refused(401, "authError"), NEEDS_SIGN_IN, 2),
+])
+def test_an_unclear_answer_is_never_sent_again(for_changing, caplog, answer, said, sends):
+    dentist = _event_url("calendar-personal", "made-up-dentist")
+    calendar = for_changing(personal=[DENTIST_THURSDAY], answers={f"DELETE {dentist}": [answer, answer]})
+    with caplog.at_level(logging.INFO):
+        assert calendar.remove("dentist", today=NOVEMBER_21) == {"success": False, "message": said}
+    assert calendar._session.sent == [_write("DELETE", dentist)] * sends
+    assert caplog.records and not any("calendar-" in record.getMessage() or "Dentist" in record.getMessage()
+                                      for record in caplog.records)
+
+
+def test_a_removed_event_is_put_back_as_it_was(for_changing):
+    dentist = _event_url("calendar-personal", "made-up-dentist")
+    calendar = for_changing(personal=[DENTIST_THURSDAY],
+                            answers={f"DELETE {dentist}": [DELETED], f"PATCH {dentist}": [DENTIST_THURSDAY]})
+    undo = calendar.remove("dentist", today=NOVEMBER_21)["undo"]
+    # Set back to confirmed, so its reminders and guests come back with it - and said back.
+    assert undo() == {"success": True, "message": "Put Dentist back, Thursday at 3 PM."}
+    assert calendar._session.sent == [_write("DELETE", dentist), _write("PATCH", dentist, {"status": "confirmed"})]
+
+
+def test_a_removed_event_google_wont_confirm_is_put_back_as_a_copy(for_changing):
+    dentist = _event_url("calendar-personal", "made-up-dentist")
+    events = _events_url("calendar-personal")
+    full = {**DENTIST_THURSDAY, "description": "Bring the form", "location": "Made-up Dental",
+            "reminders": {"useDefault": False, "overrides": [{"method": "popup", "minutes": 30}]},
+            "colorId": "5", "transparency": "transparent", "visibility": "private", "etag": '"2"',
+            "htmlLink": "https://www.google.com/calendar/event?eid=made-up", "iCalUID": "made-up-dentist@google.com",
+            "attendees": [{"email": "someone@example.com"}]}
+    # What the user sees of it - not its id, nor its guests, who'd be asked again.
+    copy = {key: full[key] for key in ("summary", "description", "location", "start", "end", "reminders", "colorId",
+                                       "transparency", "visibility")}
+    for refused in (_refused(404, "notFound"), _refused(410, "deleted"), _refused(400, "invalid")):
+        calendar = for_changing(personal=[full], answers={f"DELETE {dentist}": [DELETED], f"PATCH {dentist}": [refused],
+                                                          f"POST {events}": [_inserted()]})
+        assert calendar.remove("dentist", today=NOVEMBER_21)["undo"]() == {
+            "success": True, "message": "Put Dentist back, Thursday at 3 PM."}, refused.status_code
+        assert calendar._session.sent[1:] == [_write("PATCH", dentist, {"status": "confirmed"}),
+                                              _write("POST", events, copy)], refused.status_code
+
+    # Google slowing Nova down, or not saying whether it set it back, is never followed by a copy -
+    # it may be back already.
+    for answer, said in ((_refused(429, "rateLimitExceeded"), CANT_REACH_GOOGLE),
+                         (requests.ReadTimeout("Read timed out."), "I can't tell whether Dentist was put back.")):
+        calendar = for_changing(personal=[full], answers={f"DELETE {dentist}": [DELETED], f"PATCH {dentist}": [answer]})
+        assert calendar.remove("dentist", today=NOVEMBER_21)["undo"]() == {"success": False, "message": said}
+        assert [each["method"] for each in calendar._session.sent] == ["DELETE", "PATCH"]
+
+
+TUESDAY_EVENING = datetime(2026, 11, 24, 20, 0, tzinfo=LONDON)
+GONE = {"success": False, "message": "That day's already gone - which day did you mean?"}
+
+
+def test_from_a_day_already_gone_on_changes_nothing(for_changing):
+    # "Every week from last Tuesday" would take the times since then too - the record of them.
+    calendar = for_changing(personal=[GYM_24TH])
+    assert calendar.remove("gym", day=date(2026, 11, 17), following=True, today=NOVEMBER_21) == GONE
+    assert calendar._session.asked == [] and calendar._session.sent == []
+
+
+def test_from_this_one_on_starts_from_the_next_time_to_come(for_changing):
+    # "Remove gym every week" said at 8 on a Tuesday evening: that day's session is over, so
+    # it's from the next one, and today's stays.
+    series = _event_url("calendar-personal", "made-up-gym")
+    calendar = for_changing(personal=[GYM_24TH, GYM_1ST], answers={series: [GYM], f"PATCH {series}": [GYM]})
+    assert _said(calendar.remove("gym", following=True, now=TUESDAY_EVENING)) == {
+        "success": True, "message": "Removed Gym from Tuesday the 1st of December on."}
+    assert calendar._session.sent == [_write("PATCH", series, {"recurrence": [
+        "RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261201T175959Z", "EXDATE;TZID=Europe/London:20261110T180000"]})]
+
+    # One all day has started from the start of its day.
+    bins = _event_url("calendar-personal", "made-up-bins")
+    calendar = for_changing(personal=[_occurrence("Bins", "made-up-bins", "2026-11-24", "2026-11-25"),
+                                      _occurrence("Bins", "made-up-bins", "2026-12-01", "2026-12-02")],
+                            answers={bins: [_series("Bins", "made-up-bins", "2026-11-03", "2026-11-04",
+                                                    "RRULE:FREQ=WEEKLY;COUNT=20")], f"PATCH {bins}": [{}]})
+    assert _said(calendar.remove("bins", following=True, now=datetime(2026, 11, 24, 7, 0, tzinfo=LONDON))) == {
+        "success": True, "message": "Removed Bins from Tuesday the 1st of December on."}
+    assert calendar._session.sent == [_write("PATCH", bins, {"recurrence": ["RRULE:FREQ=WEEKLY;UNTIL=20261130"]})]
+
+
+def test_a_time_a_repeating_event_has_started_is_never_changed(for_changing):
+    # Not even that day's alone: past sessions and shifts are the record of them. Under way
+    # counts as started, and one all day from the start of its day.
+    bins_today = _occurrence("Bins", "made-up-bins", "2026-11-24", "2026-11-25")
+    for search, events, now in (("gym", [GYM_24TH], TUESDAY_EVENING),
+                                ("gym", [GYM_24TH], datetime(2026, 11, 24, 18, 30, tzinfo=LONDON)),
+                                ("bins", [bins_today], datetime(2026, 11, 24, 7, 0, tzinfo=LONDON))):
+        calendar = for_changing(personal=events)
+        assert calendar.remove(search, day=date(2026, 11, 24), now=now) == GONE, (search, now)
+        assert calendar._session.sent == []
+
+    # Beside one to come, it isn't one of those found.
+    first_of_december = _event_url("calendar-personal", GYM_1ST["id"])
+    calendar = for_changing(personal=[GYM_24TH, GYM_1ST], answers={f"DELETE {first_of_december}": [DELETED]})
+    assert _said(calendar.remove("gym", now=TUESDAY_EVENING)) == {
+        "success": True, "message": "Removed Gym, Tuesday the 1st of December at 6 PM."}
+    assert calendar._session.sent == [_write("DELETE", first_of_december)]
+
+
+def test_a_one_off_event_already_past_is_still_removed(for_changing):
+    # Only a repeating event's past times are a record - a one-off can still be put right after.
+    dentist = _own("Dentist", "2026-11-24T09:00:00Z", "2026-11-24T09:30:00Z", "made-up-dentist-past")
+    url = _event_url("calendar-personal", "made-up-dentist-past")
+    for day, now, said in ((None, TUESDAY_EVENING, "today"),
+                           (date(2026, 11, 24), datetime(2026, 11, 26, 12, 0, tzinfo=LONDON),
+                            "Tuesday the 24th of November")):
+        calendar = for_changing(personal=[dentist], answers={f"DELETE {url}": [DELETED]})
+        assert _said(calendar.remove("dentist", day=day, now=now)) == {
+            "success": True, "message": f"Removed Dentist, {said} at 9 AM."}, said
+        assert calendar._session.sent == [_write("DELETE", url)], said
+
+
+LECTURE = _own("Lecture", "2026-11-26T11:00:00Z", "2026-11-26T12:00:00Z", "made-up-lecture")
+UNI_LECTURE = _own("Lecture", "2026-11-26T11:00:00Z", "2026-11-26T12:00:00Z", "made-up-uni-lecture",
+                   calendar_id="calendar-uni")
+
+
+def test_the_calendars_are_named_when_the_matches_are_on_several(for_changing):
+    # Said the same twice, the user couldn't tell them apart.
+    calendar = for_changing(personal=[LECTURE], uni=[UNI_LECTURE])
+    assert calendar.remove("lecture", today=NOVEMBER_21) == {"success": False, "message": (
+        "I found 2: Lecture on Thursday, at 11:00 AM, on Personal; and Lecture on Thursday, at 11:00 AM, on Uni. "
+        "Which one?")}
+    assert calendar._session.sent == []
+
+
+def test_a_calendar_named_narrows_the_matches(for_changing):
+    # Named as an event is added to one - by its name, "my ... calendar", or an activity's word.
+    mine = _event_url("calendar-personal", "made-up-lecture")
+    for named in ("personal", "my calendar", "my personal calendar"):
+        calendar = for_changing(personal=[LECTURE], uni=[UNI_LECTURE], answers={f"DELETE {mine}": [DELETED]})
+        assert _said(calendar.remove("lecture", calendar=named, today=NOVEMBER_21)) == {
+            "success": True, "message": "Removed Lecture, Thursday at 11 AM."}, named
+        assert calendar._session.sent == [_write("DELETE", mine)], named
+        # Only the calendar named is read.
+        assert [calendar_id for calendar_id, _ in _read(calendar)] == ["calendar-personal"], named
+    for named in ("uni", "my uni calendar", "lectures"):
+        calendar = for_changing(personal=[LECTURE], uni=[UNI_LECTURE])
+        assert calendar.remove("lecture", calendar=named, today=NOVEMBER_21) == {
+            "success": False, "message": "I can't change that, Google only lets me change your own calendars."}, named
+        assert calendar._session.sent == [], named
+    calendar = for_changing(personal=[LECTURE], uni=[UNI_LECTURE])
+    assert calendar.remove("lecture", calendar="gym", today=NOVEMBER_21) == {
+        "success": False, "message": "I haven't got a calendar called that."}
+    assert _read(calendar) == [] and calendar._session.sent == []
+
+
+# Moving and renaming
+
+DENTIST_URL = _event_url("calendar-personal", "made-up-dentist")
+GYM_URL = _event_url("calendar-personal", "made-up-gym")
+PERSONAL_EVENTS = _events_url("calendar-personal")
+# Google's answer to an event changed - the event, as events.patch gives it back.
+CHANGED = {"kind": "calendar#event", "id": "made-up-dentist", "status": "confirmed"}
+# Gym on Tuesday the 24th, meant for 6 that evening, moved to Thursday at 6.
+GYM_MOVED_ON = _occurrence("Gym", "made-up-gym", "2026-11-26T18:00:00Z", "2026-11-26T19:00:00Z",
+                           meant="2026-11-24T18:00:00Z")
+# The gym's times before the 24th, as instances gives them with showDeleted: the 10th's was
+# deleted on its own.
+BEFORE_THE_24TH = [_occurrence("Gym", "made-up-gym", "2026-11-03T18:00:00Z", "2026-11-03T19:00:00Z"),
+                   {"kind": "calendar#event", "id": "made-up-gym_20261110T180000Z", "status": "cancelled",
+                    "recurringEventId": "made-up-gym", "originalStartTime": _when("2026-11-10T18:00:00Z")},
+                   _occurrence("Gym", "made-up-gym", "2026-11-17T18:00:00Z", "2026-11-17T19:00:00Z")]
+CUT_AT_THE_24TH = {"recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261124T175959Z",
+                                  "EXDATE;TZID=Europe/London:20261110T180000"]}
+
+
+def _splitting(**answers):
+    """A calendar with the gym's next times, to change from the 24th on - Google answering as answers give it."""
+    return {"personal": [GYM_24TH, GYM_1ST], "answers": {GYM_URL: [GYM], f"{GYM_URL}/instances": [
+        _events_page(*BEFORE_THE_24TH)], f"POST {PERSONAL_EVENTS}": [_inserted()], **answers}}
+
+
+def test_an_event_moves_keeping_its_length(for_changing, caplog):
+    # Half an hour on Thursday at 3, moved to Friday at 4, is still half an hour.
+    dentist = _own("Dentist", "2026-11-26T15:00:00Z", "2026-11-26T15:30:00Z", "made-up-dentist")
+    calendar = for_changing(personal=[dentist], answers={f"PATCH {DENTIST_URL}": [CHANGED]})
+    with caplog.at_level(logging.INFO):
+        reply = calendar.change("dentist", start="2026-11-27 16:00", today=NOVEMBER_21)
+    assert _said(reply) == {"success": True, "message": "Moved Dentist to Friday at 4 PM."}
+    assert callable(reply["undo"])
+    # One PATCH, of its times alone.
+    assert calendar._session.sent == [_write("PATCH", DENTIST_URL, {
+        "start": {"dateTime": "2026-11-27T16:00:00+00:00"}, "end": {"dateTime": "2026-11-27T16:30:00+00:00"}})]
+    assert caplog.records and not any("calendar-" in record.getMessage() or "Dentist" in record.getMessage()
+                                      for record in caplog.records)
+
+    # An end given is kept.
+    calendar = for_changing(personal=[dentist], answers={f"PATCH {DENTIST_URL}": [CHANGED]})
+    calendar.change("dentist", start="2026-11-27 16:00", end="2026-11-27 17:15", today=NOVEMBER_21)
+    assert calendar._session.sent[0]["json"]["end"] == {"dateTime": "2026-11-27T17:15:00+00:00"}
+
+    # One that was all day lasts an hour once it's given a time - with its date cleared, as
+    # Google's patch keeps whatever it isn't sent.
+    holiday = _event_url("calendar-personal", "made-up-holiday")
+    calendar = for_changing(personal=[_own("Holiday", "2026-11-22", "2026-11-23", "made-up-holiday")],
+                            answers={f"PATCH {holiday}": [CHANGED]})
+    assert _said(calendar.change("holiday", start="2026-11-27 10:00", today=NOVEMBER_21)) == {
+        "success": True, "message": "Moved Holiday to Friday at 10 AM."}
+    assert calendar._session.sent == [_write("PATCH", holiday, {
+        "start": {"date": None, "dateTime": "2026-11-27T10:00:00+00:00"},
+        "end": {"date": None, "dateTime": "2026-11-27T11:00:00+00:00"}})]
+
+    # Times that can't be read aren't looked for, and an end before the start isn't sent.
+    calendar = for_changing(personal=[dentist])
+    for start, end in (("Friday at 4", None), ("2026-11-27 16:00", "about five"), ("2026-11-27T16:00", None)):
+        assert calendar.change("dentist", start=start, end=end, today=NOVEMBER_21) == {
+            "success": False, "message": "I didn't catch when that is."}, (start, end)
+    # An end with no start is no new time.
+    assert calendar.change("dentist", end="2026-11-27 17:00", summary="Dentist check-up", today=NOVEMBER_21) == {
+        "success": False, "message": "I didn't catch when that is."}
+    assert calendar.change("dentist", end="2026-11-27 17:00", today=NOVEMBER_21) == {
+        "success": False, "message": "I didn't catch what to change."}
+    assert calendar._session.asked == []
+    for start, end in (("2026-11-27 16:00", "2026-11-27 15:00"), ("2026-11-27 16:00", "2026-11-27 16:00")):
+        calendar = for_changing(personal=[dentist])
+        assert calendar.change("dentist", start=start, end=end, today=NOVEMBER_21) == {
+            "success": False, "message": "That ends before it starts."}, end
+        assert calendar._session.sent == []
+
+
+def test_an_all_day_event_stays_all_day_on_a_new_day(for_changing):
+    # Three days from tomorrow - Google's end is the day after the last - moved to Friday: still three.
+    holiday = _own("Holiday", "2026-11-22", "2026-11-25", "made-up-holiday")
+    url = _event_url("calendar-personal", "made-up-holiday")
+    calendar = for_changing(personal=[holiday], answers={f"PATCH {url}": [CHANGED]})
+    assert _said(calendar.change("holiday", start="2026-11-27", today=NOVEMBER_21)) == {
+        "success": True, "message": "Moved Holiday to Friday, all day."}
+    assert calendar._session.sent == [_write("PATCH", url, {"start": {"date": "2026-11-27"},
+                                                            "end": {"date": "2026-11-30"}})]
+
+    # An end day given is included, as adding has it.
+    calendar = for_changing(personal=[holiday], answers={f"PATCH {url}": [CHANGED]})
+    calendar.change("holiday", start="2026-11-27", end="2026-11-28", today=NOVEMBER_21)
+    assert calendar._session.sent[0]["json"] == {"start": {"date": "2026-11-27"}, "end": {"date": "2026-11-29"}}
+
+
+def test_a_date_alone_keeps_a_timed_events_time(for_changing):
+    calendar = for_changing(personal=[DENTIST_THURSDAY], answers={f"PATCH {DENTIST_URL}": [CHANGED]})
+    assert _said(calendar.change("dentist", start="2026-11-27", today=NOVEMBER_21)) == {
+        "success": True, "message": "Moved Dentist to Friday at 3 PM."}
+    assert calendar._session.sent == [_write("PATCH", DENTIST_URL, {
+        "start": {"dateTime": "2026-11-27T15:00:00+00:00"}, "end": {"dateTime": "2026-11-27T16:00:00+00:00"}})]
+
+    # The time it's at on the clock, over the clocks going back - 9:30 on BST is 9:30 on GMT.
+    dentist = _own("Dentist", "2026-10-22T09:30:00+01:00", "2026-10-22T10:00:00+01:00", "made-up-dentist")
+    calendar = for_changing(personal=[dentist], answers={f"PATCH {DENTIST_URL}": [CHANGED]})
+    assert _said(calendar.change("dentist", start="2026-10-29", today=date(2026, 10, 20))) == {
+        "success": True, "message": "Moved Dentist to Thursday the 29th of October at 9:30 AM."}
+    assert calendar._session.sent[0]["json"] == {"start": {"dateTime": "2026-10-29T09:30:00+00:00"},
+                                                 "end": {"dateTime": "2026-10-29T10:00:00+00:00"}}
+
+
+def test_a_time_alone_is_on_the_events_own_day(for_changing):
+    # "Move the dentist to 5": Claude has no day to give, so the time alone is on the one found.
+    calendar = for_changing(personal=[DENTIST_THURSDAY], answers={f"PATCH {DENTIST_URL}": [CHANGED]})
+    assert _said(calendar.change("dentist", start="17:00", today=NOVEMBER_21)) == {
+        "success": True, "message": "Moved Dentist to Thursday at 5 PM."}
+    assert calendar._session.sent == [_write("PATCH", DENTIST_URL, {
+        "start": {"dateTime": "2026-11-26T17:00:00+00:00"}, "end": {"dateTime": "2026-11-26T18:00:00+00:00"}})]
+
+    # An end given as a time alone keeps that day too - after a start of a time alone, or of a day.
+    for start in ("17:00", "2026-11-26 17:00", "2026-11-26"):
+        calendar = for_changing(personal=[DENTIST_THURSDAY], answers={f"PATCH {DENTIST_URL}": [CHANGED]})
+        calendar.change("dentist", start=start, end="18:30", today=NOVEMBER_21)
+        assert calendar._session.sent[0]["json"]["end"] == {"dateTime": "2026-11-26T18:30:00+00:00"}, start
+
+    # One all day is given the time on its own day, and lasts an hour.
+    holiday = _event_url("calendar-personal", "made-up-holiday")
+    calendar = for_changing(personal=[_own("Holiday", "2026-11-22", "2026-11-23", "made-up-holiday")],
+                            answers={f"PATCH {holiday}": [CHANGED]})
+    calendar.change("holiday", start="10:00", today=NOVEMBER_21)
+    assert calendar._session.sent == [_write("PATCH", holiday, {
+        "start": {"date": None, "dateTime": "2026-11-22T10:00:00+00:00"},
+        "end": {"date": None, "dateTime": "2026-11-22T11:00:00+00:00"}})]
+
+    # A time which isn't one isn't looked for, and an end with no start is no new time, as before.
+    calendar = for_changing(personal=[DENTIST_THURSDAY])
+    for start, end in (("25:00", None), ("17:60", None), ("17:00", "later"), ("5pm", None)):
+        assert calendar.change("dentist", start=start, end=end, today=NOVEMBER_21) == {
+            "success": False, "message": "I didn't catch when that is."}, (start, end)
+    assert calendar.change("dentist", end="18:30", summary="Dentist check-up", today=NOVEMBER_21) == {
+        "success": False, "message": "I didn't catch when that is."}
+    assert calendar._session.asked == [] and calendar._session.sent == []
+    assert calendar.change("dentist", start="18:00", end="17:00", today=NOVEMBER_21) == {
+        "success": False, "message": "That ends before it starts."}
+    assert calendar._session.sent == []
+
+
+def test_a_time_alone_for_a_day_gone_isnt_moved_to(for_changing):
+    # An event on a day before today - looked for there by its day - is gone, as a date said is.
+    gone = _own("Dentist", "2026-11-19T15:00:00Z", "2026-11-19T16:00:00Z", "made-up-dentist")
+    calendar = for_changing(personal=[gone])
+    assert calendar.change("dentist", day=date(2026, 11, 19), start="17:00", today=NOVEMBER_21) == GONE
+    assert calendar._session.sent == []
+
+    # Earlier today is fine, as it is for a date.
+    earlier = _own("Dentist", "2026-11-21T09:00:00Z", "2026-11-21T10:00:00Z", "made-up-dentist")
+    calendar = for_changing(personal=[earlier], answers={f"PATCH {DENTIST_URL}": [CHANGED]})
+    assert _said(calendar.change("dentist", start="08:00", today=NOVEMBER_21))["success"]
+
+
+def test_an_event_is_renamed(for_changing):
+    calendar = for_changing(personal=[DENTIST_THURSDAY], answers={f"PATCH {DENTIST_URL}": [CHANGED]})
+    assert _said(calendar.change("dentist", summary=" Dentist check-up ", today=NOVEMBER_21)) == {
+        "success": True, "message": "Renamed Dentist to Dentist check-up, Thursday at 3 PM."}
+    assert calendar._session.sent == [_write("PATCH", DENTIST_URL, {"summary": "Dentist check-up"})]
+
+    # Nothing heard to change, nothing is looked for.
+    calendar = for_changing(personal=[DENTIST_THURSDAY])
+    for summary, start in ((None, None), ("  ", None), ("", "")):
+        assert calendar.change("dentist", start=start, summary=summary, today=NOVEMBER_21) == {
+            "success": False, "message": "I didn't catch what to change."}, (summary, start)
+    assert calendar._session.asked == [] and calendar._session.sent == []
+
+
+def test_moved_and_renamed_at_once(for_changing):
+    calendar = for_changing(personal=[DENTIST_THURSDAY], answers={f"PATCH {DENTIST_URL}": [CHANGED]})
+    assert _said(calendar.change("dentist", start="2026-11-27 16:00", summary="Dentist check-up",
+                                 today=NOVEMBER_21)) == {
+        "success": True, "message": "Moved Dentist to Friday at 4 PM and renamed it Dentist check-up."}
+    assert calendar._session.sent == [_write("PATCH", DENTIST_URL, {
+        "start": {"dateTime": "2026-11-27T16:00:00+00:00"}, "end": {"dateTime": "2026-11-27T17:00:00+00:00"},
+        "summary": "Dentist check-up"})]
+
+
+def test_a_day_gone_isnt_moved_to(for_changing):
+    # The week or the year misheard, as when adding - so nothing is even looked for.
+    calendar = for_changing(personal=[DENTIST_THURSDAY])
+    for start in ("2026-11-20 15:00", "2026-11-20", "2025-11-27 16:00"):
+        assert calendar.change("dentist", start=start, today=NOVEMBER_21) == GONE, start
+    assert calendar._session.asked == [] and calendar._session.sent == []
+
+    # Earlier today is fine.
+    calendar = for_changing(personal=[DENTIST_THURSDAY], answers={f"PATCH {DENTIST_URL}": [CHANGED]})
+    assert _said(calendar.change("dentist", start="2026-11-21 08:00", today=NOVEMBER_21)) == {
+        "success": True, "message": "Moved Dentist to today at 8 AM."}
+
+
+@pytest.mark.parametrize("answer, said", [
+    # Sent, but whether it changed can't be told - so it isn't sent again.
+    (requests.ReadTimeout("Read timed out."), "I can't tell whether Dentist was changed."),
+    (_refused(500, "backendError"), "I can't tell whether Dentist was changed."),
+    (FakeResponse(200, "not an answer"), "I can't tell whether Dentist was changed."),
+    # Deleted on the phone meanwhile.
+    (_refused(404, "notFound"), "Dentist was already gone."),
+    (_refused(410, "deleted"), "Dentist was already gone."),
+    # Refused, or never sent.
+    (_refused(403), "Google wouldn't change that."),
+    (requests.ConnectTimeout("Connection timed out."), CANT_REACH_GOOGLE),
+])
+def test_a_change_is_sent_once_whatever_google_answers(for_changing, caplog, answer, said):
+    calendar = for_changing(personal=[DENTIST_THURSDAY], answers={f"PATCH {DENTIST_URL}": [answer, answer]})
+    with caplog.at_level(logging.INFO):
+        assert calendar.change("dentist", start="2026-11-27 16:00", today=NOVEMBER_21) == {
+            "success": False, "message": said}
+    assert len(calendar._session.sent) == 1
+    assert caplog.records and not any("calendar-" in record.getMessage() or "Dentist" in record.getMessage()
+                                      for record in caplog.records)
+
+
+def test_a_change_is_undone_to_the_old_times_and_name(for_changing):
+    old = {"start": DENTIST_THURSDAY["start"], "end": DENTIST_THURSDAY["end"]}
+    for asked, back, said in (
+            ({"start": "2026-11-27 16:00"}, old, "Moved Dentist back to Thursday at 3 PM."),
+            ({"summary": "Dentist check-up"}, {"summary": "Dentist"}, "Renamed it back to Dentist."),
+            ({"start": "2026-11-27 16:00", "summary": "Dentist check-up"}, {**old, "summary": "Dentist"},
+             "Put Dentist back as it was, Thursday at 3 PM.")):
+        calendar = for_changing(personal=[DENTIST_THURSDAY], answers={f"PATCH {DENTIST_URL}": [CHANGED, CHANGED]})
+        undo = calendar.change("dentist", today=NOVEMBER_21, **asked)["undo"]
+        assert undo() == {"success": True, "message": said}, said
+        assert len(calendar._session.sent) == 2 and calendar._session.sent[-1] == _write("PATCH", DENTIST_URL, back)
+
+    # One that was all day is put back all day, with the time it was given cleared.
+    holiday = _own("Holiday", "2026-11-22", "2026-11-23", "made-up-holiday")
+    url = _event_url("calendar-personal", "made-up-holiday")
+    calendar = for_changing(personal=[holiday], answers={f"PATCH {url}": [CHANGED, CHANGED]})
+    assert calendar.change("holiday", start="2026-11-27 10:00", today=NOVEMBER_21)["undo"]() == {
+        "success": True, "message": "Moved Holiday back to tomorrow, all day."}
+    assert calendar._session.sent[-1] == _write("PATCH", url, {"start": {"dateTime": None, "date": "2026-11-22"},
+                                                               "end": {"dateTime": None, "date": "2026-11-23"}})
+
+    # Sent once too: an unclear answer is said as that, and one deleted since as gone, by the name it has now.
+    for answer, said in ((requests.ReadTimeout("Read timed out."), "I can't tell whether Dentist was put back."),
+                         (_refused(410, "deleted"), "Dentist check-up was already gone.")):
+        calendar = for_changing(personal=[DENTIST_THURSDAY],
+                                answers={f"PATCH {DENTIST_URL}": [CHANGED, answer, CHANGED]})
+        undo = calendar.change("dentist", summary="Dentist check-up", today=NOVEMBER_21)["undo"]
+        assert undo() == {"success": False, "message": said}
+        assert len(calendar._session.sent) == 2
+
+
+def test_all_of_them_only_changes_the_time(for_changing):
+    # Every Tuesday moved to Wednesdays would need its rule changed - that's left to Google Calendar.
+    calendar = for_changing(personal=[GYM_24TH, GYM_1ST], reads=2)
+    for start in ("2026-11-25 19:00", "2026-11-25"):
+        assert calendar.change("gym", start=start, following=True, today=NOVEMBER_21) == {
+            "success": False, "message": "I can only change the time for all of them. Move the days in Google "
+                                         "Calendar."}, start
+    assert calendar._session.sent == [] and GYM_URL not in [url for url, _ in calendar._session.asked]
+
+    # That day's alone can move to another day, by its own id.
+    tuesday = _event_url("calendar-personal", GYM_24TH["id"])
+    calendar = for_changing(personal=[GYM_24TH], answers={f"PATCH {tuesday}": [CHANGED]})
+    assert _said(calendar.change("gym", day=date(2026, 11, 24), start="2026-11-25 19:00", today=NOVEMBER_21)) == {
+        "success": True, "message": "Moved Gym to Wednesday at 7 PM."}
+    assert calendar._session.sent == [_write("PATCH", tuesday, {
+        "start": {"dateTime": "2026-11-25T19:00:00+00:00"}, "end": {"dateTime": "2026-11-25T20:00:00+00:00"}})]
+
+
+def test_from_the_first_one_on_changes_the_series_itself(for_changing):
+    first = _series("Gym", "made-up-gym", "2026-11-24T18:00:00+00:00", "2026-11-24T19:00:00+00:00", *GYM_RULES)
+    old = {"start": first["start"], "end": first["end"]}
+    # Its own first date at the new time, in the zone it repeats in, which Google needs of a repeating event.
+    moved = {"start": {"dateTime": "2026-11-24T19:00:00+00:00", "timeZone": "Europe/London"},
+             "end": {"dateTime": "2026-11-24T20:00:00+00:00", "timeZone": "Europe/London"}}
+    for asked, sent, back, said in (
+            ({"start": "2026-11-24 19:00"}, moved, old, "Moved Gym to 7 PM from Tuesday on."),
+            ({"summary": "Gym class"}, {"summary": "Gym class"}, {"summary": "Gym"},
+             "Renamed Gym to Gym class from Tuesday on."),
+            ({"start": "2026-11-24 19:00", "summary": "Gym class"}, {**moved, "summary": "Gym class"},
+             {**old, "summary": "Gym"}, "Moved Gym to 7 PM from Tuesday on and renamed it Gym class."),
+            # A time alone - on that Tuesday, which is all Claude knows of the day.
+            ({"start": "19:00"}, moved, old, "Moved Gym to 7 PM from Tuesday on.")):
+        calendar = for_changing(personal=[GYM_24TH, GYM_1ST], answers={GYM_URL: [first],
+                                                                       f"PATCH {GYM_URL}": [first, first]})
+        reply = calendar.change("gym", following=True, today=NOVEMBER_21, **asked)
+        assert _said(reply) == {"success": True, "message": said}, said
+        assert calendar._session.sent == [_write("PATCH", GYM_URL, sent)], said
+        # Undone, the series is put back as it was.
+        assert reply["undo"]() == {"success": True, "message": "Put Gym back as it was."}, said
+        assert calendar._session.sent[-1] == _write("PATCH", GYM_URL, back), said
+
+
+def test_from_this_one_on_splits_the_series_with_the_times_left(for_changing):
+    # Before the 1st of December the series - from the 3rd of November, ten times - was meant to be
+    # on four Tuesdays: the 10th's, deleted on its own, still counts, as a COUNT counts it, and the
+    # 8th's, moved to the 30th, isn't one of them.
+    before = [*BEFORE_THE_24TH, GYM_24TH,
+              _occurrence("Gym", "made-up-gym", "2026-11-30T18:00:00Z", "2026-11-30T19:00:00Z",
+                          meant="2026-12-08T18:00:00Z")]
+    instances = f"{GYM_URL}/instances"
+    calendar = for_changing(personal=[GYM_1ST], answers={
+        GYM_URL: [GYM], instances: [_events_page(*before)], f"PATCH {GYM_URL}": [GYM],
+        f"POST {PERSONAL_EVENTS}": [_inserted()]})
+    reply = calendar.change("gym", day=date(2026, 12, 1), start="2026-12-01 19:00", following=True, today=NOVEMBER_21)
+    assert _said(reply) == {"success": True, "message": "Moved Gym to 7 PM from Tuesday the 1st of December on."}
+    # Counted up to when this one was meant to be, with those deleted.
+    assert [params for url, params in calendar._session.asked if url == instances] == [
+        {"timeMax": "2026-12-01T18:00:00+00:00", "showDeleted": "true", "maxResults": 250}]
+    # The old series ended just before it, then a new one from it at the new time, with the six times left.
+    assert calendar._session.sent == [
+        _write("PATCH", GYM_URL, {"recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261201T175959Z",
+                                                 "EXDATE;TZID=Europe/London:20261110T180000"]}),
+        _write("POST", PERSONAL_EVENTS, {
+            "summary": "Gym", "start": {"dateTime": "2026-12-01T19:00:00+00:00", "timeZone": "Europe/London"},
+            "end": {"dateTime": "2026-12-01T20:00:00+00:00", "timeZone": "Europe/London"},
+            "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=6", "EXDATE;TZID=Europe/London:20261110T180000"]})]
+
+    # Renamed from the next one: the series' own times from it, under the new name - and an UNTIL is
+    # kept as it is, so nothing is counted.
+    rules = ["RRULE:FREQ=WEEKLY;UNTIL=20270105T180000Z;BYDAY=TU"]
+    until = _series("Gym", "made-up-gym", "2026-11-03T18:00:00Z", "2026-11-03T19:00:00Z", *rules)
+    calendar = for_changing(personal=[GYM_24TH, GYM_1ST], answers={
+        GYM_URL: [until], f"PATCH {GYM_URL}": [until], f"POST {PERSONAL_EVENTS}": [_inserted()]})
+    assert _said(calendar.change("gym", summary="Gym class", following=True, today=NOVEMBER_21)) == {
+        "success": True, "message": "Renamed Gym to Gym class from Tuesday on."}
+    assert calendar._session.sent == [
+        _write("PATCH", GYM_URL, {"recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261124T175959Z"]}),
+        _write("POST", PERSONAL_EVENTS, {
+            "summary": "Gym class", "start": {"dateTime": "2026-11-24T18:00:00+00:00", "timeZone": "Europe/London"},
+            "end": {"dateTime": "2026-11-24T19:00:00+00:00", "timeZone": "Europe/London"}, "recurrence": rules})]
+    assert instances not in [url for url, _ in calendar._session.asked]
+
+
+def test_from_this_one_on_with_a_time_alone_splits_at_the_next_time(for_changing):
+    # "Move my gym to 7 from now on": no day is said, so none is guessed - it's the next gym's own, the 24th.
+    calendar = for_changing(**_splitting(**{f"PATCH {GYM_URL}": [GYM]}))
+    reply = calendar.change("gym", start="19:00", following=True, today=date(2026, 11, 23))
+    assert _said(reply) == {"success": True, "message": "Moved Gym to 7 PM from tomorrow on."}
+    assert [each["method"] for each in calendar._session.sent] == ["PATCH", "POST"]
+    assert calendar._session.sent[0]["json"] == CUT_AT_THE_24TH
+    assert calendar._session.sent[1]["json"]["start"] == {"dateTime": "2026-11-24T19:00:00+00:00",
+                                                          "timeZone": "Europe/London"}
+    # Its end too, as a time alone.
+    calendar = for_changing(**_splitting(**{f"PATCH {GYM_URL}": [GYM]}))
+    calendar.change("gym", start="19:00", end="20:30", following=True, today=NOVEMBER_21)
+    assert calendar._session.sent[1]["json"]["end"] == {"dateTime": "2026-11-24T20:30:00+00:00",
+                                                        "timeZone": "Europe/London"}
+
+
+def test_an_all_day_series_is_split_from_this_one_on_with_the_times_left(for_changing):
+    # Bins all day every Tuesday from the 3rd of November, eight times, the 10th deleted on its own: three
+    # were meant to be before the 24th, so five are left - and the new series, made two days long, is from the
+    # 24th. All day, the old one ends the day before, as a date.
+    bins = _event_url("calendar-personal", "made-up-bins")
+    rules = ["RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=8", "EXDATE;VALUE=DATE:20261110"]
+    series = _series("Bins", "made-up-bins", "2026-11-03", "2026-11-04", *rules)
+    before = [_occurrence("Bins", "made-up-bins", "2026-11-03", "2026-11-04"),
+              {"kind": "calendar#event", "id": "made-up-bins_20261110", "status": "cancelled",
+               "recurringEventId": "made-up-bins", "originalStartTime": {"date": "2026-11-10"}},
+              _occurrence("Bins", "made-up-bins", "2026-11-17", "2026-11-18")]
+    calendar = for_changing(personal=[_occurrence("Bins", "made-up-bins", "2026-11-24", "2026-11-25"),
+                                      _occurrence("Bins", "made-up-bins", "2026-12-01", "2026-12-02")],
+                            answers={bins: [series], f"{bins}/instances": [_events_page(*before)],
+                                     f"PATCH {bins}": [series, series], f"POST {PERSONAL_EVENTS}": [_inserted()],
+                                     f"DELETE {_event_url('calendar-personal', 'made-up-event')}": [DELETED]})
+    reply = calendar.change("bins", start="2026-11-24", end="2026-11-25", summary="Bins and recycling",
+                            following=True, today=NOVEMBER_21)
+    assert _said(reply) == {"success": True, "message": "Moved Bins to all day from Tuesday on and renamed it "
+                                                        "Bins and recycling."}
+    assert [params for url, params in calendar._session.asked if url == f"{bins}/instances"] == [
+        {"timeMax": "2026-11-24T00:00:00+00:00", "showDeleted": "true", "maxResults": 250}]
+    assert calendar._session.sent == [
+        _write("PATCH", bins, {"recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261123", rules[1]]}),
+        _write("POST", PERSONAL_EVENTS, {
+            "summary": "Bins and recycling", "start": {"date": "2026-11-24"}, "end": {"date": "2026-11-26"},
+            "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=5", rules[1]]})]
+
+    # Undone, the new series goes and the old one has its rules back.
+    assert reply["undo"]() == {"success": True, "message": "Put Bins back as it was."}
+    assert calendar._session.sent[2:] == [_write("DELETE", _event_url("calendar-personal", "made-up-event")),
+                                          _write("PATCH", bins, {"recurrence": rules})]
+
+
+def test_a_series_with_guests_isnt_split_from_this_one_on(for_changing):
+    # A new series from this one on has no guests, so cutting the old one would take their future times
+    # away. Nothing is cut, added or put back - only the series is read.
+    me, friend = {"email": "me@example.com", "self": True}, {"email": "friend@example.com"}
+    guests = _series("Gym", "made-up-gym", "2026-11-03T18:00:00Z", "2026-11-03T19:00:00Z", *GYM_RULES,
+                     attendees=[me, friend])
+    said = {"success": False, "message": "That has guests. Change it in Google Calendar."}
+    for asked in ({"start": "2026-11-24 19:00"}, {"start": "19:00"}, {"summary": "Gym class"},
+                  {"start": "19:00", "summary": "Gym class"}):
+        calendar = for_changing(**_splitting(**{GYM_URL: [guests]}))
+        assert calendar.change("gym", following=True, today=NOVEMBER_21, **asked) == said, asked
+        assert calendar._session.sent == [], asked
+        assert f"{GYM_URL}/instances" not in [url for url, _ in calendar._session.asked], asked
+
+    # Only himself on it is no guest, and that day's alone, or from the first one on, is still changed:
+    # neither makes a new series, so the guests stay on it.
+    alone = _series("Gym", "made-up-gym", "2026-11-03T18:00:00Z", "2026-11-03T19:00:00Z", *GYM_RULES, attendees=[me])
+    calendar = for_changing(**_splitting(**{GYM_URL: [alone], f"PATCH {GYM_URL}": [alone]}))
+    assert _said(calendar.change("gym", start="19:00", following=True, today=NOVEMBER_21))["success"]
+    assert [each["method"] for each in calendar._session.sent] == ["PATCH", "POST"]
+
+    first = _series("Gym", "made-up-gym", "2026-11-24T18:00:00+00:00", "2026-11-24T19:00:00+00:00", *GYM_RULES,
+                    attendees=[me, friend])
+    calendar = for_changing(personal=[GYM_24TH, GYM_1ST], answers={GYM_URL: [first], f"PATCH {GYM_URL}": [first]})
+    assert _said(calendar.change("gym", summary="Gym class", following=True, today=NOVEMBER_21))["success"]
+    assert [each["method"] for each in calendar._session.sent] == ["PATCH"]
+
+    tuesday = _event_url("calendar-personal", GYM_24TH["id"])
+    calendar = for_changing(personal=[GYM_24TH], answers={f"PATCH {tuesday}": [CHANGED]})
+    assert _said(calendar.change("gym", summary="Gym class", today=NOVEMBER_21))["success"]
+    assert GYM_URL not in [url for url, _ in calendar._session.asked]
+
+
+def test_a_split_that_fails_puts_the_old_series_back(for_changing):
+    couldnt = "I couldn't change them, so I've left Gym as it was."
+    unsure = "I can't tell whether the new Gym was added, so check Google Calendar."
+    neither = "I couldn't change them, and I can't be sure Gym is as it was, so check Google Calendar."
+    for posted, put_back, said in (
+            # Refused, or never sent: the old rules are put back once, so it's never left cut short.
+            (_refused(400, "invalid"), CHANGED, couldnt),
+            (requests.ConnectTimeout("Connection timed out."), CHANGED, couldnt),
+            # Unanswered, the new one may be there - put back all the same, and said to be checked.
+            (requests.ReadTimeout("Read timed out."), CHANGED, unsure),
+            (FakeResponse(200, "not an event"), CHANGED, unsure),
+            (requests.ReadTimeout("Read timed out."), _refused(403), unsure),
+            # Not put back either - said to be checked, and nothing more sent.
+            (_refused(400, "invalid"), _refused(403), neither),
+            (_refused(400, "invalid"), requests.ReadTimeout("Read timed out."), neither)):
+        calendar = for_changing(**_splitting(**{f"PATCH {GYM_URL}": [GYM, put_back, GYM],
+                                                f"POST {PERSONAL_EVENTS}": [posted, _inserted()]}))
+        assert calendar.change("gym", start="2026-11-24 19:00", following=True, today=NOVEMBER_21) == {
+            "success": False, "message": said}, said
+        assert [each["method"] for each in calendar._session.sent] == ["PATCH", "POST", "PATCH"], said
+        assert calendar._session.sent[0]["json"] == CUT_AT_THE_24TH
+        assert calendar._session.sent[-1] == _write("PATCH", GYM_URL, {"recurrence": GYM_RULES}), said
+
+    # The cut itself unanswered, nothing more is sent.
+    calendar = for_changing(**_splitting(**{f"PATCH {GYM_URL}": [requests.ReadTimeout("Read timed out."), GYM]}))
+    assert calendar.change("gym", start="2026-11-24 19:00", following=True, today=NOVEMBER_21) == {
+        "success": False, "message": "I can't tell whether Gym was changed, so check Google Calendar."}
+    assert [each["method"] for each in calendar._session.sent] == ["PATCH"]
+    # As is the series' own change, from its first time on.
+    first = _series("Gym", "made-up-gym", "2026-11-24T18:00:00+00:00", "2026-11-24T19:00:00+00:00", *GYM_RULES)
+    calendar = for_changing(personal=[GYM_24TH, GYM_1ST], answers={
+        GYM_URL: [first], f"PATCH {GYM_URL}": [requests.ReadTimeout("Read timed out."), first]})
+    assert calendar.change("gym", summary="Gym class", following=True, today=NOVEMBER_21) == {
+        "success": False, "message": "I can't tell whether Gym was changed, so check Google Calendar."}
+    assert [each["method"] for each in calendar._session.sent] == ["PATCH"]
+    # Nor anything at all when the times before it can't be counted.
+    calendar = for_changing(**_splitting(**{f"{GYM_URL}/instances": [requests.ConnectionError("Network down")]}))
+    assert calendar.change("gym", start="2026-11-24 19:00", following=True, today=NOVEMBER_21) == {
+        "success": False, "message": CANT_REACH_GOOGLE}
+    assert calendar._session.sent == []
+
+
+def test_a_split_is_undone_whole(for_changing):
+    new = _event_url("calendar-personal", "made-up-event")
+    put_back = [_write("DELETE", new), _write("PATCH", GYM_URL, {"recurrence": GYM_RULES})]
+    # The new series deleted, and the old one's rules put back - even when the new one has been
+    # deleted on the phone since.
+    for deleted in (DELETED, _refused(410, "deleted")):
+        calendar = for_changing(**_splitting(**{f"PATCH {GYM_URL}": [GYM, GYM], f"DELETE {new}": [deleted]}))
+        reply = calendar.change("gym", start="2026-11-24 19:00", following=True, today=NOVEMBER_21)
+        assert _said(reply) == {"success": True, "message": "Moved Gym to 7 PM from Tuesday on."}
+        # Seven times left from the 24th: the 3rd, the 10th and the 17th were before it.
+        assert calendar._session.sent[1]["json"]["recurrence"][0] == "RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=7"
+        assert reply["undo"]() == {"success": True, "message": "Put Gym back as it was."}
+        assert calendar._session.sent[2:] == put_back
+
+    # The new one taken off but the old one not put back: said to be checked.
+    for answer in (_refused(403), requests.ReadTimeout("Read timed out.")):
+        calendar = for_changing(**_splitting(**{f"PATCH {GYM_URL}": [GYM, answer], f"DELETE {new}": [DELETED]}))
+        assert calendar.change("gym", start="2026-11-24 19:00", following=True, today=NOVEMBER_21)["undo"]() == {
+            "success": False, "message": "I can't be sure Gym is back as it was, so check Google Calendar."}
+        assert calendar._session.sent[2:] == put_back
+    # The new one not taken off: nothing more is sent.
+    calendar = for_changing(**_splitting(**{f"PATCH {GYM_URL}": [GYM, GYM], f"DELETE {new}": [_refused(403)]}))
+    assert calendar.change("gym", start="2026-11-24 19:00", following=True, today=NOVEMBER_21)["undo"]() == {
+        "success": False, "message": "Google wouldn't change that."}
+    assert calendar._session.sent[2:] == put_back[:1]
+
+
+def test_a_time_moved_from_a_slot_already_past_is_never_removed(for_changing):
+    # At 8 on the Tuesday its own time is still to come, but the time it was meant to be has gone -
+    # and from it on would end the series before that Tuesday's, which has been.
+    calendar = for_changing(personal=[GYM_MOVED_ON])
+    assert calendar.remove("gym", day=THURSDAY, now=TUESDAY_EVENING) == GONE
+    assert calendar._session.sent == []
+
+    calendar = for_changing(personal=[GYM_MOVED_ON, GYM_1ST], answers={GYM_URL: [GYM], f"PATCH {GYM_URL}": [GYM]})
+    assert _said(calendar.remove("gym", following=True, now=TUESDAY_EVENING)) == {
+        "success": True, "message": "Removed Gym from Tuesday the 1st of December on."}
+    assert calendar._session.sent[0]["json"]["recurrence"][0] == "RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261201T175959Z"
+
+
+def test_a_time_moved_from_a_slot_already_past_is_never_changed(for_changing):
+    calendar = for_changing(personal=[GYM_MOVED_ON])
+    assert calendar.change("gym", day=THURSDAY, start="2026-11-26 19:00", now=TUESDAY_EVENING) == GONE
+    assert calendar._session.sent == []
+
+    calendar = for_changing(personal=[GYM_MOVED_ON, GYM_1ST], answers={
+        GYM_URL: [GYM], f"{GYM_URL}/instances": [_events_page(*BEFORE_THE_24TH, GYM_MOVED_ON)],
+        f"PATCH {GYM_URL}": [GYM], f"POST {PERSONAL_EVENTS}": [_inserted()]})
+    assert _said(calendar.change("gym", start="2026-12-01 19:00", following=True, now=TUESDAY_EVENING)) == {
+        "success": True, "message": "Moved Gym to 7 PM from Tuesday the 1st of December on."}
+    assert calendar._session.sent[0]["json"]["recurrence"][0] == "RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261201T175959Z"
+    assert calendar._session.sent[1]["json"]["recurrence"][0] == "RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=6"

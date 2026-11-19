@@ -693,6 +693,74 @@ class SoulSync:
             return
         self._read(*self._send("/api/watchlist/remove", REQUEST_TIMEOUT, {"artist_id": artist_id}))
 
+    # Playlists SoulSync writes into Navidrome itself, which a song added by hand would be lost from
+
+    def remade_playlists(self) -> List[str]:
+        """
+        The playlists SoulSync makes again on its own schedule - "Daily Mix 1", "Hidden Gems" - which
+        throws away anything added to them by hand.
+
+        Returns:
+            Their names, as SoulSync gives them.
+
+        Raises:
+            SoulSyncError: If SoulSync couldn't be asked, refused its key, or didn't give the list.
+        """
+        playlists = self._read(*self._get("/api/personalized/playlists", REQUEST_TIMEOUT, {})).get("playlists")
+        if not isinstance(playlists, list):
+            logger.error("SoulSync's remade playlists answered without a list of playlists")
+            raise SoulSyncError()
+        return [str(playlist["name"]) for playlist in playlists if isinstance(playlist, dict) and playlist.get("name")]
+
+    def mirrors(self) -> List[Dict]:
+        """
+        The playlists SoulSync mirrors from a streaming service into Navidrome, each of which it syncs
+        again as it likes - replacing what the playlist holds unless it's been set to append only.
+
+        Returns:
+            Each as {"id": int, "server_playlist_id": Optional[str], "sync_name": str, "sync_mode": Optional[str]}:
+            its id to change it by, the Navidrome playlist it writes - None before its first sync - the name it
+            gives that playlist, and how it syncs ("replace", "append" or "reconcile", or None if never set).
+
+        Raises:
+            SoulSyncError: If SoulSync couldn't be asked, refused its key, or didn't give a list of mirrors.
+        """
+        status, answer = self._get("/api/mirrored-playlists", REQUEST_TIMEOUT, {})
+        # Unlike everything else it answers, this is a bare list. Anything else is an error or a refusal, which
+        # _read says; if it gives no reason, the answer is a shape this doesn't know.
+        if not (200 <= status < 300 and isinstance(answer, list)):
+            self._read(status, answer)
+            logger.error("SoulSync's mirrored playlists answered with something other than a list")
+            raise SoulSyncError()
+        # One row which isn't a mirror, or has no id to change it by, and the list can't be trusted to name
+        # every playlist SoulSync overwrites.
+        if not all(isinstance(row, dict) and isinstance(row.get("id"), int) for row in answer):
+            logger.error("SoulSync's mirrored playlists answered with a row which isn't a mirror")
+            raise SoulSyncError()
+        return [{"id": row["id"],
+                 "server_playlist_id": str(row["server_playlist_id"]) if row.get("server_playlist_id") else None,
+                 "sync_name": str(row.get("sync_name") or ""),
+                 "sync_mode": row["sync_mode"] if isinstance(row.get("sync_mode"), str) else None}
+                for row in answer]
+
+    def set_append(self, mirror_id: int):
+        """
+        Switches a mirror to append only, so SoulSync's next sync adds to the playlist rather than
+        replacing what it holds - and a song Nova added stays.
+
+        Args:
+            mirror_id: The mirror's id, from mirrors.
+
+        Raises:
+            SoulSyncError: If SoulSync couldn't be asked, refused its key, or answered with an error.
+        """
+        status, answer = _ask(self._session.patch, f"{self.url}/api/mirrored-playlists/{mirror_id}/preferences",
+                              REQUEST_TIMEOUT, json={"sync_mode": "append"})
+        # Its answer to a success isn't known, so any 2xx is done unless it says otherwise - which only
+        # a JSON object can, as _read has it.
+        if isinstance(answer, dict) or not 200 <= status < 300:
+            self._read(status, answer)
+
     # What the assistant asks for
 
     def find_song(self, title: str, artist: Optional[str], album: Optional[str] = None) -> SongRequest:

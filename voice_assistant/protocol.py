@@ -21,6 +21,8 @@ After the handshake, what a satellite sends the brain:
     away  {"rang": [ids], "dismissed": [ids], "ringing": [ids]}
     note_saved  {"id": ..., "file": ...} or {"id": ..., "error": ...}  (the answer to a
         save_note: the name of the file made, or a sentence saying why not)
+    media  {"action": "play"|"pause"|"next"|"previous"}  (a button of Windows' media
+        controls, from a satellite which said it has them - see docs/decisions/0031)
 
 and what the brain sends a satellite:
 
@@ -43,13 +45,20 @@ and what the brain sends a satellite:
     away_settled  (once the brain has saved what away said)
     save_note  {"id": ..., "title": ...}  (payload: the note's text, as UTF-8 - a line of
         JSON is only MAX_LINE long, and a note may be far more)
+    quiet  {"on": ...}  (Nova has started, or stopped, speaking on another satellite, so
+        ignore the wake word meanwhile - see docs/decisions/0029)
+    now_playing  {"state": "playing"|"paused"|"stopped", "track": ..., "artist": ...,
+        "album": ..., "cover"?: ...}  (what the satellite's own music is doing, for a
+        satellite which said it has Windows' media controls, sent when it changes;
+        cover: true with the new cover as the payload, false for none now, left out
+        when the cover is as it was - see docs/decisions/0031)
     restart
 
 The handshake comes first, and proves the satellite's password to the brain and the
 brain's to the satellite, without the password itself ever being sent:
 
     hello  {name, hostname, sample_rate, unclean, nonce, speaker?, push_to_talk?, machine?,
-            saves_notes?}    (satellite)
+            saves_notes?, media_controls?}    (satellite)
     challenge  {nonce, proof}    (brain; or refused, and the connection is closed)
     proof  {proof}    (satellite, once the brain's proof is right)
     ready, or refused    (brain)
@@ -75,6 +84,9 @@ MAX_AUDIO = 10 * 16000 * 2
 
 # The longest Spotify speaker name a hello may carry, e.g. "Bedroom Pi".
 MAX_SPEAKER = 64
+
+# The buttons of Windows' media controls a satellite passes on, as media's action.
+MEDIA_ACTIONS = ("play", "pause", "next", "previous")
 
 # What a nonce is: 32 hex digits, as secrets.token_hex(16) makes. Written out rather than
 # tried with int(nonce, 16), which lets through digits of other scripts, and spaces.
@@ -172,7 +184,7 @@ def _expect(stream: BinaryIO, kind: str, *fields: str) -> Dict:
 
 def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate: int, unclean: bool,
           speaker: Optional[str] = None, push_to_talk: bool = False, machine: Optional[str] = None,
-          saves_notes: bool = False):
+          saves_notes: bool = False, media_controls: bool = False):
     """
     The satellite's side of the handshake.
 
@@ -191,6 +203,8 @@ def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate
             of the hello if None.
         saves_notes: Whether it can save a note in a Downloads folder - left out of the
             hello if False.
+        media_controls: Whether this satellite shows its music in Windows' media
+            controls, and passes on their buttons - left out of the hello if False.
 
     Raises:
         Refused: The brain refused it, or couldn't prove it knows the password - in
@@ -203,11 +217,13 @@ def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate
     # Likewise, so the hello of a satellite which listens for a wake word is unchanged.
     if push_to_talk:
         extra["push_to_talk"] = True
-    # And these two, so a brain from before them is sent the hello it always was.
+    # And these three, so a brain from before them is sent the hello it always was.
     if machine is not None:
         extra["machine"] = machine
     if saves_notes:
         extra["saves_notes"] = True
+    if media_controls:
+        extra["media_controls"] = True
     send(stream, "hello", name=name, hostname=hostname, sample_rate=sample_rate,
          unclean=unclean, nonce=nonce, **extra)
     challenge = _expect(stream, "challenge", "nonce", "proof")
@@ -229,10 +245,10 @@ def admit(stream: BinaryIO, password_for: Callable[[str], Optional[str]]) -> Dic
     Returns:
         The hello's name, hostname, sample_rate and unclean, its speaker - None if
         it doesn't say one, as a satellite from before speakers were said doesn't -
-        whether it is push-to-talk, False if it doesn't say, its machine, one of
-        machine.MACHINES, and whether it saves notes. The last two are None and False
-        if the hello leaves them out or says what makes no sense, which never keeps a
-        satellite out: they are extras.
+        whether it is push-to-talk and whether it has Windows' media controls, each False
+        if it doesn't say, its machine, one of machine.MACHINES, and whether it saves
+        notes. The last two are None and False if the hello leaves them out or says what
+        makes no sense, which never keeps a satellite out: they are extras.
 
     Raises:
         Refused: The satellite is unknown or got the password wrong. It has been told so.
@@ -245,9 +261,11 @@ def admit(stream: BinaryIO, password_for: Callable[[str], Optional[str]]) -> Dic
     sample_rate = hello.get("sample_rate")
     unclean = hello.get("unclean")
     push_to_talk = hello.get("push_to_talk", False)
+    media_controls = hello.get("media_controls", False)
     if (hello["type"] != "hello" or not isinstance(name, str) or not isinstance(hostname, str)
             or isinstance(sample_rate, bool) or not isinstance(sample_rate, int)
             or not isinstance(unclean, bool) or not isinstance(push_to_talk, bool)
+            or not isinstance(media_controls, bool)
             or not isinstance(nonce, str) or not NONCE.fullmatch(nonce)):
         raise ProtocolError("Expected a hello")
     password = password_for(name)
@@ -277,7 +295,8 @@ def admit(stream: BinaryIO, password_for: Callable[[str], Optional[str]]) -> Dic
                        f"as not: {ascii(saves_notes)[:80]}")
         saves_notes = False
     return {"name": name, "hostname": hostname, "sample_rate": sample_rate, "unclean": unclean,
-            "speaker": speaker, "push_to_talk": push_to_talk, "machine": machine, "saves_notes": saves_notes}
+            "speaker": speaker, "push_to_talk": push_to_talk, "machine": machine, "saves_notes": saves_notes,
+            "media_controls": media_controls}
 
 
 def _speaker(said) -> Optional[str]:

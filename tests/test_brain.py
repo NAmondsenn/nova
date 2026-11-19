@@ -29,6 +29,7 @@ pytest.importorskip("soxr")
 from voice_assistant import brain as brain_module
 from voice_assistant import clock as clock_module
 from voice_assistant import memory as memory_module
+from voice_assistant import quiet_others as quiet_others_module
 from voice_assistant import ntfy as ntfy_module
 from voice_assistant import paths, protocol
 from voice_assistant import routines as routines_module
@@ -49,14 +50,16 @@ from voice_assistant.listening import Listening
 from voice_assistant.wrapped import WrappedStore, WrappedWatcher
 from voice_assistant.media_watch import MediaWatcher
 from voice_assistant.music_device import MusicDevice
-from voice_assistant.navidrome import NavidromeLibrary
+from voice_assistant.navidrome import NavidromeLibrary, normalise
 from voice_assistant.new_music import NewMusicPlaylist
 from voice_assistant.ntfy import Alert
+from voice_assistant.playlist_changes import PlaylistChanges
 from voice_assistant.recording import RATE
 from voice_assistant.remote import RemoteSatellite
 from voice_assistant.satellite_passwords import SatellitePasswords
 from voice_assistant.satellite_rooms import SatelliteRooms
 from voice_assistant.soulsync import SoulSync
+from voice_assistant.undo import LastChange
 from voice_assistant.usage import UsageLog
 from voice_assistant.usage_device import UsageDevice
 from voice_assistant.vad import LoudnessDetector
@@ -288,7 +291,7 @@ class Satellite:
     """
 
     def __init__(self, brain, name="bedroom", password=BEDROOM, unclean=False, away=NOTHING_AWAY, push_to_talk=False,
-                 machine=None, saves_notes=False):
+                 machine=None, saves_notes=False, media_controls=False):
         self.socket = socket.create_connection(("127.0.0.1", brain.port), timeout=5)
         self.stream = self.socket.makefile("rwb")
         self.lock = threading.Lock()
@@ -297,7 +300,7 @@ class Satellite:
         self.gone = threading.Event()
         try:
             protocol.greet(self.stream, name, f"{name}-pi", password, 48000, unclean, push_to_talk=push_to_talk,
-                           machine=machine, saves_notes=saves_notes)
+                           machine=machine, saves_notes=saves_notes, media_controls=media_controls)
         except BaseException:
             # As satellite_link does, so the brain sees it hang up.
             self.socket.close()
@@ -982,7 +985,8 @@ def test_a_satellite_removed_while_its_session_is_made_isnt_let_stay(brain, pass
     # The bad order: the brain checks which satellites are still let in while this one's
     # session is being made, so it isn't there to be let go - and, the file seen, that
     # is never checked again. Its session must be refused when it's made instead.
-    removed = SimpleNamespace(name="kitchen", connected=False, close=lambda: None)
+    removed = SimpleNamespace(name="kitchen", connected=False, close=lambda: None,
+                              speaker=SimpleNamespace(on_speech=None, speaking=False))
     passwords.remove("kitchen")
     brain._shut_out_removed()
     assert brain.session_for("kitchen") is None
@@ -994,7 +998,8 @@ def test_a_satellite_removed_while_its_session_is_made_isnt_let_stay(brain, pass
 
 
 def test_a_satellite_still_let_in_gets_its_session(brain, passwords):
-    kept = SimpleNamespace(name="kitchen", connected=False, close=lambda: None)
+    kept = SimpleNamespace(name="kitchen", connected=False, close=lambda: None,
+                              speaker=SimpleNamespace(on_speech=None, speaking=False))
 
     session = brain._start_session(kept)
 
@@ -1031,7 +1036,8 @@ def test_a_new_password_lets_go_of_the_satellite_and_refuses_the_old_one(brain, 
         connect(brain, password=BEDROOM)
     # One which proved the old password just before, and whose session is made just
     # after, isn't let stay either.
-    late = SimpleNamespace(name="bedroom", connected=False, close=lambda: None)
+    late = SimpleNamespace(name="bedroom", connected=False, close=lambda: None,
+                              speaker=SimpleNamespace(on_speech=None, speaking=False))
     assert brain._start_session(late, BEDROOM) is None and "bedroom" not in brain.sessions
 
     connect(brain, password=password)
@@ -1588,7 +1594,7 @@ def test_a_write_for_a_removed_satellite_is_refused_at_once(brain, passwords):
 def test_a_satellite_removed_as_it_reconnects_loses_its_copy(brain, passwords):
     # Online moments before, so the page's question said nothing of a copy.
     sent = []
-    removed = SimpleNamespace(name="kitchen", connected=True, close=lambda: None,
+    removed = SimpleNamespace(name="kitchen", connected=True, close=lambda: None, speaker=SimpleNamespace(on_speech=None, speaking=False),
                               send_alarms=lambda entries: sent.append(entries) or True)
     passwords.remove("kitchen")
     brain._shut_out_removed()
@@ -1598,7 +1604,7 @@ def test_a_satellite_removed_as_it_reconnects_loses_its_copy(brain, passwords):
 
     # One merely given a new password keeps it - it's still that satellite.
     passwords.renew("bedroom")
-    renewed = SimpleNamespace(name="bedroom", connected=True, close=lambda: None,
+    renewed = SimpleNamespace(name="bedroom", connected=True, close=lambda: None, speaker=SimpleNamespace(on_speech=None, speaking=False),
                               send_alarms=lambda entries: sent.append(entries) or True)
     assert brain._start_session(renewed, BEDROOM) is None
     assert sent == [[]]
@@ -1613,7 +1619,8 @@ def test_a_last_connection_which_wont_close_doesnt_stop_the_next(brain, caplog):
 
     old.close = fail
     brain.sessions["bedroom"] = old
-    new = SimpleNamespace(name="bedroom", connected=False, close=lambda: None)
+    new = SimpleNamespace(name="bedroom", connected=False, close=lambda: None,
+                              speaker=SimpleNamespace(on_speech=None, speaking=False))
 
     assert brain._start_session(new) is not None
     assert closed == ["old"] and "Couldn't let go of the bedroom satellite" in caplog.text
@@ -1916,6 +1923,57 @@ def _real_sessions(monkeypatch):
     monkeypatch.setattr(brain_module, "Session", session_module.Session)
     monkeypatch.setattr(session_module, "make_detector", lambda config: LoudnessDetector())
     monkeypatch.setattr(session_module, "make_player", lambda config, speaker, volume, spotify_speaker=None: None)
+
+
+class PausingPlayer:
+    """A music player which is playing one song until it's paused - for Windows' media controls."""
+
+    def __init__(self):
+        self.playing = {"track": "Song", "artist": "Band", "album": "Album", "playing": True, "cover": None}
+        self.done = []
+
+    def now_playing(self):
+        return dict(self.playing)
+
+    def cover(self):
+        return None
+
+    def pause(self):
+        self.done.append("pause")
+        self.playing["playing"] = False
+        return {"success": True}
+
+    def cancel_resume(self):
+        self.done.append("cancel_resume")
+
+    def close(self):
+        pass
+
+
+def test_a_satellite_with_media_controls_is_told_what_plays_and_its_buttons_work(brain, connect, monkeypatch):
+    # Through a real connection and a real session, from the hello on - see docs/decisions/0031.
+    _real_sessions(monkeypatch)
+    players = {}
+
+    def make_player(config, speaker, volume, spotify_speaker=None):
+        players[len(players)] = PausingPlayer()
+        return players[len(players) - 1]
+
+    monkeypatch.setattr(session_module, "make_player", make_player)
+    serving(brain)
+    with_controls = connect(brain, "bedroom", BEDROOM, media_controls=True)
+    without = connect(brain, "kitchen", KITCHEN)
+    connected(brain, "bedroom"), connected(brain, "kitchen")
+
+    assert wait_for(lambda: with_controls.messages("now_playing"))
+    assert with_controls.messages("now_playing")[0] == {"type": "now_playing", "state": "playing", "track": "Song",
+                                                        "artist": "Band", "album": "Album"}
+    with_controls.say("media", action="pause")
+    assert wait_for(lambda: len(with_controls.messages("now_playing")) == 2)
+    assert with_controls.messages("now_playing")[1]["state"] == "paused"
+    assert brain.session_for("bedroom").music_player.done == ["pause", "cancel_resume"]
+    assert without.messages("now_playing") == []
+    assert brain.session_for("kitchen").music_player.done == []
 
 
 def test_a_satellite_which_goes_mid_turn_leaves_the_brain_working(brain, connect, monkeypatch):
@@ -3448,6 +3506,35 @@ def test_the_top_artists_are_followed_while_the_brain_runs(make_brain, tmp_path,
     assert watcher._thread is None
 
 
+def test_playlist_changes_are_made_once_with_soulsync_and_the_new_music_playlist_as_they_are_now(
+        make_brain, tmp_path, monkeypatch):
+    monkeypatch.setenv("SOULSYNC_API_KEY", "made-up-key")
+    brain = make_brain(new_music={"playlist": "Discovery Shuffle"}, soulsync={"url": "http://soulsync.local:8008"})
+    changes = brain.playlist_changes
+    assert isinstance(changes, PlaylistChanges)
+
+    # SoulSync as it is set up now.
+    soulsync = changes._soulsync()
+    assert isinstance(soulsync, SoulSync) and soulsync.url == "http://soulsync.local:8008"
+    brain.apply_settings({("soulsync", "url"): ""})
+    assert changes._soulsync() is None
+
+    # The id Nova recorded for the playlist it makes under the name set now - none before it's made one.
+    assert changes._new_music_id() is None
+    (tmp_path / "new_music.json").write_text(json.dumps({"id": "made-up-id", "name": normalise("Discovery Shuffle")}))
+    assert changes._new_music_id() == "made-up-id"
+    brain.apply_settings({("new_music", "playlist"): "Fresh Finds"})
+    assert changes._new_music_id() is None
+    brain.apply_settings({("new_music", "playlist"): ""})
+    assert changes._new_music_id() is None
+
+
+def test_the_brain_keeps_the_one_slot_undo_that_takes_for_every_satellite(make_brain):
+    brain = make_brain()
+    assert isinstance(brain.last_change, LastChange)
+    assert make_brain().last_change is not brain.last_change
+
+
 def test_the_new_music_playlist_is_kept_while_the_brain_runs(make_brain, tmp_path, monkeypatch):
     monkeypatch.setenv("NAVIDROME_PASSWORD", "made-up-password")
     brain = make_brain(new_music={"follow_top_artists": 25, "playlist": "New Music", "days": 14},
@@ -3942,3 +4029,83 @@ def test_the_music_device_starts_and_stops_with_the_brain(stopping):
     with pytest.raises(SystemExit):
         stopping.run()
     assert stopping.closed == ["music started", "clock", "music stopped", "bedroom", "tts"]
+
+
+# Quiet while Nova speaks elsewhere
+
+def held_speech(release):
+    """Speech which goes on until the test lets it end - the test satellite says it has played at once."""
+    release.wait(5)
+    yield from ()
+
+
+def test_the_others_stop_listening_while_nova_speaks_on_one(brain, connect):
+    serving(brain)
+    bedroom = connect(brain, "bedroom", BEDROOM)
+    kitchen = connect(brain, "kitchen", KITCHEN)
+    connected(brain, "bedroom")
+    connected(brain, "kitchen")
+
+    release = threading.Event()
+    brain.session_for("kitchen").satellite.speaker.play_stream(held_speech(release), kind="reply")
+    assert wait_for(lambda: bedroom.messages("quiet") == [{"type": "quiet", "on": True}])
+    # Not the one speaking.
+    assert kitchen.messages("quiet") == []
+    release.set()
+    assert wait_for(lambda: bedroom.messages("quiet") == [{"type": "quiet", "on": True}, {"type": "quiet", "on": False}])
+    assert kitchen.messages("quiet") == []
+
+
+def test_one_which_connects_while_another_speaks_is_quiet_at_once(brain, connect):
+    serving(brain)
+    connect(brain, "kitchen", KITCHEN)
+    connected(brain, "kitchen")
+    release = threading.Event()
+    brain.session_for("kitchen").satellite.speaker.play_stream(held_speech(release), kind="reply")
+    bedroom = connect(brain, "bedroom", BEDROOM)
+    connected(brain, "bedroom")
+    assert wait_for(lambda: bedroom.messages("quiet")[:1] == [{"type": "quiet", "on": True}])
+    release.set()
+
+
+def test_one_which_connects_again_while_another_speaks_is_quiet_again(brain, connect):
+    serving(brain)
+    connect(brain, "kitchen", KITCHEN)
+    first = connect(brain, "bedroom", BEDROOM)
+    connected(brain, "kitchen")
+    connected(brain, "bedroom")
+    release = threading.Event()
+    brain.session_for("kitchen").satellite.speaker.play_stream(held_speech(release), kind="reply")
+    assert wait_for(lambda: first.messages("quiet") == [{"type": "quiet", "on": True}])
+    # The bedroom comes back before the brain noticed it go: its new connection is told too.
+    again = connect(brain, "bedroom", BEDROOM)
+    assert wait_for(lambda: again.messages("quiet")[:1] == [{"type": "quiet", "on": True}])
+    release.set()
+
+
+def test_long_speech_keeps_the_others_quiet(brain, connect, monkeypatch):
+    monkeypatch.setattr(quiet_others_module, "QUIET_RENEW", 0.2)
+    serving(brain)
+    bedroom = connect(brain, "bedroom", BEDROOM)
+    connect(brain, "kitchen", KITCHEN)
+    connected(brain, "bedroom")
+    connected(brain, "kitchen")
+    release = threading.Event()
+    brain.session_for("kitchen").satellite.speaker.play_stream(held_speech(release), kind="reply")
+    # Told again and again while it goes on, so the bedroom's own limit never runs out.
+    assert wait_for(lambda: len(bedroom.messages("quiet")) >= 3)
+    assert all(message["on"] for message in bedroom.messages("quiet"))
+    release.set()
+
+
+def test_music_never_quiets_the_others(brain, connect):
+    serving(brain)
+    bedroom = connect(brain, "bedroom", BEDROOM)
+    connect(brain, "kitchen", KITCHEN)
+    connected(brain, "bedroom")
+    connected(brain, "kitchen")
+    release = threading.Event()
+    brain.session_for("kitchen").satellite.speaker.play_stream(held_speech(release), kind="music")
+    time.sleep(0.3)
+    assert bedroom.messages("quiet") == []
+    release.set()

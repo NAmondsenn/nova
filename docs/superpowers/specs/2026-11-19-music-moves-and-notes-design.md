@@ -1,6 +1,6 @@
 # Moving music between satellites, and notes saved on the computer
 
-19 November 2026. Asked for by the user ("make it so that you could switch where music is playing at between the different satellites... play it on my Pi or change this to the PC"; "the PC and Mac satellite, when it's made, can create notes and it saves it to that device's downloads folder"). He chose "just get going" over questions, so every call below not in his words is mine, listed at the end for him to overturn. Decision record: 0030 (0029 is another session's, unpushed).
+19 November 2026. Asked for by the user ("make it so that you could switch where music is playing at between the different satellites... play it on my Pi or change this to the PC"; "the PC and Mac satellite, when it's made, can create notes and it saves it to that device's downloads folder"). He chose "just get going" over questions, so every call below not in his words is mine, listed at the end for him to overturn. Decision record: 0032 (first numbered 0030, while 0029 was another session's and unpushed; 0029 to 0031 are all published now).
 
 ## What it does
 

@@ -32,6 +32,8 @@ from voice_assistant.ha_device import DeviceControls, NovaDevice
 from voice_assistant.home_assistant import HomeAssistant
 from voice_assistant.intents import LocalIntents
 from voice_assistant.llm import LLMHandler
+from voice_assistant.media_controls import EVERY as MEDIA_EVERY
+from voice_assistant.media_controls import NowPlayingFeed
 from voice_assistant.logging_setup import transcripts_logged
 from voice_assistant.music import MusicHold, make_player
 from voice_assistant.network import online
@@ -85,6 +87,45 @@ TYPED_ANSWER_WAIT = 60
 # How many characters of a typed request are kept - as many as Home Assistant's Ask
 # Nova box takes, so only something else sending to its topic is ever cut short.
 ASK_MOST = 255
+
+
+# The longest timer the Nova view's Add timer box sets, in seconds.
+LONGEST_TIMER = 24 * 3600
+
+_TIMER_UNITS = {"h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+                "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
+                "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1}
+
+
+def timer_seconds(text: str) -> Optional[int]:
+    """
+    A length of time typed or tapped into the Nova view's Add timer box, in seconds - or
+    None if it isn't one, or is nothing or more than LONGEST_TIMER.
+
+    A bare number is minutes ("10"); hours and minutes can be "1:20"; otherwise numbers with
+    units, where a number left over after hours is minutes ("1h 20", "1 hour 20 minutes", "90s").
+    """
+    text = (text or "").strip().lower()
+    if re.fullmatch(r"\d+", text):
+        seconds = int(text) * 60
+    elif re.fullmatch(r"\d{1,2}:[0-5]\d", text):
+        hours, minutes = text.split(":")
+        seconds = int(hours) * 3600 + int(minutes) * 60
+    else:
+        parts = re.findall(r"(\d+)\s*([a-z]*)", text)
+        if not parts or re.sub(r"[\d\s]|" + "|".join(sorted(_TIMER_UNITS, key=len, reverse=True)) + r"|and|,", "", text):
+            return None
+        seconds, last = 0, None
+        for number, unit in parts:
+            if unit and unit not in _TIMER_UNITS:
+                return None
+            # A number with no unit after hours is minutes ("1h 20"); on its own it was handled above.
+            size = _TIMER_UNITS[unit] if unit else (60 if last == 3600 else None)
+            if size is None:
+                return None
+            seconds += int(number) * size
+            last = size
+    return seconds if 0 < seconds <= LONGEST_TIMER else None
 
 
 def _kept_for(what: str, satellite: str) -> str:
@@ -263,8 +304,9 @@ class Session:
                                       downloads=brain.downloads, football=brain.football,
                                       listening=brain.listening, wrapped=brain.wrapped_store, config=config,
                                       new_music=brain.new_music_playlist, journeys=brain.journeys,
-                                      ring_on=brain.ring_on, room_of=brain.room_of,
-                                      room_players=self._room_players,
+                                      playlist_changes=brain.playlist_changes, ring_on=brain.ring_on,
+                                      room_of=brain.room_of, room_players=self._room_players,
+                                      last_change=brain.last_change,
                                       mover=lambda said: brain.move_music(self.satellite.name, said),
                                       elsewhere=self._elsewhere,
                                       spoken_name=lambda name: brain.spoken_name(name),
@@ -286,6 +328,13 @@ class Session:
         self.device = NovaDevice.from_config(config, os.getenv("MQTT_PASSWORD"), self._device_controls(),
                                              hostname=satellite.hostname)
         self._stop_looking_up = threading.Event()
+
+        # What the satellite's own music is doing, sent to it as it changes, for Windows'
+        # media controls to show - only to a satellite which said it has them, and only
+        # with music. Their buttons act on this satellite's music alone. See
+        # _keep_media_controls and docs/decisions/0031.
+        self._now_playing = (NowPlayingFeed(satellite.send_now_playing)
+                             if satellite.media_controls and self.music_player else None)
 
         # Claude, offered whichever of those tools can actually work here, and told
         # what's known about the user. Each of its responses is recorded in the brain's usage log.
@@ -726,6 +775,9 @@ class Session:
                 if self.home:
                     threading.Thread(target=self._look_up_device, daemon=True,
                                      name=f"ha-device-lookup-{self.satellite.name}").start()
+            if self._now_playing is not None:
+                threading.Thread(target=self._keep_media_controls, daemon=True,
+                                 name=f"media-controls-{self.satellite.name}").start()
         try:
             while self.satellite.connected and not self._closed.is_set():
                 # Waiting for the wake word is never being stuck.
@@ -1684,11 +1736,15 @@ class Session:
             restart=self.satellite.restart,
             speak=self._speak_from_home_assistant,
             say=self._say_from_home_assistant,
+            add_timer=self._add_timer_from_home_assistant,
+            add_alarm=self._add_alarm_from_home_assistant,
             # Read by the device on a thread of its own, never the one that publishes the
             # state every second, as the player may be asking Navidrome or Spotify.
             now_playing=(lambda: self.music_player.now_playing()) if player else None,
             cover=(lambda: self.music_player.cover()) if player else None,
             playlists=(lambda: self.music_player.playlists()) if player else None,
+            playlist_covers=((lambda names: self.music_player.playlist_covers(names))
+                             if player and hasattr(player, "playlist_covers") else None),
             playback=self._playback_from_home_assistant if player else None,
             play_playlist=self._playlist_from_home_assistant if player else None,
             # The Ask Nova box, whose replies are said here and never sent back.
@@ -1721,6 +1777,60 @@ class Session:
             self.actions.control_playback("previous")
         else:
             logger.warning(f"Home Assistant asked the music to do something unknown: {action!r}")
+
+    def _keep_media_controls(self):
+        """
+        Keeps the satellite's media controls showing what its music is doing, and acts on
+        their buttons, on a thread of its own until the session ends: reads the player
+        every MEDIA_EVERY seconds, and straight after each button. One which fails is
+        logged once, until it works again. What's playing is never logged.
+        """
+        failing = False
+        pressed: Optional[str] = None
+        while self.satellite.connected and not self._closed.is_set():
+            try:
+                if pressed is not None:
+                    self._media_from_windows(pressed)
+                self._now_playing.update(self.music_player.now_playing(), self.music_player.cover,
+                                         force=pressed is not None)
+                failing = False
+            except Exception as e:
+                if not failing:
+                    logger.error(f"Couldn't keep Windows' media controls up to date on the "
+                                 f"{self.satellite.name} satellite: {e}")
+                failing = True
+            try:
+                pressed = self.satellite.media_presses.get(timeout=MEDIA_EVERY)
+            except queue.Empty:
+                pressed = None
+
+    def _media_from_windows(self, action: str):
+        """
+        Acts on a button of Windows' media controls, on this satellite's own music only -
+        never the rest of the room's, as a pause said out loud does (0026). What's playing
+        isn't logged.
+
+        Args:
+            action: "pause", which keeps it paused once Nova finishes talking, as asking
+                does; "play", which carries on what's paused here, or plays as Home
+                Assistant's play button does with nothing to carry on; "next" or "previous".
+        """
+        logger.info(f"{action.capitalize()} from Windows")
+        player = self.music_player
+        # After any pause or resume for Nova talking which is still on its way, so it
+        # can't land after this and undo it.
+        self.music.wait()
+        if action == "pause":
+            player.pause()
+            # Whether or not the pause worked, so a resume after Nova talks never undoes it.
+            player.cancel_resume()
+        elif action == "play":
+            # Without the offer to download anything: nobody is listening for a yes.
+            self.actions.play_without_offer(None)
+        elif action == "next":
+            player.skip()
+        elif action == "previous":
+            player.previous()
 
     def _playlist_from_home_assistant(self, name):
         """
@@ -1768,6 +1878,40 @@ class Session:
         """
         threading.Thread(target=self.announce, args=(message,), kwargs={"sound": None},
                          daemon=True, name="ha-say").start()
+
+    def _add_timer_from_home_assistant(self, text: str):
+        """
+        Sets a timer on this satellite from the Nova view's Add timer box, silently - the
+        page shows it, so nothing is said. Something which isn't a length of time is logged
+        and left. It rings on this satellite, whose view it was set from, never handed on as
+        a spoken one can be (see Brain.ring_on): the box belongs to this satellite's device.
+
+        Args:
+            text: What was typed or tapped: "10" (minutes), "1:20", "1h 20m", "90 min".
+        """
+        seconds = timer_seconds(text)
+        if seconds is None:
+            logger.warning("Home Assistant's Add timer wasn't a length of time")
+            return
+        result = self.brain.clock.set_timer(duration_seconds=seconds, satellite=self.satellite.name)
+        if not (result or {}).get("success"):
+            logger.warning(f"Add timer from Home Assistant: {(result or {}).get('message')}")
+
+    def _add_alarm_from_home_assistant(self, text: str):
+        """
+        Sets a one-off alarm on this satellite from the Nova view's Add alarm box, silently.
+        Repeating alarms are still set by voice or on the settings page.
+
+        Args:
+            text: The time, "07:00" or "7:00", as the view's time picker sends it.
+        """
+        found = re.fullmatch(r"\s*(\d{1,2}):(\d\d)(?::\d\d)?\s*", text or "")
+        if not found or int(found[1]) > 23 or int(found[2]) > 59:
+            logger.warning("Home Assistant's Add alarm wasn't a time")
+            return
+        result = self.brain.clock.set_alarm(int(found[1]), int(found[2]), None, satellite=self.satellite.name)
+        if not (result or {}).get("success"):
+            logger.warning(f"Add alarm from Home Assistant: {(result or {}).get('message')}")
 
     def _room(self) -> Optional[Tuple[Optional[str], Optional[str]]]:
         """
