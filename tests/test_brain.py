@@ -518,6 +518,28 @@ def test_find_satellite_knows_here_as_the_satellite_spoken_to(named, said):
     assert named.find_satellite(said, here="mac") == ("mac", None)
 
 
+def test_a_satellites_own_name_wins_over_here(named, passwords):
+    # Named by what he chose - its own name or one set on the page - a word for "here" is still its name.
+    passwords.add("speaker", "the-speakers-password")
+    named.rooms.seen("speaker", False, "linux")
+    named.rooms.set_called("mac", ["Device"])
+    assert named.find_satellite("the speaker", here="pc") == ("speaker", None)
+    assert named.find_satellite("this device", here="pc") == ("mac", None)
+    # Any other word for here is still the satellite spoken to.
+    assert named.find_satellite("here", here="pc") == ("pc", None)
+    assert named.find_satellite("this one", here="speaker") == ("speaker", None)
+
+
+def test_here_needs_no_satellites_to_be_read(named, monkeypatch):
+    def unreadable():
+        raise OSError("gone")
+
+    monkeypatch.setattr(named, "satellites", unreadable)
+    assert named.find_satellite("here", here="pc") == ("pc", None)
+    # Other words still need them.
+    assert named.find_satellite("the PC", here="pc") == (None, "I can't tell which satellites there are just now.")
+
+
 def test_find_satellite_has_no_here_without_one_given(named):
     assert named.find_satellite("here") == (None, "There's no satellite called here. There's the Pi, the PC and the Mac.")
     # The rule for words which name a satellite at once stays as it was: "switch to this one" is Claude's.
