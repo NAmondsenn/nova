@@ -13,10 +13,13 @@ imported inside that one function, so nothing here touches Windows' libraries on
 or a Mac.
 """
 
+import logging
 import os
 import sys
 import uuid
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # The kinds of machine a satellite can say it is. "linux" is any Linux that isn't a Pi.
 MACHINES = ("pi", "pc", "mac", "linux")
@@ -62,9 +65,13 @@ def downloads_folder() -> Optional[str]:
     if kind == "pc":
         try:
             folder = _windows_downloads_folder()
-        except (OSError, AttributeError):
+        except (OSError, AttributeError) as e:
             # Windows couldn't say (or ctypes has no windll to ask it with), so the
-            # usual place: C:\Users\name\Downloads.
+            # usual place: C:\Users\name\Downloads. Said, as that's the same folder unless
+            # it's been moved, so nothing else shows whether the lookup works. Only the type of
+            # the error: its message may have a path in it.
+            logger.warning(f"Couldn't look for a Downloads folder with Windows ({type(e).__name__}), "
+                           "so using the one in the user's profile")
             profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
             folder = os.path.join(profile, "Downloads")
     elif kind == "mac":

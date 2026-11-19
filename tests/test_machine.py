@@ -3,6 +3,7 @@ Machine Test
 What machine a satellite is running on, and where its Downloads folder is.
 """
 
+import logging
 import sys
 
 import pytest
@@ -102,6 +103,34 @@ def test_windows_falls_back_to_the_profile_folder(monkeypatch, tmp_path, error):
     monkeypatch.setattr(machine, "_windows_downloads_folder", lookup_fails)
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     assert machine.downloads_folder() == str(tmp_path / "Downloads")
+
+
+@pytest.mark.parametrize("error", [OSError, AttributeError])
+def test_windows_says_once_when_it_falls_back_and_with_what_failed(monkeypatch, tmp_path, caplog, error):
+    # The only evidence the Windows lookup works, as the profile's folder is usually the same place.
+    (tmp_path / "Downloads").mkdir()
+
+    def lookup_fails():
+        raise error("C:\\Users\\someone\\secret")
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(machine, "_windows_downloads_folder", lookup_fails)
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    with caplog.at_level(logging.WARNING, logger="voice_assistant.machine"):
+        assert machine.downloads_folder() == str(tmp_path / "Downloads")
+    (record,) = caplog.records
+    assert record.levelno == logging.WARNING
+    assert record.getMessage().startswith("Couldn't look for a Downloads folder") and error.__name__ in record.getMessage()
+    # Only what kind of failure it was, as the message of one may have a path in it.
+    assert "secret" not in record.getMessage()
+
+
+def test_windows_says_nothing_when_its_lookup_works(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(machine, "_windows_downloads_folder", lambda: str(tmp_path))
+    with caplog.at_level(logging.WARNING, logger="voice_assistant.machine"):
+        assert machine.downloads_folder() == str(tmp_path)
+    assert caplog.records == []
 
 
 def test_windows_with_no_downloads_folder_anywhere_is_none(monkeypatch, tmp_path):
