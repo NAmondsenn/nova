@@ -889,8 +889,10 @@ class LLMHandler:
 
         # "Add X to my Y list", with X kept whole - "eggs, milk and bread" is one thing,
         # which Claude would have split, rather than none. Nova's own things and the devices
-        # aren't lists, as with the local rule.
-        said = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9' -]", " ", user_lower)).strip()
+        # aren't lists, as with the local rule. A curly apostrophe is made straight first, as
+        # speech-to-text can give either, or "Mum’s card" would be kept as "mum s card".
+        said = user_lower.replace("\u2019", "'").replace("\u2018", "'")
+        said = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9' -]", " ", said)).strip()
         said = re.sub(r"\bto-do\b", "to do", said)
         listed = re.fullmatch(r"(?:please |can you |could you )?add (?P<item>.+) to (?!do\b)(?:my |the )?"
                               r"(?P<list>[a-z0-9' -]+?)(?: list)?(?: please)?", said)
