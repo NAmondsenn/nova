@@ -308,7 +308,7 @@ class ActionExecutor:
                  downloads=None, football=None, listening=None, wrapped=None, config=None, new_music=None,
                  journeys=None, playlist_changes=None, ring_on: Callable[[str], str] = lambda name: name,
                  room_of: Callable[[str], List[str]] = lambda name: [name],
-                 room_players: Optional[Callable[[], List]] = None):
+                 room_players: Optional[Callable[[], List]] = None, last_change: Optional[LastChange] = None):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -355,6 +355,8 @@ class ActionExecutor:
             room_players: Gives the music players of the satellites in the user's room
                 which are connected, this one's first - or None for this one's alone.
                 Pausing, resuming and the music's volume act on the room's music.
+            last_change: The LastChange "undo that" takes from, which the brain gives every satellite's
+                executor so there's one for the whole house, or None for one of its own.
         """
         self.music = music
         self.clock = clock
@@ -382,8 +384,10 @@ class ActionExecutor:
         # What was last asked, and what the assistant said - or the last alert, and
         # all of it - for "send that to my phone". Kept up to date by the Conversation.
         self.last_answer: Optional[Tuple[str, str]] = None
-        # The last playlist or calendar change, for "undo that" - see _keep_or_note.
-        self.last_change = LastChange()
+        # The last playlist or calendar change, for "undo that" - see _keep_or_note. Shared by every
+        # satellite when the brain gives it: with the PC and the Pi in one room, "cancel the dentist" at
+        # one and "add milk" at the other would otherwise leave "undo that" at the first putting it back.
+        self.last_change = last_change if last_change is not None else LastChange()
 
     def _ring_on_satellite(self) -> Optional[str]:
         """Returns the satellite a timer or alarm set now rings on - None if the user isn't at one in particular."""

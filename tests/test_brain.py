@@ -59,6 +59,7 @@ from voice_assistant.remote import RemoteSatellite
 from voice_assistant.satellite_passwords import SatellitePasswords
 from voice_assistant.satellite_rooms import SatelliteRooms
 from voice_assistant.soulsync import SoulSync
+from voice_assistant.undo import LastChange
 from voice_assistant.usage import UsageLog
 from voice_assistant.usage_device import UsageDevice
 from voice_assistant.vad import LoudnessDetector
@@ -3025,6 +3026,12 @@ def test_playlist_changes_are_made_once_with_soulsync_and_the_new_music_playlist
     assert changes._new_music_id() is None
     brain.apply_settings({("new_music", "playlist"): ""})
     assert changes._new_music_id() is None
+
+
+def test_the_brain_keeps_the_one_slot_undo_that_takes_for_every_satellite(make_brain):
+    brain = make_brain()
+    assert isinstance(brain.last_change, LastChange)
+    assert make_brain().last_change is not brain.last_change
 
 
 def test_the_new_music_playlist_is_kept_while_the_brain_runs(make_brain, tmp_path, monkeypatch):

@@ -72,6 +72,7 @@ from voice_assistant.session import Session
 from voice_assistant.settings_page import SettingsPage
 from voice_assistant.soulsync import SoulSync, SoulSyncAdmin
 from voice_assistant.text_to_speech import TextToSpeech
+from voice_assistant.undo import LastChange
 from voice_assistant.usage import UsageLog
 from voice_assistant.usage_device import UsageDevice
 from voice_assistant.weather import Weather
@@ -406,6 +407,9 @@ class Brain:
             lambda: SoulSync.from_config(self.config, os.getenv("SOULSYNC_API_KEY")),
             lambda: self.new_music_playlist.playlist_id(
                 (self.config.section("new_music").get("playlist") or "").strip()))
+        # What "undo that" takes back, one for the whole house: the last playlist or calendar change by voice
+        # at any satellite, which anything else done at any other satellite since leaves as it is.
+        self.last_change = LastChange()
         # The brain's second device in Home Assistant, showing that snapshot - or None with no MQTT
         # broker set. Made here as it needs the listening stats. Started by run().
         self.music_device = MusicDevice.from_config(config, os.getenv("MQTT_PASSWORD"), self.listening)

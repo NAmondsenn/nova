@@ -655,6 +655,30 @@ def test_another_action_since_means_undo_leaves_the_change():
     assert calendar.undone == 0
 
 
+def test_one_slot_shared_by_two_satellites_is_taken_over_by_whatever_either_does():
+    # The PC and the Pi in one room: "cancel the dentist" on one, a timer on the other, and "undo that" on the
+    # first mustn't put the dentist back, as the timer was the last thing done in the house.
+    shared = LastChange()
+    calendar = ChangingCalendar()
+    first = ActionExecutor(calendar=calendar, last_change=shared)
+    second = ActionExecutor(clock=RecordingClock(), last_change=shared)
+    assert first.last_change is second.last_change is shared
+    first.execute(DENTIST)
+    assert second.execute(Action("set_timer", {"duration_seconds": 600})).ok
+
+    result = first.execute(UNDO_THAT)
+    assert (result.ok, result.say) == (False, SOMETHING_ELSE_SINCE)
+    assert calendar.undone == 0
+
+    # And a change on the other satellite is the one "undo that" takes back, wherever it's said.
+    first.execute(DENTIST)
+    assert second.execute(UNDO_THAT).say == "Undone."
+    assert calendar.undone == 1
+
+    # With no slot given, each has one of its own, as every builder had before.
+    assert ActionExecutor().last_change is not ActionExecutor().last_change
+
+
 def test_an_action_which_answers_with_a_result_of_its_own_counts_as_another_action():
     class QuietClock:
         def dismiss(self, satellite=None):
