@@ -1755,8 +1755,9 @@ class Session:
         # can't land after this and undo it.
         self.music.wait()
         if action == "pause":
-            if player.pause().get("success"):
-                player.cancel_resume()
+            player.pause()
+            # Whether or not the pause worked, so a resume after Nova talks never undoes it.
+            player.cancel_resume()
         elif action == "play":
             # Without the offer to download anything: nobody is listening for a yes.
             self.actions.play_without_offer(None)

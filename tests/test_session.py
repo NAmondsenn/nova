@@ -2067,6 +2067,17 @@ def test_pause_from_windows_pauses_this_satellites_own_music_and_keeps_it_paused
     assert session.actions.calls == []
 
 
+def test_a_pause_from_windows_which_fails_still_keeps_the_music_from_coming_back(with_media_controls):
+    # Spotify's pause can fail, say, while the music is paused for Nova talking: the
+    # user still asked for it paused, so it isn't brought back once Nova finishes.
+    session, player, pi = with_media_controls(dict(SONG))
+    player.pause = lambda: player.done.append("pause") or {"success": False, "message": "No"}
+    assert wait_for(lambda: now_playing(pi))
+    pi.say("media", action="pause")
+    assert wait_for(lambda: len(now_playing(pi)) == 2)
+    assert player.done == ["pause", "cancel_resume"]
+
+
 @pytest.mark.parametrize("action, done", [("next", ["skip"]), ("previous", ["previous"])])
 def test_next_and_previous_from_windows_skip_this_satellites_own_music(with_media_controls, action, done):
     session, player, pi = with_media_controls(dict(SONG))
