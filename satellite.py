@@ -144,6 +144,8 @@ class _Recording(threading.Event):
         self.ids = set() if recording_id is None else {recording_id}
         # Whether it was a press, rather than the brain, which said the user has stopped.
         self.pressed = False
+        # Whether a press started it, rather than the wake word or the brain's listen.
+        self.from_press = False
 
 
 def _pieces(waiting: queue.Queue) -> Iterator[np.ndarray]:
@@ -548,6 +550,7 @@ class Satellite:
                     # stop_listening straight away.
                     recording_id = f"wake-{next(self._wake_ids)}"
                     recording = self._recording = _Recording(recording_id)
+                    recording.from_press = pressed
                     self._turn_open = False
                     # Any press which came while this was being set up is this one's, so
                     # it doesn't go on to end the recording just begun, or start another.
@@ -747,11 +750,13 @@ class Satellite:
 
     def _stop_if_listening(self, playback: Playback, kind: str):
         """
-        Stops a reply which starts while a push-to-talk satellite is listening - pressed
-        while the brain was still working on the last request, say. It would play into the
-        open microphone, which has no echo cancelling here, and come back as the user's
-        next request. So it goes as one a press over it would have, and the brain is told
-        it was stopped. The Pi cancels its own echo, so its replies play as they always have.
+        Stops a reply which starts while a press's recording is open - pressed while the
+        brain was still working on the last request, say. It would play into the open
+        microphone, which has no echo cancelling here, and come back as the user's next
+        request. So it goes as one a press over it would have, and the brain is told it was
+        stopped. Only a press's recording: the brain's own listen, for the answer to a
+        question, keeps the chime it plays. The Pi cancels its own echo, so its replies
+        play as they always have.
 
         Args:
             playback: The reply, just started.
@@ -759,8 +764,11 @@ class Satellite:
         """
         if not self.push_to_talk or kind != "reply":
             return
-        with self._lock:
-            listening = self._recording is not None and not self._recording.is_set()
+        # _waking too, so a press still setting its recording up is waited for rather than
+        # missed - in the same order _begin takes them.
+        with self._waking, self._lock:
+            recording = self._recording
+            listening = recording is not None and recording.from_press and not recording.is_set()
         if listening:
             logger.info("A reply came while listening after a press, so it isn't played")
             playback.stop()

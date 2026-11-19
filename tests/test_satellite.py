@@ -1892,8 +1892,26 @@ def test_a_reply_sound_while_a_press_is_listening_isnt_played_either(brain, make
     brain.say("play_sound", id="sound-1", name="not_heard.wav", volume=1.0, kind="reply")
 
     assert wait_for(lambda: brain.messages("played"))
-    assert made.speaker.playing[-1].stopped
+    (played,) = brain.messages("played")
+    assert played["id"] == "sound-1" and played["stopped"]
     brain.say("stop_listening")
+
+
+def test_the_chime_for_an_answer_the_brain_asked_for_still_plays(brain, make):
+    # Only what a press started stops a reply: the brain's own listen, for the answer to a
+    # question it asked, keeps its chime, the user's cue that Nova is waiting.
+    made = pressable(brain, make)
+    brain.say("listen", recording="listen-1")
+    assert wait_for(lambda: len(brain.recordings()) >= 1)
+    brain.say("play_sound", id="chime-1", name="listening.wav", volume=0.4, kind="reply")
+
+    assert wait_for(lambda: made.speaker.files())
+    (chime,) = [playback for playback in made.speaker.playing if playback.filename]
+    assert not chime.stopped
+    chime.finish()
+    assert wait_for(lambda: brain.messages("played"))
+    assert not brain.messages("played")[0]["stopped"]
+    brain.say("stop_listening", recording="listen-1")
 
 
 def test_after_the_press_s_recording_ends_a_reply_plays(brain, make):
