@@ -287,7 +287,8 @@ class Satellite:
     stream finished as soon as it has all arrived.
     """
 
-    def __init__(self, brain, name="bedroom", password=BEDROOM, unclean=False, away=NOTHING_AWAY, push_to_talk=False):
+    def __init__(self, brain, name="bedroom", password=BEDROOM, unclean=False, away=NOTHING_AWAY, push_to_talk=False,
+                 machine=None, saves_notes=False):
         self.socket = socket.create_connection(("127.0.0.1", brain.port), timeout=5)
         self.stream = self.socket.makefile("rwb")
         self.lock = threading.Lock()
@@ -295,7 +296,8 @@ class Satellite:
         # Set once the brain has let it go.
         self.gone = threading.Event()
         try:
-            protocol.greet(self.stream, name, f"{name}-pi", password, 48000, unclean, push_to_talk=push_to_talk)
+            protocol.greet(self.stream, name, f"{name}-pi", password, 48000, unclean, push_to_talk=push_to_talk,
+                           machine=machine, saves_notes=saves_notes)
         except BaseException:
             # As satellite_link does, so the brain sees it hang up.
             self.socket.close()
@@ -432,6 +434,23 @@ def test_a_connecting_satellite_is_remembered_as_push_to_talk(brain, connect):
     assert brain.rooms.push_to_talk("bedroom") is True and brain.rooms.push_to_talk("kitchen") is False
     # And kept, so it's known while it's away and after a restart.
     assert SatelliteRooms(os.path.join(paths.DATA_DIR, "satellite_rooms.json")).push_to_talk("bedroom") is True
+
+
+def test_connecting_records_machine_and_notes(brain, connect):
+    serving(brain)
+    connect(brain, "bedroom", BEDROOM, push_to_talk=True, machine="pc", saves_notes=True)
+    connect(brain, "kitchen", KITCHEN)
+    connected(brain, "bedroom"), connected(brain, "kitchen")
+
+    assert brain.rooms.machine("bedroom") == "pc" and brain.rooms.saves_notes("bedroom") is True
+    # One which says neither, as an older satellite doesn't, is unknown.
+    assert brain.rooms.machine("kitchen") is None and brain.rooms.saves_notes("kitchen") is False
+    # What the session's satellite knows of itself, for the notes tool.
+    assert brain.session_for("bedroom").satellite.machine == "pc"
+    assert brain.session_for("bedroom").satellite.saves_notes is True
+    # And kept, so it's known while the satellite is away and after a restart.
+    again = SatelliteRooms(os.path.join(paths.DATA_DIR, "satellite_rooms.json"))
+    assert again.machine("bedroom") == "pc" and again.saves_notes("bedroom") is True
 
 
 def test_ring_on(brain, passwords):

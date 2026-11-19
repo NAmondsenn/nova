@@ -1,5 +1,6 @@
 """Tests for what the brain keeps of each satellite's kind and room."""
 
+import json
 import logging
 
 from voice_assistant.satellite_rooms import SatelliteRooms
@@ -81,3 +82,76 @@ def test_a_file_which_cant_be_read_starts_empty_and_is_replaced(tmp_path, caplog
     assert rooms.push_to_talk("pc") is False and "Could not read the satellites' rooms" in caplog.text
     rooms.seen("pc", True)
     assert _rooms(tmp_path).push_to_talk("pc") is True
+
+
+def test_seen_keeps_machine_and_notes_across_a_restart(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.seen("pc", True, "pc", True)
+    rooms.seen("pi", False, "pi")
+    rooms.seen("bedroom", False)
+    rooms.set_area("pc", "Study")
+
+    for kept in (rooms, _rooms(tmp_path)):
+        assert kept.machine("pc") == "pc" and kept.saves_notes("pc") is True
+        assert kept.machine("pi") == "pi" and kept.saves_notes("pi") is False
+        assert kept.machine("bedroom") is None and kept.saves_notes("bedroom") is False
+        # Neither field costs the others theirs.
+        assert kept.push_to_talk("pc") is True and kept.area("pc") == "Study"
+    assert rooms.machine("ghost") is None and rooms.saves_notes("ghost") is False
+
+
+def test_a_new_hello_replaces_the_machine_and_notes(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.seen("pc", True, "pc", True)
+    # The satellite's latest word is the truth, e.g. its Downloads folder has gone, or it's an older program.
+    rooms.seen("pc", True, "pc", False)
+    assert _rooms(tmp_path).saves_notes("pc") is False
+    rooms.seen("pc", True)
+    assert _rooms(tmp_path).machine("pc") is None
+
+
+def test_seen_only_saves_when_something_changed(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.seen("pc", True, "pc", True)
+    path = tmp_path / "satellite_rooms.json"
+    path.write_text("{}")
+    rooms.seen("pc", True, "pc", True)
+    assert path.read_text() == "{}"
+    rooms.seen("pc", True, "mac", True)
+    assert json.loads(path.read_text())["pc"]["machine"] == "mac"
+
+
+def test_file_from_before_is_read(tmp_path):
+    (tmp_path / "satellite_rooms.json").write_text(json.dumps({
+        "pc": {"push_to_talk": True, "area": "Study"}, "bedroom": {"push_to_talk": False, "area": None}}))
+    rooms = _rooms(tmp_path)
+    assert rooms.push_to_talk("pc") is True and rooms.area("pc") == "Study"
+    assert rooms.machine("pc") is None and rooms.saves_notes("pc") is False
+    # And it takes what the satellite says next without losing the room.
+    rooms.seen("pc", True, "pc", True)
+    assert _rooms(tmp_path).area("pc") == "Study" and _rooms(tmp_path).machine("pc") == "pc"
+
+
+def test_odd_machine_or_notes_in_the_file_are_unknown_not_a_lost_file(tmp_path):
+    (tmp_path / "satellite_rooms.json").write_text(json.dumps({
+        "pc": {"push_to_talk": True, "area": "Study", "machine": 5, "saves_notes": "yes"},
+        "mac": {"push_to_talk": True, "area": None, "machine": "toaster", "saves_notes": 1}}))
+    rooms = _rooms(tmp_path)
+    assert rooms.area("pc") == "Study"
+    for name in ("pc", "mac"):
+        assert rooms.machine(name) is None and rooms.saves_notes(name) is False
+
+
+def test_an_old_brain_can_still_read_the_new_file(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.seen("pc", True, "pc", True)
+    rooms.seen("bedroom", False, "pi")
+    rooms.set_area("pc", "Study")
+    rooms.set_area("study", "Study")
+
+    stored = json.loads((tmp_path / "satellite_rooms.json").read_text())
+    assert set(stored) == {"pc", "bedroom", "study"}
+    # What the brain before this one checks of each entry, or it throws the whole file away.
+    for each in stored.values():
+        assert isinstance(each["push_to_talk"], bool)
+        assert each["area"] is None or isinstance(each["area"], str)

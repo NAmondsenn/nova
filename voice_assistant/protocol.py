@@ -19,6 +19,8 @@ After the handshake, what a satellite sends the brain:
     played  {"id": ..., "stopped": ..., "position": ...}
     progress  {"id": ..., "position": ...}
     away  {"rang": [ids], "dismissed": [ids], "ringing": [ids]}
+    note_saved  {"id": ..., "file": ...} or {"id": ..., "error": ...}  (the answer to a
+        save_note: the name of the file made, or a sentence saying why not)
 
 and what the brain sends a satellite:
 
@@ -39,12 +41,15 @@ and what the brain sends a satellite:
     alarms  {"entries": [{"id": ..., "due": ..., "kind": ..., "sound": ...}]}
     phrase  {"rate": ...}  (payload)
     away_settled  (once the brain has saved what away said)
+    save_note  {"id": ..., "title": ...}  (payload: the note's text, as UTF-8 - a line of
+        JSON is only MAX_LINE long, and a note may be far more)
     restart
 
 The handshake comes first, and proves the satellite's password to the brain and the
 brain's to the satellite, without the password itself ever being sent:
 
-    hello  {name, hostname, sample_rate, unclean, nonce, speaker?, push_to_talk?}    (satellite)
+    hello  {name, hostname, sample_rate, unclean, nonce, speaker?, push_to_talk?, machine?,
+            saves_notes?}    (satellite)
     challenge  {nonce, proof}    (brain; or refused, and the connection is closed)
     proof  {proof}    (satellite, once the brain's proof is right)
     ready, or refused    (brain)
@@ -57,6 +62,8 @@ import re
 import secrets
 import unicodedata
 from typing import BinaryIO, Callable, Dict, Optional, Tuple
+
+from voice_assistant.machine import MACHINES
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +171,8 @@ def _expect(stream: BinaryIO, kind: str, *fields: str) -> Dict:
 
 
 def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate: int, unclean: bool,
-          speaker: Optional[str] = None, push_to_talk: bool = False):
+          speaker: Optional[str] = None, push_to_talk: bool = False, machine: Optional[str] = None,
+          saves_notes: bool = False):
     """
     The satellite's side of the handshake.
 
@@ -179,6 +187,10 @@ def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate
             left out of the hello if None.
         push_to_talk: Whether this satellite records on a press of a key, not on a wake
             word - left out of the hello if False.
+        machine: What kind of computer it runs on, one of machine.MACHINES - left out
+            of the hello if None.
+        saves_notes: Whether it can save a note in a Downloads folder - left out of the
+            hello if False.
 
     Raises:
         Refused: The brain refused it, or couldn't prove it knows the password - in
@@ -191,6 +203,11 @@ def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate
     # Likewise, so the hello of a satellite which listens for a wake word is unchanged.
     if push_to_talk:
         extra["push_to_talk"] = True
+    # And these two, so a brain from before them is sent the hello it always was.
+    if machine is not None:
+        extra["machine"] = machine
+    if saves_notes:
+        extra["saves_notes"] = True
     send(stream, "hello", name=name, hostname=hostname, sample_rate=sample_rate,
          unclean=unclean, nonce=nonce, **extra)
     challenge = _expect(stream, "challenge", "nonce", "proof")
@@ -211,8 +228,11 @@ def admit(stream: BinaryIO, password_for: Callable[[str], Optional[str]]) -> Dic
 
     Returns:
         The hello's name, hostname, sample_rate and unclean, its speaker - None if
-        it doesn't say one, as a satellite from before speakers were said doesn't - and
-        whether it is push-to-talk, False if it doesn't say.
+        it doesn't say one, as a satellite from before speakers were said doesn't -
+        whether it is push-to-talk, False if it doesn't say, its machine, one of
+        machine.MACHINES, and whether it saves notes. The last two are None and False
+        if the hello leaves them out or says what makes no sense, which never keeps a
+        satellite out: they are extras.
 
     Raises:
         Refused: The satellite is unknown or got the password wrong. It has been told so.
@@ -246,8 +266,18 @@ def admit(stream: BinaryIO, password_for: Callable[[str], Optional[str]]) -> Dic
     if speaker is None and "speaker" in hello:
         logger.warning(f"{name} said a Spotify speaker which can't be one, so plays on the brain's "
                        f"own speaker name: {ascii(hello['speaker'])[:80]}")
+    machine = hello.get("machine")
+    if machine is not None and machine not in MACHINES:
+        logger.warning(f"{name} said a kind of machine the brain doesn't know, so it's taken as unknown: "
+                       f"{ascii(machine)[:80]}")
+        machine = None
+    saves_notes = hello.get("saves_notes", False)
+    if not isinstance(saves_notes, bool):
+        logger.warning(f"{name} said whether it saves notes in a way which makes no sense, so it's taken "
+                       f"as not: {ascii(saves_notes)[:80]}")
+        saves_notes = False
     return {"name": name, "hostname": hostname, "sample_rate": sample_rate, "unclean": unclean,
-            "speaker": speaker, "push_to_talk": push_to_talk}
+            "speaker": speaker, "push_to_talk": push_to_talk, "machine": machine, "saves_notes": saves_notes}
 
 
 def _speaker(said) -> Optional[str]:

@@ -24,6 +24,7 @@ from typing import Callable, Dict, Iterable, List, Optional
 import numpy as np
 
 from voice_assistant import protocol
+from voice_assistant.notes import MOST_TITLE
 from voice_assistant.recording import AudioFeed
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,21 @@ PIECE_SECONDS = 0.1
 # reports a sound's end on whichever link it has by then, so after it reconnects a late
 # "played" for the old link's "1" would otherwise finish the new link's "1".
 _playback_ids = itertools.count(1)
+
+# How long to wait for a satellite to say it has saved a note, in seconds. It writes one
+# small file, so a satellite which hasn't said by now is not going to.
+NOTE_WAIT = 5.0
+
+# The most of a note's title which is sent. A title is in a line of JSON, which may only be
+# protocol.MAX_LINE long, and takes up to 12 bytes a character there (an emoji, escaped as
+# two surrogates): 320 of them still fit. The satellite cuts the title to MOST_TITLE once
+# it's made safe, which removes slashes and the like first, so more than that is sent.
+MOST_TITLE_SENT = 4 * MOST_TITLE
+
+# Numbers for the notes the brain asks a satellite to save, counted for as long as the
+# brain runs for the reason _playback_ids is, so a late answer from the last connection
+# is never taken for one to a note on this.
+_note_ids = itertools.count(1)
 
 # Numbers for the answers the brain asks a satellite to send, said with listen and with
 # the stop_listening which ends one - "listen-1" on, never a satellite's "wake-1", and
@@ -448,6 +464,15 @@ class RemoteSpeaker:
             playback._finish()
 
 
+class _NoteWait:
+    """One note the brain has asked a satellite to save, and what the satellite said of it."""
+
+    def __init__(self):
+        # Set once the satellite has answered, or has gone.
+        self.arrived = threading.Event()
+        self.answer: Optional[Dict] = None
+
+
 class RemoteSatellite:
     """
     The brain's view of one satellite, for as long as it stays connected: its speaker,
@@ -462,7 +487,7 @@ class RemoteSatellite:
                 wake at each timeout, for serve() to notice a satellite gone quiet, and
                 no send blocks for longer.
             hello: What admit returned - the satellite's name, hostname, sample_rate,
-                speaker and whether it is push-to-talk.
+                speaker, whether it is push-to-talk, its machine and whether it saves notes.
         """
         self.name = hello["name"]
         self.hostname = hello["hostname"]
@@ -473,6 +498,10 @@ class RemoteSatellite:
         # Whether it records on a press of a key, not on a wake word - False from a
         # satellite which doesn't say.
         self.push_to_talk: bool = bool(hello.get("push_to_talk", False))
+        # What kind of computer it runs on, one of machine.MACHINES, and whether it saves
+        # notes in a Downloads folder - None and False from a satellite which doesn't say.
+        self.machine: Optional[str] = hello.get("machine")
+        self.saves_notes: bool = bool(hello.get("saves_notes", False))
         self.speaker = RemoteSpeaker(self.send, self.sample_rate)
         # Each wake word heard, in order: {"talked_over": whether a reply was playing,
         # "pre_roll": how many samples of the feed are from before the wake word - or
@@ -494,6 +523,9 @@ class RemoteSatellite:
         self._feed: Optional[AudioFeed] = None
         self._feed_recording: Optional[str] = None
         self._last_heard = monotonic()
+        # The notes asked to be saved which haven't been answered, by id.
+        self._notes_lock = threading.Lock()
+        self._note_waits: Dict[str, _NoteWait] = {}
         self._handlers: Dict[str, Callable[[Dict, bytes], None]] = {
             "ping": lambda message, payload: self.send("pong"),
             "wake": self._woken,
@@ -502,6 +534,7 @@ class RemoteSatellite:
             "played": lambda message, payload: self.speaker._played(message["id"], message.get("position")),
             "progress": lambda message, payload: self.speaker._progress(message["id"], message["position"]),
             "away": self._away,
+            "note_saved": self._note_saved,
         }
 
     @property
@@ -674,6 +707,43 @@ class RemoteSatellite:
         """
         return self.send("away_settled")
 
+    def save_note(self, title: str, text: str, wait: float = NOTE_WAIT) -> Optional[Dict]:
+        """
+        Has the satellite save a note in its Downloads folder, and waits for it to say so.
+        For a satellite whose saves_notes is True: any other can only say why not.
+
+        Args:
+            title: What to call the note. The satellite makes it a safe file name.
+            text: What it says - at most notes.MOST_TEXT characters, which the satellite
+                refuses more than.
+            wait: The longest to wait for its answer, in seconds.
+
+        Returns:
+            {"file": "Bins.txt"}, the name of the file it made, or {"error": sentence},
+            the reason it didn't, to say - or None if it didn't answer in time, or went.
+        """
+        id = f"note-{next(_note_ids)}"
+        waiting = _NoteWait()
+        with self._notes_lock:
+            # Checked under the lock _lost takes after it has made this False, so a
+            # note is never left waiting on a satellite which has already gone.
+            if not self._connected:
+                return None
+            self._note_waits[id] = waiting
+        try:
+            # The text goes as the payload, not in the line of JSON, which is only
+            # protocol.MAX_LINE long. A character which can't be encoded, from a broken
+            # reply, is for the satellite to refuse as it refuses any other note.
+            if not self.send("save_note", text.encode("utf-8", "surrogatepass"), id=id,
+                             title=title[:MOST_TITLE_SENT]):
+                return None
+            waiting.arrived.wait(wait)
+            # Whatever came, even as the wait ran out.
+            return waiting.answer
+        finally:
+            with self._notes_lock:
+                del self._note_waits[id]
+
     def restart(self) -> bool:
         """
         Has the satellite restart - Home Assistant's Restart button.
@@ -740,6 +810,23 @@ class RemoteSatellite:
                                "dismissed": list(message.get("dismissed") or []),
                                "ringing": list(message.get("ringing") or [])})
 
+    def _note_saved(self, message: Dict, payload: bytes):
+        file, error = message.get("file"), message.get("error")
+        if isinstance(file, str):
+            answer = {"file": file}
+        elif isinstance(error, str):
+            answer = {"error": error}
+        else:
+            logger.warning(f"The {self.name} satellite answered a note without saying where it was saved, "
+                           f"or why not")
+            return
+        with self._notes_lock:
+            waiting = self._note_waits.get(message.get("id"))
+        # None once the wait has been given up, which a late answer is no reason to mind.
+        if waiting is not None:
+            waiting.answer = answer
+            waiting.arrived.set()
+
     def _new_feed(self, recording: Optional[str]) -> AudioFeed:
         """
         Starts a feed for the recording the satellite is about to send, ending any before it.
@@ -780,3 +867,8 @@ class RemoteSatellite:
         self._connected = False
         self._end_feed()
         self.speaker._gone()
+        # Without an answer, which is how save_note tells it was the satellite going.
+        with self._notes_lock:
+            waiting = list(self._note_waits.values())
+        for each in waiting:
+            each.arrived.set()

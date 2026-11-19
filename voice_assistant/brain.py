@@ -945,7 +945,7 @@ class Brain:
         name = hello["name"]
         logger.info(f"The {name} satellite connected")
         # Before its session is made, as that looks up its room, which is kept with this.
-        self.rooms.seen(name, hello["push_to_talk"])
+        self.rooms.seen(name, hello["push_to_talk"], hello["machine"], hello["saves_notes"])
         if hello["unclean"]:
             self._tell_restarted(name)
 
