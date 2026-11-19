@@ -23,7 +23,8 @@ np = pytest.importorskip("numpy")
 from voice_assistant import network
 from voice_assistant import volume as volume_module
 from voice_assistant.navidrome import (CLEAN_VERSIONS, VERSIONS, WRONG_LOGIN, NavidromeError, NavidromeLibrary,
-                                       NavidromePlayer, best, is_clean, likeness, marked_clean, split_by, version_of)
+                                       NavidromePlayer, best, closest_playlist, is_clean, likeness, marked_clean,
+                                       same_song, split_by, version_of)
 from voice_assistant.volume import VolumeControl
 
 
@@ -101,6 +102,9 @@ def _until(check, timeout=2.0):
 
 
 SONGS = [{"id": str(n), "title": f"Song {n}", "artist": "Band"} for n in range(1, 5)]
+
+# The parameters which sign each request in, left out of what a test compares.
+SIGN_IN = {"u", "t", "s", "v", "c", "f"}
 
 
 @pytest.fixture
@@ -781,6 +785,151 @@ def test_the_player_is_a_library_which_signs_in_as_it_did(make_player):
     assert signed["t"] == hashlib.md5(("secret" + signed["s"]).encode()).hexdigest()
 
 
+# Changing playlists, and liking songs
+
+def _asked(library):
+    """Each request the library made, as (endpoint, its parameters without the sign-in)."""
+    return [(endpoint, {key: value for key, value in params.items() if key not in SIGN_IN})
+            for endpoint, params in library._session.requests]
+
+
+def test_the_same_song_is_its_id_or_its_title_and_artist():
+    song = {"id": "1", "title": "Made Up", "artist": "Band"}
+    assert same_song(song, {"id": "1", "title": "Other", "artist": "Other"})
+    assert same_song(song, {"id": "2", "title": "Made Up (Clean)", "artist": "Band"})
+    assert same_song(song, {"id": "3", "title": "made up", "artist": "band"})
+    assert not same_song(song, {"id": "4", "title": "Made Up (Live)", "artist": "Band"})
+    assert not same_song(song, {"id": "5", "title": "Made Up Love", "artist": "Band"})
+    assert not same_song(song, {"id": "6", "title": "Made Up", "artist": "Someone Else"})
+
+
+def test_a_credit_or_a_radio_edit_is_the_same_song_and_a_remix_is_not():
+    song = {"id": "1", "title": "Made Up", "artist": "Band"}
+    assert same_song(song, {"id": "2", "title": "Made Up (feat. Someone)", "artist": "Band"})
+    assert same_song(song, {"id": "2", "title": "Made Up - Radio Edit", "artist": "Band"})
+    assert not same_song(song, {"id": "2", "title": "Made Up (Remix)", "artist": "Band"})
+
+
+def test_a_song_with_no_id_and_no_title_of_its_own_is_never_the_same_as_another():
+    # Nothing says they're one song, however alike the little there is.
+    assert not same_song({"title": "(Live)", "artist": "Band"}, {"title": "(Live)", "artist": "Band"})
+    assert not same_song({"id": "", "title": "", "artist": "Band"}, {"id": "", "title": "", "artist": "Band"})
+    # With a title of its own, it's found by that, without an id.
+    assert same_song({"title": "Made Up", "artist": "Band"}, {"title": "Made Up", "artist": "Band"})
+
+
+def test_the_closest_playlist_is_found_as_playing_one_finds_it():
+    playlists = [{"id": "p1", "name": "Gym Bangers"}, {"id": "p2", "name": "Car Songs"}]
+    assert closest_playlist(playlists, "gym")["id"] == "p1"
+    assert closest_playlist(playlists, "car")["id"] == "p2"
+    assert closest_playlist(playlists, "jim") is None
+
+
+def test_the_closest_playlist_is_the_entry_itself_and_needs_a_name_of_its_own():
+    playlists = [{"id": "p1", "name": "Gym Bangers", "owner": "nova"}, {"id": "p2", "name": "Car Songs"}]
+    # Not a copy with the words it was matched on added.
+    assert closest_playlist(playlists, "gym") is playlists[0]
+    # "My songs" is only words almost every name has, so it names none.
+    assert closest_playlist(playlists, "my songs") is None
+    assert closest_playlist([], "gym") is None
+
+
+def test_only_the_users_own_playlists_are_changed(make_library):
+    library = make_library({"getPlaylists": {"playlists": {"playlist": [
+        {"id": "p1", "name": "Gym", "owner": "nova"},
+        {"id": "p2", "name": "Car", "owner": "someone"},
+        {"id": "p3", "name": "Work", "owner": "Nova"},
+        {"id": "p4", "name": "Nobody's"}]}}})
+    # Not another user's, public or not, nor one with no owner; the user's own however it's cased.
+    assert [playlist["id"] for playlist in library.all_playlists()] == ["p1", "p3"]
+    assert [endpoint for endpoint, _ in _asked(library)] == ["getPlaylists"]
+    assert make_library({"getPlaylists": {}}).all_playlists() == []
+
+
+def test_a_playlists_entries_are_its_songs_in_order(make_library):
+    library = make_library({"getPlaylist": {"playlist": {"id": "p1", "entry": SONGS}}})
+    assert [entry["id"] for entry in library.playlist_entries("p1")] == ["1", "2", "3", "4"]
+    assert _asked(library) == [("getPlaylist", {"id": "p1"})]
+    # An empty playlist has no entry at all.
+    assert make_library({"getPlaylist": {"playlist": {"id": "p1"}}}).playlist_entries("p1") == []
+
+
+def test_songs_are_added_to_a_playlist_by_id(make_library):
+    library = make_library()
+    library.add_songs("p1", ["7"])
+    assert _asked(library) == [("updatePlaylist", {"playlistId": "p1", "songIdToAdd": ["7"]})]
+
+
+def test_songs_are_added_a_hundred_at_a_time(make_library):
+    library = make_library()
+    ids = [str(n) for n in range(250)]
+    library.add_songs("p1", ids)
+    assert [(endpoint, asked["playlistId"], len(asked["songIdToAdd"])) for endpoint, asked in _asked(library)] == [
+        ("updatePlaylist", "p1", 100), ("updatePlaylist", "p1", 100), ("updatePlaylist", "p1", 50)]
+    assert [song for _, asked in _asked(library) for song in asked["songIdToAdd"]] == ids
+    # Nothing to add is nothing asked.
+    library = make_library()
+    library.add_songs("p1", [])
+    assert library._session.requests == []
+
+
+def test_entries_are_removed_by_their_place_last_first(make_library):
+    library = make_library()
+    library.remove_entries("p1", [0, 3])
+    assert _asked(library) == [("updatePlaylist", {"playlistId": "p1", "songIndexToRemove": [3, 0]})]
+
+
+def test_a_place_given_twice_is_removed_once_and_no_places_asks_nothing(make_library):
+    # Removed twice, it would take the song after it as well.
+    library = make_library()
+    library.remove_entries("p1", [2, 0, 2])
+    assert _asked(library) == [("updatePlaylist", {"playlistId": "p1", "songIndexToRemove": [2, 0]})]
+    library = make_library()
+    library.remove_entries("p1", [])
+    assert library._session.requests == []
+
+
+def test_a_playlist_is_deleted_by_its_id(make_library):
+    library = make_library()
+    library.delete_playlist("p1")
+    assert _asked(library) == [("deletePlaylist", {"id": "p1"})]
+
+
+def test_a_song_is_liked_and_unliked(make_library):
+    library = make_library()
+    library.set_starred("7", True)
+    library.set_starred("7", False)
+    assert _asked(library) == [("star", {"id": "7"}), ("unstar", {"id": "7"})]
+
+
+def test_a_liked_song_is_known_from_navidrome(make_library):
+    liked = make_library({"getSong": {"song": {"id": "7", "starred": "2026-11-19T10:00:00Z"}}})
+    assert liked.is_starred("7") is True
+    assert _asked(liked) == [("getSong", {"id": "7"})]
+    assert make_library({"getSong": {"song": {"id": "7"}}}).is_starred("7") is False
+    assert make_library({"getSong": {}}).is_starred("7") is False
+
+
+@pytest.mark.parametrize("change", [
+    lambda library: library.all_playlists(),
+    lambda library: library.playlist_entries("p1"),
+    lambda library: library.add_songs("p1", ["7"]),
+    lambda library: library.remove_entries("p1", [0]),
+    lambda library: library.delete_playlist("p1"),
+    lambda library: library.set_starred("7", True),
+    lambda library: library.is_starred("7"),
+])
+def test_a_playlist_change_which_cant_be_asked_or_is_refused_raises_as_any_call_does(make_library, change):
+    # Not caught here: whoever asks says what went wrong.
+    with pytest.raises(requests.ConnectionError):
+        change(make_library({endpoint: requests.ConnectionError("down") for endpoint in (
+            "getPlaylists", "getPlaylist", "updatePlaylist", "deletePlaylist", "star", "getSong")}))
+    with pytest.raises(NavidromeError):
+        change(make_library({endpoint: {"status": "failed", "error": {"code": 70, "message": "Not found"}}
+                             for endpoint in ("getPlaylists", "getPlaylist", "updatePlaylist", "deletePlaylist",
+                                              "star", "getSong")}))
+
+
 # Playing the queue
 
 def test_the_next_song_plays_when_one_finishes(make_player):
@@ -814,6 +963,31 @@ def test_going_back_soon_after_a_song_starts_goes_to_the_one_before(make_player)
     # Further in, it starts the song again instead.
     player.speaker_started[2].position = 10 * FakeSpeaker.sample_rate
     assert player.previous()["message"] == "Starting it again"
+
+
+def test_the_song_playing_and_the_one_before_are_found(make_player):
+    player = make_player()
+    # Nothing queued: no song, so no last one either.
+    assert player.song_at("this") is None and player.song_at("last") is None
+    player._start(SONGS)
+    _playing(player)
+    # The first song has none before it.
+    assert player.song_at("this")["id"] == "1" and player.song_at("last") is None
+    player.skip()
+    _until(lambda: len(player.speaker_started) == 2)
+    assert player.song_at("this")["id"] == "2" and player.song_at("last")["id"] == "1"
+
+
+def test_the_song_is_found_while_paused_and_nothing_is_playing_once_the_queue_has_run_out(make_player):
+    player = make_player()
+    player._start(SONGS[:1])
+    playing = _playing(player)
+    player.pause()
+    assert player.song_at("this")["id"] == "1"
+    playing.finish()
+    _until(lambda: player._index >= len(player._queue))
+    # Run out, nothing is playing, and the one which played last is the one before.
+    assert player.song_at("this") is None and player.song_at("last")["id"] == "1"
 
 
 def test_repeating_a_track_plays_it_again(make_player):
