@@ -13,9 +13,11 @@ command on the brain, so there's only the one way in to keep safe (0009's decisi
 
 It's plain HTTPS with requests - an authorisation code with PKCE, from a "Desktop
 app" client of the user's own - rather than a Google library, which would be one more
-dependency for four requests: the token, the list of calendars, reading events, and
-adding one. Nothing here changes or deletes an event - the scope Google has for adding
-would let it, so it's this module that never asks.
+dependency for a few requests: the token, the list of calendars, reading events, and
+writing one - adding, changing or removing it. Every write goes through _send_once, which
+sends it once, never again on an unclear answer, and tells nobody - no guest is emailed.
+Only an event on one of the user's own calendars is changed, never an invite from
+someone else.
 
 Every calendar in Google's own list of the user's is read, so one added later turns up
 by itself, unless it's chosen out of what's on, on the settings page. With Google out of
@@ -33,8 +35,8 @@ import re
 import secrets
 import threading
 import time
-from datetime import date, datetime, time as day_time, timedelta
-from typing import Dict, List, Optional, Set, Tuple, Union
+from datetime import date, datetime, time as day_time, timedelta, timezone
+from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 import requests
@@ -51,9 +53,8 @@ logger = logging.getLogger(__name__)
 # whatever Nova's own level.
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
-# The least that list the calendars, read every calendar's events, and add to the
-# user's own. events.owned could change an event too - Google has no scope that only
-# adds - so it's Nova's own code that keeps it to adding.
+# The least that list the calendars, read every calendar's events, and add to, change and
+# remove the events on the user's own - events.owned reaches no other calendar's.
 SCOPES = [
     "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
     "https://www.googleapis.com/auth/calendar.events.readonly",
@@ -126,6 +127,16 @@ CALENDAR_GONE = (403, 404)
 # not a calendar gone, or "nothing on" would be said for what wasn't read.
 RATE_LIMITED = ("rateLimitExceeded", "userRateLimitExceeded")
 
+# What Google answers for an event that's gone - deleted on the phone meanwhile, say: a 404
+# for one it has forgotten, a 410 for one deleted. Said as that, and nothing more is sent.
+EVENT_GONE = (404, 410)
+
+# What's copied of an event removed to put it back, when Google won't set it back to
+# confirmed: what the user sees of it. Not its id, its guests or the series it was in - a
+# copy is an event of its own, and nobody is asked to it again.
+COPIED = ("summary", "description", "location", "start", "end", "reminders", "colorId", "transparency",
+          "visibility")
+
 # An email address, which Google names the user's own calendar by, and a person's own shared
 # with them. A bare "@" isn't one - "Gym @ 6" is a name, said as it is. Kept wide, as a missed
 # address would be spoken and told to Claude: anything before the "@", then a domain whose
@@ -173,6 +184,9 @@ DEFAULT_LENGTH = timedelta(hours=1)
 # The only ways a time to add is read - "20261029" or "2026-10-29T15" would be read by
 # fromisoformat as times nobody meant.
 WHEN_GIVEN = re.compile(r"\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2})?")
+
+# The time an event to change is at, as the model gives it - "15:00" for "the 3 o'clock one".
+AT_GIVEN = re.compile(r"(\d{1,2}):(\d{2})")
 
 # What the user's own calendar is called, whatever Google names it - "my calendar", "my own".
 OWN_CALENDAR = {"", "primary", "personal", "own", "mine", "main"}
@@ -764,7 +778,7 @@ class GoogleCalendar:
         return words
 
     def events(self, first: date, days: int, calendar_ids: Optional[List[str]] = None,
-               leave_out: Set[str] = frozenset()) -> List[Dict]:
+               leave_out: Set[str] = frozenset(), whole: bool = False) -> List[Dict]:
         """
         Everything on the calendars over some days.
 
@@ -773,11 +787,15 @@ class GoogleCalendar:
             days: How many days, from 1.
             calendar_ids: The calendars to read, or None for every one in Google's list.
             leave_out: Calendars not to read of those - the ones chosen out of what's on.
+            whole: Whether to give what changing an event needs as well.
 
         Returns:
             The events, earliest first, each a dict with "summary", "start", "end",
             "all_day", "calendar", its calendar's name as it's said (see spoken_name), and "calendar_id" - start a local
-            datetime, or a date for an all-day event.
+            datetime, or a date for an all-day event. With whole, each has its "id" too; "recurring_id",
+            its series' id for one time a repeating event is on, else None; "invite", whether someone
+            else organised it; "writable", whether Nova can change its calendar's events; and "event",
+            Google's own.
 
         Raises:
             SignInNeeded: If there's no sign-in, or Google no longer accepts it.
@@ -787,7 +805,9 @@ class GoogleCalendar:
         Reading every calendar, one Google won't give the events of - deleted, or no longer
         shared - is left out, with a warning, and the rest are read.
         """
-        names = {calendar["id"]: spoken_name(calendar) for calendar in self.calendars()}
+        calendars = self.calendars()
+        names = {calendar["id"]: spoken_name(calendar) for calendar in calendars}
+        writable = {calendar["id"]: calendar["writable"] for calendar in calendars}
         # Each end made from its own day, not the start plus so many hours, so a day the
         # clocks change on is still from midnight to midnight.
         window = {"timeMin": datetime.combine(first, day_time()).astimezone().isoformat(),
@@ -820,7 +840,15 @@ class GoogleCalendar:
                     continue
                 # A calendar not in Google's list has no name to give - and its id, which
                 # for the primary is the user's email address, is never said in its place.
-                found.append({**_read_event(event), "calendar": names.get(calendar_id, ""), "calendar_id": calendar_id})
+                read = {**_read_event(event), "calendar": names.get(calendar_id, ""), "calendar_id": calendar_id}
+                if whole:
+                    # Google marks the organiser "self" when it's the calendar this copy is on - the
+                    # user's own event, on any of their calendars. Anyone else's is an invite.
+                    organizer = event.get("organizer")
+                    read.update(id=event.get("id"), recurring_id=event.get("recurringEventId"),
+                                invite=isinstance(organizer, dict) and organizer.get("self") is not True,
+                                writable=writable.get(calendar_id, False), event=event)
+                found.append(read)
         return sorted(found, key=lambda event: _sort_key(event["start"]))
 
     def agenda(self, first: date, days: int = 1, today: Optional[date] = None) -> Dict:
@@ -918,7 +946,8 @@ class GoogleCalendar:
             today: Today's date - only given by the tests.
 
         Returns:
-            Dict with 'success' and what was added, or why not, as the 'message'.
+            Dict with 'success' and what was added, or why not, as the 'message' - and once
+            it's added, an 'undo', which takes it back off.
         """
         summary = summary.strip() if isinstance(summary, str) else ""
         if not summary:
@@ -936,7 +965,7 @@ class GoogleCalendar:
             if isinstance(found, str):
                 return {"success": False, "message": found}
             chosen, default = found
-            self._insert(chosen["id"], {"summary": summary, "start": times[0], "end": times[1]})
+            event_id = self._insert(chosen["id"], {"summary": summary, "start": times[0], "end": times[1]})
         except _NotSure as e:
             logger.warning(f"Couldn't tell whether Google added an event: {e}")
             return {"success": False, "message": f"{e.said}, so I can't tell whether {summary} was added."}
@@ -944,7 +973,171 @@ class GoogleCalendar:
             return _not_added(e)
         logger.info("Added an event to Google's calendar")
         to = f" to {spoken_name(chosen)}" if chosen["id"] != default["id"] and chosen["name"] else ""
-        return {"success": True, "message": f"Added {summary}{to}, {_added_when(times[0], today)}."}
+        added = _event_url(chosen["id"], event_id)
+        return {"success": True, "message": f"Added {summary}{to}, {_added_when(times[0], today)}.",
+                "undo": _undo(summary, lambda: self._send_once("DELETE", added),
+                              f"Took {summary} back off your calendar.", f"I can't tell whether {summary} was taken off.")}
+
+    def remove(self, search: str, day: Optional[date] = None, at: Optional[str] = None, following: bool = False,
+               today: Optional[date] = None) -> Dict:
+        """
+        Removes an event from one of the user's own calendars, for "cancel the dentist on
+        Thursday" - straight away, and said back so a mistake is heard, and undone by "undo
+        that". Only that day's of a repeating event, unless following: then from that one on,
+        as Google Calendar's "this and following events" does, so the times before it - past
+        shifts and lectures - stay. It's sent once, never again by itself.
+
+        Args:
+            search: A word or two from its name, e.g. "dentist".
+            day: The day it's on, if the user said - else it's looked for from today.
+            at: The time it starts, "HH:MM", if the user said.
+            following: Whether to remove it from this one on, for "all of them" or "every week".
+            today: Today's date - only given by the tests.
+
+        Returns:
+            Dict with 'success' and what was removed, or why not, as the 'message' - and once
+            it's removed, an 'undo', which puts it back.
+        """
+        today = today or date.today()
+        found = self._to_change(search, day, at, following, today)
+        if isinstance(found, str):
+            return {"success": False, "message": found}
+        summary = found["summary"]
+        try:
+            if following and found["recurring_id"]:
+                message, undo = self._remove_following(found, today)
+            else:
+                # A time a repeating event is on has an id of its own, so this removes that day only.
+                url = _event_url(found["calendar_id"], found["id"])
+                self._send_once("DELETE", url)
+                when = _when_changed(found, today)
+                message = f"Removed {summary}, {when}."
+                undo = _undo(summary, lambda: self._confirm_or_copy(url, found["calendar_id"], _copy(found["event"])),
+                             f"Put {summary} back, {when}.", f"I can't tell whether {summary} was put back.")
+        except _NotSure as e:
+            logger.warning(f"Couldn't tell whether Google removed an event: {e}")
+            return {"success": False, "message": f"I can't tell whether {summary} was removed."}
+        except READ_FAILURES as e:
+            if _gone(e):
+                logger.info("An event to remove was already gone from Google's calendar")
+                return {"success": False, "message": f"{summary} was already gone."}
+            return _not_changed(e)
+        logger.info("Removed an event from Google's calendar")
+        return {"success": True, "message": message, "undo": undo}
+
+    def _remove_following(self, found: Dict, today: date) -> Tuple[str, Callable[[], Dict]]:
+        """
+        Removes a repeating event from one of its times on: the whole series from its first,
+        else the series ended just before this one.
+
+        Args:
+            found: The time, as _to_change gives it.
+            today: Today's date.
+
+        Returns:
+            What to say, and the undo - which puts the series back as it was.
+
+        Raises:
+            The same as _get and _send_once, and ValueError if the series has no rules.
+        """
+        summary = found["summary"]
+        series_url = _event_url(found["calendar_id"], found["recurring_id"])
+        series = self._get(series_url, {})
+        rules = series.get("recurrence")
+        if not isinstance(rules, list) or not all(isinstance(rule, str) for rule in rules):
+            raise ValueError("The series has no rules")
+        # By when this one was meant to be, which the series' rules make it - not where it's
+        # been moved to since.
+        this = _google_when(found["event"].get("originalStartTime") or found["event"]["start"])
+        on = f"from {spoken_day(_day_of(found), today)} on"
+        if this == _google_when(series["start"]):
+            self._send_once("DELETE", series_url)
+            copy = {**_copy(series), "recurrence": rules}
+            undo = _undo(summary, lambda: self._confirm_or_copy(series_url, found["calendar_id"], copy),
+                         f"Put {summary} back {on}.", f"I can't tell whether {summary} was put back.")
+        else:
+            self._send_once("PATCH", series_url, {"recurrence": _cut_rules(rules, this)})
+            undo = _undo(summary, lambda: self._send_once("PATCH", series_url, {"recurrence": rules}),
+                         f"Put {summary} back {on}.", f"I can't tell whether {summary} was put back.")
+        return f"Removed {summary} {on}.", undo
+
+    def _confirm_or_copy(self, url: str, calendar_id: str, copy: Dict):
+        """
+        Puts an event removed back: set back to confirmed, so its reminders, guests and
+        repeats come back with it - else, if Google won't, a copy added in its place.
+
+        Args:
+            url: The event's address.
+            calendar_id: Its calendar.
+            copy: What's added if Google won't set it back - see COPIED.
+
+        Raises:
+            The same as _send_once.
+        """
+        try:
+            self._send_once("PATCH", url, {"status": "confirmed"})
+        except requests.HTTPError as e:
+            # Only a refusal - not Google slowing Nova down, which hasn't looked at it.
+            if not _turned_down(e):
+                raise
+            logger.info(f"Google wouldn't set an event back to confirmed ({e.response.status_code}), so it's copied")
+            self._insert(calendar_id, copy)
+
+    def _to_change(self, search: str, day: Optional[date], at: Optional[str], following: bool,
+                   today: date) -> Union[Dict, str]:
+        """
+        The one event a change is for: matched by its words, as find matches them, on the day
+        given or from today over SEARCH_DAYS - then at the time given, if one was.
+
+        Args:
+            search: A word or two from its name, e.g. "dentist".
+            day: The day it's on, or None.
+            at: The time it starts, "HH:MM", or None.
+            following: Whether it's from this one on - then of several times of one series,
+                it's the earliest.
+            today: Today's date.
+
+        Returns:
+            The event, as events gives it with whole - or what to say when there isn't the
+            one, or it's not Nova's to change.
+        """
+        words = [word for word in (each.strip(".,!?'\"") for each in (search or "").split()) if word]
+        if not words:
+            return "I didn't catch which event you meant."
+        clock = None
+        if at:
+            match = AT_GIVEN.fullmatch(at.strip()) if isinstance(at, str) else None
+            clock = (int(match.group(1)), int(match.group(2))) if match else None
+            if clock is None or clock[0] > 23 or clock[1] > 59:
+                return "I didn't catch the time."
+        try:
+            events = self.events(day or today, 1 if day else SEARCH_DAYS, leave_out=self.left_out(), whole=True)
+        except READ_FAILURES as e:
+            return _failed(e)["message"]
+        patterns = [_called([word]) for word in words]
+        found = [event for event in events if all(pattern.search(event["summary"]) for pattern in patterns)]
+        if clock is not None:
+            # "The 3 o'clock one" is at 3 exactly, else any time in that hour - and never all day.
+            timed = [event for event in found if not event["all_day"]]
+            found = [event for event in timed if (event["start"].hour, event["start"].minute) == clock] or \
+                [event for event in timed if event["start"].hour == clock[0]]
+        series = {(event["calendar_id"], event["recurring_id"]) for event in found}
+        if following and len(series) == 1 and found[0]["recurring_id"]:
+            found = found[:1]
+        if not found:
+            return f"I can't find the {' '.join(words)} on your calendar{f' {_on(day, today)}' if day else ''}."
+        if len(found) > 1:
+            said = [_found_said(event, today) for event in found[:MOST_FOUND]]
+            if len(found) > MOST_FOUND:
+                said.append(f"{len(found) - MOST_FOUND} more")
+            return f"I found {len(found)}: {'; '.join(said[:-1])}; and {said[-1]}. Which one?"
+        event = found[0]
+        if not event["writable"]:
+            return "I can't change that, Google only lets me change your own calendars."
+        # Changing it would tell whoever sent it.
+        if event["invite"]:
+            return "That's an invite from someone else. Change it in Google Calendar."
+        return event
 
     def _calendar_to_add_to(self, named: Optional[str]) -> Union[str, Tuple[Dict, Dict]]:
         """
@@ -997,33 +1190,59 @@ class GoogleCalendar:
         return next((each for each in calendars if each["id"] == chosen_id and each["writable"]), None) or \
             next((each for each in calendars if each["primary"]), None)
 
-    def _insert(self, calendar_id: str, event: Dict):
+    def _insert(self, calendar_id: str, event: Dict) -> str:
         """
-        Asks Google to add an event, once. Only a 401 is sent again, with a fresh access
-        token: Google turned it down unread, so added nothing.
+        Asks Google to add an event, once - see _send_once.
 
         Args:
             calendar_id: The calendar to add it to.
             event: The event, as Google's events.insert takes it.
 
+        Returns:
+            The new event's id.
+
         Raises:
-            _NotSure: If it was sent but Google's answer didn't say it was added - Google's
+            The same as _send_once, and _NotSure if Google's answer didn't give the event added.
+        """
+        answer = self._send_once("POST", f"{CALENDARS}/{quote(calendar_id, safe='')}/events", event)
+        if not isinstance(answer, dict) or not isinstance(answer.get("id"), str) or not answer["id"]:
+            raise _NotSure("Google's answer didn't say", "an answer without an event")
+        return answer["id"]
+
+    def _send_once(self, method: str, url: str, body: Optional[Dict] = None) -> Optional[Dict]:
+        """
+        Sends one write to Google - an event added, changed or deleted - once. It's the only
+        way Nova writes to Google, so every write tells nobody (sendUpdates=none - no guest is
+        emailed about it) and none is sent twice. Only a 401 is sent again, with a fresh access
+        token: Google turned it down unread, so changed nothing.
+
+        Args:
+            method: "POST", "PATCH" or "DELETE".
+            url: The address.
+            body: What's sent, as JSON, or None.
+
+        Returns:
+            Google's answer, or None for a 204 - a delete's.
+
+        Raises:
+            _NotSure: If it was sent but Google's answer didn't say it was done - Google's
                 own trouble, a 5xx, too.
             SignInNeeded: If there's no sign-in, or Google no longer accepts it.
-            requests.RequestException: If Google couldn't be reached, or refused it.
+            requests.RequestException: If Google couldn't be reached, or refused it - an
+                HTTPError of a 404 or 410 for an event gone (see EVENT_GONE).
         """
         if not network.online():
             raise requests.ConnectionError("No network connection")
-        url = f"{CALENDARS}/{quote(calendar_id, safe='')}/events"
         for _ in range(2):
             headers = {"Authorization": f"Bearer {self.sign_in.access_token()}"}
             try:
-                response = self._session.post(url, json=event, headers=headers, timeout=REQUEST_TIMEOUT)
+                response = self._session.request(method, url, params={"sendUpdates": "none"}, json=body,
+                                                 headers=headers, timeout=REQUEST_TIMEOUT)
             except requests.ConnectTimeout:
-                # Never sent, so certainly not added.
+                # Never sent, so certainly not done.
                 raise
             except requests.Timeout as e:
-                # Sent, but unanswered - so it may well have been added.
+                # Sent, but unanswered - so it may well have been done.
                 raise _NotSure(NO_ANSWER, "no answer in time") from e
             except (requests.ConnectionError, requests.exceptions.ChunkedEncodingError,
                     requests.exceptions.ContentDecodingError) as e:
@@ -1036,22 +1255,26 @@ class GoogleCalendar:
             self.sign_in.drop_access_token()
         if response.status_code == 401:
             raise SignInNeeded("Google turned Nova's access token down.")
-        # Google's own trouble may come after it was added - a 502 or 504 is a front end
+        # Google's own trouble may come after it was done - a 502 or 504 is a front end
         # that got no answer from behind it, and a 500 backendError is one Google says to
-        # retry - so asking again could add it twice. Reading, it's only out of reach.
+        # retry - so asking again could do it twice. Reading, it's only out of reach.
         if response.status_code >= 500:
             raise _NotSure(TROUBLE, f"a {response.status_code}")
         response.raise_for_status()
+        if response.status_code == 204:
+            return None
         try:
             answer = response.json()
         except ValueError:
             answer = None
-        if not isinstance(answer, dict) or not answer.get("id"):
-            raise _NotSure("Google's answer didn't say", f"a {response.status_code} without an event")
+        # Anything but Google's own answer - a page from a Wi-Fi sign-in, say - doesn't say it was done.
+        if not isinstance(answer, dict):
+            raise _NotSure("Google's answer didn't say", f"a {response.status_code} without an answer")
+        return answer
 
 
 class _NotSure(Exception):
-    """An event was sent to Google, but whether it was added can't be told."""
+    """A write was sent to Google, but whether it was done can't be told."""
 
     def __init__(self, said: str, why: str):
         """
@@ -1077,12 +1300,117 @@ def _not_added(error: Exception) -> Dict:
     logger.error(f"Couldn't add to the calendar: {type(error).__name__}{f' {status}' if status else ''}")
     if isinstance(error, SignInNeeded):
         return {"success": False, "message": NEEDS_SIGN_IN}
-    # Google slowing Nova down is Google out of reach, as when reading - only a 4xx
-    # otherwise is the event refused. Its own trouble, a 5xx, is never here: see _insert.
-    if isinstance(error, requests.HTTPError) and status is not None and 400 <= status < 500 and status != 429 \
-            and not _rate_limited(error.response):
+    if _turned_down(error):
         return {"success": False, "message": "Google wouldn't add that."}
     return {"success": False, "message": CANT_REACH_GOOGLE}
+
+
+def _not_changed(error: Exception) -> Dict:
+    """
+    What's said when an event certainly wasn't changed, removed or put back, depending on
+    why - as _not_added has it.
+    """
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    logger.error(f"Couldn't change the calendar: {type(error).__name__}{f' {status}' if status else ''}")
+    if isinstance(error, SignInNeeded):
+        return {"success": False, "message": NEEDS_SIGN_IN}
+    if _turned_down(error):
+        return {"success": False, "message": "Google wouldn't change that."}
+    return {"success": False, "message": CANT_REACH_GOOGLE}
+
+
+def _turned_down(error: Exception) -> bool:
+    """
+    Whether Google refused a write. Google slowing Nova down is Google out of reach, as
+    when reading - only a 4xx otherwise is a refusal. Its own trouble, a 5xx, is never
+    here: see _send_once.
+    """
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    return isinstance(error, requests.HTTPError) and status is not None and 400 <= status < 500 and status != 429 \
+        and not _rate_limited(error.response)
+
+
+def _gone(error: Exception) -> bool:
+    """Whether Google said the event asked about is gone - see EVENT_GONE."""
+    return isinstance(error, requests.HTTPError) and getattr(error.response, "status_code", None) in EVENT_GONE
+
+
+def _undo(summary: str, write: Callable[[], None], done: str, unclear: str) -> Callable[[], Dict]:
+    """
+    How to take a change to the calendar back, for "undo that" - sent once, as the change was.
+
+    Args:
+        summary: The event's name, e.g. "Dentist".
+        write: Takes it back, raising as _send_once does.
+        done: What's said once it's taken back, e.g. "Put Dentist back, Thursday at 3 PM.".
+        unclear: What's said when Google's answer doesn't say whether it was.
+
+    Returns:
+        The undo, which answers with 'success' and a 'message', and never raises: an event
+        gone since - deleted on the phone - is said as that, and nothing more is sent.
+    """
+    def undo() -> Dict:
+        try:
+            write()
+        except _NotSure as e:
+            logger.warning(f"Couldn't tell whether Google took a change back: {e}")
+            return {"success": False, "message": unclear}
+        except READ_FAILURES as e:
+            if _gone(e):
+                logger.info("An event to take a change back on was gone from Google's calendar")
+                return {"success": False, "message": f"{summary} was already gone."}
+            return _not_changed(e)
+        logger.info("Took a change to Google's calendar back")
+        return {"success": True, "message": done}
+
+    return undo
+
+
+def _event_url(calendar_id: str, event_id: str) -> str:
+    """The address of one event on a calendar - a time a repeating event is on, or its series."""
+    return f"{CALENDARS}/{quote(calendar_id, safe='')}/events/{quote(event_id, safe='')}"
+
+
+def _copy(event: Dict) -> Dict:
+    """A copy of an event, to add in its place - see COPIED."""
+    return {key: event[key] for key in COPIED if key in event}
+
+
+def _google_when(when: Dict) -> Union[date, datetime]:
+    """A start as Google gives one - {"date"} for all day, else {"dateTime"} - as a date, or a time with its offset."""
+    return date.fromisoformat(when["date"]) if "date" in when else datetime.fromisoformat(when["dateTime"])
+
+
+def _cut_rules(rules: List[str], before: Union[date, datetime]) -> List[str]:
+    """
+    A repeating event's rules, ended just before one of its times - for "remove the gym from
+    Tuesday on", which leaves every time before it as it was.
+
+    Args:
+        rules: The series' recurrence, as Google gives it - "RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=10",
+            and any EXDATE and RDATE lines.
+        before: The time it ends before, as the series' start is given - a time for a timed
+            series, a date for an all-day one.
+
+    Returns:
+        The rules, each RRULE ending before it.
+    """
+    # Each RRULE loses its COUNT and UNTIL and ends just before `before`: a second before it, in UTC,
+    # for a timed series ("UNTIL=20261124T085959Z"), the day before for an all-day one
+    # ("UNTIL=20261123"). EXDATE and RDATE lines are kept as they are.
+    if isinstance(before, datetime):
+        until = (before.astimezone(timezone.utc) - timedelta(seconds=1)).strftime("%Y%m%dT%H%M%SZ")
+    else:
+        until = (before - timedelta(days=1)).strftime("%Y%m%d")
+    cut = []
+    for rule in rules:
+        if not rule.upper().startswith("RRULE:"):
+            cut.append(rule)
+            continue
+        parts = [part for part in rule[len("RRULE:"):].split(";")
+                 if part.split("=", 1)[0].upper() not in ("COUNT", "UNTIL")]
+        cut.append(rule[:len("RRULE:")] + ";".join(parts + [f"UNTIL={until}"]))
+    return cut
 
 
 def _never_connected(error: Exception) -> bool:
@@ -1555,11 +1883,29 @@ def describe_found(wanted: str, events: List[Dict], today: date) -> str:
     """
     if not events:
         return f"I can't see {wanted} on your calendar in the next three months."
-    said = []
-    for event in events[:MOST_FOUND]:
-        day = event["start"] if event["all_day"] else event["start"].date()
-        when = "all day" if event["all_day"] else f"at {spoken_clock_time(event['start'].hour, event['start'].minute)}"
-        said.append(f"{event['summary']} {_on(day, today)}, {when}")
+    said = [_found_said(event, today) for event in events[:MOST_FOUND]]
     listed = said[0] if len(said) == 1 else "; ".join(said[:-1]) + "; and " + said[-1]
     more = f" And {len(events) - MOST_FOUND} more after that." if len(events) > MOST_FOUND else ""
     return f"You've got {listed}.{more}"
+
+
+def _found_said(event: Dict, today: date) -> str:
+    """One event found, as it's said: "Car MOT on Thursday, at 9:30 AM", "Holiday tomorrow, all day"."""
+    when = "all day" if event["all_day"] else f"at {spoken_clock_time(event['start'].hour, event['start'].minute)}"
+    return f"{event['summary']} {_on(_day_of(event), today)}, {when}"
+
+
+def _day_of(event: Dict) -> date:
+    """The day an event read starts on - its own, for one all day."""
+    return event["start"] if event["all_day"] else event["start"].date()
+
+
+def _when_changed(event: Dict, today: date) -> str:
+    """
+    When an event changed is on, as it's said back - "Thursday at 3 PM", "tomorrow at 10:30
+    AM", "Friday, all day" - with the time as an event added is said.
+    """
+    if event["all_day"]:
+        return f"{spoken_day(event['start'], today)}, all day"
+    start = event["start"]
+    return f"{spoken_day(start.date(), today)} at {spoken_clock_time(start.hour, start.minute).replace(':00', '')}"
