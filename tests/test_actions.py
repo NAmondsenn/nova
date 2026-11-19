@@ -5,6 +5,7 @@ temporary folder) and a fake Spotify controller, so nothing plays or goes online
 """
 
 import time
+from datetime import date
 from types import SimpleNamespace
 
 import pytest
@@ -477,6 +478,105 @@ def test_add_to_calendar_is_only_offered_once_google_is_set_up():
                                                          "calendar": "work"}, from_model=True))
     assert calendar.asked == ("Shift", "2026-10-31 09:00", None, None, "work")
     assert (result.ok, result.say) == (True, "Added Shift to Work, Saturday the 31st at 9 AM.")
+
+
+# Removing, moving and renaming calendar events
+
+class RecordingChangeCalendar:
+    """A calendar which records what remove and change were asked, and answers with an undo."""
+
+    def __init__(self):
+        self.asked = []
+        self.undone = 0
+
+    def activity_calendars(self):
+        return {}
+
+    def remove(self, search, day=None, at=None, following=False, calendar=None, today=None, now=None):
+        self.asked.append(("remove", search, day, at, following, calendar))
+        return {"success": True, "message": "Removed Dentist.", "undo": self._undo}
+
+    def change(self, search, day=None, at=None, start=None, end=None, summary=None, following=False, calendar=None,
+               today=None, now=None):
+        self.asked.append(("change", search, day, at, start, end, summary, following, calendar))
+        return {"success": True, "message": "Moved Dentist.", "undo": self._undo}
+
+    def _undo(self):
+        self.undone += 1
+        return {"success": True, "message": "Undone."}
+
+
+def test_remove_from_calendar_passes_the_day_time_and_from_this_one_on():
+    calendar = RecordingChangeCalendar()
+    executor = ActionExecutor(calendar=calendar)
+    offered = {schema["name"]: schema for schema in executor.tool_schemas()}
+    assert offered["remove_from_calendar"]["input_schema"]["required"] == ["search"]
+    assert set(offered["remove_from_calendar"]["input_schema"]["properties"]) == {
+        "search", "day", "time", "following", "calendar"}
+
+    result = executor.execute(Action("remove_from_calendar", {
+        "search": "yoga", "day": "2026-11-26", "time": "18:30", "following": True, "calendar": "work"},
+        from_model=True))
+    assert calendar.asked == [("remove", "yoga", date(2026, 11, 26), "18:30", True, "work")]
+    assert (result.ok, result.say) == (True, "Removed Dentist.")
+
+    # Only what the user said is passed, and "from this one on" isn't assumed.
+    calendar.asked.clear()
+    executor.execute(Action("remove_from_calendar", {"search": "dentist", "following": None}, from_model=True))
+    assert calendar.asked == [("remove", "dentist", None, None, False, None)]
+
+
+def test_change_calendar_event_passes_the_new_times_and_name():
+    calendar = RecordingChangeCalendar()
+    executor = ActionExecutor(calendar=calendar)
+    offered = {schema["name"]: schema for schema in executor.tool_schemas()}
+    assert offered["change_calendar_event"]["input_schema"]["required"] == ["search"]
+    assert set(offered["change_calendar_event"]["input_schema"]["properties"]) == {
+        "search", "day", "time", "new_start", "new_end", "new_name", "following", "calendar"}
+
+    result = executor.execute(Action("change_calendar_event", {
+        "search": "dentist", "day": "2026-11-26", "time": "15:00", "new_start": "2026-11-27 16:00",
+        "new_end": "2026-11-27 17:00", "new_name": "Check-up", "following": True, "calendar": "personal"},
+        from_model=True))
+    assert calendar.asked == [("change", "dentist", date(2026, 11, 26), "15:00", "2026-11-27 16:00",
+                               "2026-11-27 17:00", "Check-up", True, "personal")]
+    assert (result.ok, result.say) == (True, "Moved Dentist.")
+
+    calendar.asked.clear()
+    executor.execute(Action("change_calendar_event", {"search": "dentist", "new_name": "Check-up"}, from_model=True))
+    assert calendar.asked == [("change", "dentist", None, None, None, None, "Check-up", False, None)]
+
+
+def test_an_unreadable_day_is_said():
+    calendar = RecordingChangeCalendar()
+    executor = ActionExecutor(calendar=calendar)
+    for tool in ("remove_from_calendar", "change_calendar_event"):
+        result = executor.execute(Action(tool, {"search": "dentist", "day": "Thursday"}, from_model=True))
+        assert (result.ok, result.say) == (False, "I didn't catch which day you meant."), tool
+    assert calendar.asked == []
+
+
+def test_a_calendar_change_is_kept_for_undo():
+    calendar = RecordingChangeCalendar()
+    executor = ActionExecutor(calendar=calendar)
+    assert executor.execute(Action("remove_from_calendar", {"search": "dentist"}, from_model=True)).ok
+    assert calendar.undone == 0
+    assert executor.execute(Action("undo_last_change")).say == "Undone."
+    assert calendar.undone == 1
+
+    assert executor.execute(Action("change_calendar_event", {"search": "dentist", "new_name": "Check-up"},
+                                   from_model=True)).ok
+    assert executor.execute(Action("undo_last_change")).say == "Undone."
+    assert calendar.undone == 2
+
+
+def test_the_calendar_change_tools_say_so_when_the_calendar_isnt_set_up():
+    executor = ActionExecutor()
+    offered = [schema["name"] for schema in executor.tool_schemas()]
+    assert "remove_from_calendar" not in offered and "change_calendar_event" not in offered
+    for tool in ("remove_from_calendar", "change_calendar_event"):
+        result = executor.execute(Action(tool, {"search": "dentist"}))
+        assert (result.ok, result.say) == (False, "The calendar isn't set up yet."), tool
 
 
 # "Undo that"

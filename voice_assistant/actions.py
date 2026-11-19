@@ -1640,6 +1640,90 @@ class ActionExecutor:
                         all_day: Optional[bool] = None, calendar: Optional[str] = None):
         return self.calendar.add(summary or "", start or "", end=end, all_day=all_day, calendar=calendar)
 
+    @tool(
+        "Remove an event from the user's Google calendar, for 'cancel the dentist', 'take the gym off my "
+        "calendar on Friday' or 'get rid of my yoga classes'. Give search, and the day and time only when the "
+        "user said them. Give following only for 'all of them', 'every week' or 'from now on' - it removes "
+        "only that one and the ones after it, never earlier ones. What was done is said for you, so just reply "
+        "'Okay.' When Nova lists several and asks which, call again with the day, time or calendar the user "
+        "picks.",
+        needs="calendar",
+        required=["search"],
+        search={"type": "string", "description": "A word from the event's name as it'd be written on the "
+                                                 "calendar, e.g. 'dentist' or 'yoga' - putting right anything "
+                                                 "clearly misheard."},
+        day={"type": "string", "description": "Only when the user said which day, for the event as it is now: "
+                                              "YYYY-MM-DD, worked out from today's date."},
+        time={"type": "string", "description": "Only when the user said what time, for the event as it is now: "
+                                               "HH:MM, 24-hour."},
+        following={"type": "boolean", "description": "True only for 'all of them', 'every week' or 'from now "
+                                                     "on'. Leave out for just the one."},
+        calendar={"type": "string", "description": "The calendar the user named, as they said it, only when they "
+                                                   "named one or Nova asked which."},
+    )
+    def remove_from_calendar(self, search: Optional[str] = None, day: Optional[str] = None,
+                             time: Optional[str] = None, following: Optional[bool] = None,
+                             calendar: Optional[str] = None):
+        return self._calendar_event(self.calendar.remove, day, search=search or "", at=time,
+                                    following=following is True, calendar=calendar)
+
+    @tool(
+        "Move or rename an event on the user's Google calendar, for 'move the dentist to Friday at 4', 'push my "
+        "shift back an hour' or 'call my Tuesday meeting Planning'. Give search, and the day and time only when "
+        "the user said them, for the event as it is now. new_start and new_end are local 'YYYY-MM-DD HH:MM', "
+        "or 'YYYY-MM-DD' for all day; leave out whatever isn't changing. Give following only for 'all of them', "
+        "'every week' or 'from now on' - it changes only that one and the ones after it, never earlier ones. "
+        "What was done is said for you, so just reply 'Okay.' When Nova lists several and asks which, call "
+        "again with the day, time or calendar the user picks.",
+        needs="calendar",
+        required=["search"],
+        search={"type": "string", "description": "A word from the event's name as it'd be written on the "
+                                                 "calendar, e.g. 'dentist' or 'yoga' - putting right anything "
+                                                 "clearly misheard."},
+        day={"type": "string", "description": "Only when the user said which day, for the event as it is now: "
+                                              "YYYY-MM-DD, worked out from today's date."},
+        time={"type": "string", "description": "Only when the user said what time, for the event as it is now: "
+                                               "HH:MM, 24-hour."},
+        new_start={"type": "string", "description": "When it should start, worked out from today's date."},
+        new_end={"type": "string", "description": "When it should end, only when the user said - an end day is "
+                                                  "included."},
+        new_name={"type": "string", "description": "What it should be called, as it'd be written on the "
+                                                   "calendar, e.g. 'Planning'."},
+        following={"type": "boolean", "description": "True only for 'all of them', 'every week' or 'from now "
+                                                     "on'. Leave out for just the one."},
+        calendar={"type": "string", "description": "The calendar the user named, as they said it, only when they "
+                                                   "named one or Nova asked which."},
+    )
+    def change_calendar_event(self, search: Optional[str] = None, day: Optional[str] = None,
+                              time: Optional[str] = None, new_start: Optional[str] = None,
+                              new_end: Optional[str] = None, new_name: Optional[str] = None,
+                              following: Optional[bool] = None, calendar: Optional[str] = None):
+        return self._calendar_event(self.calendar.change, day, search=search or "", at=time, start=new_start,
+                                    end=new_end, summary=new_name, following=following is True,
+                                    calendar=calendar)
+
+    @staticmethod
+    def _calendar_event(act, day: Optional[str], **asked) -> Dict:
+        """
+        Removes or changes an event on the day the model gave, if it gave one which can be read.
+
+        Args:
+            act: The calendar's remove or change.
+            day: The event's day as the model gave it, 'YYYY-MM-DD', or None for the user not
+                having said one.
+            **asked: The rest of what to pass on.
+
+        Returns:
+            What the calendar said, or that the day wasn't caught.
+        """
+        when = None
+        if day:
+            try:
+                when = date.fromisoformat(day)
+            except (TypeError, ValueError):
+                return {"success": False, "message": "I didn't catch which day you meant."}
+        return act(day=when, **asked)
+
     @staticmethod
     def _calendar_days(start: Optional[str], days: Optional[int], read) -> Dict:
         """Reads the calendar for the days the model gave, if it gave a day which can be read."""
