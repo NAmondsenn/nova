@@ -30,6 +30,7 @@ from voice_assistant import logging_setup, paths, storage
 from voice_assistant.actions import Action, ActionExecutor
 from voice_assistant.batteries import BatteryChoices, BatteryWatcher
 from voice_assistant import clock as clock_module
+from voice_assistant import satellite_rooms as satellite_rooms_module
 from voice_assistant import settings_page as page_module
 from voice_assistant import google_calendar, spotify_controller
 from voice_assistant.brain import Brain
@@ -48,11 +49,15 @@ from voice_assistant.ntfy import Ntfy
 from voice_assistant.page_password import Logins, PagePassword
 from voice_assistant.pc import PCPower
 from voice_assistant.routines import Routines
+from voice_assistant.satellite_rooms import SatelliteRooms
 from voice_assistant.settings_page import LATER, NOW, SettingsPage
 from voice_assistant.weather import Weather
 from voice_assistant.wrapped import WrappedStore
 
 LOGIN = "you@example.com"
+
+# What the page says of a satellite nothing is known of: not what machine it is, what else it's called, or whether it saves notes.
+UNKNOWN = {"machine": None, "called": [], "saves_notes": False}
 
 
 class FakeVolume:
@@ -249,6 +254,16 @@ class FakeRooms:
 
     def push_to_talk(self, name):
         return name in self.pressed
+
+    # Nothing is known of what any satellite is, or what it's called, unless a test uses a real SatelliteRooms.
+    def machine(self, name):
+        return None
+
+    def saves_notes(self, name):
+        return False
+
+    def called(self, name):
+        return []
 
 
 class FakeBrain:
@@ -1505,6 +1520,9 @@ def test_the_pages_script_and_style_are_served_with_its_safety_headers(served, p
         assert b'"/api/satellites/remove"' in body and b'"/api/satellites/default"' in body
         # The switch for a satellite which travels with the user, with its words and what it means.
         assert b'"/api/satellites/travels"' in body and b'"Travels with me"' in body
+        # What each satellite is, whether it saves notes, and the box for what else it's called.
+        assert b'"/api/satellites/called"' in body and b'"Also called"' in body
+        assert b'"Saves notes to its Downloads"' in body and b'"Raspberry Pi"' in body
         assert b'"Journeys are worked out from where your phone is."' in body
         # The speaker a satellite says it plays Spotify on is put on the page only as text.
         assert b'element("span", `Spotify plays on ${satellite.spotify_speaker}`, "detail")' in body
@@ -2171,11 +2189,11 @@ def test_the_page_lists_each_satellite(files):
 
     assert state["satellites"] == [
         {"name": "bedroom", "connected": True, "activity": "speaking", "muted": False, "default": True,
-         "spotify_speaker": "Voice-Assistant", "push_to_talk": False, "travels": False},
+         "spotify_speaker": "Voice-Assistant", "push_to_talk": False, "travels": False, **UNKNOWN},
         {"name": "kitchen", "connected": True, "activity": "idle", "muted": True, "default": False,
-         "spotify_speaker": "Voice-Assistant", "push_to_talk": False, "travels": False},
+         "spotify_speaker": "Voice-Assistant", "push_to_talk": False, "travels": False, **UNKNOWN},
         {"name": "garage", "connected": False, "activity": "idle", "muted": False, "default": False,
-         "spotify_speaker": None, "push_to_talk": False, "travels": False}]
+         "spotify_speaker": None, "push_to_talk": False, "travels": False, **UNKNOWN}]
     # What's shown below is the default's, unless another is asked for.
     assert state["muted"] is False and page.state("kitchen")["muted"] is True
 
@@ -2273,7 +2291,7 @@ def test_alarms_and_routines_work_with_no_satellite(files):
     assert state["volumes"] == {} and state["muted"] is False
     assert state["satellites"] == [
         {"name": "bedroom", "connected": False, "activity": "idle", "muted": False, "default": True,
-         "spotify_speaker": None, "push_to_talk": False, "travels": False}]
+         "spotify_speaker": None, "push_to_talk": False, "travels": False, **UNKNOWN}]
     # Without any satellite added at all, too.
     assert _page(sessions={}, known=[]).state()["satellites"] == []
 
@@ -2515,6 +2533,183 @@ def test_the_travels_route_needs_the_pages_own_header(served, tmp_path):
     said = json.loads(_ask(served, "/api/satellites/travels", {"name": "bedroom", "on": True}, X_Nova="page")[2])
     assert said == {"success": True, "message": "bedroom travels with you now."}
     assert served.brain.journeys.travels("bedroom")
+
+
+def _rooms(tmp_path, *seen):
+    """The real SatelliteRooms, over a file of its own, with each satellite as its hello would have said it."""
+    rooms = SatelliteRooms(str(tmp_path / "satellite_rooms.json"))
+    for name, machine, saves_notes in seen:
+        rooms.seen(name, False, machine, saves_notes)
+    return rooms
+
+
+def _three(tmp_path):
+    """A page over a Pi, a PC called Desk and a Mac - and the rooms it keeps what they are in."""
+    rooms = _rooms(tmp_path, ("home-assistant", "pi", False), ("pc", "pc", True), ("mac", "mac", True))
+    rooms.set_called("pc", ["Desk"])
+    sessions = {"home-assistant": FakeSession(), "pc": FakeSession(), "mac": FakeSession()}
+    return _page(sessions=sessions, rooms=rooms)
+
+
+def test_satellites_say_machine_called_and_notes(files, tmp_path):
+    rooms = _rooms(tmp_path, ("bedroom", "pi", False), ("pc", "pc", True), ("lab", "linux", False))
+    rooms.set_called("pc", ["Desk", "computer"])
+    page = _page(sessions={"bedroom": FakeSession(), "pc": FakeSession()}, known=["bedroom", "pc", "lab", "garage"],
+                 rooms=rooms)
+    assert {each["name"]: (each["machine"], each["called"], each["saves_notes"])
+            for each in page.state()["satellites"]} == {
+        "bedroom": ("pi", [], False), "pc": ("pc", ["Desk", "computer"], True), "lab": ("linux", [], False),
+        # One the brain has never seen says nothing of itself.
+        "garage": (None, [], False)}
+
+
+def test_set_called_saves_trimmed_names(files, tmp_path, caplog):
+    rooms = _rooms(tmp_path, ("bedroom", "pi", False))
+    page = _page(rooms=rooms)
+    with caplog.at_level(logging.INFO):
+        assert page.set_called("bedroom", "Desk, , computer ", LOGIN) == {
+            "success": True, "message": "bedroom is also called Desk and computer."}
+    assert rooms.called("bedroom") == ["Desk", "computer"]
+    assert page.state()["satellites"][0]["called"] == ["Desk", "computer"]
+    assert f"Settings page: {LOGIN} gave the bedroom satellite the other names ['Desk', 'computer']" in caplog.text
+    # Kept in the file, for the next time the brain starts.
+    assert SatelliteRooms(rooms.path).called("bedroom") == ["Desk", "computer"]
+    # What it said about itself is left alone.
+    assert rooms.machine("bedroom") == "pi"
+    # One name is said as one.
+    assert page.set_called("bedroom", "Study", LOGIN)["message"] == "bedroom is also called Study."
+
+
+def test_set_called_refuses_too_many_or_too_long(files, tmp_path):
+    rooms = _rooms(tmp_path, ("bedroom", "pi", False))
+    rooms.set_called("bedroom", ["Kept"])
+    page = _page(rooms=rooms)
+    assert page.set_called("bedroom", "a, b, c, d, e, f", LOGIN) == {
+        "success": False, "message": "That's more than 5 names."}
+    assert page.set_called("bedroom", "x" * 31, LOGIN) == {
+        "success": False, "message": "A name can't be more than 30 characters."}
+    # Counted once trimmed.
+    assert page.set_called("bedroom", f" {'x' * 31} ", LOGIN)["success"] is False
+    assert rooms.called("bedroom") == ["Kept"]
+    # Five names and thirty characters are as many as there can be, with what's empty left out.
+    assert page.set_called("bedroom", f"a, b, c, d, {'x' * 30}, ,", LOGIN)["success"] is True
+    assert rooms.called("bedroom") == ["a", "b", "c", "d", "x" * 30]
+
+
+def test_set_called_refuses_a_name_with_no_words_in_it(files, tmp_path):
+    rooms = _rooms(tmp_path, ("bedroom", "pi", False))
+    page = _page(rooms=rooms)
+    # Marks alone are no name anyone can say, so they'd be kept and never found.
+    assert page.set_called("bedroom", "Desk, ?!", LOGIN) == {"success": False, "message": "?! has no words in it."}
+    assert page.set_called("bedroom", "...", LOGIN)["success"] is False
+    assert rooms.called("bedroom") == []
+    # Marks among words are fine.
+    assert page.set_called("bedroom", "Dad's room", LOGIN)["success"] is True
+
+
+def test_set_called_refuses_a_name_another_has(files, tmp_path, caplog):
+    page = _three(tmp_path)
+    rooms = page.brain.rooms
+    with caplog.at_level(logging.INFO):
+        # Another satellite's page name, however it's capitalised or put - compared as it's said.
+        for said in ("Desk", "desk", "The Desk", "my DESK", "Desk satellite"):
+            assert page.set_called("mac", said, LOGIN) == {
+                "success": False, "message": f"{said} is already what you call pc."}
+        # Another satellite's own name, as a transcript would spell it.
+        assert page.set_called("mac", "Home Assistant", LOGIN) == {
+            "success": False, "message": "Home Assistant is already what you call home-assistant."}
+        # One bad name of several spoils them all: nothing is saved.
+        assert page.set_called("mac", "Laptop, Desk", LOGIN)["success"] is False
+    assert rooms.called("mac") == []
+    assert "gave the mac satellite" not in caplog.text
+    # Its own name, and the names it already has, are its to keep.
+    assert page.set_called("pc", "pc, Desk, Study", LOGIN)["success"] is True
+    assert page.set_called("mac", "mac", LOGIN)["success"] is True
+    # Another's is free once it's let go of.
+    assert page.set_called("pc", "", LOGIN)["success"] is True
+    assert page.set_called("mac", "Desk", LOGIN)["success"] is True
+
+
+def test_set_called_refuses_another_satellites_machine_words_unless_its_own(files, tmp_path):
+    page = _three(tmp_path)
+    rooms = page.brain.rooms
+    # "pc" on the Mac would take the PC's word from it, and so for each of the others.
+    for name, said, other in [("mac", "pc", "pc"), ("mac", "My PC", "pc"), ("mac", "desktop", "pc"),
+                              ("pc", "laptop", "mac"), ("pc", "MacBook", "mac"),
+                              ("mac", "Raspberry Pi", "home-assistant"), ("pc", "pie", "home-assistant"),
+                              ("home-assistant", "computer", "pc")]:
+        assert page.set_called(name, said, LOGIN) == {
+            "success": False, "message": f"{said} is already what you call {other}."}, (name, said)
+    # "computer" is both the PC's and the Mac's, so either may be called it...
+    assert page.set_called("pc", "computer", LOGIN)["success"] is True
+    # ...but not both: once one is, it's a name another has, and "the computer" means that one.
+    assert page.set_called("mac", "Computer", LOGIN) == {
+        "success": False, "message": "Computer is already what you call pc."}
+    assert page.set_called("mac", "laptop", LOGIN)["success"] is True
+    assert rooms.called("pc") == ["computer"] and rooms.called("mac") == ["laptop"]
+    assert page.set_called("pc", "", LOGIN)["success"] is True
+    assert page.set_called("mac", "Computer", LOGIN)["success"] is True
+    assert page.set_called("pc", "computer", LOGIN)["message"] == "computer is already what you call mac."
+    # One whose machine isn't known has no words of its own, so it can't be called another's.
+    page.brain.known.append("lab")
+    assert page.set_called("lab", "Workshop", LOGIN)["success"] is True
+    assert page.set_called("lab", "pc", LOGIN)["success"] is False
+
+
+def test_set_called_refuses_unknown_satellite_and_odd_types(files, tmp_path, monkeypatch, caplog):
+    rooms = _rooms(tmp_path, ("bedroom", "pi", False))
+    page = _page(rooms=rooms)
+    nonsense = {"success": False, "message": "That didn't make sense."}
+    # The page sends the text box's text, so a list or a number is not what it sends.
+    assert page.set_called("bedroom", ["Desk"], LOGIN) == nonsense
+    assert page.set_called("bedroom", None, LOGIN) == nonsense
+    assert page.set_called("bedroom", 5, LOGIN) == nonsense
+    assert page.set_called(["bedroom"], "Desk", LOGIN) == nonsense
+    assert page.set_called(None, "Desk", LOGIN) == nonsense
+    assert page.set_called("ghost", "Desk", LOGIN) == {"success": False, "message": "There's no satellite called ghost."}
+    # Nothing is made for a satellite which isn't there.
+    assert "ghost" not in storage.load_json(rooms.path, {})
+    assert rooms.called("bedroom") == []
+
+    def broken():
+        raise json.JSONDecodeError("Expecting value", "", 0)
+
+    page.brain.satellites = broken
+    assert page.set_called("bedroom", "Desk", LOGIN) == {"success": False, "message": page_module.SATELLITES_UNREADABLE}
+    del page.brain.satellites
+
+    def full(path, data, **how):
+        raise OSError("No space left on device")
+
+    with monkeypatch.context() as full_disk, caplog.at_level(logging.ERROR):
+        full_disk.setattr(satellite_rooms_module, "save_json", full)
+        assert page.set_called("bedroom", "Desk", LOGIN) == {"success": False, "message": "That couldn't be saved."}
+    assert "couldn't save" in caplog.text
+    assert rooms.called("bedroom") == []
+
+
+def test_set_called_empty_clears(files, tmp_path, caplog):
+    rooms = _rooms(tmp_path, ("bedroom", "pi", False))
+    rooms.set_called("bedroom", ["Desk", "Study"])
+    page = _page(rooms=rooms)
+    with caplog.at_level(logging.INFO):
+        assert page.set_called("bedroom", "", LOGIN) == {"success": True, "message": "bedroom has no other names now."}
+    assert rooms.called("bedroom") == []
+    assert f"Settings page: {LOGIN} cleared the other names of the bedroom satellite" in caplog.text
+    # Only commas and spaces left is the same as nothing.
+    rooms.set_called("bedroom", ["Desk"])
+    assert page.set_called("bedroom", " , ,", LOGIN)["success"] is True
+    assert rooms.called("bedroom") == []
+
+
+def test_the_called_route_needs_the_pages_own_header(served, tmp_path):
+    served.brain.rooms = _rooms(tmp_path, ("bedroom", "pi", False))
+    assert _ask(served, "/api/satellites/called", {"name": "bedroom", "called": "Desk"})[0] == 403
+    assert served.brain.rooms.called("bedroom") == []
+    said = json.loads(_ask(served, "/api/satellites/called", {"name": "bedroom", "called": "Desk, Study"},
+                           X_Nova="page")[2])
+    assert said == {"success": True, "message": "bedroom is also called Desk and Study."}
+    assert served.brain.rooms.called("bedroom") == ["Desk", "Study"]
 
 
 def test_a_broken_satellites_file_is_said_so_not_taken_for_no_satellite(files, caplog):

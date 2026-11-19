@@ -2,23 +2,41 @@
 Satellite Rooms Module.
 
 The brain keeps what it has learnt of each satellite - whether it records on a press
-of a key or listens for a wake word, and the room Home Assistant has it in - so a
-satellite is still known once it has gone, and across a restart. The kind comes in
-the satellite's hello and the room from Home Assistant, which only a session's
-lookup finds out. It is kept in satellite_rooms.json in Nova's data folder.
+of a key or listens for a wake word, what machine it runs on and whether it saves
+notes, and the room Home Assistant has it in - so a satellite is still known once it
+has gone, and across a restart. All but the room come in the satellite's hello, and the
+room from Home Assistant, which only a session's lookup finds out. It is kept in
+satellite_rooms.json in Nova's data folder. The other names he has given a satellite on
+the settings page are kept with them: they aren't the satellite's to say.
+
+Every entry keeps push_to_talk and area, as the brain before the machine, notes and
+names were kept needs to read the file - it throws the whole of it away otherwise.
 """
 
 import logging
 import threading
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
+from voice_assistant.machine import MACHINES
 from voice_assistant.storage import load_json, save_json
 
 logger = logging.getLogger(__name__)
 
 
+def _blank() -> Dict:
+    """Returns the entry of a satellite nothing is known of, with every field the file keeps."""
+    return {"push_to_talk": False, "area": None, "machine": None, "saves_notes": False, "called": []}
+
+
+def _names(stored: Any) -> List[str]:
+    """Returns the names read from the file, or none if what's there isn't a list of names."""
+    if isinstance(stored, list) and all(isinstance(each, str) for each in stored):
+        return list(stored)
+    return []
+
+
 class SatelliteRooms:
-    """Each satellite's kind and room, kept in a file."""
+    """Each satellite's kind, machine, notes, room and other names, kept in a file."""
 
     def __init__(self, path: str):
         """
@@ -44,7 +62,12 @@ class SatelliteRooms:
             logger.error(f"Could not read the satellites' rooms, so none are known until they connect "
                          f"({type(e).__name__}: {e})")
             return
-        self._known = {name: {"push_to_talk": each["push_to_talk"], "area": each.get("area")}
+        # The machine, notes and names are only extras, so a file from before them is read, and
+        # one with something odd in them is read as not knowing, never thrown away.
+        self._known = {name: {"push_to_talk": each["push_to_talk"], "area": each.get("area"),
+                              "machine": each.get("machine") if each.get("machine") in MACHINES else None,
+                              "saves_notes": each.get("saves_notes") is True,
+                              "called": _names(each.get("called"))}
                        for name, each in stored.items()}
 
     def _save(self):
@@ -54,21 +77,26 @@ class SatelliteRooms:
         except (OSError, TypeError) as e:
             logger.error(f"Could not save the satellites' rooms: {e}")
 
-    def seen(self, name: str, push_to_talk: bool):
+    def seen(self, name: str, push_to_talk: bool, machine: Optional[str] = None, saves_notes: bool = False):
         """
-        Notes what a satellite said it is as it connected.
+        Notes what a satellite said it is as it connected. What it says now replaces
+        what it said before, so a satellite which no longer says its machine is unknown.
 
         Args:
             name: The satellite's name.
             push_to_talk: Whether it records on a press of a key, not a wake word.
+            machine: What kind of computer it runs on, one of machine.MACHINES - None if
+                it doesn't say.
+            saves_notes: Whether it saves notes in a Downloads folder.
         """
+        said = {"push_to_talk": push_to_talk, "machine": machine, "saves_notes": saves_notes}
         with self._lock:
             each = self._known.get(name)
-            if each is not None and each["push_to_talk"] == push_to_talk:
+            if each is not None and all(each[key] == value for key, value in said.items()):
                 return
             if each is None:
-                each = self._known[name] = {"push_to_talk": push_to_talk, "area": None}
-            each["push_to_talk"] = push_to_talk
+                each = self._known[name] = _blank()
+            each.update(said)
             self._save()
 
     def set_area(self, name: str, area: Optional[str]):
@@ -84,16 +112,49 @@ class SatelliteRooms:
         if area is None:
             return
         with self._lock:
-            each = self._known.setdefault(name, {"push_to_talk": False, "area": None})
+            each = self._known.setdefault(name, _blank())
             if each["area"] == area:
                 return
             each["area"] = area
             self._save()
 
+    def set_called(self, name: str, called: List[str]):
+        """
+        Notes the other names he has given a satellite, as the settings page saves them.
+
+        Args:
+            name: The satellite's name. One not seen yet is made an entry of its own, as
+                seen would, which its hello then fills in.
+            called: The names, as the page checked them - none to clear them.
+
+        Raises:
+            OSError: If they couldn't be saved. They aren't kept in memory either then,
+                as the page tells him it failed.
+        """
+        with self._lock:
+            updated = {**self._known.get(name, _blank()), "called": list(called)}
+            save_json(self.path, {**self._known, name: updated}, indent=2)
+            self._known[name] = updated
+
     def push_to_talk(self, name: str) -> bool:
         """Returns whether a satellite records on a press of a key - False for one not known."""
         with self._lock:
             return self._known.get(name, {}).get("push_to_talk", False)
+
+    def machine(self, name: str) -> Optional[str]:
+        """Returns what kind of machine a satellite runs on, one of machine.MACHINES - None for one not known."""
+        with self._lock:
+            return self._known.get(name, {}).get("machine")
+
+    def saves_notes(self, name: str) -> bool:
+        """Returns whether a satellite saves notes in a Downloads folder - False for one not known."""
+        with self._lock:
+            return self._known.get(name, {}).get("saves_notes", False)
+
+    def called(self, name: str) -> List[str]:
+        """Returns the other names he has given a satellite - none for one not known or never given any."""
+        with self._lock:
+            return list(self._known.get(name, {}).get("called", []))
 
     def area(self, name: str) -> Optional[str]:
         """Returns the room a satellite is in, or None if it isn't known."""

@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
-from voice_assistant import logging_setup, paths, protocol, storage, watchdog
+from voice_assistant import logging_setup, paths, protocol, satellite_names, storage, watchdog
 from voice_assistant.batteries import BatteryChoices, BatteryWatcher
 from voice_assistant.choices import ChoiceStore
 from voice_assistant.clean_check import CleanCheck
@@ -149,6 +149,11 @@ STOP_CHECK = 0.5
 # fallback.Phrase.
 FALLBACK_PHRASE = "Sorry, I can't reach my server right now."
 
+# What's said when there's no music to move, and when the player can't move it - Spotify's
+# can't hand its music over, and plays on one speaker of its own.
+NO_MUSIC_TO_MOVE = "There's no music to move."
+MOVING_NEEDS_NAVIDROME = "Moving music only works with Navidrome."
+
 # The settings each satellite is sent with its state - see Session.send_state - so a
 # save of any of them on the settings page sends every satellite its state again.
 SENT_IN_STATE = (("thresholds", "recording_timeout"), ("thresholds", "wake_word_confidence"),
@@ -190,6 +195,37 @@ def _speech_to_text(config, tts: TextToSpeech):
             logger.warning(f"The second speech model couldn't be loaded, so Nova will hear lone words again by "
                            f"itself: {e}")
     return NemotronSpeechToText(nemotron, please=make_please(tts), fallback=fallback)
+
+
+def _music_source(room: List[Session], everyone: List[Session]) -> Optional[Session]:
+    """
+    Finds the music to move: what's playing, where it was asked for, else somewhere near, else
+    anywhere - and only when nothing plays, what's paused in the same order. "It" is what he can
+    hear, so an old queue paused here isn't taken in place of the music playing beside it.
+
+    Args:
+        room: The connected sessions of the room the user is in, the satellite they're
+            talking to first.
+        everyone: Every connected session, in the order they connected.
+
+    Returns:
+        The first of the room playing now, else the first of everyone playing now; else the first
+        of the room with music paused, else the first of everyone with music paused - or None.
+        A player which can't say, as Spotify's can't, has none.
+    """
+    def has_music(session: Session) -> bool:
+        asked = getattr(session.music_player, "has_music", None)
+        return bool(asked and asked())
+
+    def is_playing(session: Session) -> bool:
+        asked = getattr(session.music_player, "is_playing", None)
+        return bool(asked and asked())
+
+    for sessions, has in ((room, is_playing), (everyone, is_playing), (room, has_music), (everyone, has_music)):
+        found = next((session for session in sessions if has(session)), None)
+        if found is not None:
+            return found
+    return None
 
 
 def _skipped_message(skipped: List[Dict]) -> str:
@@ -812,6 +848,87 @@ class Brain:
             logger.warning(f"Couldn't read the satellites for the {name} satellite's room, so it's on its own: {e}")
             return [name]
 
+    def _named_satellites(self) -> Dict[str, Tuple[Optional[str], List[str]]]:
+        """
+        Returns:
+            Every satellite which may connect, the default first, connected or not, by
+            name, each with its machine and the other names he has given it - what
+            satellite_names matches words against.
+
+        Raises:
+            OSError or ValueError: If the satellites can't be read.
+        """
+        return {name: (self.rooms.machine(name), self.rooms.called(name)) for name in self.satellites()}
+
+    def find_satellite(self, said: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Finds the satellite some words name, such as "my Pi", "the PC" or a name he has
+        given one on the settings page - among every one which may connect, not only those
+        connected, so "the PC isn't connected" can be said of one which is off.
+
+        Args:
+            said: The words, as they were said.
+
+        Returns:
+            The satellite's name and None; or None and what to say when the words name
+            none ("There's no satellite called the phone. There's the Pi and the PC.") or
+            more than one ("Which one: the PC or the Mac?"), or the satellites can't be read.
+        """
+        try:
+            satellites = self._named_satellites()
+        except (OSError, ValueError) as e:
+            logger.warning(f"Couldn't read the satellites to find which one {said!r} is: {e}")
+            return None, "I can't tell which satellites there are just now."
+        found = satellite_names.matching(said, satellites)
+        if len(found) == 1:
+            return found[0], None
+        if found:
+            spoken = [self.spoken_name(name) for name in found]
+            return None, f"Which one: {satellite_names.listed(spoken, 'or')}?"
+        sentence = f"There's no satellite called {said.strip()}."
+        if satellites:
+            there = satellite_names.listed([self.spoken_name(name) for name in satellites], "and")
+            sentence += f" There's {there}."
+        return None, sentence
+
+    def names_satellite(self, said: str) -> bool:
+        """
+        Args:
+            said: Words which may name a satellite, e.g. "the PC".
+
+        Returns:
+            Whether they do - even if they name more than one, as which one isn't what's
+            asked. False if the satellites can't be read, so a phrase falls through to the
+            rest of the rules rather than failing.
+        """
+        try:
+            return bool(satellite_names.matching(said, self._named_satellites()))
+        except (OSError, ValueError) as e:
+            logger.warning(f"Couldn't read the satellites to find whether {said!r} names one: {e}")
+            return False
+
+    def spoken_name(self, name: str) -> str:
+        """
+        Args:
+            name: A satellite's name.
+
+        Returns:
+            What it's called in a reply - "the PC", or the name he gave it on the settings
+            page (not one of its machine's own words, as "computer" is for the PC) - as it's
+            said mid-sentence: capitalise it to start one. If another
+            satellite is called the same, its own name, as "the Pi" would mean both of two
+            Pis - and if the satellites can't be read, what the machine gives it.
+        """
+        spoken = satellite_names.spoken(name, self.rooms.machine(name), self.rooms.called(name))
+        try:
+            others = [other for other in self.satellites() if other != name]
+        except (OSError, ValueError) as e:
+            logger.warning(f"Couldn't read the satellites to tell the {name} satellite's name from the others': {e}")
+            return spoken
+        shared = any(spoken == satellite_names.spoken(other, self.rooms.machine(other), self.rooms.called(other))
+                     for other in others)
+        return name if shared else spoken
+
     def ring_on(self, name: str) -> str:
         """
         Where a timer or alarm set at a satellite should ring. One which records on a press
@@ -861,6 +978,78 @@ class Brain:
         with self._lock:
             session = self.sessions.get(name) if name else None
         return session if session is not None and session.satellite.connected else None
+
+    def move_music(self, spoken_at: str, said: str) -> Dict:
+        """
+        Moves the music to the satellite some words name, as the user asked at spoken_at -
+        from what's playing, here or in its room or anywhere, else from what's paused - to play on
+        from the same place, with the other's stopped. Nothing moves if the words name none or more
+        than one, if the one named is where it already is (carried on there, if it's paused) or isn't
+        connected (a sleeping PC isn't woken for it), or if either player is Spotify's.
+
+        Args:
+            spoken_at: The satellite the user was talking to.
+            said: The words for where to, e.g. "the PC".
+
+        Returns:
+            Dict with 'success' and the 'message' to say - "Moved to the PC.", or why not. Also
+            'nothing_to_move' (True) when it's because there's no music anywhere to move, for a
+            play on another satellite to start some there instead - without reading the message.
+        """
+        name, problem = self.find_satellite(said)
+        if name is None:
+            return {"success": False, "message": problem}
+        # A session stays in the brain's list for a moment after its satellite goes.
+        everyone = [session for session in self.connected_sessions() if session.satellite.connected]
+        source = _music_source(self.room_sessions(spoken_at), everyone)
+        if source is None:
+            here = self.session_for(spoken_at)
+            can_move = here is None or here.music_player is None or hasattr(here.music_player, "hand_over")
+            if not can_move:
+                return {"success": False, "message": MOVING_NEEDS_NAVIDROME}
+            return {"success": False, "message": NO_MUSIC_TO_MOVE, "nothing_to_move": True}
+        there, from_here = self.spoken_name(name), self.spoken_name(source.satellite.name)
+        if name == source.satellite.name:
+            # A pause on its way lands first, so what's said is of the music as it is.
+            source.music.wait()
+            if source.music_player.is_playing():
+                return {"success": False, "message": f"It's already on {there}."}
+            # Paused where he wants it playing: carried on, as a bare "play" would.
+            return source.music_player.play(None)
+        target = self.session_for(name)
+        if target is None:
+            away = there[:1].upper() + there[1:]
+            return {"success": False, "message": f"{away} isn't connected, so the music's staying on {from_here}."}
+        if not hasattr(target.music_player, "take_over"):
+            return {"success": False, "message": MOVING_NEEDS_NAVIDROME}
+
+        stays = {"success": False, "message": f"I couldn't move the music to {there}, so it's staying on {from_here}."}
+        # A pause or resume on its way to either lands first: the source's, so it can't undo
+        # the hand-over, and the target's, so music moved in the middle of a reply is held
+        # until the reply is over - and nothing plays under it for a moment before.
+        source.music.wait()
+        target.music.wait()
+        try:
+            state = source.music_player.hand_over()
+        except Exception as e:
+            logger.warning(f"The {source.satellite.name} satellite couldn't hand its music over: {e}")
+            return stays
+        if state is None:
+            return {"success": False, "message": NO_MUSIC_TO_MOVE, "nothing_to_move": True}
+        try:
+            taken = target.music_player.take_over(state)
+        except Exception as e:
+            logger.warning(f"The {name} satellite couldn't take the music over: {e}")
+            taken = {}
+        if not (isinstance(taken, dict) and taken.get("success")):
+            # So he isn't left with none playing anywhere.
+            try:
+                source.music_player.take_over(state)
+            except Exception as e:
+                logger.warning(f"The {source.satellite.name} satellite couldn't take its music back: {e}")
+            return stays
+        logger.info(f"Moved the music from the {source.satellite.name} satellite to the {name} one")
+        return {"success": True, "message": f"Moved to {there}."}
 
     def _stoppable_sessions(self) -> List[Tuple[str, Session]]:
         """
@@ -965,7 +1154,7 @@ class Brain:
         name = hello["name"]
         logger.info(f"The {name} satellite connected")
         # Before its session is made, as that looks up its room, which is kept with this.
-        self.rooms.seen(name, hello["push_to_talk"])
+        self.rooms.seen(name, hello["push_to_talk"], hello["machine"], hello["saves_notes"])
         if hello["unclean"]:
             self._tell_restarted(name)
 

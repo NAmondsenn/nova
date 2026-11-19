@@ -911,6 +911,100 @@ test("the choice of satellite to look after has its caption, shown and hidden wi
   assert.equal(shown.node("satellite-choice-title").hidden, true);
 });
 
+// A satellite's row as the page draws it, by its name - which the page puts first in the row's `what`, as text.
+const satelliteRow = (shown, name) => shown.node("satellites").children
+  .find((one) => one.querySelector(".what").children[0].text === name) || assert.fail(`No row for ${name}`);
+const badgesOf = (row) => row.querySelectorAll(".badge").map((one) => one.textContent);
+const detailsOf = (row) => row.querySelectorAll(".detail").map((one) => one.textContent);
+// The box of the names a satellite is also called, and the words beside it.
+const calledBox = (row) => row.querySelectorAll("input").find((one) => one.type === "text");
+
+// What /api/state says of some satellites which are each a different machine.
+const MACHINES_SEEN = [
+  { name: "home-assistant", connected: true, default: true, travels: false, machine: "pi", called: [], saves_notes: false },
+  { name: "pc", connected: true, default: false, travels: false, machine: "pc", called: ["Desk", "computer"], saves_notes: true },
+  { name: "mac", connected: false, default: false, travels: false, machine: "mac", called: [], saves_notes: true },
+  { name: "lab", connected: true, default: false, travels: false, machine: "linux", called: [], saves_notes: false },
+  { name: "old", connected: true, default: false, travels: false, machine: null, called: [], saves_notes: false },
+];
+
+// What is POSTed, as the page sends it, with each answered as given - everything else as the stand-in does.
+function posting(shown, said = { success: true, message: "Done." }) {
+  const posts = [];
+  const asked = shown.context.fetch;
+  shown.context.fetch = async (path, options) => {
+    if (!options || options.method !== "POST") return asked(path, options);
+    posts.push({ path, ...JSON.parse(options.body) });
+    return { ok: true, status: 200, json: async () => said, text: async () => "" };
+  };
+  return posts;
+}
+
+test("a satellite's row says what machine it is, if it says, and whether it saves notes", async () => {
+  const shown = page({ state: { ...STATE, satellites: MACHINES_SEEN, satellite: "home-assistant" } });
+  await shown.context.load();
+  assert.equal(badgesOf(satelliteRow(shown, "home-assistant")).join("|"), "Raspberry Pi|Default");
+  assert.equal(badgesOf(satelliteRow(shown, "pc")).join("|"), "PC");
+  assert.equal(badgesOf(satelliteRow(shown, "mac")).join("|"), "Mac");
+  // A Linux computer which isn't a Pi, and one which doesn't say, are shown without.
+  assert.equal(badgesOf(satelliteRow(shown, "lab")).join("|"), "");
+  assert.equal(badgesOf(satelliteRow(shown, "old")).join("|"), "");
+  // It saves notes where it says it does, in a line of its own, never where it doesn't - the Pi, say.
+  const notes = (name) => detailsOf(satelliteRow(shown, name)).includes("Saves notes to its Downloads");
+  assert.equal(`${notes("home-assistant")} ${notes("pc")} ${notes("mac")} ${notes("lab")} ${notes("old")}`,
+               "false true true false false");
+});
+
+test("a satellite's row has a box for what else it's called, which holds them as written and sends the text on change", async () => {
+  const shown = page({ state: { ...STATE, satellites: MACHINES_SEEN, satellite: null } });
+  await shown.context.load();
+  const box = calledBox(satelliteRow(shown, "pc"));
+  assert.equal(box.value, "Desk, computer");
+  assert.equal(calledBox(satelliteRow(shown, "home-assistant")).value, "");
+  // Said in words by the label round it, which holds it, so it needs no id.
+  const label = box.parent;
+  assert.equal(`${label.tag} ${label.textContent.startsWith("Also called")} ${label.contains(box)}`, "label true true");
+  // Nothing is sent as the page draws, nor as it's typed in.
+  const posts = posting(shown);
+  box.value = "Desk, , Study ";
+  assert.equal(posts.length, 0);
+  for (const listener of box.listeners.change || []) await listener({});
+  assert.equal(posts.length, 1);
+  assert.equal(`${posts[0].path}|${posts[0].name}|${posts[0].called}`, "/api/satellites/called|pc|Desk, , Study ");
+  // The text as typed, so the brain's trimming and checking are the same wherever it's sent from.
+  assert.equal(Object.keys(posts[0]).sort().join(), "called,name,path");
+});
+
+test("a change of names which was refused, or didn't save, is drawn as it is - not as typed", async () => {
+  const shown = page({ state: { ...STATE, satellites: MACHINES_SEEN, satellite: null } });
+  await shown.context.load();
+  const posts = posting(shown, { success: false, message: "Desk is already what you call pc." });
+  const box = calledBox(satelliteRow(shown, "mac"));
+  box.value = "Desk";
+  for (const listener of box.listeners.change || []) await listener({});
+  assert.equal(posts.length, 1);
+  // Drawn again from what the brain says, which has none: the refused name isn't left in the box.
+  assert.equal(calledBox(satelliteRow(shown, "mac")).value, "");
+  assert.equal(calledBox(satelliteRow(shown, "mac")) === box, false);
+});
+
+test("a row isn't drawn over while a satellite's names are typed, and is once the box is left", async () => {
+  const shown = page({ state: { ...STATE, satellites: MACHINES_SEEN, satellite: null } });
+  await shown.context.load();
+  const box = calledBox(satelliteRow(shown, "pc"));
+  box.focus();
+  box.value = "Desk, Stu";
+  // Something else about a satellite changed, as it does every time one starts speaking.
+  shown.given.state = { ...STATE, satellites: MACHINES_SEEN.map((one) => ({ ...one, connected: !one.connected })), satellite: null };
+  await shown.context.load();
+  assert.equal(calledBox(satelliteRow(shown, "pc")) === box, true);
+  assert.equal(box.value, "Desk, Stu");
+  box.blur();
+  await shown.context.load();
+  assert.equal(calledBox(satelliteRow(shown, "pc")) === box, false);
+  assert.equal(calledBox(satelliteRow(shown, "pc")).value, "Desk, computer");
+});
+
 test("a setting is found by the words of its key too, though its label alone is shown", async () => {
   const shown = page({ state: { ...STATE, settings: [number("journeys.buffer_minutes", 10), ...QUIET] } });
   await shown.loadAll();

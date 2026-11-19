@@ -19,9 +19,10 @@ import os
 import queue
 import signal
 import socket
+import sys
 import threading
 import time
-from typing import Callable, Dict, Iterator, List, Optional
+from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 
@@ -30,7 +31,9 @@ from voice_assistant.config import Config, ConfigError
 from voice_assistant.echo import make_echo_canceller
 from voice_assistant.fallback import AlarmCopy, FallbackRinger, Phrase, StateCopy
 from voice_assistant.logging_setup import setup_logging
+from voice_assistant.machine import downloads_folder, machine_kind
 from voice_assistant.microphone import RATE, Microphone
+from voice_assistant.notes import NoteRefused, save_note
 from voice_assistant.press import PressListener
 from voice_assistant.satellite_link import SILENT_FOR, SatelliteLink
 from voice_assistant.speaker import BLOCK_SECONDS, Playback, Speaker
@@ -188,6 +191,34 @@ def _speaker(device_name) -> Optional[str]:
     return None
 
 
+def _machine_and_notes() -> Tuple[Optional[str], bool]:
+    """
+    What to say in the hello of this machine, and whether it saves notes.
+
+    Neither lookup may stop the satellite. The Windows one in particular has only ever
+    been written, never run on real Windows, and a satellite which can't start over it
+    would be one with no voice at all - so what it raises is logged, and this machine
+    is taken as unknown and as saving no notes.
+
+    Returns:
+        Its kind, one of machine.MACHINES - or None if that couldn't be told - and
+        whether it has a Downloads folder to save notes in.
+    """
+    try:
+        machine = machine_kind()
+    except Exception as e:
+        logger.warning(f"Couldn't tell what kind of machine this is, so the brain isn't told "
+                       f"({type(e).__name__}: {e})")
+        machine = None
+    try:
+        saves_notes = downloads_folder() is not None
+    except Exception as e:
+        logger.warning(f"Couldn't look for a Downloads folder, so this satellite saves no notes "
+                       f"({type(e).__name__}: {e})")
+        saves_notes = False
+    return machine, saves_notes
+
+
 class Satellite:
     """One Pi's microphone and speaker, for a brain elsewhere."""
 
@@ -226,6 +257,9 @@ class Satellite:
         # and so has no wake word to load - nor any clips of it. Its mute is then kept in
         # the state copy alone.
         self.push_to_talk = config.section("satellite").get("trigger", "wake_word") == "push_to_talk"
+        # Said in every hello, so the brain can name this satellite by its machine and
+        # offer a notes tool only where there's a Downloads folder to save one in.
+        self.machine, self.saves_notes = _machine_and_notes()
 
         # The one speaker and the one microphone, with what's played taken back out of
         # what's heard - see echo.py. Push-to-talk, each is open only when needed, so
@@ -339,6 +373,7 @@ class Satellite:
             "alarms": lambda message, payload: self.alarms.replace(message["entries"]),
             "phrase": lambda message, payload: self.phrase.replace(payload, message["rate"]),
             "away_settled": self._away_settled,
+            "save_note": self._save_note,
             "restart": self._restart,
         }
 
@@ -363,6 +398,7 @@ class Satellite:
             self.link = SatelliteLink(self.address, self.name, self.hostname, self.password, self.sample_rate,
                                       self._note_start(), self._on_message, self._on_connected,
                                       speaker=self.spotify_speaker, push_to_talk=self.push_to_talk,
+                                      machine=self.machine, saves_notes=self.saves_notes,
                                       media_controls=self.media is not None)
             self.link.start()
             threading.Thread(target=self._ring_when_due, daemon=True, name="fallback").start()
@@ -907,6 +943,58 @@ class Satellite:
             self.alarms.clear_report(sent)
             self.ringer.quiet()
             self.alarms.taken_over(sent["ringing"])
+
+    def _save_note(self, message: Dict, payload: bytes):
+        id = message.get("id")
+        if not isinstance(id, str):
+            # Nothing could be answered, and the brain has given up waiting by now.
+            logger.warning("The brain asked for a note to be saved without an id, so it wasn't")
+            return
+        title = message.get("title")
+        # On a thread of its own, as this is the link's reader: the disk, or Windows
+        # looking for the folder, never holds up hearing the brain or answering its pings.
+        threading.Thread(target=self._write_note, args=(id, title if isinstance(title, str) else "", payload),
+                         daemon=True, name="save-note").start()
+
+    def _write_note(self, id: str, title: str, payload: bytes):
+        """
+        Saves a note in the Downloads folder and tells the brain how it went.
+
+        What the note says is never logged, here or in anything which fails, as it may
+        be anything the user said.
+
+        Args:
+            id: What the brain knows the note by, to say in the answer.
+            title: What to call it.
+            payload: What it says, as UTF-8.
+        """
+        try:
+            # Looked for now, not when the satellite started: it may have been made or
+            # moved since.
+            try:
+                folder = downloads_folder()
+            except Exception as e:
+                logger.warning(f"Couldn't look for a Downloads folder ({type(e).__name__}: {e})")
+                folder = None
+            if folder is None:
+                raise NoteRefused("There's no Downloads folder to save it in.")
+            try:
+                # surrogatepass, as the brain's encoding of a broken reply's lone
+                # surrogate is, for save_note to refuse it as it refuses any other.
+                text = payload.decode("utf-8", "surrogatepass")
+            except UnicodeDecodeError as e:
+                raise NoteRefused("The file couldn't be written.") from e
+            file = save_note(folder, title, text, sys.platform == "win32")
+        except NoteRefused as e:
+            logger.info(f"Didn't save a note: {e}")
+            self.link.send("note_saved", id=id, error=str(e))
+        except Exception as e:
+            # Only what kind of failure, as some exceptions carry what they were handed.
+            logger.error(f"Saving a note failed ({type(e).__name__})")
+            self.link.send("note_saved", id=id, error="The file couldn't be written.")
+        else:
+            logger.info(f"Saved a note as {file}")
+            self.link.send("note_saved", id=id, file=file)
 
     def _restart(self, message: Dict, payload: bytes):
         logger.info("Restarting, as the brain asked")

@@ -18,7 +18,7 @@ import inspect
 import logging
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -62,6 +62,7 @@ UNAVAILABLE = {
     "journeys": "Journeys need Home Assistant.",
     "listening": "Listening stats need SoulSync.",
     "wrapped": "Wrapped isn't set up.",
+    "notes": "I can only save a note at a computer.",
 }
 
 # What's said when the new-music playlist isn't there - before Nova's first morning making it,
@@ -69,6 +70,17 @@ UNAVAILABLE = {
 NEW_MUSIC_MISSING = "Your new-music playlist isn't made yet; Nova makes it each morning from what's arrived."
 NO_NEW_MUSIC_PLAYLIST = "No new-music playlist is set. It goes in Settings, under Music."
 NEW_MUSIC_NOT_ON_SPOTIFY = "New music plays from Navidrome, and Spotify is your music player right now."
+
+# What play_music and play_playlist are told of their "on": only for somewhere other than the
+# satellite the user is talking to, where music plays unless they say otherwise.
+ON_ANOTHER_SATELLITE = {
+    "type": "string",
+    "description": (
+        "Only when the user names somewhere other than here to play it - 'on the PC', 'on my Pi' - as they said "
+        "it, e.g. 'the PC'. Leave this out when they don't, which plays here. With no query, it moves the music "
+        "that's playing now to there, as move_music does - or, when none is playing anywhere, starts some there."
+    ),
+}
 
 # How many days back "what's new" may look, and looks without being told: a month at most, as
 # a longer look reads ever more of Navidrome's newest albums - and how many artists it names.
@@ -93,6 +105,12 @@ APP_COMMAND_STARTS = ("command_", "kiosk_")
 NOT_A_COMMAND = "\u200b"
 
 
+# The (tool, parameter) pairs whose value is never logged, only how long it is - see Action.for_log.
+# A note's text is the user's own writing, or notes Claude made for them, and the lines which say
+# what was asked for are kept with the transcripts: without this every note would be in backend.log.
+NOT_LOGGED = {("save_note", "text")}
+
+
 @dataclass
 class Action:
     """
@@ -107,6 +125,19 @@ class Action:
     tool: str
     params: Dict[str, Any] = field(default_factory=dict)
     from_model: bool = False
+
+    def for_log(self) -> "Action":
+        """
+        Returns:
+            This action, or a copy with the value of each parameter in NOT_LOGGED said as its
+            length - "<17 characters>", or "<not logged>" when it isn't text - to put in a log
+            line in place of it. Never what's run, which is this one whole.
+        """
+        hidden = {name for tool, name in NOT_LOGGED if tool == self.tool} & set(self.params)
+        if not hidden:
+            return self
+        return replace(self, params={name: (f"<{len(value)} characters>" if isinstance(value, str) else "<not logged>")
+                                     if name in hidden else value for name, value in self.params.items()})
 
 
 @dataclass
@@ -308,7 +339,12 @@ class ActionExecutor:
                  downloads=None, football=None, listening=None, wrapped=None, config=None, new_music=None,
                  journeys=None, playlist_changes=None, ring_on: Callable[[str], str] = lambda name: name,
                  room_of: Callable[[str], List[str]] = lambda name: [name],
-                 room_players: Optional[Callable[[], List]] = None, last_change: Optional[LastChange] = None):
+                 room_players: Optional[Callable[[], List]] = None, last_change: Optional[LastChange] = None,
+                 mover: Optional[Callable[[str], Dict]] = None,
+                 elsewhere: Optional[Callable[[str], Tuple[Optional["ActionExecutor"], Optional[str]]]] = None,
+                 spoken_name: Callable[[str], str] = lambda name: name,
+                 settled: Optional[Callable[[], None]] = None,
+                 notes: Optional[Callable[[str, str], Dict]] = None):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -357,6 +393,20 @@ class ActionExecutor:
                 Pausing, resuming and the music's volume act on the room's music.
             last_change: The LastChange "undo that" takes from, which the brain gives every satellite's
                 executor so there's one for the whole house, or None for one of its own.
+            mover: Moves the music to the satellite the words name, e.g. "the PC" - given them,
+                gives what the brain says of it - or None if the music can't be moved from here.
+            elsewhere: Given the words for a satellite, gives the executor of that satellite -
+                this one's own, if it's the one named - and None; or None and what to say, when
+                they name none, or one which isn't connected. None if there's no other satellite
+                to play on.
+            spoken_name: Given a satellite's name, what it's called in a reply - "the PC" - for
+                saying where music has started when it's on another satellite.
+            settled: Waits for any pause or resume still on its way to this satellite's music, so
+                something asked for on it from another satellite's conversation can't be undone by
+                one landing late - see MusicHold.wait. None if there's nothing to wait for.
+            notes: Saves a note on the computer the user is at - given its title and what it says,
+                gives what the brain says of it - or None if the satellite can't save one, as the
+                Pi can't.
         """
         self.music = music
         self.clock = clock
@@ -381,6 +431,11 @@ class ActionExecutor:
         self.ring_on = ring_on
         self.room_of = room_of
         self.room_players = room_players or (lambda: [self.music])
+        self.mover = mover
+        self.elsewhere = elsewhere
+        self.spoken_name = spoken_name
+        self.settled = settled
+        self.notes = notes
         # What was last asked, and what the assistant said - or the last alert, and
         # all of it - for "send that to my phone". Kept up to date by the Conversation.
         self.last_answer: Optional[Tuple[str, str]] = None
@@ -637,8 +692,27 @@ class ActionExecutor:
                 "as a song, even when you know it's also an album."
             ),
         },
+        on=ON_ANOTHER_SATELLITE,
     )
-    def play_music(self, query: Optional[str] = None, search_type: Optional[str] = None):
+    def play_music(self, query: Optional[str] = None, search_type: Optional[str] = None, on: Optional[str] = None):
+        other, failure = self._named(on)
+        if not query and (other is not None or failure is not None):
+            # Nothing new to play, so it's the music playing now which is wanted there - and it's the
+            # brain's to say if it can't go: "The PC isn't connected, so the music's staying on the Pi.",
+            # rather than the lookup's "The PC isn't connected.".
+            moved = self.move_music(on)
+            if not moved.get("nothing_to_move"):
+                return moved
+            # With none anywhere to move, "play something on the PC" means the PC's own bare "play": it
+            # carries on or plays the liked songs, which is said where he is as any play elsewhere is. It's
+            # the lookup which says why if there's no PC to play on, not "There's no music to move.".
+            if other is None:
+                return failure
+            return self._play_on(other, "play_music", {"query": None, "search_type": search_type}, on)
+        if failure:
+            return failure
+        if other is not None:
+            return self._play_on(other, "play_music", {"query": query, "search_type": search_type}, on)
         if not query:
             # Carries on whatever is paused in the user's room - see _resumes.
             return self._music_offline() or self._resumes().play(None, search_type=search_type)
@@ -671,8 +745,14 @@ class ActionExecutor:
         needs="music",
         required=["name"],
         name={"type": "string", "description": "The playlist name as the user said it."},
+        on=ON_ANOTHER_SATELLITE,
     )
-    def play_playlist(self, name: str = ""):
+    def play_playlist(self, name: str = "", on: Optional[str] = None):
+        other, failure = self._named(on)
+        if failure:
+            return failure
+        if other is not None:
+            return self._play_on(other, "play_playlist", {"name": name}, on)
         return self._music_offline() or self.music.play_playlist(name or "")
 
     @tool(
@@ -875,6 +955,109 @@ class ActionExecutor:
     )
     def shuffle(self, enabled: bool = True):
         return self._music_offline() or self.music.shuffle(bool(enabled))
+
+    @tool(
+        "Move the music to another satellite, such as the Pi, the PC or the Mac, so it carries on from the same "
+        "place with the same queue, repeat and shuffle, and stops where it was. Use it for 'play it on my Pi', "
+        "'move this to the PC' or 'switch the music to the Mac'. For something new to play there, use play_music "
+        "or play_playlist with 'on' instead. It only works with Navidrome.",
+        needs=("music", "mover"),
+        required=["to"],
+        to={"type": "string", "description": "Where to, as the user said it, e.g. 'the PC' or 'my Pi'."},
+    )
+    def move_music(self, to: str = ""):
+        if self.mover is None:
+            return {"success": False, "message": UNAVAILABLE["music"]}
+        try:
+            return self.mover(to or "")
+        except Exception as e:
+            # The other end is the brain's, and another satellite's: never the end of this request.
+            logger.warning(f"Couldn't move the music: {e}")
+            return {"success": False, "message": "I couldn't move the music."}
+
+    def _named(self, on: Optional[str]) -> Tuple[Optional["ActionExecutor"], Optional[Dict]]:
+        """
+        Finds where play_music or play_playlist is asked to play, when that isn't here.
+
+        Args:
+            on: The satellite as the user said it, e.g. "the PC" - or None for here.
+
+        Returns:
+            Tuple of (the executor of another satellite, None) to hand the request on to;
+            (None, None) to carry on here, as nothing was named, or this is the one named, or
+            there's no telling of any other; or (None, a failure to say) when the words name no
+            satellite, or one which isn't connected, or can't be looked up.
+        """
+        if not isinstance(on, str) or not on.strip() or self.elsewhere is None:
+            return None, None
+        try:
+            other, sentence = self.elsewhere(on.strip())
+        except Exception as e:
+            logger.warning(f"Couldn't look up the satellite to play on: {e}")
+            return None, {"success": False, "message": "I couldn't tell which satellite you meant."}
+        if other is None:
+            return None, {"success": False, "message": sentence or "I couldn't tell which satellite you meant."}
+        return (None if other is self else other), None
+
+    def _play_on(self, other: "ActionExecutor", tool_name: str, params: Dict[str, Any], on: str):
+        """
+        Has another satellite's executor play something, as it would for the user talking to it, and
+        says where it's playing since he mayn't hear it start there.
+
+        Args:
+            other: That satellite's executor.
+            tool_name: "play_music" or "play_playlist".
+            params: What it's asked to play.
+            on: The satellite as the user said it, for saying it couldn't.
+
+        Returns:
+            What it came to - an ActionResult - or a failure to say, if it couldn't be asked.
+            "Playing Gooba by 6ix9ine on the PC." once it's started, which is the player's own
+            "Playing Gooba by 6ix9ine" and where. Anything else - it couldn't, or an offer to
+            download it, or that it's on its way - is said as it came.
+        """
+        try:
+            # As a move does: a pause or resume on its way there mustn't land after what's asked for.
+            if other.settled is not None:
+                other.settled()
+            result = other.execute(Action(tool_name, params))
+        except Exception as e:
+            logger.warning(f"Couldn't play on the satellite asked for: {e}")
+            return {"success": False, "message": f"I couldn't play that on {on.strip()}."}
+        # What a player says when it starts something. The offers to download, which also succeed,
+        # don't start anything - "I'm already getting Gooba." isn't playing on the PC.
+        if not (result.ok and result.ask_first is None and result.say.startswith("Playing")):
+            return result
+        self._pause_the_rooms_other_music(other)
+        try:
+            there = other.spoken_name(other.satellite) if other.satellite else on.strip()
+        except Exception as e:
+            logger.warning(f"Couldn't say what the satellite played on is called: {e}")
+            there = on.strip()
+        return ActionResult(True, f"{result.say.rstrip('.')} on {there}.")
+
+    def _pause_the_rooms_other_music(self, target: "ActionExecutor"):
+        """
+        Pauses what else plays in the user's room once something has started on another satellite
+        in it, as saying "pause" would - kept paused when the reply is over, so the room has the one
+        music and not two. Nothing when that satellite is in another room, and never Spotify's: it has
+        one stream for the whole account, so starting it on the target took it from the others already,
+        and pausing "theirs" would pause the target's, with nothing to bring it back.
+
+        Args:
+            target: The executor of the satellite it started on.
+        """
+        try:
+            room = [player for player in self.room_players() if player]
+            if target.music not in room:
+                return
+            for player in room:
+                if player is not target.music and hasattr(player, "hand_over") and player.was_playing():
+                    if player.pause().get("success"):
+                        player.cancel_resume()
+        except Exception as e:
+            # It's playing where he asked, so this isn't a failure to say.
+            logger.warning(f"Couldn't pause the music in the room: {e}")
 
     # Playlists and liked songs - see playlist_changes.py
 
@@ -1881,6 +2064,29 @@ class ActionExecutor:
         replies = [self.lists.tick_off(thing, list or None) for thing in things]
         return {"success": all(reply["success"] for reply in replies),
                 "message": " ".join(reply["message"] for reply in replies)}
+
+    # Notes
+
+    @tool(
+        "Save a note as a text file in the Downloads folder of the computer the user is talking to, for 'make a "
+        "note', 'take a note', 'write this down' and 'write me notes on ...'. When they dictate it, text is their "
+        "own words; when they ask for notes on something, text is plain-text notes of at most about 400 words. Give "
+        "the note a title of a few words. 'Add X to my notes' is the notes list, not this: use manage_list for "
+        "that. What happened is said for you, so just reply 'Okay.'",
+        needs="notes",
+        required=["title", "text"],
+        title={"type": "string", "description": "What to call the note, in a few words, e.g. 'Bins'."},
+        text={"type": "string", "description": "What the note says."},
+    )
+    def save_note(self, title: str = "", text: str = ""):
+        if not isinstance(text, str) or not text.strip():
+            return {"success": False, "message": "I didn't catch what to write."}
+        try:
+            return self.notes(title if isinstance(title, str) else "", text)
+        except Exception as e:
+            # The kind of error only: its message could quote the note, whose text is never logged.
+            logger.warning(f"Couldn't save a note: {type(e).__name__}")
+            return {"success": False, "message": "I couldn't save the note."}
 
     # Memory
 

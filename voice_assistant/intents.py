@@ -81,6 +81,15 @@ FOUND_DEVICE = "phone|tablet|mac|laptop"
 # The PC, as ha_guard.PC_LOCK has it - see pc.py.
 PC = r"(?:my |the )?(?:pc|computer)"
 
+# Moving the music to another satellite - "play it on my Pi", "move this to the PC", "switch to the
+# Mac". The thing moved is optional, and "on" is only a way to say where after "play": "switch on my
+# PC" is the PC's power, which comes further down, whether or not "pc" names a satellite. Where it goes
+# is of up to four words, taken only when the brain says they name a satellite, so "switch to the next
+# song" and "change it to 50" are left to the rules after, or Claude.
+MOVED_THING = r"(?:(?:it|this|that|the music|music|the song|this song) )?"
+MOVE_TO = rf"(?:(?:move|switch|change|swap|transfer|take|play) {MOVED_THING}(?:to|onto|over to)|play {MOVED_THING}on)"
+MOVE_WHERE = r"(?P<where>[a-z0-9']+(?: [a-z0-9']+){0,3})"
+
 # A thing of Home Assistant's for Assist - "the TV", "AdGuard protection", "movie
 # night" - of one to four words, none of them "and", "then" or "plus", so "turn off
 # the TV and the lamp" is left to Claude rather than sent as one thing. "The" or "my"
@@ -304,7 +313,8 @@ class LocalIntents:
     """Recognises the everyday commands handled without Claude."""
 
     def __init__(self, clock=None, ntfy=None, home=None, activities: Optional[Callable[[], Dict[str, str]]] = None,
-                 wake_word: str = DEFAULT_WAKE_WORD, football: Optional[Callable[[], List[str]]] = None):
+                 wake_word: str = DEFAULT_WAKE_WORD, football: Optional[Callable[[], List[str]]] = None,
+                 names_satellite: Optional[Callable[[str], bool]] = None):
         """
         Args:
             clock: The Clock, to check there's exactly one timer before cancelling
@@ -325,12 +335,16 @@ class LocalIntents:
             wake_word: The wake word, e.g. "Hey Nova" - its last word, run into a command
                 said in the same breath ("Novopause."), is taken off it, and so are the
                 words before that ("Hey Novopause.").
+            names_satellite: Says whether some words name a satellite - Brain.names_satellite.
+                Without it, "play it on my Pi" and the like are left to Claude, as there's no
+                telling "the PC" from "the next song".
         """
         self.clock = clock
         self.ntfy = ntfy
         self.home = home
         self.activities = activities
         self.football = football
+        self.names_satellite = names_satellite
         # How the wake word's last word starts a lone word it's been run into - and, for
         # "Nova", how Nemotron heard it so: "Nova, pause." said in one breath was "Novopause.".
         ending = (wake_word.split() or [""])[-1].lower()
@@ -435,6 +449,9 @@ class LocalIntents:
             # battery, so "where's my phone charger?" is Claude's.
             (rf"where(?:'s| is) (?:my |the )(?P<device>{FOUND_DEVICE})", self._find_device(False)),
             (rf"(?:find|ring) (?:my |the )(?P<device>{FOUND_DEVICE})", self._find_device(True)),
+            # The music, moved to a satellite he names - before the sending of a reply to a device
+            # below, whose "put it on my Mac" is the Mac's, not a satellite's.
+            (rf"{MOVE_TO} {MOVE_WHERE}", self._move_music),
             (r"(?:send|text) (?:that|it|this) to (?:my phone|me)|text me (?:that|it)"
              r"|(?:send|put) (?:that|it|this) on my phone", self._send_to_phone),
             # The Mac or the tablet, through the Home Assistant app - only the device itself, said
@@ -504,8 +521,10 @@ class LocalIntents:
                     result["actions"] and all(action.tool in only for action in result["actions"])):
                 continue
             if result is not None:
-                logger.info(f"Handled locally: '{text}'" + (f" (actions: {result['actions']})"
-                                                            if result["actions"] else ""), extra=TRANSCRIPT)
+                # Without a note's text, which is never logged - see actions.NOT_LOGGED.
+                asked = [action.for_log() for action in result["actions"]]
+                logger.info(f"Handled locally: '{text}'" + (f" (actions: {asked})" if asked else ""),
+                            extra=TRANSCRIPT)
                 return result
 
         # A lone word which is the wake word run into a command, tried as the command - only
@@ -555,6 +574,12 @@ class LocalIntents:
     def _resume(self, found) -> Dict:
         # A play with nothing named carries on with whatever was playing.
         return self._result("Okay.", [Action("play_music")])
+
+    def _move_music(self, found) -> Optional[Dict]:
+        # Not a move at all unless the words name a satellite: "change it to 50" goes on to Claude.
+        if self.names_satellite is None or not self.names_satellite(found["where"]):
+            return None
+        return self._result("Okay.", [Action("move_music", {"to": found["where"]})])
 
     def _volume(self, change: Dict) -> Dict:
         # Which volume is left to the executor, which turns the music down if it's

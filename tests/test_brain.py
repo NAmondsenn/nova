@@ -291,7 +291,7 @@ class Satellite:
     """
 
     def __init__(self, brain, name="bedroom", password=BEDROOM, unclean=False, away=NOTHING_AWAY, push_to_talk=False,
-                 media_controls=False):
+                 machine=None, saves_notes=False, media_controls=False):
         self.socket = socket.create_connection(("127.0.0.1", brain.port), timeout=5)
         self.stream = self.socket.makefile("rwb")
         self.lock = threading.Lock()
@@ -300,7 +300,7 @@ class Satellite:
         self.gone = threading.Event()
         try:
             protocol.greet(self.stream, name, f"{name}-pi", password, 48000, unclean, push_to_talk=push_to_talk,
-                           media_controls=media_controls)
+                           machine=machine, saves_notes=saves_notes, media_controls=media_controls)
         except BaseException:
             # As satellite_link does, so the brain sees it hang up.
             self.socket.close()
@@ -439,6 +439,23 @@ def test_a_connecting_satellite_is_remembered_as_push_to_talk(brain, connect):
     assert SatelliteRooms(os.path.join(paths.DATA_DIR, "satellite_rooms.json")).push_to_talk("bedroom") is True
 
 
+def test_connecting_records_machine_and_notes(brain, connect):
+    serving(brain)
+    connect(brain, "bedroom", BEDROOM, push_to_talk=True, machine="pc", saves_notes=True)
+    connect(brain, "kitchen", KITCHEN)
+    connected(brain, "bedroom"), connected(brain, "kitchen")
+
+    assert brain.rooms.machine("bedroom") == "pc" and brain.rooms.saves_notes("bedroom") is True
+    # One which says neither, as an older satellite doesn't, is unknown.
+    assert brain.rooms.machine("kitchen") is None and brain.rooms.saves_notes("kitchen") is False
+    # What the session's satellite knows of itself, for the notes tool.
+    assert brain.session_for("bedroom").satellite.machine == "pc"
+    assert brain.session_for("bedroom").satellite.saves_notes is True
+    # And kept, so it's known while the satellite is away and after a restart.
+    again = SatelliteRooms(os.path.join(paths.DATA_DIR, "satellite_rooms.json"))
+    assert again.machine("bedroom") == "pc" and again.saves_notes("bedroom") is True
+
+
 def test_ring_on(brain, passwords):
     passwords.add("pc", "the-pcs-password")
     brain.rooms.seen("pc", True)
@@ -462,6 +479,155 @@ def test_ring_on(brain, passwords):
     passwords.remove("bedroom")
     passwords.remove("kitchen")
     assert brain.satellites() == ["pc"] and brain.ring_on("pc") == "pc"
+
+
+# Naming a satellite in words
+
+@pytest.fixture
+def named(brain, passwords):
+    """A brain with a Pi (the bedroom, the default), a PC and a Mac, none of them connected."""
+    passwords.add("pc", "the-pcs-password")
+    passwords.add("mac", "the-macs-password")
+    passwords.remove("kitchen")
+    brain.rooms.seen("bedroom", False, "pi")
+    brain.rooms.seen("pc", True, "pc", True)
+    brain.rooms.seen("mac", True, "mac", True)
+    return brain
+
+
+def test_find_satellite_by_machine_word(named):
+    assert named.find_satellite("my Pi") == ("bedroom", None)
+    assert named.find_satellite("the Raspberry Pi") == ("bedroom", None)
+    assert named.find_satellite("the PC") == ("pc", None)
+    assert named.find_satellite("desktop") == ("pc", None)
+    assert named.find_satellite("my laptop") == ("mac", None)
+    # Its own name works too, which is how a machine with no word of its own is found.
+    assert named.find_satellite("bedroom") == ("bedroom", None)
+    assert named.names_satellite("my Pi") is True and named.names_satellite("the PC") is True
+
+
+def test_find_satellite_by_a_name_set_on_the_page(named):
+    named.rooms.set_called("pc", ["Desk", "computer"])
+    # "Computer" is the PC's alone now, not the Mac's too.
+    assert named.find_satellite("the computer") == ("pc", None)
+    assert named.find_satellite("my desk") == ("pc", None)
+    assert named.spoken_name("pc") == "Desk"
+
+
+def test_find_satellite_ambiguous_says_which(named):
+    assert named.find_satellite("the computer") == (None, "Which one: the PC or the Mac?")
+    # Still a name of a satellite, for the rules which ask before they act on it.
+    assert named.names_satellite("the computer") is True
+    named.rooms.set_called("mac", ["Desk"])
+    assert named.find_satellite("computer") == (None, "Which one: the PC or Desk?")
+
+
+def test_find_satellite_ambiguous_among_three_says_which(named, passwords):
+    passwords.add("study", "the-studys-password")
+    named.rooms.seen("study", True, "pc", True)
+    named.rooms.set_called("study", ["Study PC"])
+    assert named.find_satellite("computer") == (None, "Which one: the PC, the Mac or Study PC?")
+
+
+def test_find_satellite_none_lists_them(named, passwords):
+    passwords.remove("mac")
+    assert named.find_satellite("the phone") == (None, "There's no satellite called the phone. There's the Pi and the PC.")
+    # As it was said, not as it's matched.
+    assert named.find_satellite("  My Phone ")[1].startswith("There's no satellite called My Phone. ")
+    assert named.names_satellite("the phone") is False
+
+
+def test_find_satellite_none_lists_three_or_more_and_names_without_a_machine_word(named, passwords):
+    passwords.add("study", "the-studys-password")
+    named.rooms.seen("study", False, "linux")
+    assert named.find_satellite("the phone") == (
+        None, "There's no satellite called the phone. There's the Pi, the PC, the Mac and study.")
+    # The default first, then the rest as they were added.
+    assert named.satellites() == ["bedroom", "pc", "mac", "study"]
+
+
+def test_find_satellite_with_none_to_name_says_so(named, passwords):
+    for name in ("bedroom", "pc", "mac"):
+        passwords.remove(name)
+    assert named.find_satellite("the PC") == (None, "There's no satellite called the PC.")
+
+
+def test_find_satellite_includes_disconnected_ones(named):
+    assert named.sessions == {}
+    assert named.find_satellite("the PC") == ("pc", None)
+    assert named.find_satellite("the Mac") == ("mac", None)
+    # By its own name too, with no session at all.
+    assert named.find_satellite("bedroom") == ("bedroom", None)
+
+
+def test_find_satellite_when_the_satellites_cant_be_read(named, monkeypatch):
+    def unreadable():
+        raise OSError("gone")
+
+    monkeypatch.setattr(named, "satellites", unreadable)
+    # Neither raises, as a voice command shouldn't fail for it.
+    assert named.find_satellite("the PC") == (None, "I can't tell which satellites there are just now.")
+    assert named.names_satellite("the PC") is False
+
+
+def test_spoken_name(named, passwords):
+    assert named.spoken_name("bedroom") == "the Pi"
+    assert named.spoken_name("pc") == "the PC"
+    assert named.spoken_name("mac") == "the Mac"
+    # One with no machine word, or one not known at all, is called what it's named.
+    passwords.add("study", "the-studys-password")
+    named.rooms.seen("study", False, "linux")
+    assert named.spoken_name("study") == "study" and named.spoken_name("ghost") == "ghost"
+    named.rooms.set_called("pc", ["Desk"])
+    assert named.spoken_name("pc") == "Desk"
+
+
+def test_spoken_name_isnt_the_satellites_machine_word(named):
+    # "computer" on the PC makes "the computer" the PC, but a reply still says "the PC", not "computer".
+    named.rooms.set_called("pc", ["computer"])
+    assert named.find_satellite("the computer") == ("pc", None)
+    assert named.spoken_name("pc") == "the PC"
+    named.rooms.set_called("pc", ["computer", "Desk"])
+    assert named.spoken_name("pc") == "Desk"
+
+
+@pytest.fixture
+def two_pis(brain, passwords):
+    """A brain with two Pis (the bedroom, the default, and the kitchen) and a PC, none of them connected."""
+    passwords.add("pc", "the-pcs-password")
+    brain.rooms.seen("bedroom", False, "pi")
+    brain.rooms.seen("kitchen", False, "pi")
+    brain.rooms.seen("pc", True, "pc", True)
+    return brain
+
+
+def test_two_of_a_kind_are_asked_about_by_their_own_names(two_pis):
+    # "the Pi or the Pi" couldn't be answered, as "the Pi" would be both again.
+    assert two_pis.find_satellite("the pi") == (None, "Which one: bedroom or kitchen?")
+    assert two_pis.find_satellite("the phone") == (
+        None, "There's no satellite called the phone. There's bedroom, kitchen and the PC.")
+    # The answer he gives names one of them.
+    assert two_pis.find_satellite("bedroom") == ("bedroom", None)
+    assert two_pis.find_satellite("the kitchen satellite") == ("kitchen", None)
+
+
+def test_spoken_name_is_the_satellites_own_name_when_another_shares_its_form(two_pis):
+    assert two_pis.spoken_name("bedroom") == "bedroom" and two_pis.spoken_name("kitchen") == "kitchen"
+    # The one of its kind is still called by what it is.
+    assert two_pis.spoken_name("pc") == "the PC"
+    # A name set on the page tells them apart, so the other is called by what it is again.
+    two_pis.rooms.set_called("kitchen", ["Kitchen Pi"])
+    assert two_pis.spoken_name("kitchen") == "Kitchen Pi" and two_pis.spoken_name("bedroom") == "the Pi"
+    # "The Pi" still fits both, but the question can be answered now.
+    assert two_pis.find_satellite("the pi") == (None, "Which one: the Pi or Kitchen Pi?")
+
+
+def test_spoken_name_keeps_the_machines_form_when_the_satellites_cant_be_read(two_pis, monkeypatch):
+    def unreadable():
+        raise OSError("gone")
+
+    monkeypatch.setattr(two_pis, "satellites", unreadable)
+    assert two_pis.spoken_name("bedroom") == "the Pi" and two_pis.spoken_name("pc") == "the PC"
 
 
 def test_the_brain_lists_the_satellites_of_a_room_own_first(brain, connect):
@@ -494,6 +660,288 @@ def test_a_satellite_whose_room_cant_be_read_is_a_room_of_its_own(brain, passwor
     with caplog.at_level(logging.WARNING, logger="voice_assistant.brain"):
         assert brain.room_of("kitchen") == ["kitchen"]
     assert any("kitchen" in record.message and str(problem) in record.message for record in caplog.records)
+
+
+# Moving music from one satellite to another
+
+class MovingPlayer:
+    """Stands in for a Navidrome player: has music or not, and notes what it's asked to hand over or take."""
+
+    def __init__(self, name, happened, music=False, playing=False):
+        self.name, self.happened, self.music, self.playing = name, happened, music, playing
+
+    def has_music(self):
+        return self.music
+
+    def is_playing(self):
+        return self.playing
+
+    def hand_over(self):
+        self.happened.append(("hand_over", self.name))
+        if not self.music:
+            return None
+        self.music = self.playing = False
+        return {"queue": [f"a song from {self.name}"]}
+
+    def take_over(self, state):
+        self.happened.append(("take_over", self.name, state))
+        self.music = self.playing = True
+        return {"success": True, "message": "Playing"}
+
+    def play(self, query=None, search_type=None):
+        self.happened.append(("play", self.name))
+        self.playing = True
+        return {"success": True, "message": "Resumed playback", "silent": True}
+
+
+class Spotify:
+    """Stands in for Spotify's controller, which can't hand its music over."""
+
+    name = "Spotify"
+
+
+class Moving:
+    """Connects stand-in sessions, each with a player, to a brain - noting in `happened` what each is asked."""
+
+    def __init__(self, brain):
+        self.brain, self.happened = brain, []
+
+    def add(self, name, music=False, playing=False, player=None):
+        player = player or MovingPlayer(name, self.happened, music, playing)
+        hold = SimpleNamespace(wait=lambda: self.happened.append(("wait", name)))
+        satellite = SimpleNamespace(name=name, connected=True, close=lambda: None)
+        self.brain.sessions[name] = SimpleNamespace(satellite=satellite, music_player=player, music=hold,
+                                                    close=lambda: None)
+        return player
+
+    def moved(self):
+        """What was handed over and taken, leaving out the waits."""
+        return [event for event in self.happened if event[0] != "wait"]
+
+
+@pytest.fixture
+def moving(named):
+    """The Pi (bedroom), the PC and the Mac of `named`, with sessions added as each test says."""
+    return Moving(named)
+
+
+def test_move_from_the_satellite_spoken_to(moving):
+    # The PC connected first, so it's what the first playing satellite anywhere is.
+    moving.add("pc", music=True, playing=True)
+    moving.add("bedroom", music=True, playing=True)
+    moving.add("mac")
+    # Where it was said wins over another which is playing too.
+    assert moving.brain.move_music("bedroom", "the Mac") == {"success": True, "message": "Moved to the Mac."}
+    assert [event[:2] for event in moving.moved()] == [("hand_over", "bedroom"), ("take_over", "mac")]
+
+
+def test_move_from_the_room_when_here_has_none(moving):
+    for name in ("bedroom", "pc"):
+        moving.brain.rooms.set_area(name, "Study")
+    moving.brain.rooms.set_area("mac", "Lounge")
+    # The Mac connected first and plays too, but in another room: the room's own wins.
+    moving.add("mac", music=True, playing=True)
+    moving.add("bedroom")
+    moving.add("pc", music=True, playing=True)
+    assert moving.brain.move_music("bedroom", "my Pi") == {"success": True, "message": "Moved to the Pi."}
+    assert [event[:2] for event in moving.moved()] == [("hand_over", "pc"), ("take_over", "bedroom")]
+
+
+def test_move_with_two_playing_in_the_room_takes_the_one_spoken_to(moving):
+    for name in ("bedroom", "pc"):
+        moving.brain.rooms.set_area(name, "Study")
+    # The PC connected first, but it's the Pi he spoke to, and the room puts it first.
+    moving.add("pc", music=True, playing=True)
+    moving.add("bedroom", music=True, playing=True)
+    moving.add("mac")
+    assert moving.brain.move_music("bedroom", "the Mac") == {"success": True, "message": "Moved to the Mac."}
+    assert [event[:2] for event in moving.moved()] == [("hand_over", "bedroom"), ("take_over", "mac")]
+
+
+def test_move_takes_what_is_playing_before_what_is_paused(moving):
+    # "It" is what he can hear: an old queue paused here, with the PC playing in the same room, isn't moved
+    # or resumed in its place - the PC's music comes here, and the old queue is replaced.
+    for name in ("bedroom", "pc"):
+        moving.brain.rooms.set_area(name, "Study")
+    moving.add("bedroom", music=True)
+    moving.add("pc", music=True, playing=True)
+    assert moving.brain.move_music("bedroom", "my Pi") == {"success": True, "message": "Moved to the Pi."}
+    assert [event[:2] for event in moving.moved()] == [("hand_over", "pc"), ("take_over", "bedroom")]
+    assert moving.happened.count(("play", "bedroom")) == 0
+
+
+def test_move_takes_what_is_paused_in_the_room_when_nothing_is_playing(moving):
+    for name in ("bedroom", "pc"):
+        moving.brain.rooms.set_area(name, "Study")
+    moving.brain.rooms.set_area("mac", "Lounge")
+    moving.add("bedroom")
+    moving.add("pc", music=True)
+    moving.add("mac", music=True)
+    assert moving.brain.move_music("bedroom", "my Pi")["success"] is True
+    assert [event[:2] for event in moving.moved()] == [("hand_over", "pc"), ("take_over", "bedroom")]
+
+
+def test_move_from_the_one_playing_anywhere(moving):
+    moving.add("bedroom")
+    moving.add("pc", music=True)
+    moving.add("mac", music=True, playing=True)
+    assert moving.brain.move_music("bedroom", "my Pi")["success"] is True
+    # Not the PC, whose music is only paused.
+    assert [event[:2] for event in moving.moved()] == [("hand_over", "mac"), ("take_over", "bedroom")]
+
+
+def test_move_from_the_one_with_music_paused_when_none_is_playing(moving):
+    moving.add("bedroom")
+    moving.add("pc")
+    moving.add("mac", music=True)
+    assert moving.brain.move_music("bedroom", "the PC") == {"success": True, "message": "Moved to the PC."}
+    assert [event[:2] for event in moving.moved()] == [("hand_over", "mac"), ("take_over", "pc")]
+
+
+def test_move_leaves_music_on_a_satellite_which_has_gone(moving):
+    moving.add("bedroom")
+    moving.add("pc", music=True, playing=True)
+    # Still in the brain's list as its connection ends, but no longer there to move music from.
+    moving.brain.sessions["pc"].satellite.connected = False
+    moving.add("mac")
+    assert moving.brain.move_music("bedroom", "the Mac") == {
+        "success": False, "message": "There's no music to move.", "nothing_to_move": True}
+    assert moving.moved() == []
+
+
+def test_move_with_two_equals_takes_the_first_connected(moving):
+    moving.add("bedroom")
+    moving.add("pc", music=True, playing=True)
+    moving.add("mac", music=True, playing=True)
+    moving.brain.move_music("bedroom", "my Pi")
+    assert [event[:2] for event in moving.moved()] == [("hand_over", "pc"), ("take_over", "bedroom")]
+
+
+def test_move_with_no_music_says_so(moving):
+    moving.add("bedroom")
+    moving.add("pc")
+    # Flagged, so a play on the PC with nothing to move can start music there without reading the words.
+    assert moving.brain.move_music("bedroom", "the PC") == {
+        "success": False, "message": "There's no music to move.", "nothing_to_move": True}
+    assert moving.moved() == []
+
+
+def test_move_with_music_which_isnt_there_to_hand_over_is_flagged_as_nothing_to_move(moving):
+    # It had music when looked at, and none by the time it was asked to give it up.
+    class Emptied(MovingPlayer):
+        def hand_over(self):
+            self.happened.append(("hand_over", self.name))
+            return None
+
+    moving.add("bedroom", player=Emptied("bedroom", moving.happened, music=True, playing=True))
+    moving.add("pc")
+    assert moving.brain.move_music("bedroom", "the PC") == {
+        "success": False, "message": "There's no music to move.", "nothing_to_move": True}
+    assert [event[:2] for event in moving.moved()] == [("hand_over", "bedroom")]
+
+
+def test_moves_which_fail_for_other_reasons_are_not_flagged_as_nothing_to_move(moving):
+    moving.add("bedroom", music=True)
+    # Not connected, and no such satellite: moves which could be wanted, or answered, as they are.
+    for said in ("the PC", "the phone"):
+        assert "nothing_to_move" not in moving.brain.move_music("bedroom", said)
+
+
+def test_move_to_itself_says_already(moving):
+    moving.add("bedroom")
+    moving.add("pc", music=True, playing=True)
+    # Said at the PC, and from the Pi where the PC's music is the one playing anywhere.
+    for spoken_at in ("pc", "bedroom"):
+        assert moving.brain.move_music(spoken_at, "the PC") == {"success": False, "message": "It's already on the PC."}
+    assert moving.moved() == []
+
+
+@pytest.mark.parametrize("spoken_at", ["pc", "bedroom"])
+def test_move_to_where_the_music_is_paused_resumes_it(moving, spoken_at):
+    moving.add("bedroom")
+    moving.add("pc", music=True)
+    # As a bare "play" would, so what it says is what that says.
+    assert moving.brain.move_music(spoken_at, "the PC") == {
+        "success": True, "message": "Resumed playback", "silent": True}
+    assert moving.happened == [("wait", "pc"), ("play", "pc")]
+
+
+def test_move_to_where_the_music_is_playing_says_already(moving):
+    moving.add("pc", music=True, playing=True)
+    moving.add("bedroom")
+    assert moving.brain.move_music("pc", "the PC") == {"success": False, "message": "It's already on the PC."}
+    assert moving.happened == [("wait", "pc")]
+
+
+def test_move_to_a_disconnected_one_stays(moving):
+    moving.add("bedroom", music=True)
+    # The PC may connect, but hasn't.
+    assert moving.brain.move_music("bedroom", "the PC") == {
+        "success": False, "message": "The PC isn't connected, so the music's staying on the Pi."}
+    assert moving.moved() == []
+
+
+def test_move_ambiguous_moves_nothing(moving):
+    moving.add("bedroom", music=True)
+    moving.add("pc")
+    moving.add("mac")
+    assert moving.brain.move_music("bedroom", "the computer") == {
+        "success": False, "message": "Which one: the PC or the Mac?"}
+    # Nor to one which isn't there.
+    result = moving.brain.move_music("bedroom", "the phone")
+    assert result["success"] is False and result["message"].startswith("There's no satellite called the phone.")
+    assert moving.moved() == []
+
+
+def test_move_with_spotify_says_navidrome_only(moving):
+    moving.add("bedroom", player=Spotify())
+    moving.add("pc", player=Spotify())
+    assert moving.brain.move_music("bedroom", "the PC") == {
+        "success": False, "message": "Moving music only works with Navidrome."}
+
+
+def test_move_to_one_which_cant_take_it_says_navidrome_only_and_keeps_the_music(moving):
+    moving.add("bedroom", music=True, playing=True)
+    moving.add("pc", player=Spotify())
+    assert moving.brain.move_music("bedroom", "the PC") == {
+        "success": False, "message": "Moving music only works with Navidrome."}
+    assert moving.happened == []
+
+
+def test_move_success_says_moved(moving):
+    moving.add("bedroom", music=True, playing=True)
+    moving.add("pc")
+    assert moving.brain.move_music("bedroom", "my desktop") == {"success": True, "message": "Moved to the PC."}
+    # The source's pause lands first, as does a hold on the target, before the music moves.
+    assert moving.happened == [("wait", "bedroom"), ("wait", "pc"), ("hand_over", "bedroom"),
+                               ("take_over", "pc", {"queue": ["a song from bedroom"]})]
+
+
+def test_a_take_over_which_answers_nothing_gives_the_music_back(moving):
+    moving.add("bedroom", music=True, playing=True)
+    pc = moving.add("pc")
+
+    def answers_nothing(state):
+        moving.happened.append(("take_over", "pc", state))
+
+    pc.take_over = answers_nothing
+    assert moving.brain.move_music("bedroom", "the PC") == {
+        "success": False, "message": "I couldn't move the music to the PC, so it's staying on the Pi."}
+    assert moving.happened[-1] == ("take_over", "bedroom", {"queue": ["a song from bedroom"]})
+
+
+def test_a_move_the_target_cant_take_gives_the_music_back(moving):
+    moving.add("bedroom", music=True, playing=True)
+    pc = moving.add("pc")
+
+    def refuse(state):
+        moving.happened.append(("take_over", "pc", state))
+        raise OSError("speaker gone")
+
+    pc.take_over = refuse
+    assert moving.brain.move_music("bedroom", "the PC") == {
+        "success": False, "message": "I couldn't move the music to the PC, so it's staying on the Pi."}
+    assert moving.happened[-1] == ("take_over", "bedroom", {"queue": ["a song from bedroom"]})
 
 
 def test_a_second_connection_replaces_the_first(brain, connect, caplog):
