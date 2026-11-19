@@ -105,7 +105,7 @@ def timer_seconds(text: str) -> Optional[int]:
     text = (text or "").strip().lower()
     if re.fullmatch(r"\d+", text):
         seconds = int(text) * 60
-    elif re.fullmatch(r"\d{1,2}:\d\d", text):
+    elif re.fullmatch(r"\d{1,2}:[0-5]\d", text):
         hours, minutes = text.split(":")
         seconds = int(hours) * 3600 + int(minutes) * 60
     else:
@@ -1665,8 +1665,8 @@ class Session:
             now_playing=(lambda: self.music_player.now_playing()) if player else None,
             cover=(lambda: self.music_player.cover()) if player else None,
             playlists=(lambda: self.music_player.playlists()) if player else None,
-            playlist_cover=((lambda name: self.music_player.playlist_cover(name))
-                            if player and hasattr(player, "playlist_cover") else None),
+            playlist_covers=((lambda names: self.music_player.playlist_covers(names))
+                             if player and hasattr(player, "playlist_covers") else None),
             playback=self._playback_from_home_assistant if player else None,
             play_playlist=self._playlist_from_home_assistant if player else None,
             # The Ask Nova box, whose replies are said here and never sent back.
@@ -1751,7 +1751,8 @@ class Session:
         """
         Sets a timer on this satellite from the Nova view's Add timer box, silently - the
         page shows it, so nothing is said. Something which isn't a length of time is logged
-        and left.
+        and left. It rings on this satellite, whose view it was set from, never handed on as
+        a spoken one can be (see Brain.ring_on): the box belongs to this satellite's device.
 
         Args:
             text: What was typed or tapped: "10" (minutes), "1:20", "1h 20m", "90 min".
@@ -1760,7 +1761,9 @@ class Session:
         if seconds is None:
             logger.warning("Home Assistant's Add timer wasn't a length of time")
             return
-        self.brain.clock.set_timer(duration_seconds=seconds, satellite=self.satellite.name)
+        result = self.brain.clock.set_timer(duration_seconds=seconds, satellite=self.satellite.name)
+        if not (result or {}).get("success"):
+            logger.warning(f"Add timer from Home Assistant: {(result or {}).get('message')}")
 
     def _add_alarm_from_home_assistant(self, text: str):
         """
@@ -1774,7 +1777,9 @@ class Session:
         if not found or int(found[1]) > 23 or int(found[2]) > 59:
             logger.warning("Home Assistant's Add alarm wasn't a time")
             return
-        self.brain.clock.set_alarm(int(found[1]), int(found[2]), None, satellite=self.satellite.name)
+        result = self.brain.clock.set_alarm(int(found[1]), int(found[2]), None, satellite=self.satellite.name)
+        if not (result or {}).get("success"):
+            logger.warning(f"Add alarm from Home Assistant: {(result or {}).get('message')}")
 
     def _room(self) -> Optional[Tuple[Optional[str], Optional[str]]]:
         """

@@ -1156,28 +1156,35 @@ class NavidromePlayer(NavidromeLibrary):
         self._cover = (art, (response.content, kind))
         return self._cover[1]
 
-    def playlist_cover(self, name: str) -> Optional[Tuple[bytes, str]]:
+    def playlist_covers(self, names: List[str]) -> Dict[str, Optional[Tuple[bytes, str]]]:
         """
-        The cover of the user's playlist of that name - Navidrome's own, made from what's
-        in it - as an image and its type, for the Nova view's playlist tiles. None without
-        one, or if Navidrome couldn't be asked.
+        The covers of the user's playlists named - Navidrome's own, made from what's in each -
+        for the Nova view's playlist tiles. One ask for the playlists, then one for each cover;
+        the first which fails ends it, so a Navidrome which is down costs one wait, not one a cover.
+
+        Returns:
+            By name: the picture and its type, or None for a playlist with no cover. One which
+            couldn't be read is left out.
         """
+        covers: Dict[str, Optional[Tuple[bytes, str]]] = {}
         try:
             found = self._call("getPlaylists").get("playlists", {}).get("playlist") or []
-            art = next((playlist.get("coverArt") for playlist in found if playlist.get("name") == name), None)
-            if not art:
-                return None
-            if not network.online():
-                raise requests.ConnectionError("No network connection")
-            response = self._session.get(f"{self.url}/rest/getCoverArt",
-                                         params={**self._sign_in(), "id": art, "size": COVER_SIZE},
-                                         timeout=REQUEST_TIMEOUT)
-            response.raise_for_status()
+            art = {playlist.get("name"): playlist.get("coverArt") for playlist in found}
+            for name in names:
+                if not art.get(name):
+                    covers[name] = None
+                    continue
+                if not network.online():
+                    raise requests.ConnectionError("No network connection")
+                response = self._session.get(f"{self.url}/rest/getCoverArt",
+                                             params={**self._sign_in(), "id": art[name], "size": COVER_SIZE},
+                                             timeout=REQUEST_TIMEOUT)
+                response.raise_for_status()
+                kind = response.headers.get("Content-Type", "")
+                covers[name] = (response.content, kind) if kind.startswith("image/") else None
         except (requests.RequestException, NavidromeError) as e:
             self._failure_message(e)
-            return None
-        kind = response.headers.get("Content-Type", "")
-        return (response.content, kind) if kind.startswith("image/") else None
+        return covers
 
     def playlists(self) -> List[str]:
         """The names of the user's playlists, for the settings page to offer - none if Navidrome couldn't be asked."""

@@ -965,8 +965,17 @@ def test_kept_or_empty_words_to_say_are_ignored(saying, said, nova):
 # Timers and alarms added from the Nova view, and its playlist tiles
 
 def test_the_box_template_shows_a_box_empty_either_way():
-    # "-" shows "" and "--" a lone space: both blank, and a change Home Assistant redraws on.
-    assert ha_device.BOX_TEMPLATE == "{{ ' ' if value == '--' else '' }}"
+    # "-" shows "" and "--" a zero-width space: both blank, and a change Home Assistant redraws
+    # on - which a plain space wouldn't be, as Home Assistant strips what a template gives.
+    assert ha_device.BOX_TEMPLATE == "{{ '\u200b' if value == '--' else '' }}"
+    assert ha_device.ZERO_WIDTH.strip() == ha_device.ZERO_WIDTH != ""
+
+
+def test_a_zero_width_space_left_in_a_box_is_dropped_from_what_was_typed(clocked):
+    device, client, added = clocked
+    client.connects()
+    client.delivers(f"{BASE}/add_timer/set", "\u200b10")
+    assert _eventually(lambda: added == [("timer", "10")])
 
 
 @pytest.fixture
@@ -1019,7 +1028,7 @@ def test_each_playlist_has_a_tile_which_plays_it(nova, player, monkeypatch):
     monkeypatch.setattr(ha_device, "MUSIC_EVERY", 3600)
     covers = {"Chill": (b"chill-cover", "image/png")}
     controls = player.controls(nova)
-    controls.playlist_cover = lambda name: covers.get(name)
+    controls.playlist_covers = lambda names: {name: covers.get(name) for name in names}
     made = []
     device = NovaDevice("broker.local", 1883, "nova", "secret", controls, node_id="nova_test",
                         client_factory=lambda client_id: made.append(FakeClient(client_id)) or made[-1])
@@ -1034,15 +1043,33 @@ def test_each_playlist_has_a_tile_which_plays_it(nova, player, monkeypatch):
         assert tiles["playlist_1"]["default_entity_id"] == "button.nova_playlist_1"
         assert tiles["playlist_2_cover"]["default_entity_id"] == "image.nova_playlist_2"
         assert tiles["playlist_1_cover"]["content_type"] == "image/png"
+        assert tiles["playlist_2"]["payload_press"] == "Gym"
         assert "playlist_3" not in tiles
 
         device.publish_music()
+        device.publish_music()
+        # Sent once, unchanged ones not again.
         assert client.sent(f"{BASE}/playlist/1/cover") == [(f"{BASE}/playlist/1/cover", b"chill-cover", 1, True)]
         assert client.sent(f"{BASE}/playlist/2/cover") == [(f"{BASE}/playlist/2/cover", b"", 1, True)]
 
-        client.delivers(f"{BASE}/playlist/2/play", "PRESS")
-        client.delivers(f"{BASE}/playlist/9/play", "PRESS")
+        # A press plays the playlist its button names, wherever it is in the list now -
+        # and nothing for a name no longer offered.
+        player.names = ["Alpha", "Chill", "Gym"]
+        device.refresh_playlists()
+        client.delivers(f"{BASE}/playlist/2/play", "Gym")
+        client.delivers(f"{BASE}/playlist/9/play", "Gone")
         assert _eventually(lambda: ("play_playlist", "Gym") in player.calls)
         assert [call for call in player.calls if call[0] == "play_playlist"] == [("play_playlist", "Gym")]
+
+        # A tile which goes is sent as its platform alone once, so Home Assistant removes it,
+        # and its cover is emptied; after that it's left out.
+        player.names = ["Chill"]
+        device.refresh_playlists()
+        tiles = json.loads(client.sent(DISCOVERY)[-1][1])["cmps"]
+        assert tiles["playlist_2"] == {"p": "button"} and tiles["playlist_2_cover"] == {"p": "image"}
+        assert tiles["playlist_3"] == {"p": "button"} and tiles["playlist_1"]["name"] == "Chill"
+        assert "playlist_2" not in _components(device)
+        device.publish_music()
+        assert client.sent(f"{BASE}/playlist/2/cover")[-1] == (f"{BASE}/playlist/2/cover", b"", 1, True)
     finally:
         device.stop()

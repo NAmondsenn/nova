@@ -57,11 +57,13 @@ UNKNOWN = "None"
 # it into the empty state it shows.
 ASK_PLACEHOLDER = "-"
 # The same, doubled - what a box's state topic says after every other thing typed into it,
-# which its value template turns into a single space. Home Assistant only redraws a box
+# which its value template turns into a zero-width space. Home Assistant only redraws a box
 # when its state changes, so a box whose state were always empty would keep showing what
-# was just sent until the page was reloaded; flipping between "" and " " clears it.
+# was just sent until the page was reloaded; flipping between "" and the zero-width space
+# clears it. Not a plain space: Home Assistant strips whitespace from what a template gives.
 ASK_FLIPPED = "--"
-BOX_TEMPLATE = "{{ ' ' if value == '--' else '' }}"
+ZERO_WIDTH = "\u200b"
+BOX_TEMPLATE = "{{ '" + ZERO_WIDTH + "' if value == '--' else '' }}"
 
 # How many playlists get a tile of their own - a play button and a cover - on the Nova view.
 PLAYLIST_TILES = 12
@@ -150,9 +152,10 @@ class DeviceControls:
     add_timer: Optional[Callable[[str], None]] = None
     # Sets a one-off alarm, silently, from what was typed into Add alarm - "07:00".
     add_alarm: Optional[Callable[[str], None]] = None
-    # The cover of the playlist of that name, with its content type, or None - a network
-    # call, so only made on the music thread.
-    playlist_cover: Optional[Callable[[str], Optional[Tuple[bytes, str]]]] = None
+    # The covers of the playlists named, by name: each picture with its content type, or None
+    # for one which has none. One left out couldn't be read. Network calls, so only made on
+    # the music thread.
+    playlist_covers: Optional[Callable[[List[str]], Dict[str, Optional[Tuple[bytes, str]]]]] = None
 
 
 def _slug(text: str) -> str:
@@ -243,6 +246,8 @@ class NovaDevice:
         # The tiles' covers as last read, by playlist name, and each cover's content type as announced.
         self._tile_pictures: Dict[str, Tuple[bytes, str]] = {}
         self._announced_tile_types: List[str] = []
+        # How many tiles Home Assistant was last told of, so ones gone since can be removed.
+        self._announced_tile_count = 0
         self._discovery_topic = f"{DISCOVERY_PREFIX}/device/{self.node_id}/config"
 
         self._client = None
@@ -362,6 +367,9 @@ class NovaDevice:
                                  "value_template": BOX_TEMPLATE, "max": 40, "icon": icon,
                                  "default_entity_id": f"text.{_slug(self.name)}_{key}"}
         for control, settings in controls.items():
+            # A component sent as its platform alone is being removed, and must stay so.
+            if len(settings) == 1:
+                continue
             settings["unique_id"] = f"{self.node_id}_{control}"
             settings["qos"] = QOS
         return {"dev": {"ids": [self.node_id], "name": self.name, "mf": "Nova", "mdl": "Raspberry Pi"},
@@ -432,14 +440,23 @@ class NovaDevice:
         for n, (name, kind) in enumerate(zip(playlists, tile_types), start=1):
             # A tile per playlist: its cover, and a button which plays it - both named after
             # the playlist, so the view shows its name without knowing the list.
+            # The button sends the playlist's own name, so a press plays what its tile was
+            # named after even if the list has moved on since Home Assistant was told it.
             controls[f"playlist_{n}"] = {"p": "button", "name": name, "command_topic": self._tile_play[n],
-                                         "icon": "mdi:playlist-play", "default_entity_id": f"button.{slug}_playlist_{n}"}
+                                         "payload_press": name, "icon": "mdi:playlist-play",
+                                         "default_entity_id": f"button.{slug}_playlist_{n}"}
             controls[f"playlist_{n}_cover"] = {"p": "image", "name": name, "image_topic": self._tile_cover[n],
                                                "content_type": kind,
                                                "default_entity_id": f"image.{slug}_playlist_{n}"}
+        # Tiles there were before and aren't now: Home Assistant only removes a component of a
+        # device which it's sent as its platform alone, once, before it's left out.
+        for n in range(len(tile_types) + 1, self._announced_tile_count + 1):
+            controls[f"playlist_{n}"] = {"p": "button"}
+            controls[f"playlist_{n}_cover"] = {"p": "image"}
         self._announced_cover_type = cover_type
         self._announced_playlists = playlists
         self._announced_tile_types = tile_types
+        self._announced_tile_count = len(tile_types)
         return controls
 
     # Connecting
@@ -671,7 +688,10 @@ class NovaDevice:
             # asked, so the old one is kept until a read which has some.
             if playlists or not self._playlists:
                 self._playlists = playlists
-            self._read_tile_pictures()
+            # Only after a read which worked: an empty one means the player couldn't be asked,
+            # and the covers wouldn't be had either.
+            if playlists:
+                self._read_tile_pictures()
         self._announce_if_stale()
 
     def _read_tile_pictures(self):
@@ -679,16 +699,23 @@ class NovaDevice:
         Reads the cover of each playlist with a tile, again at every refresh, since a
         playlist's cover follows what's in it. One which can't be had keeps the last.
         """
-        if self.controls.playlist_cover is None:
+        if self.controls.playlist_covers is None:
             return
-        for name in self._playlists[:PLAYLIST_TILES]:
-            try:
-                picture = self.controls.playlist_cover(name)
-            except Exception as e:
-                logger.warning(f"Couldn't read a playlist's cover for Home Assistant: {e}")
-                continue
+        names = self._playlists[:PLAYLIST_TILES]
+        try:
+            covers = self.controls.playlist_covers(list(names))
+        except Exception as e:
+            logger.warning(f"Couldn't read the playlists' covers for Home Assistant: {e}")
+            return
+        for name, picture in covers.items():
             if picture:
                 self._tile_pictures[name] = (picture[0], picture[1] or DEFAULT_COVER_TYPE)
+            else:
+                # It has none now - unlike one which couldn't be read, which isn't in covers.
+                self._tile_pictures.pop(name, None)
+        # Only the playlists which have tiles are kept, so renamed or deleted ones go.
+        for name in set(self._tile_pictures) - set(names):
+            del self._tile_pictures[name]
 
     def _announce_if_stale(self):
         """Announces the device again if the playlists or the cover's type aren't what it was last announced with."""
@@ -738,6 +765,8 @@ class NovaDevice:
                 if not self._music_failing:
                     logger.error(f"Couldn't tell Home Assistant what Nova's playing: {e}")
                 self._music_failing = True
+                # The tiles' covers don't depend on what's playing, so they're still sent.
+                self._send_tiles()
                 return
             self._music_failing = False
             self._send(self._playing, state)
@@ -745,12 +774,20 @@ class NovaDevice:
             # Nothing is sent as an empty payload, so Home Assistant shows no picture
             # rather than the last song's.
             self._send(self._playing_cover, self._cover)
-            # Each tile's cover - unchanged ones aren't sent again, so this costs nothing
-            # between the refreshes which read them.
-            for n, name in enumerate(self._playlists[:PLAYLIST_TILES], start=1):
-                self._send(self._tile_cover[n], self._tile_pictures.get(name, (b"", DEFAULT_COVER_TYPE))[0])
+            self._send_tiles()
         # The type is only known from the picture, which comes after the announcement.
         self._announce_if_stale()
+
+    def _send_tiles(self):
+        """
+        Sends each tile's cover - unchanged ones aren't sent again, so this costs nothing
+        between the refreshes which read them - and an empty picture for a tile number no
+        playlist has now, so a removed tile's cover isn't kept by the broker.
+        """
+        names = self._playlists[:PLAYLIST_TILES]
+        for n in range(1, PLAYLIST_TILES + 1):
+            picture = self._tile_pictures.get(names[n - 1], (b"", DEFAULT_COVER_TYPE)) if n <= len(names) else (b"", "")
+            self._send(self._tile_cover[n], picture[0])
 
     def _read_cover(self, cover_id):
         """Fetches the cover unless its id is the one already held, and keeps it with its type."""
@@ -802,7 +839,9 @@ class NovaDevice:
     def _on_message(self, client, userdata, message):
         """paho's callback for a message from Home Assistant - a command, or it being back."""
         try:
-            self._command(message.topic, message.payload.decode("utf-8", "replace").strip(), message.retain)
+            # Without the zero-width space a box may still hold from its flipped state - see ASK_FLIPPED.
+            payload = message.payload.decode("utf-8", "replace").replace(ZERO_WIDTH, "").strip()
+            self._command(message.topic, payload, message.retain)
         except Exception as e:
             logger.error(f"Couldn't do what Home Assistant asked, on {message.topic}: {e}")
 
@@ -853,11 +892,10 @@ class NovaDevice:
                 self._queue("Add timer" if key == "add_timer" else "Add alarm", getattr(self.controls, key), payload)
                 self._sent_from_box(key)
         elif self._has_music() and topic in self._tile_play.values():
-            n = next(n for n, where in self._tile_play.items() if where == topic)
-            playlists = list(self._playlists)
-            if n <= len(playlists) and self.controls.play_playlist is not None:
+            # The press carries the playlist's name; only one which is still offered is played.
+            if payload in self._playlists and self.controls.play_playlist is not None:
                 logger.info("Playing a playlist tile, from Home Assistant")
-                self._queue("Playlist", self.controls.play_playlist, playlists[n - 1])
+                self._queue("Playlist", self.controls.play_playlist, payload)
         elif topic == f"{self._muted}/set":
             if payload in (ON, OFF):
                 logger.info(f"Microphone {'muted' if payload == ON else 'unmuted'} from Home Assistant")
