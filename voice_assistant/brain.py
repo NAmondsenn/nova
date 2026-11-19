@@ -65,6 +65,8 @@ from voice_assistant.remote import RemoteSatellite
 from voice_assistant.routines import Routines
 from voice_assistant.satellite_link import SOCKET_TIMEOUT, Stream
 from voice_assistant.satellite_passwords import SatellitePasswords, name_problem
+from voice_assistant import quiet_others as quiet_others_module
+from voice_assistant.quiet_others import QuietOthers
 from voice_assistant.satellite_rooms import SatelliteRooms
 from voice_assistant.session import Session
 from voice_assistant.settings_page import SettingsPage
@@ -274,6 +276,10 @@ class Brain:
         # Home Assistant - which outlasts its connection. Made before any session, as
         # each says its room to it.
         self.rooms = SatelliteRooms(os.path.join(paths.DATA_DIR, "satellite_rooms.json"))
+        # Which satellites ignore the wake word while Nova speaks on another - see
+        # _quiet_others_forever, which _quiet_nudge wakes.
+        self.quiet_others = QuietOthers()
+        self._quiet_nudge = threading.Event()
         # Each satellite's session, by its name, for as long as it's connected.
         self.sessions: Dict[str, Session] = {}
         # Guards sessions and the other notes below. Only ever held for a moment, and
@@ -912,6 +918,7 @@ class Brain:
                 self._alarms_changed.clear()
             logger.info(f"Listening for satellites on port {self.port}")
             threading.Thread(target=self._send_alarm_copies, daemon=True, name="alarm-copies").start()
+            threading.Thread(target=self._quiet_others_forever, daemon=True, name="quiet-others").start()
             server.serve_forever(poll_interval=STOP_CHECK)
         finally:
             with self._lock:
@@ -924,8 +931,9 @@ class Brain:
             self._stopped.set()
             server = self._server
             sessions = list(self.sessions.values())
-        # Wakes the thread sending the copies, to see it's stopped.
+        # Wakes the threads sending the copies and the quiet, to see it's stopped.
         self._alarms_changed.set()
+        self._quiet_nudge.set()
         if server is not None:
             server.shutdown()
         for session in sessions:
@@ -1200,6 +1208,8 @@ class Brain:
                 self._let_go(old)
             self._give_out_orphans()
             session = Session(self, satellite)
+            # Before it's registered, so nothing it says is missed.
+            satellite.speaker.on_speech = lambda speaking: self._quiet_nudge.set()
             with self._lock:
                 stopped = self._stopped.is_set()
                 if not stopped:
@@ -1228,7 +1238,36 @@ class Brain:
             self._let_go(session)
             self._forget(session)
             return None
+        # So one which connects while another is speaking is quiet at once.
+        self._quiet_nudge.set()
         return session
+
+    def _quiet_others_forever(self):
+        """
+        Tells each satellite whether to ignore the wake word while Nova speaks on another
+        - see quiet_others.py - whenever one starts or stops speaking, or one joins or
+        goes, and every QUIET_RENEW seconds besides. The one thread works from who is
+        speaking now, so nothing heard in the wrong order is acted on, and a satellite
+        slow to take a message holds up only this, never what Nova is saying.
+        """
+        while not self._stopped.is_set():
+            self._quiet_nudge.wait(quiet_others_module.QUIET_RENEW)
+            self._quiet_nudge.clear()
+            if self._stopped.is_set():
+                return
+            try:
+                speaking = {session.satellite: session.satellite.speaker.speaking
+                            for session in self.connected_sessions() if session.satellite.connected}
+                changes = self.quiet_others.tell(speaking, time.monotonic())
+            except Exception as e:
+                logger.error(f"Couldn't work out which satellites to quiet: {e}")
+                continue
+            # Each on its own, so one which fails can't keep the rest from being told.
+            for satellite, quiet in changes:
+                try:
+                    satellite.send("quiet", on=quiet)
+                except Exception as e:
+                    logger.error(f"Couldn't tell the {satellite.name} satellite whether to be quiet: {e}")
 
     def _removed(self, name: str, password: Optional[str] = None) -> bool:
         """
@@ -1313,6 +1352,7 @@ class Brain:
             del self.sessions[name]
             self._caught_up.discard(name)
         self._satellites_changed()
+        self._quiet_nudge.set()
 
     def _give_out_orphans(self):
         """

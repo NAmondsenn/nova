@@ -1177,6 +1177,55 @@ def test_the_page_is_offered_the_playlists_by_name(make_player):
     assert player.playlists() == []
 
 
+def test_playlists_covers_are_navidromes_own(make_player):
+    player = make_player({"getPlaylists": {"playlists": {"playlist": [
+        {"id": "p2", "name": "workout", "coverArt": "pl-p2"}, {"id": "p1", "name": "Chill"}]}}})
+    asked, answer = [], player._session.get
+
+    def get(url, params=None, timeout=None):
+        if url.endswith("/getCoverArt"):
+            asked.append(params)
+            return FakeImage()
+        return answer(url, params=params, timeout=timeout)
+
+    player._session.get = get
+    # A cover, none for a playlist without one, and none for a name Navidrome hasn't got.
+    assert player.playlist_covers(["workout", "Chill", "Nope"]) == {
+        "workout": (b"a cover", "image/jpeg"), "Chill": None, "Nope": None}
+    assert [params["id"] for params in asked] == ["pl-p2"]
+
+
+def test_a_navidrome_which_is_down_costs_one_wait_for_all_the_covers(make_player):
+    player = make_player({"getPlaylists": {"playlists": {"playlist": [
+        {"id": "p1", "name": "a", "coverArt": "pl-p1"}, {"id": "p2", "name": "b", "coverArt": "pl-p2"}]}}})
+    asked, answer = [], player._session.get
+
+    def get(url, params=None, timeout=None):
+        if url.endswith("/getCoverArt"):
+            asked.append(params)
+            raise requests.ConnectionError("down")
+        return answer(url, params=params, timeout=timeout)
+
+    player._session.get = get
+    # Left out, not None: they couldn't be read, so the tiles keep the covers they had.
+    assert player.playlist_covers(["a", "b"]) == {}
+    assert len(asked) == 1
+
+
+def test_one_cover_navidrome_refuses_doesnt_stop_the_rest(make_player):
+    player = make_player({"getPlaylists": {"playlists": {"playlist": [
+        {"id": "p1", "name": "a", "coverArt": "pl-p1"}, {"id": "p2", "name": "b", "coverArt": "pl-p2"}]}}})
+    answer = player._session.get
+
+    def get(url, params=None, timeout=None):
+        if url.endswith("/getCoverArt"):
+            return FakeHttp(status=404) if params["id"] == "pl-p1" else FakeImage()
+        return answer(url, params=params, timeout=timeout)
+
+    player._session.get = get
+    assert player.playlist_covers(["a", "b"]) == {"b": (b"a cover", "image/jpeg")}
+
+
 # What Navidrome says of a song's file, sound and lyrics, for listening (decision 0022)
 
 class FakeHttp:

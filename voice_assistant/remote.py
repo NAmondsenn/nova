@@ -223,6 +223,17 @@ class RemoteSpeaker:
         self._lock = threading.Lock()
         # What's playing, by id, until the satellite says it has ended, or goes.
         self._playing: Dict[str, RemotePlayback] = {}
+        # Told True as the satellite starts saying something - speech streamed to it, not
+        # music or one of its own sounds - and False once it has stopped, for the brain to
+        # quiet the other satellites meanwhile (see quiet_others.py). None for no one.
+        self.on_speech: Optional[Callable[[bool], None]] = None
+        self._speaking = False
+
+    @property
+    def speaking(self) -> bool:
+        """Whether the satellite is saying something now - see on_speech."""
+        with self._lock:
+            return self._speaking
 
     def play(self, audio: np.ndarray, sample_rate: Optional[int] = None, volume: float = 1.0,
              kind: str = "reply") -> RemotePlayback:
@@ -376,11 +387,26 @@ class RemoteSpeaker:
             self._playing[playback.id] = playback
         if self._send(message, id=playback.id, **fields):
             playback._told = True
+            self._check_speaking()
             return True
         with self._lock:
             self._playing.pop(playback.id, None)
         playback._finish()
         return False
+
+    def _check_speaking(self):
+        """Tells on_speech when the satellite starts or stops saying something."""
+        with self._lock:
+            # Only what the satellite has been sent the start of, as _matching.
+            speaking = any(playback._told and playback._rate is not None and playback.kind != "music"
+                           for playback in self._playing.values())
+            changed = speaking != self._speaking
+            self._speaking = speaking
+        if changed and self.on_speech is not None:
+            try:
+                self.on_speech(speaking)
+            except Exception as e:
+                logger.error(f"Couldn't pass on that a satellite is speaking: {e}")
 
     def _feed(self, playback: RemotePlayback, pieces: Iterable[np.ndarray], channels: int,
               most_ahead: Optional[float]):
@@ -431,6 +457,7 @@ class RemoteSpeaker:
             playback = self._playing.pop(id, None)
         if playback is not None:
             playback._finish(position)
+            self._check_speaking()
 
     def _progress(self, id: str, position: int):
         """The satellite says how far the music has got."""
@@ -446,6 +473,7 @@ class RemoteSpeaker:
             self._playing = {}
         for playback in playing:
             playback._finish()
+        self._check_speaking()
 
 
 class RemoteSatellite:

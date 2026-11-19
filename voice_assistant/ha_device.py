@@ -56,6 +56,17 @@ UNKNOWN = "None"
 # Home Assistant to read after a restart; this is, and the box's value template turns
 # it into the empty state it shows.
 ASK_PLACEHOLDER = "-"
+# The same, doubled - what a box's state topic says after every other thing typed into it,
+# which its value template turns into a zero-width space. Home Assistant only redraws a box
+# when its state changes, so a box whose state were always empty would keep showing what
+# was just sent until the page was reloaded; flipping between "" and the zero-width space
+# clears it. Not a plain space: Home Assistant strips whitespace from what a template gives.
+ASK_FLIPPED = "--"
+ZERO_WIDTH = "\u200b"
+BOX_TEMPLATE = "{{ '" + ZERO_WIDTH + "' if value == '--' else '' }}"
+
+# How many playlists get a tile of their own - a play button and a cover - on the Nova view.
+PLAYLIST_TILES = 12
 
 # What Nova can be doing, as each satellite's session has it - see session.py.
 STATUSES = ("idle", "listening", "thinking", "speaking")
@@ -137,6 +148,14 @@ class DeviceControls:
     # Says out loud what was typed into Say on Nova, word for word and with no sound
     # first - the person typing knows it's coming. Only shown when set.
     say: Optional[Callable[[str], None]] = None
+    # Sets a timer, silently, from what was typed into Add timer - "10", "1:20", "1h 20m".
+    add_timer: Optional[Callable[[str], None]] = None
+    # Sets a one-off alarm, silently, from what was typed into Add alarm - "07:00".
+    add_alarm: Optional[Callable[[str], None]] = None
+    # The covers of the playlists named, by name: each picture with its content type, or None
+    # for one which has none. One left out couldn't be read. Network calls, so only made on
+    # the music thread.
+    playlist_covers: Optional[Callable[[List[str]], Dict[str, Optional[Tuple[bytes, str]]]]] = None
 
 
 def _slug(text: str) -> str:
@@ -218,6 +237,17 @@ class NovaDevice:
         self._ask_set = f"{base}/ask/set"
         self._say = f"{base}/say"
         self._say_set = f"{base}/say/set"
+        self._add_timer, self._add_alarm = f"{base}/add_timer", f"{base}/add_alarm"
+        # Which text boxes show their flipped placeholder now - see ASK_FLIPPED.
+        self._flipped: Dict[str, bool] = {"ask": False, "say": False, "add_timer": False, "add_alarm": False}
+        # Each playlist tile's play button and cover, by its number from 1.
+        self._tile_play = {n: f"{base}/playlist/{n}/play" for n in range(1, PLAYLIST_TILES + 1)}
+        self._tile_cover = {n: f"{base}/playlist/{n}/cover" for n in range(1, PLAYLIST_TILES + 1)}
+        # The tiles' covers as last read, by playlist name, and each cover's content type as announced.
+        self._tile_pictures: Dict[str, Tuple[bytes, str]] = {}
+        self._announced_tile_types: List[str] = []
+        # How many tiles Home Assistant was last told of, so ones gone since can be removed.
+        self._announced_tile_count = 0
         self._discovery_topic = f"{DISCOVERY_PREFIX}/device/{self.node_id}/config"
 
         self._client = None
@@ -228,6 +258,7 @@ class NovaDevice:
         self._commands = queue.Queue()
         # What each state topic was last sent, so only what's changed is sent again.
         self._lock = threading.Lock()
+        self._announcing = threading.Lock()
         self._published: Dict[str, Union[str, bytes]] = {}
         # Whether a problem has been logged since things last worked, so an outage is
         # logged once rather than at every try.
@@ -319,16 +350,27 @@ class NovaDevice:
             # the value template turns into "": the box is always empty, so what was typed
             # is neither shown nor kept by Home Assistant - see _state.
             controls["ask"] = {"p": "text", "name": "Ask Nova", "command_topic": self._ask_set,
-                               "state_topic": self._ask, "value_template": "{{ '' }}", "max": 255,
+                               "state_topic": self._ask, "value_template": BOX_TEMPLATE, "max": 255,
                                "icon": "mdi:keyboard-outline",
                                "default_entity_id": f"text.{_slug(self.name)}_ask"}
         if self._has_say():
             # The same kind of box as Ask Nova, kept as empty the same way.
             controls["say"] = {"p": "text", "name": "Say on Nova", "command_topic": self._say_set,
-                               "state_topic": self._say, "value_template": "{{ '' }}", "max": 255,
+                               "state_topic": self._say, "value_template": BOX_TEMPLATE, "max": 255,
                                "icon": "mdi:bullhorn-outline",
                                "default_entity_id": f"text.{_slug(self.name)}_say"}
+        if self._has_clock_boxes():
+            # Timers and alarms set from the Nova view, silently: the page shows them.
+            for key, name, icon in (("add_timer", "Add timer", "mdi:timer-plus-outline"),
+                                    ("add_alarm", "Add alarm", "mdi:alarm-plus")):
+                topic = getattr(self, f"_{key}")
+                controls[key] = {"p": "text", "name": name, "command_topic": f"{topic}/set", "state_topic": topic,
+                                 "value_template": BOX_TEMPLATE, "max": 40, "icon": icon,
+                                 "default_entity_id": f"text.{_slug(self.name)}_{key}"}
         for control, settings in controls.items():
+            # A component sent as its platform alone is being removed, and must stay so.
+            if len(settings) == 1:
+                continue
             settings["unique_id"] = f"{self.node_id}_{control}"
             settings["qos"] = QOS
         return {"dev": {"ids": [self.node_id], "name": self.name, "mf": "Nova", "mdl": "Raspberry Pi"},
@@ -343,6 +385,19 @@ class NovaDevice:
     def _has_ask(self) -> bool:
         """Whether Nova can be asked things from Home Assistant - the brain's usage device can't."""
         return self.controls is not None and self.controls.ask is not None
+
+    def _has_clock_boxes(self) -> bool:
+        """Whether timers and alarms can be added from Home Assistant."""
+        return self.controls is not None and self.controls.add_timer is not None and self.controls.add_alarm is not None
+
+    def _box_state(self, key: str) -> str:
+        """What a text box's state topic says now: its placeholder, flipped or not."""
+        return ASK_FLIPPED if self._flipped[key] else ASK_PLACEHOLDER
+
+    def _sent_from_box(self, key: str):
+        """Flips a box's placeholder once something typed into it has been taken, so Home Assistant clears it."""
+        self._flipped[key] = not self._flipped[key]
+        self.publish_state()
 
     def _has_say(self) -> bool:
         """Whether Nova can be given words to say from Home Assistant's Say on Nova box."""
@@ -382,8 +437,27 @@ class NovaDevice:
             controls["playlist"] = {"p": "select", "name": "Playlist", "command_topic": self._playlist_set,
                                     "state_topic": self._playlist, "options": playlists,
                                     "icon": "mdi:playlist-music", "default_entity_id": f"select.{slug}_playlist"}
+        tile_types = [self._tile_pictures.get(name, (b"", DEFAULT_COVER_TYPE))[1] for name in playlists[:PLAYLIST_TILES]]
+        for n, (name, kind) in enumerate(zip(playlists, tile_types), start=1):
+            # A tile per playlist: its cover, and a button which plays it - both named after
+            # the playlist, so the view shows its name without knowing the list.
+            # The button sends the playlist's own name, so a press plays what its tile was
+            # named after even if the list has moved on since Home Assistant was told it.
+            controls[f"playlist_{n}"] = {"p": "button", "name": name, "command_topic": self._tile_play[n],
+                                         "payload_press": name, "icon": "mdi:playlist-play",
+                                         "default_entity_id": f"button.{slug}_playlist_{n}"}
+            controls[f"playlist_{n}_cover"] = {"p": "image", "name": name, "image_topic": self._tile_cover[n],
+                                               "content_type": kind,
+                                               "default_entity_id": f"image.{slug}_playlist_{n}"}
+        # Tiles there were before and aren't now: Home Assistant only removes a component of a
+        # device which it's sent as its platform alone, once, before it's left out.
+        for n in range(len(tile_types) + 1, self._announced_tile_count + 1):
+            controls[f"playlist_{n}"] = {"p": "button"}
+            controls[f"playlist_{n}_cover"] = {"p": "image"}
         self._announced_cover_type = cover_type
         self._announced_playlists = playlists
+        self._announced_tile_types = tile_types
+        self._announced_tile_count = len(tile_types)
         return controls
 
     # Connecting
@@ -511,13 +585,22 @@ class NovaDevice:
             topics.append((self._ask_set, QOS))
         if self._has_say():
             topics.append((self._say_set, QOS))
+        if self._has_clock_boxes():
+            topics += [(f"{self._add_timer}/set", QOS), (f"{self._add_alarm}/set", QOS)]
+        if self._has_music():
+            topics += [(topic, QOS) for topic in self._tile_play.values()]
         return topics
 
     def _announce(self):
-        """Tells Home Assistant about Nova's device and its controls."""
+        """
+        Tells Home Assistant about Nova's device and its controls. One at a time: paho's
+        thread and the music thread both announce, and an older announcement sent after a
+        newer one would bring back tiles the newer one removed.
+        """
         client = self._client
         if client is not None:
-            client.publish(self._discovery_topic, json.dumps(self.discovery()), qos=QOS, retain=True)
+            with self._announcing:
+                client.publish(self._discovery_topic, json.dumps(self.discovery()), qos=QOS, retain=True)
 
     # Nova's state, to Home Assistant
 
@@ -548,10 +631,13 @@ class NovaDevice:
             # sending, and what was typed on it - which is what the user said - is never
             # sent back to be shown or kept. Not "", which the broker would take as
             # forgetting the message, leaving the box "unknown" after Home Assistant restarts.
-            state[self._ask] = ASK_PLACEHOLDER
+            state[self._ask] = self._box_state("ask")
         if self._has_say():
             # Kept empty as Ask Nova's is, for the same reasons.
-            state[self._say] = ASK_PLACEHOLDER
+            state[self._say] = self._box_state("say")
+        if self._has_clock_boxes():
+            state[self._add_timer] = self._box_state("add_timer")
+            state[self._add_alarm] = self._box_state("add_alarm")
         if self._has_music():
             # Always "None": see the playlist select in _music_discovery.
             state[self._playlist] = UNKNOWN
@@ -608,12 +694,42 @@ class NovaDevice:
             # asked, so the old one is kept until a read which has some.
             if playlists or not self._playlists:
                 self._playlists = playlists
+            # Only after a read which worked: an empty one means the player couldn't be asked,
+            # and the covers wouldn't be had either.
+            if playlists:
+                self._read_tile_pictures()
         self._announce_if_stale()
+
+    def _read_tile_pictures(self):
+        """
+        Reads the cover of each playlist with a tile, again at every refresh, since a
+        playlist's cover follows what's in it. One which can't be had keeps the last.
+        """
+        if self.controls.playlist_covers is None:
+            return
+        names = self._playlists[:PLAYLIST_TILES]
+        try:
+            covers = self.controls.playlist_covers(list(names))
+        except Exception as e:
+            logger.warning(f"Couldn't read the playlists' covers for Home Assistant: {e}")
+            return
+        for name, picture in covers.items():
+            if picture:
+                self._tile_pictures[name] = (picture[0], picture[1] or DEFAULT_COVER_TYPE)
+            else:
+                # It has none now - unlike one which couldn't be read, which isn't in covers.
+                self._tile_pictures.pop(name, None)
+        # Only the playlists which have tiles are kept, so renamed or deleted ones go.
+        for name in set(self._tile_pictures) - set(names):
+            del self._tile_pictures[name]
 
     def _announce_if_stale(self):
         """Announces the device again if the playlists or the cover's type aren't what it was last announced with."""
+        tile_types = [self._tile_pictures.get(name, (b"", DEFAULT_COVER_TYPE))[1]
+                      for name in self._playlists[:PLAYLIST_TILES]]
         if self._connected and (self._playlists != self._announced_playlists
-                                or self._cover_type != self._announced_cover_type):
+                                or self._cover_type != self._announced_cover_type
+                                or tile_types != self._announced_tile_types):
             self._announce()
 
     def _send(self, topic: str, payload):
@@ -655,6 +771,8 @@ class NovaDevice:
                 if not self._music_failing:
                     logger.error(f"Couldn't tell Home Assistant what Nova's playing: {e}")
                 self._music_failing = True
+                # The tiles' covers don't depend on what's playing, so they're still sent.
+                self._send_tiles()
                 return
             self._music_failing = False
             self._send(self._playing, state)
@@ -662,8 +780,20 @@ class NovaDevice:
             # Nothing is sent as an empty payload, so Home Assistant shows no picture
             # rather than the last song's.
             self._send(self._playing_cover, self._cover)
+            self._send_tiles()
         # The type is only known from the picture, which comes after the announcement.
         self._announce_if_stale()
+
+    def _send_tiles(self):
+        """
+        Sends each tile's cover - unchanged ones aren't sent again, so this costs nothing
+        between the refreshes which read them - and an empty picture for a tile number no
+        playlist has now, so a removed tile's cover isn't kept by the broker.
+        """
+        names = self._playlists[:PLAYLIST_TILES]
+        for n in range(1, PLAYLIST_TILES + 1):
+            picture = self._tile_pictures.get(names[n - 1], (b"", DEFAULT_COVER_TYPE)) if n <= len(names) else (b"", "")
+            self._send(self._tile_cover[n], picture[0])
 
     def _read_cover(self, cover_id):
         """Fetches the cover unless its id is the one already held, and keeps it with its type."""
@@ -715,7 +845,9 @@ class NovaDevice:
     def _on_message(self, client, userdata, message):
         """paho's callback for a message from Home Assistant - a command, or it being back."""
         try:
-            self._command(message.topic, message.payload.decode("utf-8", "replace").strip(), message.retain)
+            # Without the zero-width space a box may still hold from its flipped state - see ASK_FLIPPED.
+            payload = message.payload.decode("utf-8", "replace").replace(ZERO_WIDTH, "").strip()
+            self._command(message.topic, payload, message.retain)
         except Exception as e:
             logger.error(f"Couldn't do what Home Assistant asked, on {message.topic}: {e}")
 
@@ -753,10 +885,23 @@ class NovaDevice:
                 # Logged as heard text is, so the transcripts setting decides if it's kept.
                 logger.info(f"Home Assistant asked: '{payload}'", extra=TRANSCRIPT)
                 self._queue("Ask Nova", self.controls.ask, payload)
+                self._sent_from_box("ask")
         elif self._has_say() and topic == self._say_set:
             if payload:
                 logger.info(f"Home Assistant asked to say aloud: '{payload}'", extra=TRANSCRIPT)
                 self._queue("Say on Nova", self.controls.say, payload)
+                self._sent_from_box("say")
+        elif self._has_clock_boxes() and topic in (f"{self._add_timer}/set", f"{self._add_alarm}/set"):
+            if payload:
+                key = "add_timer" if topic.startswith(self._add_timer) else "add_alarm"
+                logger.info(f"{'Timer' if key == 'add_timer' else 'Alarm'} '{payload}', from Home Assistant")
+                self._queue("Add timer" if key == "add_timer" else "Add alarm", getattr(self.controls, key), payload)
+                self._sent_from_box(key)
+        elif self._has_music() and topic in self._tile_play.values():
+            # The press carries the playlist's name; only one which is still offered is played.
+            if payload in self._playlists and self.controls.play_playlist is not None:
+                logger.info("Playing a playlist tile, from Home Assistant")
+                self._queue("Playlist", self.controls.play_playlist, payload)
         elif topic == f"{self._muted}/set":
             if payload in (ON, OFF):
                 logger.info(f"Microphone {'muted' if payload == ON else 'unmuted'} from Home Assistant")

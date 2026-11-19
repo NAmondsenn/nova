@@ -1864,6 +1864,83 @@ def test_a_press_ends_the_answer_to_a_question_too(brain, make):
     assert brain.messages("wake") == []
 
 
+def test_a_reply_which_starts_while_a_press_is_listening_isnt_played(brain, make):
+    # Pressed while the brain is still working on the last request: its reply would play
+    # into the open microphone, which on a push-to-talk satellite has no echo cancelling,
+    # and be heard as the user's next request. So it's stopped as it starts, as a press
+    # over it would have done.
+    made = pressable(brain, make)
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 1)
+    brain.say("play_stream", id="reply-1", rate=22050, channels=1, volume=0.8, kind="reply", paused=False)
+    brain.say("stream_audio", np.array([1, 2, 3], np.int16).tobytes(), id="reply-1")
+
+    assert wait_for(lambda: brain.messages("played"))
+    (reply,) = made.speaker.streams()
+    assert reply.stopped
+    assert brain.messages("played")[0]["id"] == "reply-1" and brain.messages("played")[0]["stopped"]
+    # Still listening to the user.
+    count = len(brain.recordings())
+    assert wait_for(lambda: len(brain.recordings()) > count)
+    brain.say("stop_listening")
+
+
+def test_a_reply_sound_while_a_press_is_listening_isnt_played_either(brain, make):
+    made = pressable(brain, make)
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 1)
+    brain.say("play_sound", id="sound-1", name="not_heard.wav", volume=1.0, kind="reply")
+
+    assert wait_for(lambda: brain.messages("played"))
+    (played,) = brain.messages("played")
+    assert played["id"] == "sound-1" and played["stopped"]
+    brain.say("stop_listening")
+
+
+def test_the_chime_for_an_answer_the_brain_asked_for_still_plays(brain, make):
+    # Only what a press started stops a reply: the brain's own listen, for the answer to a
+    # question it asked, keeps its chime, the user's cue that Nova is waiting.
+    made = pressable(brain, make)
+    brain.say("listen", recording="listen-1")
+    assert wait_for(lambda: len(brain.recordings()) >= 1)
+    brain.say("play_sound", id="chime-1", name="listening.wav", volume=0.4, kind="reply")
+
+    assert wait_for(lambda: made.speaker.files())
+    (chime,) = [playback for playback in made.speaker.playing if playback.filename]
+    assert not chime.stopped
+    chime.finish()
+    assert wait_for(lambda: brain.messages("played"))
+    assert not brain.messages("played")[0]["stopped"]
+    brain.say("stop_listening", recording="listen-1")
+
+
+def test_after_the_press_s_recording_ends_a_reply_plays(brain, make):
+    made = pressable(brain, make)
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 1)
+    brain.say("stop_listening")
+    assert wait_for(lambda: brain.messages("audio_end") or made._recording is None)
+    brain.say("play_stream", id="reply-1", rate=22050, channels=1, volume=0.8, kind="reply", paused=False)
+    brain.say("stream_audio", np.array([1, 2, 3], np.int16).tobytes(), id="reply-1")
+
+    assert wait_for(lambda: made.speaker.streams() and made.speaker.streams()[0].pieces)
+    assert not made.speaker.streams()[0].stopped
+
+
+def test_a_wake_word_satellite_plays_a_reply_over_its_recording_as_before(brain, make):
+    # The Pi cancels its own echo, so a reply which starts while it listens plays as it always has.
+    made = make()
+    assert wait_for(lambda: connected(made) and made.wake.listening)
+    made.wake.say()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    brain.say("play_stream", id="reply-1", rate=22050, channels=1, volume=0.8, kind="reply", paused=False)
+    brain.say("stream_audio", np.array([1, 2, 3], np.int16).tobytes(), id="reply-1")
+
+    assert wait_for(lambda: made.speaker.streams() and made.speaker.streams()[0].pieces)
+    assert not made.speaker.streams()[0].stopped
+    brain.say("stop_listening")
+
+
 def test_a_press_over_a_reply_stops_it_and_listens(brain, make):
     made = pressable(brain, make)
     brain.say("play_stream", id="music-1", rate=44100, channels=2, volume=0.5, kind="music", paused=False)
@@ -2045,3 +2122,64 @@ def test_wake_word_satellite_hello_is_unchanged(brain, make):
     make()
     assert wait_for(lambda: brain.hellos)
     assert brain.hellos[0]["push_to_talk"] is False
+
+
+def quiet_until_said(brain, made, on):
+    brain.say("quiet", on=on)
+    if on:
+        assert wait_for(lambda: made._quiet_until > time.monotonic())
+
+
+def test_the_wake_word_is_ignored_while_nova_speaks_on_another_satellite(brain, make):
+    made = make()
+    assert wait_for(lambda: connected(made) and made.wake.listening)
+    brain.say("play_stream", id="music-1", rate=44100, channels=2, volume=0.5, kind="music", paused=False)
+    assert wait_for(lambda: made.speaker.streams())
+    quiet_until_said(brain, made, True)
+    made.wake.say()
+    # Heard, and let go: no wake for the brain, and nothing here stopped or paused.
+    assert wait_for(lambda: made.wake.listening)
+    time.sleep(0.2)
+    assert brain.messages("wake") == []
+    assert not made.speaker.streams()[0].paused
+
+
+def test_the_wake_word_works_again_just_after_the_other_satellite_stops(brain, make, monkeypatch):
+    monkeypatch.setattr(satellite, "QUIET_AFTER", 0.2)
+    made = make()
+    assert wait_for(lambda: connected(made) and made.wake.listening)
+    quiet_until_said(brain, made, True)
+    brain.say("quiet", on=False)
+    # Still quiet for a moment, for the last words still leaving the other's speakers.
+    assert wait_for(lambda: made._quiet_until <= time.monotonic() + 0.2)
+    time.sleep(0.3)
+    made.wake.say()
+    assert wait_for(lambda: brain.messages("wake"))
+    brain.say("stop_listening")
+
+
+def test_being_quiet_ends_by_itself_if_never_lifted(brain, make, monkeypatch):
+    monkeypatch.setattr(satellite, "QUIET_MOST", 0.3)
+    made = make()
+    assert wait_for(lambda: connected(made) and made.wake.listening)
+    quiet_until_said(brain, made, True)
+    time.sleep(0.4)
+    made.wake.say()
+    assert wait_for(lambda: brain.messages("wake"))
+    brain.say("stop_listening")
+
+
+def test_losing_the_brain_ends_being_quiet(brain, make):
+    made = make()
+    assert wait_for(lambda: connected(made) and made.wake.listening)
+    quiet_until_said(brain, made, True)
+    brain.drop()
+    assert wait_for(lambda: made._quiet_until == 0)
+
+
+def test_a_press_still_works_while_nova_speaks_on_another_satellite(brain, make):
+    made = pressable(brain, make)
+    quiet_until_said(brain, made, True)
+    made._pressed()
+    assert wait_for(lambda: brain.messages("wake"))
+    brain.say("stop_listening")

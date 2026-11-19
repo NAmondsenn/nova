@@ -1765,6 +1765,42 @@ def test_speak_is_said_in_turn_even_when_muted(make_session):
     assert said_out_loud == ["The washing's done"]
 
 
+@pytest.mark.parametrize("typed, seconds", [
+    ("10", 600), ("1:20", 4800), ("1h 20m", 4800), ("1h 20", 4800), ("1 hour 20 minutes", 4800),
+    ("90 min", 5400), ("30s", 30), ("2 hours", 7200), ("1 hour and 5 minutes", 3900),
+    ("1h", 3600), ("45", 2700), ("20 mins", 1200), ("10m30s", 630), ("1H 20M", 4800), (" 1h 20m ", 4800),
+    ("", None), ("0", None), ("soon", None), ("25 hours", None), ("10 bananas", None), ("20 5", None),
+    ("1:60", None), ("1:99", None)])
+def test_a_length_of_time_typed_for_a_timer(typed, seconds):
+    assert session_module.timer_seconds(typed) == seconds
+
+
+def test_timers_and_alarms_from_home_assistant_are_set_silently(make_session, brain, caplog):
+    set_up = []
+    brain.clock = SimpleNamespace(
+        set_timer=lambda duration_seconds=None, satellite=None: set_up.append(("timer", duration_seconds, satellite))
+        or {"success": True},
+        set_alarm=lambda hour, minute, repeat=None, satellite=None: set_up.append(("alarm", hour, minute, repeat, satellite))
+        or {"success": hour != 8, "message": "There's already an alarm at 8 AM."},
+        overview=lambda satellite=None: {})
+    session = make_session()
+    said = []
+    session.announce = lambda *args, **kwargs: said.append(args)
+    controls = session._device_controls()
+    controls.add_timer("1h 20")
+    controls.add_alarm("07:05")
+    controls.add_alarm("7:5")
+    controls.add_alarm("25:00")
+    controls.add_timer("whenever")
+    with caplog.at_level(logging.WARNING):
+        controls.add_alarm("08:00")
+    name = session.satellite.name
+    assert set_up == [("timer", 4800, name), ("alarm", 7, 5, None, name), ("alarm", 8, 0, None, name)]
+    assert said == []
+    # One the clock refused is logged with why.
+    assert any("already an alarm" in record.getMessage() for record in caplog.records)
+
+
 def test_say_on_nova_is_said_in_turn_without_a_sound(make_session):
     # Typed on the Nova view to be said out loud, so no chime first: the person typing
     # knows it's coming. Speak, which automations use, keeps its sound.

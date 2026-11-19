@@ -781,3 +781,41 @@ def test_nothing_plays_on_a_satellite_which_isnt_connected(pair):
     assert ends_at_once(satellite.listen())
     time.sleep(0.1)
     assert fake.received == []
+
+
+def test_the_speaker_says_when_it_starts_and_stops_speaking():
+    sent = []
+    speaker = remote.RemoteSpeaker(lambda *args, **fields: sent.append((args, fields)) or True, 48000)
+    heard = []
+    speaker.on_speech = heard.append
+
+    reply = speaker.play_stream(iter([]), kind="reply")
+    assert heard == [True] and speaker.speaking
+    # A second while the first goes on changes nothing; music and the satellite's own sounds never count.
+    speaker.play_stream(iter([]), kind="announcement")
+    speaker.play_stream(iter([]), kind="music")
+    speaker.play_file("listening.wav")
+    assert heard == [True]
+    speaker._played(reply.id, None)
+    assert heard == [True]
+    for playback in list(speaker._playing.values()):
+        speaker._played(playback.id, None)
+    assert heard == [True, False]
+
+
+def test_the_speaker_stops_speaking_when_the_satellite_goes():
+    speaker = remote.RemoteSpeaker(lambda *args, **fields: True, 48000)
+    heard = []
+    speaker.on_speech = heard.append
+    speaker.play_stream(iter([]), kind="reply")
+    speaker._gone()
+    assert heard == [True, False]
+
+
+def test_speech_the_satellite_couldnt_be_sent_never_counts():
+    speaker = remote.RemoteSpeaker(lambda *args, **fields: False, 48000)
+    heard = []
+    speaker.on_speech = heard.append
+    speaker.play_stream(iter([]), kind="reply")
+    assert heard == []
+    assert not speaker.speaking
