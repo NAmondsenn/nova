@@ -3,6 +3,8 @@
 import json
 import logging
 
+import pytest
+
 from voice_assistant.satellite_rooms import SatelliteRooms
 
 
@@ -155,3 +157,107 @@ def test_an_old_brain_can_still_read_the_new_file(tmp_path):
     for each in stored.values():
         assert isinstance(each["push_to_talk"], bool)
         assert each["area"] is None or isinstance(each["area"], str)
+
+
+def test_called_is_kept_across_a_restart(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.seen("pc", True, "pc", True)
+    rooms.set_area("pc", "Study")
+    rooms.set_called("pc", ["Desk", "the computer"])
+
+    for kept in (rooms, _rooms(tmp_path)):
+        assert kept.called("pc") == ["Desk", "the computer"]
+        # What it costs the others nothing.
+        assert kept.push_to_talk("pc") is True and kept.machine("pc") == "pc" and kept.area("pc") == "Study"
+    # The next hello, and the room being found, keep the names.
+    rooms.seen("pc", True, "pc", True)
+    rooms.seen("pc", False, "pc", False)
+    rooms.set_area("pc", "Office")
+    assert _rooms(tmp_path).called("pc") == ["Desk", "the computer"]
+    # And no names clears them.
+    rooms.set_called("pc", [])
+    assert _rooms(tmp_path).called("pc") == []
+
+
+def test_called_defaults_to_none(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.seen("pc", True)
+    rooms.set_area("study", "Study")
+    assert rooms.called("pc") == [] and rooms.called("study") == [] and rooms.called("ghost") == []
+
+
+def test_a_file_from_before_has_no_names(tmp_path):
+    (tmp_path / "satellite_rooms.json").write_text(json.dumps({
+        "pc": {"push_to_talk": True, "area": "Study", "machine": "pc", "saves_notes": True}}))
+    rooms = _rooms(tmp_path)
+    assert rooms.called("pc") == []
+    rooms.set_called("pc", ["Desk"])
+    assert _rooms(tmp_path).called("pc") == ["Desk"] and _rooms(tmp_path).machine("pc") == "pc"
+
+
+def test_odd_names_in_the_file_are_none_not_a_lost_file(tmp_path):
+    (tmp_path / "satellite_rooms.json").write_text(json.dumps({
+        "pc": {"push_to_talk": True, "area": "Study", "called": "Desk"},
+        "mac": {"push_to_talk": True, "area": None, "called": ["Desk", 5]},
+        "pi": {"push_to_talk": False, "area": None, "called": None}}))
+    rooms = _rooms(tmp_path)
+    assert rooms.area("pc") == "Study"
+    for name in ("pc", "mac", "pi"):
+        assert rooms.called(name) == []
+
+
+def test_called_gives_a_copy(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.set_called("pc", ["Desk"])
+    rooms.called("pc").append("Other")
+    assert rooms.called("pc") == ["Desk"]
+    names = ["Desk"]
+    rooms.set_called("pc", names)
+    names.append("Other")
+    assert rooms.called("pc") == ["Desk"]
+
+
+def test_called_for_a_satellite_not_yet_seen_makes_its_entry(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.set_called("pc", ["Desk"])
+
+    stored = json.loads((tmp_path / "satellite_rooms.json").read_text())
+    # As seen makes it, so an old brain can read the file, and push_to_talk starts as False.
+    assert stored["pc"]["push_to_talk"] is False and stored["pc"]["area"] is None
+    assert stored["pc"]["called"] == ["Desk"]
+    assert rooms.push_to_talk("pc") is False and rooms.machine("pc") is None and rooms.saves_notes("pc") is False
+    # The satellite's hello then fills in the rest and keeps the names.
+    rooms.seen("pc", True, "pc", True)
+    again = _rooms(tmp_path)
+    assert again.called("pc") == ["Desk"] and again.push_to_talk("pc") is True and again.machine("pc") == "pc"
+
+
+def test_an_old_brain_can_still_read_a_file_with_names(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.seen("pc", True, "pc", True)
+    rooms.set_called("pc", ["Desk"])
+    rooms.set_called("new", ["Other"])
+
+    stored = json.loads((tmp_path / "satellite_rooms.json").read_text())
+    assert set(stored) == {"pc", "new"}
+    for each in stored.values():
+        assert isinstance(each["push_to_talk"], bool)
+        assert each["area"] is None or isinstance(each["area"], str)
+
+
+def test_set_called_raises_when_it_cant_be_saved_and_keeps_what_it_had(tmp_path, monkeypatch):
+    from voice_assistant import satellite_rooms as rooms_module
+
+    rooms = _rooms(tmp_path)
+    rooms.set_called("pc", ["Desk"])
+
+    def refuse(path, data, indent=None):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(rooms_module, "save_json", refuse)
+    with pytest.raises(OSError):
+        rooms.set_called("pc", ["Other"])
+    with pytest.raises(OSError):
+        rooms.set_called("new", ["Other"])
+    # The page is told it failed, so it mustn't also be doing what it was refused.
+    assert rooms.called("pc") == ["Desk"] and rooms.called("new") == []

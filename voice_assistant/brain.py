@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
-from voice_assistant import logging_setup, paths, protocol, storage, watchdog
+from voice_assistant import logging_setup, paths, protocol, satellite_names, storage, watchdog
 from voice_assistant.batteries import BatteryChoices, BatteryWatcher
 from voice_assistant.choices import ChoiceStore
 from voice_assistant.clean_check import CleanCheck
@@ -793,6 +793,76 @@ class Brain:
         except (OSError, ValueError) as e:
             logger.warning(f"Couldn't read the satellites for the {name} satellite's room, so it's on its own: {e}")
             return [name]
+
+    def _named_satellites(self) -> Dict[str, Tuple[Optional[str], List[str]]]:
+        """
+        Returns:
+            Every satellite which may connect, the default first, connected or not, by
+            name, each with its machine and the other names he has given it - what
+            satellite_names matches words against.
+
+        Raises:
+            OSError or ValueError: If the satellites can't be read.
+        """
+        return {name: (self.rooms.machine(name), self.rooms.called(name)) for name in self.satellites()}
+
+    def find_satellite(self, said: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Finds the satellite some words name, such as "my Pi", "the PC" or a name he has
+        given one on the settings page - among every one which may connect, not only those
+        connected, so "the PC isn't connected" can be said of one which is off.
+
+        Args:
+            said: The words, as they were said.
+
+        Returns:
+            The satellite's name and None; or None and what to say when the words name
+            none ("There's no satellite called the phone. There's the Pi and the PC.") or
+            more than one ("Which one: the PC or the Mac?"), or the satellites can't be read.
+        """
+        try:
+            satellites = self._named_satellites()
+        except (OSError, ValueError) as e:
+            logger.warning(f"Couldn't read the satellites to find which one {said!r} is: {e}")
+            return None, "I can't tell which satellites there are just now."
+        found = satellite_names.matching(said, satellites)
+        if len(found) == 1:
+            return found[0], None
+        if found:
+            spoken = [self.spoken_name(name) for name in found]
+            return None, f"Which one: {satellite_names.listed(spoken, 'or')}?"
+        sentence = f"There's no satellite called {said.strip()}."
+        if satellites:
+            there = satellite_names.listed([self.spoken_name(name) for name in satellites], "and")
+            sentence += f" There's {there}."
+        return None, sentence
+
+    def names_satellite(self, said: str) -> bool:
+        """
+        Args:
+            said: Words which may name a satellite, e.g. "the PC".
+
+        Returns:
+            Whether they do - even if they name more than one, as which one isn't what's
+            asked. False if the satellites can't be read, so a phrase falls through to the
+            rest of the rules rather than failing.
+        """
+        try:
+            return bool(satellite_names.matching(said, self._named_satellites()))
+        except (OSError, ValueError) as e:
+            logger.warning(f"Couldn't read the satellites to find whether {said!r} names one: {e}")
+            return False
+
+    def spoken_name(self, name: str) -> str:
+        """
+        Args:
+            name: A satellite's name.
+
+        Returns:
+            What it's called in a reply - "the PC", or the name he gave it on the settings
+            page - as it's said mid-sentence: capitalise it to start one.
+        """
+        return satellite_names.spoken(name, self.rooms.machine(name), self.rooms.called(name))
 
     def ring_on(self, name: str) -> str:
         """

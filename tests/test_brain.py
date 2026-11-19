@@ -478,6 +478,107 @@ def test_ring_on(brain, passwords):
     assert brain.satellites() == ["pc"] and brain.ring_on("pc") == "pc"
 
 
+# Naming a satellite in words
+
+@pytest.fixture
+def named(brain, passwords):
+    """A brain with a Pi (the bedroom, the default), a PC and a Mac, none of them connected."""
+    passwords.add("pc", "the-pcs-password")
+    passwords.add("mac", "the-macs-password")
+    passwords.remove("kitchen")
+    brain.rooms.seen("bedroom", False, "pi")
+    brain.rooms.seen("pc", True, "pc", True)
+    brain.rooms.seen("mac", True, "mac", True)
+    return brain
+
+
+def test_find_satellite_by_machine_word(named):
+    assert named.find_satellite("my Pi") == ("bedroom", None)
+    assert named.find_satellite("the Raspberry Pi") == ("bedroom", None)
+    assert named.find_satellite("the PC") == ("pc", None)
+    assert named.find_satellite("desktop") == ("pc", None)
+    assert named.find_satellite("my laptop") == ("mac", None)
+    # Its own name works too, which is how a machine with no word of its own is found.
+    assert named.find_satellite("bedroom") == ("bedroom", None)
+    assert named.names_satellite("my Pi") is True and named.names_satellite("the PC") is True
+
+
+def test_find_satellite_by_a_name_set_on_the_page(named):
+    named.rooms.set_called("pc", ["Desk", "computer"])
+    # "Computer" is the PC's alone now, not the Mac's too.
+    assert named.find_satellite("the computer") == ("pc", None)
+    assert named.find_satellite("my desk") == ("pc", None)
+    assert named.spoken_name("pc") == "Desk"
+
+
+def test_find_satellite_ambiguous_says_which(named):
+    assert named.find_satellite("the computer") == (None, "Which one: the PC or the Mac?")
+    # Still a name of a satellite, for the rules which ask before they act on it.
+    assert named.names_satellite("the computer") is True
+    named.rooms.set_called("mac", ["Desk"])
+    assert named.find_satellite("computer") == (None, "Which one: the PC or Desk?")
+
+
+def test_find_satellite_ambiguous_among_three_says_which(named, passwords):
+    passwords.add("study", "the-studys-password")
+    named.rooms.seen("study", True, "pc", True)
+    named.rooms.set_called("study", ["Study PC"])
+    assert named.find_satellite("computer") == (None, "Which one: the PC, the Mac or Study PC?")
+
+
+def test_find_satellite_none_lists_them(named, passwords):
+    passwords.remove("mac")
+    assert named.find_satellite("the phone") == (None, "There's no satellite called the phone. There's the Pi and the PC.")
+    # As it was said, not as it's matched.
+    assert named.find_satellite("  My Phone ")[1].startswith("There's no satellite called My Phone. ")
+    assert named.names_satellite("the phone") is False
+
+
+def test_find_satellite_none_lists_three_or_more_and_names_without_a_machine_word(named, passwords):
+    passwords.add("study", "the-studys-password")
+    named.rooms.seen("study", False, "linux")
+    assert named.find_satellite("the phone") == (
+        None, "There's no satellite called the phone. There's the Pi, the PC, the Mac and study.")
+    # The default first, then the rest as they were added.
+    assert named.satellites() == ["bedroom", "pc", "mac", "study"]
+
+
+def test_find_satellite_with_none_to_name_says_so(named, passwords):
+    for name in ("bedroom", "pc", "mac"):
+        passwords.remove(name)
+    assert named.find_satellite("the PC") == (None, "There's no satellite called the PC.")
+
+
+def test_find_satellite_includes_disconnected_ones(named):
+    assert named.sessions == {}
+    assert named.find_satellite("the PC") == ("pc", None)
+    assert named.find_satellite("the Mac") == ("mac", None)
+    # By its own name too, with no session at all.
+    assert named.find_satellite("bedroom") == ("bedroom", None)
+
+
+def test_find_satellite_when_the_satellites_cant_be_read(named, monkeypatch):
+    def unreadable():
+        raise OSError("gone")
+
+    monkeypatch.setattr(named, "satellites", unreadable)
+    # Neither raises, as a voice command shouldn't fail for it.
+    assert named.find_satellite("the PC") == (None, "I can't tell which satellites there are just now.")
+    assert named.names_satellite("the PC") is False
+
+
+def test_spoken_name(named, passwords):
+    assert named.spoken_name("bedroom") == "the Pi"
+    assert named.spoken_name("pc") == "the PC"
+    assert named.spoken_name("mac") == "the Mac"
+    # One with no machine word, or one not known at all, is called what it's named.
+    passwords.add("study", "the-studys-password")
+    named.rooms.seen("study", False, "linux")
+    assert named.spoken_name("study") == "study" and named.spoken_name("ghost") == "ghost"
+    named.rooms.set_called("pc", ["Desk"])
+    assert named.spoken_name("pc") == "Desk"
+
+
 def test_the_brain_lists_the_satellites_of_a_room_own_first(brain, connect):
     serving(brain)
     connect(brain, "bedroom", BEDROOM)
