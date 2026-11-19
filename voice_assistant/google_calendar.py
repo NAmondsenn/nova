@@ -1087,6 +1087,233 @@ class GoogleCalendar:
             logger.info(f"Google wouldn't set an event back to confirmed ({e.response.status_code}), so it's copied")
             self._insert(calendar_id, copy)
 
+    def change(self, search: str, day: Optional[date] = None, at: Optional[str] = None, start: Optional[str] = None,
+               end: Optional[str] = None, summary: Optional[str] = None, following: bool = False,
+               calendar: Optional[str] = None, today: Optional[date] = None, now: Optional[datetime] = None) -> Dict:
+        """
+        Moves or renames an event on one of the user's own calendars, for "move the dentist to
+        Friday at 4" or "rename it to dentist check-up" - straight away, and said back so a
+        mistake is heard, and undone by "undo that". Only that day's of a repeating event, unless
+        following: then from that one on, as Google Calendar's "this and following events" does,
+        so the times before it stay - and then only its time of day can move, not its day. It's
+        sent once, never again by itself.
+
+        Args:
+            search: A word or two from its name, e.g. "dentist".
+            day: The day it's on, if the user said - else it's looked for from today.
+            at: The time it starts, "HH:MM", if the user said.
+            start: When it's to start, local - "YYYY-MM-DD HH:MM", or "YYYY-MM-DD" for the day
+                alone, which keeps the time it's at, or keeps one all day all day. None to leave it.
+            end: When it's to end, the same way - an end day is included. None for the length it
+                had, or DEFAULT_LENGTH for one all day given a time.
+            summary: What it's to be called, or None to leave its name.
+            following: Whether to change it from this one on, for "all of them" or "every week".
+            calendar: The calendar it's on, if the user named one - "work" is Work.
+            today: Today's date - only given by the tests.
+            now: The time now - only given by the tests.
+
+        Returns:
+            Dict with 'success' and what was changed, or why not, as the 'message' - and once
+            it's changed, an 'undo', which puts it back as it was.
+        """
+        today, now = _today_and_now(today, now)
+        new_name = summary.strip() if isinstance(summary, str) else ""
+        start, end = (None if isinstance(each, str) and not each.strip() else each for each in (start, end))
+        if start is None and not new_name:
+            return {"success": False, "message": "I didn't catch what to change."}
+        first = last = None
+        if start is not None or end is not None:
+            first, last = _when_said(start), _when_said(end) if end is not None else None
+            if first is None or (end is not None and last is None):
+                return {"success": False, "message": "I didn't catch when that is."}
+            # As adding: earlier today is fine, but a day gone is most likely the week or the
+            # year misheard.
+            if (first.date() if isinstance(first, datetime) else first) < today:
+                return {"success": False, "message": DAY_GONE}
+        found = self._to_change(search, day, at, following, today, now, calendar)
+        if isinstance(found, str):
+            return {"success": False, "message": found}
+        try:
+            times = _moved_times(first, last, found) if first is not None else None
+        except READ_FAILURES as e:
+            return _not_changed(e)
+        if isinstance(times, str):
+            return {"success": False, "message": times}
+        if following and found["recurring_id"]:
+            # Another day for every time would need the series' rule changed too - "every Tuesday"
+            # to Wednesdays - which is left to Google Calendar.
+            if times and _first_day(times[0]) != _day_of(found):
+                return {"success": False, "message": "I can only change the time for all of them. Move the days in "
+                                                     "Google Calendar."}
+            return self._change_following(found, times, new_name, today)
+        summary = found["summary"]
+        # A time a repeating event is on has an id of its own, so this changes that day only.
+        url = _event_url(found["calendar_id"], found["id"])
+        try:
+            event = found["event"]
+            changed, back = {}, {}
+            if times:
+                changed["start"], changed["end"] = _replacing(times, (event["start"], event["end"]))
+                back["start"], back["end"] = _replacing((event["start"], event["end"]), times)
+            if new_name:
+                changed["summary"], back["summary"] = new_name, event.get("summary")
+            self._send_once("PATCH", url, changed)
+        except (_NotSure,) + READ_FAILURES as e:
+            return _change_failed(e, summary)
+        logger.info("Changed an event on Google's calendar")
+        was = _when_changed(found, today)
+        if times:
+            to = _when_changed(_read_event({"start": times[0], "end": times[1]}), today)
+        if times and new_name:
+            message, undone = f"Moved {summary} to {to} and renamed it {new_name}.", \
+                f"Put {summary} back as it was, {was}."
+        elif times:
+            message, undone = f"Moved {summary} to {to}.", f"Moved {summary} back to {was}."
+        else:
+            message, undone = f"Renamed {summary} to {new_name}, {was}.", f"Renamed it back to {summary}."
+        # One deleted since is gone by the name it has now.
+        return {"success": True, "message": message,
+                "undo": _undo(new_name or summary, lambda: self._send_once("PATCH", url, back), undone,
+                              f"I can't tell whether {summary} was put back.")}
+
+    def _change_following(self, found: Dict, times: Optional[Tuple[Dict, Dict]], new_name: str, today: date) -> Dict:
+        """
+        Changes a repeating event from one of its times on: the series itself from its first,
+        else the series ended just before this one and a new one started from it, with the change -
+        as Google Calendar's "this and following events" does, so the times before it stay.
+
+        Args:
+            found: The time, as _to_change gives it.
+            times: Its new start and end, on its own day, as Google takes them - or None to leave them.
+            new_name: What it's to be called, or "" to leave its name.
+            today: Today's date.
+
+        Returns:
+            Dict with 'success' and what was changed, or why not, as the 'message' - and once
+            it's changed, an 'undo', which puts the series back as it was.
+        """
+        summary = found["summary"]
+        series_url = _event_url(found["calendar_id"], found["recurring_id"])
+        on = f"from {spoken_day(_day_of(found), today)} on"
+        if times:
+            new = _read_event({"start": times[0]})
+            at = "all day" if new["all_day"] else spoken_clock_time(new["start"].hour, new["start"].minute).replace(":00", "")
+        if times and new_name:
+            message = f"Moved {summary} to {at} {on} and renamed it {new_name}."
+        elif times:
+            message = f"Moved {summary} to {at} {on}."
+        else:
+            message = f"Renamed {summary} to {new_name} {on}."
+        try:
+            series = self._get(series_url, {})
+            rules = series.get("recurrence")
+            if not isinstance(rules, list) or not all(isinstance(rule, str) for rule in rules):
+                raise ValueError("The series has no rules")
+            # By when this one was meant to be, which the series' rules make it - not where it's
+            # been moved to since.
+            this = _google_when(found["event"].get("originalStartTime") or found["event"]["start"])
+            day = this.astimezone().date() if isinstance(this, datetime) else this
+            # The new times - or for a new name alone, the series' own - on the day this one was
+            # meant to be, in the zone the series repeats in, which Google needs of a repeating event.
+            moved = _in_zone(_on_day(times or (series["start"], series["end"]), day),
+                             (series["start"] or {}).get("timeZone"))
+            if this == _google_when(series["start"]):
+                changed, back = {}, {}
+                if times:
+                    changed["start"], changed["end"] = _replacing(moved, (series["start"], series["end"]))
+                    back["start"], back["end"] = _replacing((series["start"], series["end"]), moved)
+                if new_name:
+                    changed["summary"], back["summary"] = new_name, series.get("summary")
+                self._send_once("PATCH", series_url, changed)
+                logger.info("Changed a repeating event on Google's calendar")
+                return {"success": True, "message": message,
+                        "undo": _undo(new_name or summary, lambda: self._send_once("PATCH", series_url, back),
+                                      f"Put {summary} back as it was.", f"I can't tell whether {summary} was put back.")}
+            # A COUNT counts from the series' first time, so the new series' is what was left of it.
+            counted = any(re.search(r"[:;]COUNT=", rule, re.IGNORECASE) for rule in rules
+                          if rule.upper().startswith("RRULE:"))
+            new_series = {**_copy(series), "start": moved[0], "end": moved[1],
+                          "recurrence": _rules_left(rules, self._times_before(series_url, this) if counted else 0)}
+            if new_name:
+                new_series["summary"] = new_name
+            self._send_once("PATCH", series_url, {"recurrence": _cut_rules(rules, this)})
+        except (_NotSure,) + READ_FAILURES as e:
+            return _change_failed(e, summary)
+        # The series is cut short now, so whatever happens to the new one, it's never left that
+        # way unsaid: put back as it was if the new one wasn't added, or may have been.
+        try:
+            new_id = self._insert(found["calendar_id"], new_series)
+        except _NotSure as e:
+            logger.warning(f"Couldn't tell whether Google added a repeating event's new series: {e}")
+            self._rules_back(series_url, rules)
+            return {"success": False, "message": f"I can't tell whether the new {summary} was added, so check Google "
+                                                 "Calendar."}
+        except READ_FAILURES as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            logger.error(f"Couldn't add a repeating event's new series: {type(e).__name__}{f' {status}' if status else ''}")
+            if self._rules_back(series_url, rules):
+                return {"success": False, "message": f"I couldn't change them, so I've left {summary} as it was."}
+            return {"success": False, "message": f"I couldn't change them, and I can't be sure {summary} is as it was, "
+                                                 "so check Google Calendar."}
+        logger.info("Changed a repeating event on Google's calendar from one of its times on")
+        new_url = _event_url(found["calendar_id"], new_id)
+
+        def put_back():
+            try:
+                self._send_once("DELETE", new_url)
+            except requests.HTTPError as e:
+                # Deleted on the phone since - the old series is still to be put back.
+                if not _gone(e):
+                    raise
+            try:
+                self._send_once("PATCH", series_url, {"recurrence": rules})
+            except READ_FAILURES as e:
+                if _gone(e):
+                    raise
+                # The new series is off, but the old one is still cut short.
+                raise _NotSure("Google wouldn't put it back", f"the old series not put back: {type(e).__name__}") \
+                    from e
+
+        return {"success": True, "message": message,
+                "undo": _undo(summary, put_back, f"Put {summary} back as it was.",
+                              f"I can't be sure {summary} is back as it was, so check Google Calendar.")}
+
+    def _times_before(self, series_url: str, this: Union[date, datetime]) -> int:
+        """
+        How many times of a repeating event were meant to be before one of them - for its COUNT,
+        which counts every time its rule makes, so one deleted on its own counts too, and each
+        by when it was meant to be, wherever it's been moved since.
+
+        Args:
+            series_url: The series' address.
+            this: When the time was meant to be, as the series' start is given.
+
+        Returns:
+            How many.
+
+        Raises:
+            The same as _pages, and KeyError, ValueError or TypeError for a time that can't be read.
+        """
+        until = _sort_key(this)
+        listed = self._pages(f"{series_url}/instances",
+                             {"timeMax": until.isoformat(), "showDeleted": "true", "maxResults": EVENTS_PAGE})
+        return sum(1 for each in listed if _sort_key(_google_when(each.get("originalStartTime") or each["start"])) < until)
+
+    def _rules_back(self, series_url: str, rules: List[str]) -> bool:
+        """
+        Puts a repeating event's rules back as they were, once - after its series was cut short
+        for a new one that wasn't added, or may not have been.
+
+        Returns:
+            Whether Google said it was done.
+        """
+        try:
+            self._send_once("PATCH", series_url, {"recurrence": rules})
+        except (_NotSure,) + READ_FAILURES as e:
+            logger.error(f"Couldn't put a repeating event's rules back: {type(e).__name__}")
+            return False
+        return True
+
     def _to_change(self, search: str, day: Optional[date], at: Optional[str], following: bool, today: date,
                    now: datetime, calendar: Optional[str] = None) -> Union[Dict, str]:
         """
@@ -1095,8 +1322,9 @@ class GoogleCalendar:
         named, if they were.
 
         A time a repeating event was on that has started is never one: earlier times are the
-        record of past shifts and lectures, so they stay as they were. A one-off is changed
-        whenever it was.
+        record of past shifts and lectures, so they stay as they were. One moved since has started
+        when the time it was meant to be has, too - see _started. A one-off is changed whenever it
+        was.
 
         Args:
             search: A word or two from its name, e.g. "dentist".
@@ -1457,6 +1685,131 @@ def _cut_rules(rules: List[str], before: Union[date, datetime]) -> List[str]:
                  if part.split("=", 1)[0].upper() not in ("COUNT", "UNTIL")]
         cut.append(rule[:len("RRULE:")] + ";".join(parts + [f"UNTIL={until}"]))
     return cut
+
+
+def _rules_left(rules: List[str], before: int) -> List[str]:
+    """
+    A repeating event's rules for a new series from one of its times on - for "move the gym to
+    7 from Tuesday on", whose new series has only the times that were left.
+
+    Args:
+        rules: The series' recurrence, as Google gives it.
+        before: How many of its times were meant to be before the one the new series is from.
+
+    Returns:
+        The rules, each RRULE's COUNT lowered by those before - "COUNT=10" with 4 before is
+        "COUNT=6" - and an UNTIL, and EXDATE and RDATE lines, kept as they are.
+
+    Raises:
+        ValueError: If a COUNT can't be read, or has no times left.
+    """
+    left = []
+    for rule in rules:
+        if rule.upper().startswith("RRULE:"):
+            parts = rule[len("RRULE:"):].split(";")
+            for index, part in enumerate(parts):
+                name, _, value = part.partition("=")
+                if name.upper() == "COUNT":
+                    count = int(value) - before
+                    if count < 1:
+                        raise ValueError("The series has no times left")
+                    parts[index] = f"{name}={count}"
+            rule = rule[:len("RRULE:")] + ";".join(parts)
+        left.append(rule)
+    return left
+
+
+def _change_failed(error: Exception, summary: str) -> Dict:
+    """
+    What's said when an event wasn't changed - or may have been, when Google's answer didn't
+    say, so it's never sent again - or was gone meanwhile.
+
+    Args:
+        error: Why, as _send_once or reading raised it.
+        summary: The event's name, e.g. "Dentist".
+
+    Returns:
+        Dict with 'success' False and what to say as the 'message'.
+    """
+    if isinstance(error, _NotSure):
+        logger.warning(f"Couldn't tell whether Google changed an event: {error}")
+        return {"success": False, "message": f"I can't tell whether {summary} was changed."}
+    if _gone(error):
+        logger.info("An event to change was already gone from Google's calendar")
+        return {"success": False, "message": f"{summary} was already gone."}
+    return _not_changed(error)
+
+
+def _moved_times(first: Union[date, datetime], last: Union[date, datetime, None],
+                 event: Dict) -> Union[str, Tuple[Dict, Dict]]:
+    """
+    An event's new start and end, for "move the dentist to Friday at 4".
+
+    Args:
+        first: When it's to start, as _when_said reads it - a day alone keeps the time one at a
+            time is at, and keeps one all day all day.
+        last: When it's to end, the same way - an end day is included - or None for the length
+            it had: DEFAULT_LENGTH for one all day given a time, and as many days for one all day.
+        event: The event, as events gives it with whole.
+
+    Returns:
+        (start, end) - each {"dateTime": local RFC 3339} or {"date"} - or what to say when they
+        can't be used.
+
+    Raises:
+        ValueError: If Google's own end of an event all day can't be read.
+    """
+    if not isinstance(first, datetime) and event["all_day"]:
+        if last is None:
+            # Google's end day is the day after - one day's event ends on the next.
+            end = (event["event"].get("end") or {}).get("date")
+            days = max(date.fromisoformat(end) - event["start"], timedelta(days=1)) if end else timedelta(days=1)
+        else:
+            last = last.date() if isinstance(last, datetime) else last
+            if last < first:
+                return "That ends before it starts."
+            days = last - first + timedelta(days=1)
+        return {"date": first.isoformat()}, {"date": (first + days).isoformat()}
+    if not isinstance(first, datetime):
+        first = datetime.combine(first, event["start"].time()).astimezone()
+    if last is not None and not isinstance(last, datetime):
+        return "I didn't catch when that is."
+    length = event["end"] - event["start"] if not event["all_day"] and event["end"] else DEFAULT_LENGTH
+    # Added on, then put in the brain's zone again, as an event added is.
+    last = last or (first + length).astimezone()
+    if last <= first:
+        return "That ends before it starts."
+    return {"dateTime": first.isoformat()}, {"dateTime": last.isoformat()}
+
+
+def _on_day(times: Tuple[Dict, Dict], day: date) -> Tuple[Dict, Dict]:
+    """
+    A start and end, as Google gives them, put on another day - at the same time on the clock,
+    for as long: a time of a series, as a new series from it starts.
+    """
+    start, end = times
+    if "date" in start:
+        return {"date": day.isoformat()}, {"date": (day + (_google_when(end) - _google_when(start))).isoformat()}
+    first, last = _google_when(start).astimezone(), _google_when(end)
+    moved = datetime.combine(day, first.time()).astimezone()
+    return {"dateTime": moved.isoformat()}, {"dateTime": (moved + (last - first)).astimezone().isoformat()}
+
+
+def _in_zone(times: Tuple[Dict, Dict], zone: Optional[str]) -> Tuple[Dict, Dict]:
+    """A repeating event's start and end, each at a time given the zone it repeats in - which Google needs of one."""
+    if not zone:
+        return times
+    return tuple({**each, "timeZone": zone} if "dateTime" in each else each for each in times)
+
+
+def _replacing(times: Tuple[Dict, Dict], was: Tuple[Dict, Dict]) -> Tuple[Dict, Dict]:
+    """
+    A start and end to patch over the ones an event has, with the kind they take the place of
+    cleared - Google's patch keeps whatever it isn't sent, so one all day given a time is sent
+    {"date": None, "dateTime": ...}.
+    """
+    return tuple({**{key: None for key in ("date", "dateTime") if key in old and key not in new}, **new}
+                 for new, old in zip(times, was))
 
 
 def _never_connected(error: Exception) -> bool:
@@ -1957,8 +2310,20 @@ def _today_and_now(today: Optional[date], now: Optional[datetime]) -> Tuple[date
 
 
 def _started(event: Dict, now: datetime) -> bool:
-    """Whether an event read has started by now - one all day from the start of its day."""
-    return event["start"] <= now.date() if event["all_day"] else event["start"] <= now
+    """
+    Whether an event read has started by now - one all day from the start of its day. A time of
+    a repeating event moved since has started once either its own time or the one it was meant
+    to be has: changing it from that one on would cut its series from when it was meant to be.
+    """
+    starts = [event["start"]]
+    meant = (event.get("event") or {}).get("originalStartTime")
+    if meant:
+        try:
+            starts.append(_google_when(meant))
+        except (KeyError, ValueError, TypeError):
+            # When it was meant to be can't be read, so it's never changed.
+            return True
+    return any(start <= now if isinstance(start, datetime) else start <= now.date() for start in starts)
 
 
 def _when_changed(event: Dict, today: date) -> str:
