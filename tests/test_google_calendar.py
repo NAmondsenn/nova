@@ -746,9 +746,9 @@ def test_every_calendar_in_googles_list_is_read(monkeypatch, tmp_path):
     # Both pages of the list, the second asked for by Google's token for it.
     assert [params.get("pageToken") for url, params in google.asked if url == LIST] == [None, "page-2"]
     assert calendar.known() == [
-        {"id": "calendar-personal", "name": "Personal", "primary": True, "writable": True},
-        {"id": "calendar-uni", "name": "Uni", "primary": False, "writable": False},
-        {"id": "calendar-work", "name": "Work", "primary": False, "writable": False}]
+        {"id": "calendar-personal", "name": "Personal", "primary": True, "writable": True, "timeZone": "Europe/London"},
+        {"id": "calendar-uni", "name": "Uni", "primary": False, "writable": False, "timeZone": "Europe/London"},
+        {"id": "calendar-work", "name": "Work", "primary": False, "writable": False, "timeZone": "Europe/London"}]
     for calendar_id, params in _read(calendar):
         assert params["singleEvents"] == "true" and params["orderBy"] == "startTime"
         assert params["maxResults"] == 250
@@ -1247,7 +1247,8 @@ def test_the_primary_calendar_isnt_an_activity(make_calendar, tmp_path):
     calendar = make_calendar(calendars={"calendar-personal": [], "calendar-work": []})
     calendar.calendars()
     assert calendar.activity_calendars() == {
-        "work": {"id": "calendar-work", "name": "Work", "primary": False, "writable": True}}
+        "work": {"id": "calendar-work", "name": "Work", "primary": False, "writable": True,
+                 "timeZone": "Europe/London"}}
 
     # Until it's switched on in calendars.json - and Work, switched off there, isn't one.
     calendar.choices = _choices(tmp_path, {"calendar-personal": True, "calendar-work": False})
@@ -2887,6 +2888,46 @@ def test_an_all_day_series_is_split_from_this_one_on_with_the_times_left(for_cha
     assert reply["undo"]() == {"success": True, "message": "Put Bins back as it was."}
     assert calendar._session.sent[2:] == [_write("DELETE", _event_url("calendar-personal", "made-up-event")),
                                           _write("PATCH", bins, {"recurrence": rules})]
+
+
+def _bins_series_all_day(first_day="2026-11-03", last_day="2026-11-04"):
+    """Bins all day every Tuesday from a day, eight times, the 10th of November left out."""
+    return _series("Bins", "made-up-bins", first_day, last_day, "RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=8",
+                   "EXDATE;VALUE=DATE:20261110")
+
+
+def test_an_all_day_series_given_a_time_from_this_one_on_is_given_the_calendars_zone(for_changing):
+    # Google needs a zone for a repeating event at a time, and one all day has none: the calendar's, Europe/London
+    # for Personal, is given to the new start and end.
+    bins = _event_url("calendar-personal", "made-up-bins")
+    series = _bins_series_all_day()
+    before = [_occurrence("Bins", "made-up-bins", "2026-11-03", "2026-11-04"),
+              _occurrence("Bins", "made-up-bins", "2026-11-17", "2026-11-18")]
+    occurrences = [_occurrence("Bins", "made-up-bins", "2026-11-24", "2026-11-25"),
+                   _occurrence("Bins", "made-up-bins", "2026-12-01", "2026-12-02")]
+    calendar = for_changing(personal=occurrences, answers={
+        bins: [series], f"{bins}/instances": [_events_page(), _events_page(*before)],
+        f"PATCH {bins}": [series], f"POST {PERSONAL_EVENTS}": [_inserted()]})
+    assert _said(calendar.change("bins", start="2026-11-24 19:00", following=True, today=NOVEMBER_21))["success"]
+    sent = calendar._session.sent[1]["json"]
+    assert sent["start"] == {"dateTime": "2026-11-24T19:00:00+00:00", "timeZone": "Europe/London"}
+    assert sent["end"] == {"dateTime": "2026-11-24T20:00:00+00:00", "timeZone": "Europe/London"}
+
+    # From its first time on, the series itself is changed, with the date cleared.
+    first = _bins_series_all_day("2026-11-24", "2026-11-25")
+    calendar = for_changing(personal=occurrences, answers={bins: [first], f"PATCH {bins}": [first]})
+    assert _said(calendar.change("bins", start="2026-11-24 19:00", following=True, today=NOVEMBER_21))["success"]
+    assert calendar._session.sent == [_write("PATCH", bins, {
+        "start": {"date": None, "dateTime": "2026-11-24T19:00:00+00:00", "timeZone": "Europe/London"},
+        "end": {"date": None, "dateTime": "2026-11-24T20:00:00+00:00", "timeZone": "Europe/London"}})]
+
+    # A calendar Google gave no zone for leaves it out, as it was.
+    unzoned = _entry("calendar-personal", "Personal", primary=True)
+    del unzoned["timeZone"]
+    calendar = for_changing(personal=occurrences, answers={
+        LIST: [_calendar_list(unzoned)], bins: [first], f"PATCH {bins}": [first]})
+    assert _said(calendar.change("bins", start="2026-11-24 19:00", following=True, today=NOVEMBER_21))["success"]
+    assert calendar._session.sent[0]["json"]["start"] == {"date": None, "dateTime": "2026-11-24T19:00:00+00:00"}
 
 
 def test_a_series_with_guests_isnt_split_from_this_one_on(for_changing):

@@ -607,8 +607,9 @@ class GoogleCalendar:
             max_age: Seconds the list read last is good for.
 
         Returns:
-            Each calendar as {"id", "name", "primary", "writable"} - writable for the user's
-            own, as calendar.events.owned only adds to those.
+            Each calendar as {"id", "name", "primary", "writable", "timeZone"} - writable for the
+            user's own, as calendar.events.owned only adds to those, and the zone Google keeps the
+            calendar in, e.g. "Europe/London", or None if it gave none.
 
         Raises:
             SignInNeeded: If there's no sign-in, or Google no longer accepts it.
@@ -629,11 +630,28 @@ class GoogleCalendar:
                     raise ValueError("A calendar in Google's list has no id")
                 listed.append({"id": entry["id"], "name": entry.get("summaryOverride") or entry.get("summary") or "",
                                "primary": entry.get("primary") is True,
-                               "writable": entry.get("accessRole") == "owner"})
+                               "writable": entry.get("accessRole") == "owner",
+                               "timeZone": entry["timeZone"] if isinstance(entry.get("timeZone"), str) else None})
             with self._reading:
                 if generation == self._generation:
                     self._known, self._known_at = listed, time.monotonic()
                     return list(listed)
+
+    def _calendar_zone(self, calendar_id: str) -> Optional[str]:
+        """
+        The zone Google keeps a calendar in, as its list gives it - which a repeating event at a
+        time of its own is expanded in, unless it has one of its own.
+
+        Args:
+            calendar_id: The calendar's id.
+
+        Returns:
+            The zone's name, e.g. "Europe/London" - or None if Google gave none.
+
+        Raises:
+            The same as calendars.
+        """
+        return next((each["timeZone"] for each in self.calendars() if each["id"] == calendar_id), None)
 
     def read_list_again(self):
         """
@@ -1275,7 +1293,11 @@ class GoogleCalendar:
             repeats_in = (series["start"] or {}).get("timeZone")
             own = None if times else repeats_in
             day = this.astimezone(_zone_named(own)).date() if isinstance(this, datetime) else this
-            moved = _in_zone(_on_day(times or (series["start"], series["end"]), day, own), repeats_in)
+            moved = _on_day(times or (series["start"], series["end"]), day, own)
+            # A series all day has no zone, and Google needs one of a repeating event at a time: the calendar's.
+            if not repeats_in and "dateTime" in moved[0]:
+                repeats_in = self._calendar_zone(found["calendar_id"])
+            moved = _in_zone(moved, repeats_in)
             if this == _google_when(series["start"]):
                 changed, back = {}, {}
                 if times:

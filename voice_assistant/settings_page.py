@@ -935,7 +935,9 @@ class SettingsPage:
         left_out = calendar.left_out()
         new_events = calendar.new_events_calendar(listed)
         return {"available": True, "signed_in": True, "new_events": new_events["id"] if new_events else None,
-                "calendars": [{**each, "whats_on": each["id"] not in left_out, "activity": calendar.is_activity(each)}
+                # The zone is for the calendar's own writes, not something the page shows.
+                "calendars": [{**{key: value for key, value in each.items() if key != "timeZone"},
+                               "whats_on": each["id"] not in left_out, "activity": calendar.is_activity(each)}
                               for each in listed]}
 
     def home_choices_state(self) -> Dict:
