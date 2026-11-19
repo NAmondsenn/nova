@@ -36,6 +36,7 @@ from voice_assistant.google_calendar import named_by_address
 from voice_assistant.home_assistant import CANT_REACH, HomeAssistant, NotAllowed
 from voice_assistant.lists import NO_ANSWER, names_list
 from voice_assistant.navidrome import NavidromeError, NavidromeLibrary
+from voice_assistant.undo import LastChange
 
 # Logger setup
 logger = logging.getLogger(__name__)
@@ -359,6 +360,8 @@ class ActionExecutor:
         # What was last asked, and what the assistant said - or the last alert, and
         # all of it - for "send that to my phone". Kept up to date by the Conversation.
         self.last_answer: Optional[Tuple[str, str]] = None
+        # The last playlist or calendar change, for "undo that" - see _keep_or_note.
+        self.last_change = LastChange()
 
     def _ring_on_satellite(self) -> Optional[str]:
         """Returns the satellite a timer or alarm set now rings on - None if the user isn't at one in particular."""
@@ -482,7 +485,40 @@ class ActionExecutor:
         accepted = list(inspect.signature(method).parameters)[1:]
         params = {name: value for name, value in action.params.items() if name in accepted}
         reply = method(self, **params)
+        self._keep_or_note(action.tool, method, reply)
         return reply if isinstance(reply, ActionResult) else ActionResult.from_reply(reply)
+
+    def _keep_or_note(self, name: str, method: Callable, reply: Union[Dict, ActionResult]) -> None:
+        """
+        Keeps a change which has just been made for "undo that", or notes that something
+        else was done since the last one - "undo that" only reaches a change which was
+        the last thing done, so it never takes back the dentist when "that" was the milk.
+
+        A change says how to take it back with an "undo" in its reply, which only a success
+        has. A failure changed nothing, so it leaves the slot as it was - "add this to Gym"
+        refused leaves the add before it undoable - and so does a tool which only reads
+        something for the model to answer from. A tool may answer with an ActionResult of its
+        own, whose ok counts as success but which can't carry an undo.
+
+        Args:
+            name: The tool's name.
+            method: The tool.
+            reply: What it answered.
+        """
+        # Undoing touches nothing more: taking the change emptied the slot if it worked, and a
+        # refusal - "I've left it" - leaves it as it was, to be said the same again.
+        if name == "undo_last_change":
+            return
+        if isinstance(reply, ActionResult):
+            succeeded, undo = reply.ok, None
+        else:
+            succeeded, undo = bool(reply.get("success")), reply.get("undo")
+        if not succeeded:
+            return
+        if callable(undo):
+            self.last_change.keep(undo)
+        elif not method.tool["reads"]:
+            self.last_change.note_other()
 
     # Music
 
@@ -1971,3 +2007,17 @@ class ActionExecutor:
     )
     def tell_me_more(self):
         return self.ntfy.tell_more()
+
+    # Undoing
+
+    @tool(
+        "Undo the last playlist or calendar change you made - adding, removing, moving or renaming, a new "
+        "playlist, or a like - for 'undo that', 'put it back' or 'take that back'. It only reaches that change "
+        "while it's the last thing done. What it did is said for you, so just reply 'Okay.'",
+        needs=None,
+    )
+    def undo_last_change(self):
+        taken = self.last_change.take()
+        if isinstance(taken, str):
+            return {"success": False, "message": taken}
+        return taken()

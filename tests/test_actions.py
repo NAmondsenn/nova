@@ -14,6 +14,8 @@ from voice_assistant import volume as volume_module
 from voice_assistant.actions import NOT_A_COMMAND, Action, ActionExecutor, ActionResult, confirm
 from voice_assistant.batteries import Battery
 from voice_assistant.downloads import ON_ITS_WAY, Downloads, Wanted
+from voice_assistant.undo import (NOTHING_TO_UNDO, SOMETHING_ELSE_SINCE, TOO_LATE, UNDO_CHANGE_KEPT,
+                                   LastChange)
 from voice_assistant.volume import VolumeControl
 
 
@@ -475,6 +477,134 @@ def test_add_to_calendar_is_only_offered_once_google_is_set_up():
                                                          "calendar": "work"}, from_model=True))
     assert calendar.asked == ("Shift", "2026-10-31 09:00", None, None, "work")
     assert (result.ok, result.say) == (True, "Added Shift to Work, Saturday the 31st at 9 AM.")
+
+
+# "Undo that"
+
+class ChangingCalendar:
+    """A calendar whose add works, leaving a way to undo it, until it's made to fail."""
+
+    def __init__(self):
+        self.works = True
+        self.undone = 0
+
+    def activity_calendars(self):
+        return {}
+
+    def agenda(self, first, days):
+        return {"success": True, "message": "You've got nothing on."}
+
+    def add(self, summary, start, end=None, all_day=None, calendar=None):
+        if not self.works:
+            return {"success": False, "message": "I couldn't add that."}
+        return {"success": True, "message": "Added.", "undo": self._undo}
+
+    def _undo(self):
+        self.undone += 1
+        return {"success": True, "message": "Undone."}
+
+
+DENTIST = Action("add_to_calendar", {"summary": "Dentist", "start": "2026-11-26 15:00"})
+UNDO_THAT = Action("undo_last_change")
+
+
+def test_undo_that_runs_the_last_changes_undo_and_says_what_it_says():
+    calendar = ChangingCalendar()
+    executor = ActionExecutor(calendar=calendar)
+    assert executor.execute(DENTIST).say == "Added."
+    assert calendar.undone == 0
+
+    result = executor.execute(UNDO_THAT)
+    assert (result.ok, result.say) == (True, "Undone.")
+    assert calendar.undone == 1
+
+    # Kept for one undo, and an undo can't itself be undone.
+    result = executor.execute(UNDO_THAT)
+    assert (result.ok, result.say) == (False, NOTHING_TO_UNDO)
+    assert calendar.undone == 1
+
+
+def test_undo_that_is_always_offered_and_says_what_it_reverses():
+    offered = {schema["name"]: schema for schema in ActionExecutor().tool_schemas()}
+    description = offered["undo_last_change"]["description"]
+    for words in ("playlist or calendar change", "undo that", "put it back", "take that back"):
+        assert words in description
+    assert ActionExecutor().execute(UNDO_THAT).say == NOTHING_TO_UNDO
+
+
+def test_undo_that_after_ten_minutes_is_too_late():
+    now = [1000.0]
+    calendar = ChangingCalendar()
+    executor = ActionExecutor(calendar=calendar)
+    executor.last_change = LastChange(clock=lambda: now[0])
+    executor.execute(DENTIST)
+    now[0] += UNDO_CHANGE_KEPT + 1
+    result = executor.execute(UNDO_THAT)
+    assert (result.ok, result.say) == (False, TOO_LATE)
+    assert calendar.undone == 0
+
+
+def test_another_action_since_means_undo_leaves_the_change():
+    calendar = ChangingCalendar()
+    executor = ActionExecutor(calendar=calendar, clock=RecordingClock())
+    executor.execute(DENTIST)
+    assert executor.execute(Action("set_timer", {"duration_seconds": 600})).ok
+
+    result = executor.execute(UNDO_THAT)
+    assert (result.ok, result.say) == (False, SOMETHING_ELSE_SINCE)
+    assert calendar.undone == 0
+
+
+def test_an_action_which_answers_with_a_result_of_its_own_counts_as_another_action():
+    class SpeakingClock:
+        def list_timers(self):
+            return ActionResult(True, "You've got no timers.")
+
+    calendar = ChangingCalendar()
+    executor = ActionExecutor(calendar=calendar, clock=SpeakingClock())
+    executor.execute(DENTIST)
+    assert executor.execute(Action("list_timers")).ok
+    assert executor.execute(UNDO_THAT).say == SOMETHING_ELSE_SINCE
+
+
+def test_a_failed_action_or_a_read_since_leaves_the_change_undoable():
+    calendar = ChangingCalendar()
+    home = SimpleNamespace(status=lambda about: {"success": True, "message": "The sun sets at 4."})
+    executor = ActionExecutor(calendar=calendar, home=home)
+    executor.execute(DENTIST)
+
+    # A change which didn't work, whatever the tool.
+    calendar.works = False
+    assert executor.execute(DENTIST).ok is False
+    assert executor.execute(Action("get_calendar", {"start": "Thursday"})).ok is False
+    assert executor.execute(Action("play_netflix")).ok is False
+    # Something Home Assistant is only read from, to answer from.
+    assert executor.execute(Action("home_status", {"about": "sunset"})).ok
+
+    result = executor.execute(UNDO_THAT)
+    assert (result.ok, result.say) == (True, "Undone.")
+    assert calendar.undone == 1
+
+
+def test_a_change_which_failed_leaves_nothing_to_undo():
+    calendar = ChangingCalendar()
+    calendar.works = False
+    executor = ActionExecutor(calendar=calendar)
+    assert executor.execute(DENTIST).ok is False
+    assert executor.execute(UNDO_THAT).say == NOTHING_TO_UNDO
+
+
+def test_a_change_which_says_it_failed_is_never_kept():
+    # Even with an undo in its reply, which a failure shouldn't have.
+    class OddCalendar(ChangingCalendar):
+        def add(self, summary, start, end=None, all_day=None, calendar=None):
+            return {"success": False, "message": "No.", "undo": self._undo}
+
+    calendar = OddCalendar()
+    executor = ActionExecutor(calendar=calendar)
+    executor.execute(DENTIST)
+    assert executor.execute(UNDO_THAT).say == NOTHING_TO_UNDO
+    assert calendar.undone == 0
 
 
 def test_without_home_assistant_the_lights_say_so():
