@@ -46,6 +46,7 @@ import urllib3
 from voice_assistant import network, paths, storage
 from voice_assistant.choices import ChoiceStore
 from voice_assistant.clock import spoken_clock_time
+from voice_assistant.lists import joined
 
 logger = logging.getLogger(__name__)
 
@@ -1270,7 +1271,7 @@ class GoogleCalendar:
         on = f"from {spoken_day(_day_of(found), today)} on"
         if times:
             new = _read_event({"start": times[0]})
-            at = "all day" if new["all_day"] else spoken_clock_time(new["start"].hour, new["start"].minute).replace(":00", "")
+            at = "all day" if new["all_day"] else _clock_said(new["start"])
         if times and new_name:
             message = f"Moved {summary} to {at} {on} and renamed it {new_name}."
         elif times:
@@ -1533,6 +1534,7 @@ class GoogleCalendar:
         if following and day is not None and day < today:
             return DAY_GONE
         first, days = (day, 1) if day else (today, SEARCH_DAYS)
+        named = []
         try:
             if isinstance(calendar, str) and calendar.strip():
                 named = self._calendars_named(calendar, self.calendars())
@@ -1559,12 +1561,15 @@ class GoogleCalendar:
         if following and len(series) == 1 and found[0]["recurring_id"]:
             found = found[:1]
         if not found:
-            return f"I can't find the {' '.join(words)} on your calendar{f' {_on(day, today)}' if day else ''}."
+            # On the calendar the user named, as it's said - "on Work" - else on their calendars as a whole.
+            where = f"on {joined([spoken_name(each) for each in named])}" if named else "on your calendar"
+            return f"I can't find the {' '.join(words)} {where}{f' {_on(day, today)}' if day else ''}."
         if len(found) > 1:
             # Named by their calendars too when they're on more than one - a lecture at 11 on
             # Uni and on the user's own would otherwise be said twice the same.
             several = len({event["calendar_id"] for event in found}) > 1
-            said = [_found_said(event, today) + (f", on {event['calendar']}" if several and event["calendar"] else "")
+            said = [_found_said(event, today, as_replied=True)
+                    + (f", on {event['calendar']}" if several and event["calendar"] else "")
                     for event in found[:MOST_FOUND]]
             if len(found) > MOST_FOUND:
                 said.append(f"{len(found) - MOST_FOUND} more")
@@ -2244,7 +2249,7 @@ def _added_when(start: Dict, today: date) -> str:
         at = ", all day"
     else:
         when = datetime.fromisoformat(start["dateTime"])
-        at = f" at {spoken_clock_time(when.hour, when.minute).replace(':00', '')}"
+        at = f" at {_clock_said(when)}"
     # A year on is the same day of the month - the 28th of February, from a 29th.
     year_on = today.replace(year=today.year + 1, day=28) if (today.month, today.day) == (2, 29) else \
         today.replace(year=today.year + 1)
@@ -2593,13 +2598,14 @@ def _overview(events: List[Dict], first: date, days: int, today: date) -> str:
     if len(others) > len(named):
         named.append(f"{len(others) - len(named)} more")
 
-    def joined(items: List[str]) -> str:
+    # With a comma before the "and" even for two, as these overviews are said - unlike joined's lists.
+    def listed(items: List[str]) -> str:
         return items[0] if len(items) == 1 else ", ".join(items[:-1]) + ", and " + items[-1]
 
     if not activities:
-        return f"{over}, you've got {joined(named)}."
-    said = f"{over}, you've got {joined(activities)}."
-    return f"{said} There's also {joined(named)}." if named else said
+        return f"{over}, you've got {listed(named)}."
+    said = f"{over}, you've got {listed(activities)}."
+    return f"{said} There's also {listed(named)}." if named else said
 
 
 def _event_said(event: Dict) -> str:
@@ -2632,10 +2638,28 @@ def describe_found(wanted: str, events: List[Dict], today: date) -> str:
     return f"You've got {listed}.{more}"
 
 
-def _found_said(event: Dict, today: date) -> str:
-    """One event found, as it's said: "Car MOT on Thursday, at 9:30 AM", "Holiday tomorrow, all day"."""
-    when = "all day" if event["all_day"] else f"at {spoken_clock_time(event['start'].hour, event['start'].minute)}"
+def _found_said(event: Dict, today: date, as_replied: bool = False) -> str:
+    """
+    One event found, as it's said: "Car MOT on Thursday, at 9:30 AM", "Holiday tomorrow, all day".
+
+    Args:
+        event: The event, as events gives it.
+        today: Today's date.
+        as_replied: Whether its time is said as every reply to a change says it - "at 3 PM", not "at 3:00 PM" -
+            for the list of those found when it's asked which one.
+    """
+    if event["all_day"]:
+        when = "all day"
+    elif as_replied:
+        when = f"at {_clock_said(event['start'])}"
+    else:
+        when = f"at {spoken_clock_time(event['start'].hour, event['start'].minute)}"
     return f"{event['summary']} {_on(_day_of(event), today)}, {when}"
+
+
+def _clock_said(when: datetime) -> str:
+    """A time as every reply to a change says it: "3 PM" on the hour, "10:30 AM" otherwise."""
+    return spoken_clock_time(when.hour, when.minute).replace(":00", "")
 
 
 def _day_of(event: Dict) -> date:
@@ -2678,4 +2702,4 @@ def _when_changed(event: Dict, today: date) -> str:
     if event["all_day"]:
         return f"{spoken_day(event['start'], today)}, all day"
     start = event["start"]
-    return f"{spoken_day(start.date(), today)} at {spoken_clock_time(start.hour, start.minute).replace(':00', '')}"
+    return f"{spoken_day(start.date(), today)} at {_clock_said(start)}"

@@ -2006,17 +2006,17 @@ def test_several_matches_remove_nothing_and_ask_which(for_changing):
     for asked, events, said in (
             # On more than one calendar, each is named by its calendar too.
             (("dentist", False), {"personal": personal, "work": work},
-             "I found 4: Dentist on Monday, at 9:00 AM, on Personal; Dentist on Thursday, at 3:00 PM, on Personal; "
+             "I found 4: Dentist on Monday, at 9 AM, on Personal; Dentist on Thursday, at 3 PM, on Personal; "
              "Dentist on Friday, at 11:30 AM, on Work; and 1 more. Which one?"),
             (("dentist", False), {"personal": personal[:2]},
-             "I found 2: Dentist on Monday, at 9:00 AM; and Dentist on Thursday, at 3:00 PM. Which one?"),
+             "I found 2: Dentist on Monday, at 9 AM; and Dentist on Thursday, at 3 PM. Which one?"),
             # A repeating event's times are several, unless it's from this one on - and two series are
             # several either way.
             (("gym", False), {"personal": [GYM_24TH, GYM_1ST]},
-             "I found 2: Gym on Tuesday, at 6:00 PM; and Gym on Tuesday the 1st of December, at 6:00 PM. Which one?"),
+             "I found 2: Gym on Tuesday, at 6 PM; and Gym on Tuesday the 1st of December, at 6 PM. Which one?"),
             (("gym", True), {"personal": [GYM_24TH, other_gym, GYM_1ST]},
-             "I found 3: Gym on Tuesday, at 6:00 PM; Gym on Thursday, at 6:00 PM; and Gym on Tuesday the 1st of "
-             "December, at 6:00 PM. Which one?")):
+             "I found 3: Gym on Tuesday, at 6 PM; Gym on Thursday, at 6 PM; and Gym on Tuesday the 1st of "
+             "December, at 6 PM. Which one?")):
         calendar = for_changing(**events)
         search, following = asked
         # Nothing changed, so there's nothing to undo.
@@ -2062,11 +2062,11 @@ def test_a_time_picks_the_event_at_it(for_changing):
 
     calendar = for_changing(personal=events, reads=3)
     assert calendar.remove("dentist", day=THURSDAY, at="15:45", today=NOVEMBER_21) == {"success": False, "message": (
-        "I found 2: Dentist on Thursday, at 3:00 PM; and Dentist on Thursday, at 3:30 PM. Which one?")}
+        "I found 2: Dentist on Thursday, at 3 PM; and Dentist on Thursday, at 3:30 PM. Which one?")}
     assert calendar.remove("dentist", day=THURSDAY, at="12:00", today=NOVEMBER_21) == {
         "success": False, "message": "I can't find the dentist on your calendar on Thursday."}
     assert calendar.remove("dentist", day=THURSDAY, today=NOVEMBER_21)["message"] == (
-        "I found 4: Dentist on Thursday, all day; Dentist on Thursday, at 9:00 AM; Dentist on Thursday, at 3:00 PM; "
+        "I found 4: Dentist on Thursday, all day; Dentist on Thursday, at 9 AM; Dentist on Thursday, at 3 PM; "
         "and 1 more. Which one?")
     # A time that can't be read isn't guessed at.
     assert calendar.remove("dentist", day=THURSDAY, at="three", today=NOVEMBER_21) == {
@@ -2399,7 +2399,7 @@ def test_the_calendars_are_named_when_the_matches_are_on_several(for_changing):
     # Said the same twice, the user couldn't tell them apart.
     calendar = for_changing(personal=[LECTURE], uni=[UNI_LECTURE])
     assert calendar.remove("lecture", today=NOVEMBER_21) == {"success": False, "message": (
-        "I found 2: Lecture on Thursday, at 11:00 AM, on Personal; and Lecture on Thursday, at 11:00 AM, on Uni. "
+        "I found 2: Lecture on Thursday, at 11 AM, on Personal; and Lecture on Thursday, at 11 AM, on Uni. "
         "Which one?")}
     assert calendar._session.sent == []
 
@@ -2423,6 +2423,21 @@ def test_a_calendar_named_narrows_the_matches(for_changing):
     assert calendar.remove("lecture", calendar="gym", today=NOVEMBER_21) == {
         "success": False, "message": "I haven't got a calendar called that."}
     assert _read(calendar) == [] and calendar._session.sent == []
+
+
+def test_nothing_found_on_a_calendar_named_says_that_calendar(for_changing):
+    # Said by the calendar's own name, not "your calendar", which it might not be - and the day, as before.
+    calendar = for_changing(personal=[LECTURE], work=[], uni=[UNI_LECTURE], reads=4)
+    assert calendar.remove("dentist", calendar="work", today=NOVEMBER_21) == {
+        "success": False, "message": "I can't find the dentist on Work."}
+    assert calendar.remove("dentist", calendar="work", day=THURSDAY, today=NOVEMBER_21) == {
+        "success": False, "message": "I can't find the dentist on Work on Thursday."}
+    # The user's own is said by its name too.
+    assert calendar.remove("dentist", calendar="my calendar", today=NOVEMBER_21) == {
+        "success": False, "message": "I can't find the dentist on Personal."}
+    # And with no calendar named, it's looked for on them all, as before.
+    assert calendar.remove("dentist", today=NOVEMBER_21) == {
+        "success": False, "message": "I can't find the dentist on your calendar."}
 
 
 # Moving and renaming
