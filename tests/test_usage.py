@@ -67,6 +67,7 @@ def test_kind_of():
     assert kind_of(["set_timer", "play_music"], 0) == "Timers and alarms"
     assert kind_of(["play_playlist"], 0) == "Music"
     assert kind_of(["find_new_music"], 0) == "Music"
+    assert kind_of(["move_music"], 0) == "Music"
     assert kind_of(["manage_list"], 0) == "Calendar and lists"
 
 

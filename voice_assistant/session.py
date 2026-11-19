@@ -265,7 +265,9 @@ class Session:
                                       ring_on=brain.ring_on, room_of=brain.room_of,
                                       room_players=self._room_players,
                                       mover=lambda said: brain.move_music(self.satellite.name, said),
-                                      elsewhere=self._elsewhere)
+                                      elsewhere=self._elsewhere,
+                                      spoken_name=lambda name: brain.spoken_name(name),
+                                      settled=lambda: self.music.wait())
 
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.

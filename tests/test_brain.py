@@ -676,6 +676,11 @@ class MovingPlayer:
         self.music = self.playing = True
         return {"success": True, "message": "Playing"}
 
+    def play(self, query=None, search_type=None):
+        self.happened.append(("play", self.name))
+        self.playing = True
+        return {"success": True, "message": "Resumed playback", "silent": True}
+
 
 class Spotify:
     """Stands in for Spotify's controller, which can't hand its music over."""
@@ -780,6 +785,23 @@ def test_move_to_itself_says_already(moving):
     assert moving.moved() == []
 
 
+@pytest.mark.parametrize("spoken_at", ["pc", "bedroom"])
+def test_move_to_where_the_music_is_paused_resumes_it(moving, spoken_at):
+    moving.add("bedroom")
+    moving.add("pc", music=True)
+    # As a bare "play" would, so what it says is what that says.
+    assert moving.brain.move_music(spoken_at, "the PC") == {
+        "success": True, "message": "Resumed playback", "silent": True}
+    assert moving.happened == [("wait", "pc"), ("play", "pc")]
+
+
+def test_move_to_where_the_music_is_playing_says_already(moving):
+    moving.add("pc", music=True, playing=True)
+    moving.add("bedroom")
+    assert moving.brain.move_music("pc", "the PC") == {"success": False, "message": "It's already on the PC."}
+    assert moving.happened == [("wait", "pc")]
+
+
 def test_move_to_a_disconnected_one_stays(moving):
     moving.add("bedroom", music=True)
     # The PC may connect, but hasn't.
@@ -822,6 +844,19 @@ def test_move_success_says_moved(moving):
     # The source's pause lands first, as does a hold on the target, before the music moves.
     assert moving.happened == [("wait", "bedroom"), ("wait", "pc"), ("hand_over", "bedroom"),
                                ("take_over", "pc", {"queue": ["a song from bedroom"]})]
+
+
+def test_a_take_over_which_answers_nothing_gives_the_music_back(moving):
+    moving.add("bedroom", music=True, playing=True)
+    pc = moving.add("pc")
+
+    def answers_nothing(state):
+        moving.happened.append(("take_over", "pc", state))
+
+    pc.take_over = answers_nothing
+    assert moving.brain.move_music("bedroom", "the PC") == {
+        "success": False, "message": "I couldn't move the music to the PC, so it's staying on the Pi."}
+    assert moving.happened[-1] == ("take_over", "bedroom", {"queue": ["a song from bedroom"]})
 
 
 def test_a_move_the_target_cant_take_gives_the_music_back(moving):

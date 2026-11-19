@@ -75,8 +75,8 @@ ON_ANOTHER_SATELLITE = {
     "type": "string",
     "description": (
         "Only when the user names somewhere other than here to play it - 'on the PC', 'on my Pi' - as they said "
-        "it, e.g. 'the PC'. Leave this out when they don't, which plays here. With no query, it moves what is "
-        "playing there, as move_music does."
+        "it, e.g. 'the PC'. Leave this out when they don't, which plays here. With no query, it moves the music "
+        "that's playing now to there, as move_music does."
     ),
 }
 
@@ -302,7 +302,9 @@ class ActionExecutor:
                  room_of: Callable[[str], List[str]] = lambda name: [name],
                  room_players: Optional[Callable[[], List]] = None,
                  mover: Optional[Callable[[str], Dict]] = None,
-                 elsewhere: Optional[Callable[[str], Tuple[Optional["ActionExecutor"], Optional[str]]]] = None):
+                 elsewhere: Optional[Callable[[str], Tuple[Optional["ActionExecutor"], Optional[str]]]] = None,
+                 spoken_name: Callable[[str], str] = lambda name: name,
+                 settled: Optional[Callable[[], None]] = None):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -352,6 +354,11 @@ class ActionExecutor:
                 this one's own, if it's the one named - and None; or None and what to say, when
                 they name none, or one which isn't connected. None if there's no other satellite
                 to play on.
+            spoken_name: Given a satellite's name, what it's called in a reply - "the PC" - for
+                saying where music has started when it's on another satellite.
+            settled: Waits for any pause or resume still on its way to this satellite's music, so
+                something asked for on it from another satellite's conversation can't be undone by
+                one landing late - see MusicHold.wait. None if there's nothing to wait for.
         """
         self.music = music
         self.clock = clock
@@ -377,6 +384,8 @@ class ActionExecutor:
         self.room_players = room_players or (lambda: [self.music])
         self.mover = mover
         self.elsewhere = elsewhere
+        self.spoken_name = spoken_name
+        self.settled = settled
         # What was last asked, and what the assistant said - or the last alert, and
         # all of it - for "send that to my phone". Kept up to date by the Conversation.
         self.last_answer: Optional[Tuple[str, str]] = None
@@ -589,12 +598,14 @@ class ActionExecutor:
     )
     def play_music(self, query: Optional[str] = None, search_type: Optional[str] = None, on: Optional[str] = None):
         other, failure = self._named(on)
+        if not query and (other is not None or failure is not None):
+            # Nothing new to play, so it's the music playing now which is wanted there - and it's the
+            # brain's to say if there's none, or it can't go: "The PC isn't connected, so the music's
+            # staying on the Pi.", rather than the lookup's "The PC isn't connected.".
+            return self.move_music(on)
         if failure:
             return failure
         if other is not None:
-            if not query:
-                # Nothing new to play, so it's what's playing which is wanted there.
-                return self.move_music(on)
             return self._play_on(other, "play_music", {"query": query, "search_type": search_type}, on)
         if not query:
             # Carries on whatever is paused in the user's room - see _resumes.
@@ -882,10 +893,10 @@ class ActionExecutor:
             return None, {"success": False, "message": sentence or "I couldn't tell which satellite you meant."}
         return (None if other is self else other), None
 
-    @staticmethod
-    def _play_on(other: "ActionExecutor", tool_name: str, params: Dict[str, Any], on: str):
+    def _play_on(self, other: "ActionExecutor", tool_name: str, params: Dict[str, Any], on: str):
         """
-        Has another satellite's executor play something, as it would for the user talking to it.
+        Has another satellite's executor play something, as it would for the user talking to it, and
+        says where it's playing since he mayn't hear it start there.
 
         Args:
             other: That satellite's executor.
@@ -895,12 +906,50 @@ class ActionExecutor:
 
         Returns:
             What it came to - an ActionResult - or a failure to say, if it couldn't be asked.
+            "Playing Gooba by 6ix9ine on the PC." once it's started, which is the player's own
+            "Playing Gooba by 6ix9ine" and where. Anything else - it couldn't, or an offer to
+            download it, or that it's on its way - is said as it came.
         """
         try:
-            return other.execute(Action(tool_name, params))
+            # As a move does: a pause or resume on its way there mustn't land after what's asked for.
+            if other.settled is not None:
+                other.settled()
+            result = other.execute(Action(tool_name, params))
         except Exception as e:
             logger.warning(f"Couldn't play on the satellite asked for: {e}")
             return {"success": False, "message": f"I couldn't play that on {on.strip()}."}
+        # What a player says when it starts something. The offers to download, which also succeed,
+        # don't start anything - "I'm already getting Gooba." isn't playing on the PC.
+        if not (result.ok and result.ask_first is None and result.say.startswith("Playing")):
+            return result
+        self._pause_the_rooms_other_music(other)
+        try:
+            there = other.spoken_name(other.satellite) if other.satellite else on.strip()
+        except Exception as e:
+            logger.warning(f"Couldn't say what the satellite played on is called: {e}")
+            there = on.strip()
+        return ActionResult(True, f"{result.say.rstrip('.')} on {there}.")
+
+    def _pause_the_rooms_other_music(self, target: "ActionExecutor"):
+        """
+        Pauses what else plays in the user's room once something has started on another satellite
+        in it, as saying "pause" would - kept paused when the reply is over, so the room has the one
+        music and not two. Nothing when that satellite is in another room.
+
+        Args:
+            target: The executor of the satellite it started on.
+        """
+        try:
+            room = [player for player in self.room_players() if player]
+            if target.music not in room:
+                return
+            for player in room:
+                if player is not target.music and player.was_playing():
+                    if player.pause().get("success"):
+                        player.cancel_resume()
+        except Exception as e:
+            # It's playing where he asked, so this isn't a failure to say.
+            logger.warning(f"Couldn't pause the music in the room: {e}")
 
     # Timers, reminders and alarms
 

@@ -986,7 +986,12 @@ class Brain:
             return {"success": False, "message": NO_MUSIC_TO_MOVE if can_move else MOVING_NEEDS_NAVIDROME}
         there, from_here = self.spoken_name(name), self.spoken_name(source.satellite.name)
         if name == source.satellite.name:
-            return {"success": False, "message": f"It's already on {there}."}
+            # A pause on its way lands first, so what's said is of the music as it is.
+            source.music.wait()
+            if source.music_player.is_playing():
+                return {"success": False, "message": f"It's already on {there}."}
+            # Paused where he wants it playing: carried on, as a bare "play" would.
+            return source.music_player.play(None)
         target = self.session_for(name)
         if target is None:
             away = there[:1].upper() + there[1:]
@@ -1012,7 +1017,7 @@ class Brain:
         except Exception as e:
             logger.warning(f"The {name} satellite couldn't take the music over: {e}")
             taken = {}
-        if not taken.get("success"):
+        if not (isinstance(taken, dict) and taken.get("success")):
             # So he isn't left with none playing anywhere.
             try:
                 source.music_player.take_over(state)

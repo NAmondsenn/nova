@@ -980,6 +980,61 @@ def test_elsewhere_gives_the_named_sessions_executor(brain, connect, make_sessio
     assert asked == [("bedroom", "the PC")]
 
 
+def test_a_sessions_actions_know_how_a_satellite_is_called_and_how_to_wait_for_its_music(brain, make_session):
+    session = make_session()
+    brain.spoken_name = {"bedroom": "the Pi", "pc": "the PC"}.get
+    assert session.actions.spoken_name("pc") == "the PC"
+    waited = []
+    session.music = SimpleNamespace(wait=lambda: waited.append("waited"))
+    session.actions.settled()
+    assert waited == ["waited"]
+
+
+@pytest.mark.parametrize("in_one_room", [True, False])
+def test_playing_on_another_satellite_pauses_the_rooms_own_music_for_good_when_it_shares_the_room(
+        brain, connect, make_session, in_one_room):
+    # At the Pi, with Drake asked for on the PC: in the same room, the Pi's own song is paused, as "pause"
+    # would, and stays so once the reply is over - and in another room it carries on, as it did.
+    pi, pc = make_session(connect("bedroom")[0]), make_session(connect("pc")[0])
+    pi_speaker, pc_speaker = _with_navidrome(pi), _with_navidrome(pc)
+    sessions, spoken = {"bedroom": pi, "pc": pc}, {"bedroom": "the Pi", "pc": "the PC"}
+    brain.room_sessions = lambda name: [pi, pc] if in_one_room else [pi]
+    brain.session_for = sessions.get
+    brain.find_satellite = lambda said: ("pc", None)
+    brain.spoken_name = spoken.get
+    songs = [{"id": str(number), "title": f"Song {number}", "artist": "Band"} for number in range(1, 4)]
+
+    def play(query=None, search_type=None):
+        pc.music_player._start(songs)
+        return {"success": True, "message": f"Playing {query}"}
+
+    pc.music_player.play = play
+    pi.music_player._start(songs)
+    assert wait_for(lambda: pi_speaker.started and not pi_speaker.started[0].paused)
+    pi.conversation = ScriptedConversation()
+    played = []
+
+    def answer(feed, timeline, pre_roll=None, pressed=False):
+        # As the conversation does before it runs what was asked for.
+        pi.music.wait()
+        played.append(pi.actions.execute(Action("play_music", {"query": "Drake", "on": "the PC"})))
+        return None
+
+    pi._handle_interaction = answer
+    pi._converse({"talked_over": False, "feed": AudioFeed()})
+
+    assert [(result.ok, result.say) for result in played] == [(True, "Playing Drake on the PC.")]
+    pi.music.wait(), pc.music.wait()
+    assert wait_for(lambda: pc_speaker.started and not pc_speaker.started[-1].paused)
+    if in_one_room:
+        # Still queued, so it can be carried on, but paused for good.
+        assert pi.music_player.has_music() and not pi.music_player.is_playing()
+        assert pi_speaker.started[0].paused and not pi_speaker.started[0].stopped
+    else:
+        assert wait_for(lambda: pi.music_player.is_playing() and not pi_speaker.started[0].paused)
+    assert len(pi_speaker.started) == 1
+
+
 def test_closing_lets_go_of_the_device_the_music_and_the_satellites_sounds_once_in_order(make_session):
     class Recorder:
         def __init__(self, name, closed):
