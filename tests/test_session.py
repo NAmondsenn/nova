@@ -24,7 +24,7 @@ np = pytest.importorskip("numpy")
 pytest.importorskip("soxr")
 
 from voice_assistant import clock as clock_module
-from voice_assistant import ha_device, music, network, paths, protocol, satellite_link, spotify_controller
+from voice_assistant import ha_device, music, network, notes, paths, protocol, satellite_link, spotify_controller
 from voice_assistant import session as session_module
 from voice_assistant.actions import Action
 from voice_assistant.brain import Brain
@@ -1033,6 +1033,130 @@ def test_playing_on_another_satellite_pauses_the_rooms_own_music_for_good_when_i
     else:
         assert wait_for(lambda: pi.music_player.is_playing() and not pi_speaker.started[0].paused)
     assert len(pi_speaker.started) == 1
+
+
+# Notes saved at a computer
+
+def _at_the_pc(brain, connect, make_session, answers=None, saves_notes=True):
+    """
+    A session for the PC, which says it saves notes unless told it doesn't, with the notes
+    its satellite was asked to save - each a title and text - which it answers from answers.
+
+    Returns:
+        The session, and the notes the satellite was asked to save.
+    """
+    satellite, _ = connect("pc")
+    satellite.saves_notes = saves_notes
+    asked = []
+
+    def save_note(title, text, wait=5.0):
+        asked.append((title, text))
+        return answers.pop(0) if answers else {"file": "Bins.txt"}
+
+    satellite.save_note = save_note
+    brain.spoken_name = {"pc": "the PC", "bedroom": "the Pi"}.get
+    return make_session(satellite), asked
+
+
+def _note(session, title="Bins", text="Green on Tuesday."):
+    return session.actions.execute(Action("save_note", {"title": title, "text": text}, from_model=True))
+
+
+def test_save_note_reply_names_the_file_without_extension(brain, connect, make_session):
+    session, asked = _at_the_pc(brain, connect, make_session, [{"file": "Bins.txt"}, {"file": "Bins (2).txt"},
+                                                                {"file": "Bins.txt.txt"}, {"file": "Notes"}])
+    assert "save_note" in {tool["name"] for tool in session.actions.tool_schemas()}
+    result = _note(session)
+    assert (result.ok, result.say, result.confirm) == (True, "Saved to your Downloads as Bins.", "speak")
+    assert asked == [("Bins", "Green on Tuesday.")]
+    # Only a final ".txt" goes: the " (2)" is part of the name.
+    assert _note(session).say == "Saved to your Downloads as Bins (2)."
+    assert _note(session).say == "Saved to your Downloads as Bins.txt."
+    assert _note(session).say == "Saved to your Downloads as Notes."
+
+
+def test_save_note_error_is_said(brain, connect, make_session):
+    session, _ = _at_the_pc(brain, connect, make_session,
+                            [{"error": "There's no Downloads folder to save it in."}])
+    result = _note(session)
+    assert (result.ok, result.say) == (
+        False, "I couldn't save it on the PC: There's no Downloads folder to save it in.")
+
+
+def test_save_note_no_answer(brain, connect, make_session):
+    # None is no answer in time, or the satellite going.
+    session, asked = _at_the_pc(brain, connect, make_session, [None])
+    result = _note(session)
+    assert (result.ok, result.say) == (False, "The PC didn't answer, so the note wasn't saved.")
+    assert asked == [("Bins", "Green on Tuesday.")]
+
+
+def test_a_note_too_long_is_refused_before_anything_is_sent(brain, connect, make_session):
+    session, asked = _at_the_pc(brain, connect, make_session)
+    result = _note(session, text="x" * (notes.MOST_TEXT + 1))
+    assert (result.ok, result.say) == (False, "I couldn't save it on the PC: That note's too long to save.")
+    assert asked == []
+    # The most there is, is sent.
+    assert _note(session, text="x" * notes.MOST_TEXT).ok and len(asked) == 1
+
+
+def test_a_note_which_cant_be_looked_up_by_name_is_still_saved(brain, connect, make_session):
+    # The name is only wanted to say it couldn't, so a note saved isn't reported lost over it.
+    session, asked = _at_the_pc(brain, connect, make_session)
+
+    def broken(name):
+        raise OSError("the satellites can't be read")
+
+    brain.spoken_name = broken
+    result = _note(session)
+    assert (result.ok, result.say) == (True, "Saved to your Downloads as Bins.")
+    assert len(asked) == 1
+
+
+def test_a_note_is_saved_through_the_satellite_and_its_text_is_never_logged(brain, connect, make_session, caplog):
+    satellite, pi = connect("pc")
+    satellite.saves_notes = True
+    brain.spoken_name = {"pc": "the PC"}.get
+    session = make_session(satellite)
+    done = []
+    caplog.set_level(logging.DEBUG)
+    thread = threading.Thread(target=lambda: done.append(_note(session, "Bins", "Green on Tuesday, secret.")))
+    thread.start()
+    assert wait_for(lambda: pi.messages("save_note"))
+    # As the PC's satellite answers, with the file as it was made.
+    pi.say("note_saved", id=pi.messages("save_note")[0]["id"], file="Bins (2).txt")
+    thread.join(5)
+
+    assert [(result.ok, result.say) for result in done] == [(True, "Saved to your Downloads as Bins (2).")]
+    sent = [(message, payload) for message, payload in pi.received if message["type"] == "save_note"]
+    assert [(message["title"], payload) for message, payload in sent] == [("Bins", b"Green on Tuesday, secret.")]
+    # The title and the file are fine to log - never what it says.
+    assert "secret" not in caplog.text
+    assert "Bins (2).txt" in caplog.text
+
+
+def test_pi_session_has_no_notes_tool(brain, connect, make_session):
+    # A satellite which doesn't say it saves notes - the Pi, or one from before there were any.
+    session, _ = _at_the_pc(brain, connect, make_session, saves_notes=False)
+    assert session.actions.notes is None
+    assert "save_note" not in {tool["name"] for tool in session.actions.tool_schemas()}
+    # Asked for by name anyway, it's refused rather than sent anywhere.
+    result = _note(session)
+    assert result.ok is False and result.say
+    # And one which does is offered it.
+    pc, _ = _at_the_pc(brain, connect, make_session)
+    assert pc.actions.notes is not None
+
+
+def test_add_to_my_notes_is_still_the_list_at_the_pc(brain, connect, make_session):
+    session, asked = _at_the_pc(brain, connect, make_session)
+    # As it is once Home Assistant is set up: the lists are its.
+    session.intents.home = object()
+    for said in ("Add milk to my notes.", "Add milk to notes.", "Put milk on my notes list."):
+        result = session.intents.match(said)
+        assert [action.tool for action in result["actions"]] == ["add_to_list"], said
+        assert result["actions"][0].params["item"] == "milk"
+    assert asked == []
 
 
 def test_closing_lets_go_of_the_device_the_music_and_the_satellites_sounds_once_in_order(make_session):

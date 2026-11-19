@@ -18,6 +18,10 @@ import re
 # stop a runaway reply filling the disk.
 MOST_TEXT = 50_000
 
+# What's said of a note over MOST_TEXT, by the satellite which refuses it and by the brain,
+# which won't send it - so it's the same wherever it's refused.
+TOO_LONG = "That note's too long to save."
+
 # The longest title kept, before ".txt" - well inside every file system's limit.
 MOST_TITLE = 80
 
@@ -78,7 +82,7 @@ def save_note(folder: str, title: str, text: str, windows: bool) -> str:
         there, all MOST_NOTES names are taken, or the file couldn't be written.
     """
     if len(text) > MOST_TEXT:
-        raise NoteRefused("That note's too long to save.")
+        raise NoteRefused(TOO_LONG)
     if not os.path.isdir(folder):
         raise NoteRefused("There's no Downloads folder to save it in.")
     try:

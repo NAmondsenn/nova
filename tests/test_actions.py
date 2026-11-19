@@ -2497,3 +2497,68 @@ def test_without_home_assistant_journeys_say_so():
     for tool in ("journey", "set_leave_reminder"):
         result = executor.execute(Action(tool, {"place": "Work"}))
         assert (result.ok, result.say) == (False, "Journeys need Home Assistant.")
+
+
+# Notes saved on the computer the user is at
+
+def test_save_note_offered_only_with_notes():
+    # The Pi, and any satellite which can't save a note, has no way to, so isn't offered one.
+    assert "save_note" not in {tool["name"] for tool in ActionExecutor(clock=object()).tool_schemas()}
+    schemas = {tool["name"]: tool for tool in ActionExecutor(notes=lambda title, text: {}).tool_schemas()}
+    assert schemas["save_note"]["input_schema"]["required"] == ["title", "text"]
+    assert set(schemas["save_note"]["input_schema"]["properties"]) == {"title", "text"}
+
+
+def test_save_note_passes_title_and_text():
+    saved = []
+
+    def notes(title, text):
+        saved.append((title, text))
+        return {"success": True, "message": "Saved to your Downloads as Bins."}
+
+    result = ActionExecutor(notes=notes).execute(
+        Action("save_note", {"title": "Bins", "text": "Green on Tuesday.", "extra": "ignored"}, from_model=True))
+    assert (result.ok, result.say, result.confirm) == (True, "Saved to your Downloads as Bins.", "speak")
+    assert saved == [("Bins", "Green on Tuesday.")]
+    # What the session says of a note it couldn't save is said as it is.
+    refused = ActionExecutor(notes=lambda title, text: {"success": False, "message": "The PC didn't answer."})
+    result = refused.execute(Action("save_note", {"title": "Bins", "text": "Green on Tuesday."}))
+    assert (result.ok, result.say) == (False, "The PC didn't answer.")
+
+
+def test_save_note_description_keeps_the_list_apart():
+    schemas = {tool["name"]: tool for tool in ActionExecutor(notes=lambda title, text: {}).tool_schemas()}
+    description = schemas["save_note"]["description"]
+    # "Add milk to my notes" is the notes list, which has a tool of its own.
+    assert "'Add X to my notes' is the notes list" in description and "manage_list" in description
+    assert "400 words" in description
+    for words in ("make a note", "take a note", "write this down", "write me notes on", "Downloads"):
+        assert words in description
+
+
+def test_save_note_asked_for_without_a_way_to_save_one_says_so():
+    # It can be asked for by name, offered or not, as at the Pi.
+    result = ActionExecutor().execute(Action("save_note", {"title": "Bins", "text": "Green on Tuesday."}))
+    assert result.ok is False and result.say
+
+
+def test_save_note_with_nothing_to_write_or_a_notes_which_fails_says_so():
+    saved = []
+    executor = ActionExecutor(notes=lambda title, text: saved.append(title))
+    # Nothing is saved for words which weren't given, whatever type the model gave.
+    for text in ("", "  ", None, 5):
+        result = executor.execute(Action("save_note", {"title": "Bins", "text": text}))
+        assert (result.ok, result.say) == (False, "I didn't catch what to write.")
+    assert saved == []
+
+    # A title which isn't words is left for the satellite to name, as it does an empty one.
+    ActionExecutor(notes=lambda title, text: saved.append(title) or {"success": True}).execute(
+        Action("save_note", {"title": None, "text": "Green on Tuesday."}))
+    assert saved == [""]
+
+    # The session's end is another machine, never the end of this request.
+    def broken(title, text):
+        raise OSError("the satellite's lost it")
+
+    result = ActionExecutor(notes=broken).execute(Action("save_note", {"title": "Bins", "text": "Green"}))
+    assert (result.ok, result.say) == (False, "I couldn't save the note.")
