@@ -190,6 +190,53 @@ def test_an_album_plays_in_order(make_player):
     assert [song["id"] for song in player._queue] == ["1", "2", "3", "4"]
 
 
+# What his library's search for "Drake" gave: the tag "Drake/Birdman" and the like make track artists
+# which have no albums beside the album artist, and all of them read as "drake" to likeness.
+DRAKES = [
+    {"id": "d1", "name": "Drake/", "albumCount": 0},
+    {"id": "d2", "name": "Drake//", "albumCount": 0},
+    {"id": "d3", "name": "Drake, Lil Durk", "albumCount": 0},
+    {"id": "d4", "name": "Drake", "albumCount": 21},
+    {"id": "d5", "name": "Drake/Birdman", "albumCount": 0},
+]
+
+
+def _artists_found(artists, albums_of):
+    """Navidrome with these artists found for any search, and the albums each id has."""
+    return {
+        "search3": {"searchResult3": {"artist": artists}},
+        "getArtist": lambda params: {"artist": {"album": [{"id": album} for album in albums_of.get(params["id"], [])]}},
+        "getAlbum": lambda params: {"album": {"song": [{"id": f"{params['id']}-song", "title": "Song", "artist": "x"}]}},
+    }
+
+
+def test_an_artist_with_albums_is_played_not_a_stray_tag_of_the_same_name(make_player):
+    player = make_player(_artists_found(DRAKES, {"d4": ["al1", "al2"]}))
+    assert player.play("Drake", search_type="artist") == {"success": True, "message": "Playing Drake"}
+    assert sorted(song["id"] for song in player._queue) == ["al1-song", "al2-song"]
+    assert [params["id"] for endpoint, params in player._session.requests if endpoint == "getArtist"] == ["d4"]
+
+
+def test_an_artist_asked_for_by_name_beats_another_of_the_same_likeness_which_has_albums_too(make_player):
+    player = make_player(_artists_found(
+        [{"id": "d1", "name": "Drake/", "albumCount": 2}, {"id": "d4", "name": "drake", "albumCount": 21}],
+        {"d1": ["stray"], "d4": ["real"]}))
+    assert player.play("Drake", search_type="artist")["message"] == "Playing drake"
+    assert [song["id"] for song in player._queue] == ["real-song"]
+
+
+def test_an_artist_which_doesnt_say_how_many_albums_is_still_played(make_player):
+    player = make_player(_artists_found([{"id": "d4", "name": "Drake"}], {"d4": ["al1"]}))
+    assert player.play("Drake", search_type="artist")["message"] == "Playing Drake"
+    assert [song["id"] for song in player._queue] == ["al1-song"]
+
+
+def test_nothing_is_found_when_every_artist_found_has_no_albums(make_player):
+    player = make_player(_artists_found([artist for artist in DRAKES if not artist["albumCount"]], {}))
+    assert player.play("Drake", search_type="artist") == {
+        "success": False, "message": "I couldn't find Drake on Navidrome.", "missing": True}
+
+
 def test_a_playlist_is_found_by_part_of_its_name(make_player):
     player = make_player({
         "getPlaylists": {"playlists": {"playlist": [{"id": "p1", "name": "Chill"}, {"id": "p2", "name": "Workout Mix"}]}},
