@@ -556,15 +556,46 @@ def test_another_action_since_means_undo_leaves_the_change():
 
 
 def test_an_action_which_answers_with_a_result_of_its_own_counts_as_another_action():
-    class SpeakingClock:
-        def list_timers(self):
-            return ActionResult(True, "You've got no timers.")
+    class QuietClock:
+        def dismiss(self, satellite=None):
+            return ActionResult(True, "Okay.", confirm="chime")
 
     calendar = ChangingCalendar()
-    executor = ActionExecutor(calendar=calendar, clock=SpeakingClock())
+    executor = ActionExecutor(calendar=calendar, clock=QuietClock())
     executor.execute(DENTIST)
-    assert executor.execute(Action("list_timers")).ok
+    assert executor.execute(Action("dismiss_timer")).ok
     assert executor.execute(UNDO_THAT).say == SOMETHING_ELSE_SINCE
+    assert calendar.undone == 0
+
+
+def test_a_calendar_read_or_the_timers_listed_since_leave_the_change_undoable():
+    # Neither is read back to the model, but neither changes anything - "what's on Thursday?"
+    # after a change isn't a reason to refuse "undo that".
+    class ListingClock:
+        def list_timers(self):
+            return {"success": True, "message": "You don't have any timers running."}
+
+    calendar = ChangingCalendar()
+    executor = ActionExecutor(calendar=calendar, clock=ListingClock())
+    executor.execute(DENTIST)
+    assert executor.execute(Action("get_calendar", {"start": "2026-11-26"})).say == "You've got nothing on."
+    assert executor.execute(Action("list_timers")).ok
+
+    result = executor.execute(UNDO_THAT)
+    assert (result.ok, result.say) == (True, "Undone.")
+    assert calendar.undone == 1
+
+
+def test_the_tools_which_only_say_something_are_declared_so():
+    # Declared one by one, as a tool which says something but also changes a little - which
+    # clears what was missed, or marks notifications heard, or pauses the music - must count.
+    tools = ActionExecutor.tools()
+    for name in ("get_calendar", "get_activity", "get_weather", "list_timers", "list_alarms", "next_alarm",
+                 "read_list", "list_memories", "get_batteries", "tell_me_more"):
+        assert tools[name].tool["changes"] is False, name
+    for name in ("control_playback", "check_missed", "read_notifications", "manage_list", "journey",
+                 "find_device", "set_timer", "add_to_calendar", "undo_last_change"):
+        assert tools[name].tool["changes"] is True, name
 
 
 def test_a_failed_action_or_a_read_since_leaves_the_change_undoable():

@@ -243,7 +243,7 @@ def bare_acknowledgement(text: str) -> bool:
 
 
 def tool(description: str, needs: Union[str, Tuple[str, ...], None] = None, required: Sequence[str] = (),
-         for_model: bool = True, reads: bool = False, private: bool = False,
+         for_model: bool = True, reads: bool = False, private: bool = False, changes: bool = True,
          **parameters: Dict[str, Any]) -> Callable:
     """
     Declares an ActionExecutor method as a tool the model can call.
@@ -262,6 +262,12 @@ def tool(description: str, needs: Union[str, Tuple[str, ...], None] = None, requ
             answer goes back to the model rather than being said - see read_tools.
         private: Whether what it says is the user's alone, never to be in the model's
             history - see private_tools.
+        changes: Whether running it changes anything, so that once it has worked it's the
+            last thing Nova did, and "undo that" leaves the playlist or calendar change
+            before it alone - see ActionExecutor._keep_or_note. False for one which only
+            says something, e.g. what's on the calendar. A tool which reads never counts,
+            whatever this says. True when in doubt: one which isn't declared false only
+            ever stops an undo, never undoes the wrong thing.
         parameters: Each parameter's JSON schema, by name - the method's own
             keyword arguments, which it's called with.
 
@@ -270,7 +276,8 @@ def tool(description: str, needs: Union[str, Tuple[str, ...], None] = None, requ
     """
     def declare(method: Callable) -> Callable:
         method.tool = {"description": description, "needs": needs, "required": list(required),
-                       "for_model": for_model, "reads": reads, "private": private, "parameters": parameters}
+                       "for_model": for_model, "reads": reads, "private": private, "changes": changes,
+                       "parameters": parameters}
         return method
     return declare
 
@@ -496,9 +503,10 @@ class ActionExecutor:
 
         A change says how to take it back with an "undo" in its reply, which only a success
         has. A failure changed nothing, so it leaves the slot as it was - "add this to Gym"
-        refused leaves the add before it undoable - and so does a tool which only reads
-        something for the model to answer from. A tool may answer with an ActionResult of its
-        own, whose ok counts as success but which can't carry an undo.
+        refused leaves the add before it undoable - and so does a tool which doesn't change
+        anything, however it says what it found: "what's on Thursday?" after "cancel the
+        dentist" leaves that undoable. A tool may answer with an ActionResult of its own,
+        whose ok counts as success but which can't carry an undo.
 
         Args:
             name: The tool's name.
@@ -517,7 +525,7 @@ class ActionExecutor:
             return
         if callable(undo):
             self.last_change.keep(undo)
-        elif not method.tool["reads"]:
+        elif method.tool["changes"] and not method.tool["reads"]:
             self.last_change.note_other()
 
     # Music
@@ -902,7 +910,7 @@ class ActionExecutor:
     def name_reminder(self, label: Optional[str] = None):
         return self.clock.name_pending_reminder(label)
 
-    @tool("Report which timers are running and how long is left on each.", needs="clock")
+    @tool("Report which timers are running and how long is left on each.", needs="clock", changes=False)
     def list_timers(self):
         return self.clock.list_timers()
 
@@ -987,7 +995,8 @@ class ActionExecutor:
         ring = self._ring_on_satellite()
         return self._say_where_it_rings(self.clock.set_alarm(hour, minute, repeat or None, satellite=ring), ring)
 
-    @tool("Report which alarms are set, for 'what alarms do I have' or 'list my alarms'.", needs="clock")
+    @tool("Report which alarms are set, for 'what alarms do I have' or 'list my alarms'.", needs="clock",
+          changes=False)
     def list_alarms(self):
         return self.clock.list_alarms()
 
@@ -995,6 +1004,7 @@ class ActionExecutor:
         "Report how long until the next alarm, for 'how long until my alarm' or "
         "'when's my next alarm'.",
         needs="clock",
+        changes=False,
     )
     def next_alarm(self):
         return self.clock.next_alarm()
@@ -1174,6 +1184,7 @@ class ActionExecutor:
         "need a coat?' or 'will it rain later?'. The forecast it returns is what gets "
         "spoken, so just reply 'Okay.'",
         needs="weather",
+        changes=False,
         day={
             "type": "string",
             "enum": ["today", "tomorrow"],
@@ -1431,6 +1442,7 @@ class ActionExecutor:
         "dentist soon?' - give what to search for, and today as the first day, rather "
         "than reading whole days. What's on is read out to the user, so just reply 'Okay.'",
         needs="calendar",
+        changes=False,
         required=["start"],
         start={"type": "string", "description": "The first day, as YYYY-MM-DD."},
         days={"type": "integer", "description": "How many days from it, 1 to 14. Leave out for one day."},
@@ -1455,6 +1467,7 @@ class ActionExecutor:
         "for 'next'), and how many days, or for 'next', how many times. The times are read "
         "out to the user, so just reply 'Okay.'",
         needs="calendar",
+        changes=False,
         required=["activity", "start"],
         activity={
             "type": "string",
@@ -1576,6 +1589,7 @@ class ActionExecutor:
     @tool(
         "Read a list.",
         needs="lists",
+        changes=False,
         for_model=False,
         list={"type": "string", "description": "The list, as the user said it, or left out for the main one."},
     )
@@ -1681,6 +1695,7 @@ class ActionExecutor:
         "Say what you remember about the user, for 'what do you know about me?' or "
         "'what have I told you?'. It's read out for you, so just reply 'Okay.'",
         needs="memory",
+        changes=False,
     )
     def list_memories(self):
         return self.memory.describe()
@@ -1693,6 +1708,7 @@ class ActionExecutor:
         "Give the device as the user said it, or leave it out for all of them. It's read out "
         "for you, so just reply 'Okay.'",
         needs="batteries",
+        changes=False,
         device={
             "type": "string",
             "description": ("Which device, as the user said it, e.g. 'mac', 'phone', 'tablet' or "
@@ -2004,6 +2020,7 @@ class ActionExecutor:
         "Read out the whole of the last notification, for 'tell me more' or 'what was that "
         "about?' just after one was said. It's read out for you, so just reply 'Okay.'",
         needs="ntfy",
+        changes=False,
     )
     def tell_me_more(self):
         return self.ntfy.tell_more()
