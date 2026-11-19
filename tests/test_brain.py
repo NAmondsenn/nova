@@ -714,8 +714,9 @@ def moving(named):
 
 
 def test_move_from_the_satellite_spoken_to(moving):
-    moving.add("bedroom", music=True, playing=True)
+    # The PC connected first, so it's what the first playing satellite anywhere is.
     moving.add("pc", music=True, playing=True)
+    moving.add("bedroom", music=True, playing=True)
     moving.add("mac")
     # Where it was said wins over another which is playing too.
     assert moving.brain.move_music("bedroom", "the Mac") == {"success": True, "message": "Moved to the Mac."}
@@ -726,12 +727,23 @@ def test_move_from_the_room_when_here_has_none(moving):
     for name in ("bedroom", "pc"):
         moving.brain.rooms.set_area(name, "Study")
     moving.brain.rooms.set_area("mac", "Lounge")
+    # The Mac connected first and plays too, but in another room: the room's own wins.
+    moving.add("mac", music=True, playing=True)
     moving.add("bedroom")
     moving.add("pc", music=True, playing=True)
-    # Playing too, but in another room: the room's own wins.
-    moving.add("mac", music=True, playing=True)
     assert moving.brain.move_music("bedroom", "my Pi") == {"success": True, "message": "Moved to the Pi."}
     assert [event[:2] for event in moving.moved()] == [("hand_over", "pc"), ("take_over", "bedroom")]
+
+
+def test_move_with_two_playing_in_the_room_takes_the_one_spoken_to(moving):
+    for name in ("bedroom", "pc"):
+        moving.brain.rooms.set_area(name, "Study")
+    # The PC connected first, but it's the Pi he spoke to, and the room puts it first.
+    moving.add("pc", music=True, playing=True)
+    moving.add("bedroom", music=True, playing=True)
+    moving.add("mac")
+    assert moving.brain.move_music("bedroom", "the Mac") == {"success": True, "message": "Moved to the Mac."}
+    assert [event[:2] for event in moving.moved()] == [("hand_over", "bedroom"), ("take_over", "mac")]
 
 
 def test_move_takes_what_is_playing_before_what_is_paused(moving):
