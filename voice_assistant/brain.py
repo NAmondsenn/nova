@@ -195,8 +195,9 @@ def _speech_to_text(config, tts: TextToSpeech):
 
 def _music_source(room: List[Session], everyone: List[Session]) -> Optional[Session]:
     """
-    Finds the music to move: where it was asked for, else somewhere near, else the only
-    music there is - so "move this to the PC" works from any room.
+    Finds the music to move: what's playing, where it was asked for, else somewhere near, else
+    anywhere - and only when nothing plays, what's paused in the same order. "It" is what he can
+    hear, so an old queue paused here isn't taken in place of the music playing beside it.
 
     Args:
         room: The connected sessions of the room the user is in, the satellite they're
@@ -204,9 +205,9 @@ def _music_source(room: List[Session], everyone: List[Session]) -> Optional[Sess
         everyone: Every connected session, in the order they connected.
 
     Returns:
-        The first of the room with music, playing or paused; else the first of everyone
-        playing now; else the first of everyone with music paused - or None. A player which
-        can't say, as Spotify's can't, has none.
+        The first of the room playing now, else the first of everyone playing now; else the first
+        of the room with music paused, else the first of everyone with music paused - or None.
+        A player which can't say, as Spotify's can't, has none.
     """
     def has_music(session: Session) -> bool:
         asked = getattr(session.music_player, "has_music", None)
@@ -216,7 +217,7 @@ def _music_source(room: List[Session], everyone: List[Session]) -> Optional[Sess
         asked = getattr(session.music_player, "is_playing", None)
         return bool(asked and asked())
 
-    for sessions, has in ((room, has_music), (everyone, is_playing), (everyone, has_music)):
+    for sessions, has in ((room, is_playing), (everyone, is_playing), (room, has_music), (everyone, has_music)):
         found = next((session for session in sessions if has(session)), None)
         if found is not None:
             return found
@@ -962,10 +963,10 @@ class Brain:
     def move_music(self, spoken_at: str, said: str) -> Dict:
         """
         Moves the music to the satellite some words name, as the user asked at spoken_at -
-        from where it is, or where it's playing if that isn't there - to play on from the
-        same place, with the other's stopped. Nothing moves if the words name none or more
-        than one, if the one named is where it already is or isn't connected (a sleeping PC
-        isn't woken for it), or if either player is Spotify's.
+        from what's playing, here or in its room or anywhere, else from what's paused - to play on
+        from the same place, with the other's stopped. Nothing moves if the words name none or more
+        than one, if the one named is where it already is (carried on there, if it's paused) or isn't
+        connected (a sleeping PC isn't woken for it), or if either player is Spotify's.
 
         Args:
             spoken_at: The satellite the user was talking to.

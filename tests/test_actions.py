@@ -213,6 +213,10 @@ class QueryPlayer:
     def was_playing(self):
         return self.was_playing_before
 
+    def hand_over(self):
+        # What only Navidrome's player has: one which stream of its own to pause, rather than the account's.
+        return None
+
     def pause(self):
         self.calls.append("pause")
         return {"success": True, "message": "Paused", "chime": True}
@@ -429,6 +433,56 @@ def test_playing_on_one_in_the_room_pauses_the_rooms_other_music_and_keeps_it_pa
     # The PC's is what's playing now, though it was before too, and a third which wasn't playing is left alone.
     assert "pause" not in roomed.pc_player.calls and not roomed.pc_player.resume_cancelled
     assert roomed.third_player.calls == [] and not roomed.third_player.resume_cancelled
+
+
+class OneStream:
+    """Spotify's one stream for the whole account, which plays on one device at a time."""
+
+    def __init__(self):
+        self.device = "bedroom"
+        self.paused = False
+
+
+class OneStreamPlayer:
+    """Spotify's controller on one satellite: its pause stops whichever device the account is playing on."""
+
+    name = "Spotify"
+    needs_internet = False
+
+    def __init__(self, stream, device):
+        self.stream, self.device = stream, device
+        self.resume_cancelled = False
+
+    def was_playing(self):
+        return True
+
+    def pause(self):
+        self.stream.paused = True
+        return {"success": True, "message": "Paused", "chime": True}
+
+    def cancel_resume(self):
+        self.resume_cancelled = True
+
+    def play(self, query=None, search_type=None):
+        self.stream.device, self.stream.paused = self.device, False
+        return {"success": True, "message": f"Playing {query}"}
+
+
+def test_playing_on_one_in_the_room_never_pauses_spotifys_one_stream(make_executor):
+    # Starting it on the PC took the account's stream from the Pi already: pausing "the Pi's" music would
+    # pause the PC's, and nothing would bring it back.
+    stream = OneStream()
+    pi_player, pc_player = OneStreamPlayer(stream, "bedroom"), OneStreamPlayer(stream, "pc")
+    pc = make_executor(pc_player, satellite="pc")
+    pc.spoken_name = lambda name: "the PC"
+    pi = make_executor(pi_player, satellite="bedroom", elsewhere=lambda said: (pc, None),
+                       room_players=lambda: [pi_player, pc_player])
+
+    result = pi.execute(Action("play_music", {"query": "Drake", "on": "the PC"}))
+
+    assert (result.ok, result.say) == (True, "Playing Drake on the PC.")
+    assert stream.device == "pc" and not stream.paused
+    assert not pi_player.resume_cancelled and not pc_player.resume_cancelled
 
 
 def test_a_play_elsewhere_which_didnt_start_leaves_the_rooms_music_playing(roomed):

@@ -934,7 +934,9 @@ class ActionExecutor:
         """
         Pauses what else plays in the user's room once something has started on another satellite
         in it, as saying "pause" would - kept paused when the reply is over, so the room has the one
-        music and not two. Nothing when that satellite is in another room.
+        music and not two. Nothing when that satellite is in another room, and never Spotify's: it has
+        one stream for the whole account, so starting it on the target took it from the others already,
+        and pausing "theirs" would pause the target's, with nothing to bring it back.
 
         Args:
             target: The executor of the satellite it started on.
@@ -944,7 +946,7 @@ class ActionExecutor:
             if target.music not in room:
                 return
             for player in room:
-                if player is not target.music and player.was_playing():
+                if player is not target.music and hasattr(player, "hand_over") and player.was_playing():
                     if player.pause().get("success"):
                         player.cancel_resume()
         except Exception as e:

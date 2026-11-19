@@ -714,10 +714,10 @@ def moving(named):
 
 
 def test_move_from_the_satellite_spoken_to(moving):
-    moving.add("bedroom", music=True)
+    moving.add("bedroom", music=True, playing=True)
     moving.add("pc", music=True, playing=True)
     moving.add("mac")
-    # Where it was said wins over another which is playing.
+    # Where it was said wins over another which is playing too.
     assert moving.brain.move_music("bedroom", "the Mac") == {"success": True, "message": "Moved to the Mac."}
     assert [event[:2] for event in moving.moved()] == [("hand_over", "bedroom"), ("take_over", "mac")]
 
@@ -727,10 +727,33 @@ def test_move_from_the_room_when_here_has_none(moving):
         moving.brain.rooms.set_area(name, "Study")
     moving.brain.rooms.set_area("mac", "Lounge")
     moving.add("bedroom")
-    moving.add("pc", music=True)
-    # Playing, but in another room: the room's own wins.
+    moving.add("pc", music=True, playing=True)
+    # Playing too, but in another room: the room's own wins.
     moving.add("mac", music=True, playing=True)
     assert moving.brain.move_music("bedroom", "my Pi") == {"success": True, "message": "Moved to the Pi."}
+    assert [event[:2] for event in moving.moved()] == [("hand_over", "pc"), ("take_over", "bedroom")]
+
+
+def test_move_takes_what_is_playing_before_what_is_paused(moving):
+    # "It" is what he can hear: an old queue paused here, with the PC playing in the same room, isn't moved
+    # or resumed in its place - the PC's music comes here, and the old queue is replaced.
+    for name in ("bedroom", "pc"):
+        moving.brain.rooms.set_area(name, "Study")
+    moving.add("bedroom", music=True)
+    moving.add("pc", music=True, playing=True)
+    assert moving.brain.move_music("bedroom", "my Pi") == {"success": True, "message": "Moved to the Pi."}
+    assert [event[:2] for event in moving.moved()] == [("hand_over", "pc"), ("take_over", "bedroom")]
+    assert moving.happened.count(("play", "bedroom")) == 0
+
+
+def test_move_takes_what_is_paused_in_the_room_when_nothing_is_playing(moving):
+    for name in ("bedroom", "pc"):
+        moving.brain.rooms.set_area(name, "Study")
+    moving.brain.rooms.set_area("mac", "Lounge")
+    moving.add("bedroom")
+    moving.add("pc", music=True)
+    moving.add("mac", music=True)
+    assert moving.brain.move_music("bedroom", "my Pi")["success"] is True
     assert [event[:2] for event in moving.moved()] == [("hand_over", "pc"), ("take_over", "bedroom")]
 
 
