@@ -1256,7 +1256,12 @@ class GoogleCalendar:
             if new_name:
                 new_series["summary"] = new_name
             self._send_once("PATCH", series_url, {"recurrence": _cut_rules(rules, this)})
-        except (_NotSure,) + READ_FAILURES as e:
+        except _NotSure as e:
+            # Sent, but not said to be done - and never sent again, so it's checked by the user.
+            logger.warning(f"Couldn't tell whether Google changed a repeating event: {e}")
+            return {"success": False, "message": f"I can't tell whether {summary} was changed, so check Google "
+                                                 "Calendar."}
+        except READ_FAILURES as e:
             return _change_failed(e, summary)
         # The series is cut short now, so whatever happens to the new one, it's never left that
         # way unsaid: put back as it was if the new one wasn't added, or may have been.

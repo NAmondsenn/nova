@@ -2776,7 +2776,14 @@ def test_a_split_that_fails_puts_the_old_series_back(for_changing):
     # The cut itself unanswered, nothing more is sent.
     calendar = for_changing(**_splitting(**{f"PATCH {GYM_URL}": [requests.ReadTimeout("Read timed out."), GYM]}))
     assert calendar.change("gym", start="2026-11-24 19:00", following=True, today=NOVEMBER_21) == {
-        "success": False, "message": "I can't tell whether Gym was changed."}
+        "success": False, "message": "I can't tell whether Gym was changed, so check Google Calendar."}
+    assert [each["method"] for each in calendar._session.sent] == ["PATCH"]
+    # As is the series' own change, from its first time on.
+    first = _series("Gym", "made-up-gym", "2026-11-24T18:00:00+00:00", "2026-11-24T19:00:00+00:00", *GYM_RULES)
+    calendar = for_changing(personal=[GYM_24TH, GYM_1ST], answers={
+        GYM_URL: [first], f"PATCH {GYM_URL}": [requests.ReadTimeout("Read timed out."), first]})
+    assert calendar.change("gym", summary="Gym class", following=True, today=NOVEMBER_21) == {
+        "success": False, "message": "I can't tell whether Gym was changed, so check Google Calendar."}
     assert [each["method"] for each in calendar._session.sent] == ["PATCH"]
     # Nor anything at all when the times before it can't be counted.
     calendar = for_changing(**_splitting(**{f"{GYM_URL}/instances": [requests.ConnectionError("Network down")]}))
