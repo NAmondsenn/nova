@@ -225,6 +225,18 @@ def test_an_artist_asked_for_by_name_beats_another_of_the_same_likeness_which_ha
     assert [song["id"] for song in player._queue] == ["real-song"]
 
 
+def test_a_worse_match_with_albums_isnt_played_for_an_artist_with_none(make_player):
+    # "Future" is only on features, so it has no albums: "Future Islands" shares a word with it and has
+    # some, but isn't who was asked for, so nothing is found and a download can be offered.
+    player = make_player(_artists_found(
+        [{"id": "f1", "name": "Future", "albumCount": 0}, {"id": "f2", "name": "Future Islands", "albumCount": 3}],
+        {"f2": ["islands"]}))
+    assert player.play("Future", search_type="artist") == {
+        "success": False, "message": "I couldn't find Future on Navidrome.", "missing": True}
+    assert player._queue == []
+    assert not any(endpoint == "getArtist" and params["id"] == "f2" for endpoint, params in player._session.requests)
+
+
 def test_an_artist_which_doesnt_say_how_many_albums_is_still_played(make_player):
     player = make_player(_artists_found([{"id": "d4", "name": "Drake"}], {"d4": ["al1"]}))
     assert player.play("Drake", search_type="artist")["message"] == "Playing Drake"
