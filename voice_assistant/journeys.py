@@ -154,9 +154,8 @@ def _asked(state: Dict, month: str) -> int:
         month: The month, e.g. "2026-11".
 
     Returns:
-        The count, which starts again at 0 for a month which isn't the stored one. So does a count which
-        can't be one: whatever a hand-edited file holds, it can only make the count more than 0, never less
-        than what was asked.
+        The count for that month, or 0 for a month which isn't the stored one. A count below 0 reads as 0,
+        so a hand-edited file can only raise the count it reads, never lower what was spent.
     """
     return max(0, state["requests"]) if state["month"] == month else 0
 

@@ -1558,6 +1558,18 @@ def test_the_pages_script_and_style_are_served_with_its_safety_headers(served, p
         assert b'id="football"' in html and b'id="follow-team"' in html and b'id="i-football"' in html
 
 
+@pytest.mark.parametrize("name, said", [
+    # The page's own words for what Nova would say, when it hasn't said: no player, no Home Assistant.
+    ("NO_PLAYER", page_module.NO_PLAYER),
+    ("NO_HOME", page_module.NO_HOME),
+    # What the page leaves unsaid under a setting, which has to be Nova's words for it to the letter.
+    ("USED_NOW", page_module.NOW),
+])
+def test_the_pages_script_has_novas_own_sentences_word_for_word(served, name, said):
+    script = _ask(served, "/settings.js")[2].decode()
+    assert re.findall(rf'^const {name} = "(.*)";$', script, re.MULTILINE) == [said]
+
+
 def test_the_lists_rules_are_served_and_loaded_before_the_pages_script(served):
     body = _ask(served, "/settings_list.js")[2]
     assert b"globalThis.NovaList" in body
@@ -3415,7 +3427,7 @@ def test_a_choice_which_cant_be_saved_or_read_says_so(files, monkeypatch):
 
 def test_home_choices_without_home_assistant_say_so(files):
     page = _page()
-    said = "Nova isn't connected to Home Assistant. Add its address in Settings, and its token in Keys."
+    said = "Nova isn't connected to Home Assistant. Add its address under Everything else, and its token in Keys."
     assert page.home_choices_state() == {"available": False, "message": said}
     assert page.choose_main_list("todo.todo", LOGIN) == {"success": False, "message": "Nova isn't connected to Home Assistant."}
     assert page.choose_weather("weather.cabin", LOGIN)["success"] is False

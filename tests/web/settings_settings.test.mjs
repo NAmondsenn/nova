@@ -117,6 +117,11 @@ class Node {
     return null;
   }
 
+  contains(other) {
+    for (let node = other; node; node = node.parent) if (node === this) return true;
+    return false;
+  }
+
   querySelector() {
     return null;
   }
@@ -187,7 +192,19 @@ function page({ state = { ...STATE, settings: SETTINGS }, saved = { success: tru
       (listeners[kind] ||= []).push(listener);
     },
   };
-  const window = { scrollY: 0, matchMedia: () => ({ matches: false }), scrollTo() {}, addEventListener() {} };
+  // The window keeps its listeners, for the one which asks before the page is left.
+  const windowListeners = {};
+  const window = {
+    scrollY: 0,
+    matchMedia: () => ({ matches: false, addEventListener() {} }),
+    scrollTo() {},
+    addEventListener(kind, listener) {
+      (windowListeners[kind] ||= []).push(listener);
+    },
+    removeEventListener(kind, listener) {
+      windowListeners[kind] = (windowListeners[kind] || []).filter((one) => one !== listener);
+    },
+  };
   const answers = { state };
   const answer = (body) => ({ ok: true, status: 200, json: async () => body, text: async () => "" });
   const context = vm.createContext({
@@ -245,6 +262,15 @@ function page({ state = { ...STATE, settings: SETTINGS }, saved = { success: tru
     },
     // The save bar's words.
     said: () => node("unsaved").textContent,
+    // The window's listeners for an event, as a count.
+    listening: (kind) => (windowListeners[kind] || []).length,
+    // The browser about to leave the page: whether the page asked it to check first.
+    leaving() {
+      let asked = false;
+      const event = { returnValue: undefined, preventDefault: () => (asked = true) };
+      for (const listener of windowListeners.beforeunload || []) listener(event);
+      return asked && event.returnValue !== undefined;
+    },
     async submit() {
       let prevented = false;
       for (const listener of node("settings").listeners.submit || []) await listener({ preventDefault: () => (prevented = true) });
@@ -374,6 +400,52 @@ test("saving saves every section's changes in one go, and the bar goes", async (
   assert.equal(shown.posted[0], JSON.stringify({ changes: { "football.kickoff_minutes": "20", "sounds.reminder_enabled": false } }));
   assert.equal(shown.node("settings").hidden, true);
   assert.equal(shown.said(), "Nothing's changed yet.");
+});
+
+test("leaving the page is checked with the browser while anything is unsaved, and only then", async () => {
+  const shown = page();
+  await arrived(shown);
+  // None while nothing is changed, so the browser's back/forward cache is never held back by it.
+  assert.equal(shown.listening("beforeunload"), 0);
+  shown.typed("football.kickoff_minutes", "20");
+  assert.equal(shown.listening("beforeunload"), 1);
+  assert.equal(shown.leaving(), true);
+  shown.typed("sounds.reminder_enabled", false);
+  assert.equal(shown.listening("beforeunload"), 1);
+  // Changed back, one and then the other.
+  shown.typed("football.kickoff_minutes", "15");
+  assert.equal(shown.listening("beforeunload"), 1);
+  shown.typed("sounds.reminder_enabled", true);
+  assert.equal(shown.listening("beforeunload"), 0);
+  assert.equal(shown.leaving(), false);
+  // And saved.
+  shown.typed("football.kickoff_minutes", "20");
+  assert.equal(shown.listening("beforeunload"), 1);
+  await shown.submit();
+  assert.equal(shown.listening("beforeunload"), 0);
+});
+
+test("a save which hides the bar puts the focus on the open section's heading, or the search box on the list", async () => {
+  const shown = page();
+  await arrived(shown);
+  const save = shown.node("save-settings");
+  shown.node("settings").append(save);
+  shown.typed("football.kickoff_minutes", "20");
+  save.focus();
+  await shown.submit();
+  assert.equal(active === shown.node("find"), true);
+  // A section open, with the focus dropped as the button it was on was turned off.
+  shown.context.document.body.dataset.open = "football";
+  shown.typed("football.kickoff_minutes", "25");
+  active = null;
+  await shown.submit();
+  assert.equal(active === shown.node("football-title"), true);
+  // Saved with Enter in a field, which keeps the focus it has.
+  const field = shown.input("football.kickoff_minutes");
+  shown.typed("football.kickoff_minutes", "30");
+  field.focus();
+  await shown.submit();
+  assert.equal(active === field, true);
 });
 
 test("a save which needs a restart keeps the bar, offering Restart now, until Nova has restarted", async () => {

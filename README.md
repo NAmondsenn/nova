@@ -170,13 +170,13 @@ Everything is under `%LOCALAPPDATA%\nova`: `app` (the code and its `venv`), `con
 
 Navidrome or Spotify - `music.player` in `config.yaml` says which, and it's Spotify unless you change it. Both are set up on the brain, which plays the music through each satellite's speaker.
 
-**Navidrome.** Make a Navidrome user for Nova (or use your own), then put its password under Keys on the settings page (at `https://` and the brain's name on your tailnet - see [The settings page](#the-settings-page)), and its address and user under Settings. Or, on the brain, add the password to `~/.config/nova/.env` yourself:
+**Navidrome.** Make a Navidrome user for Nova (or use your own), then put its password under Keys on the settings page (at `https://` and the brain's name on your tailnet - see [The settings page](#the-settings-page)), and its address and user in the page's Music section. Or, on the brain, add the password to `~/.config/nova/.env` yourself:
 
 ```
 NAVIDROME_PASSWORD=the-password
 ```
 
-and point Nova at it in `~/.config/nova/config.yaml` (Settings has these too, used once Nova restarts):
+and point Nova at it in `~/.config/nova/config.yaml` (the page's Music section has these too, used once Nova restarts):
 
 ```yaml
 music:
@@ -205,7 +205,7 @@ To set it up:
    ```
    SOULSYNC_API_KEY=the-key
    ```
-3. Put SoulSync's address under Settings on the settings page, under Music (used straight away), or in `~/.config/nova/config.yaml`:
+3. Put SoulSync's address in the settings page's Music section (used straight away), or in `~/.config/nova/config.yaml`:
 
    ```yaml
    soulsync:
@@ -264,7 +264,7 @@ Whatever's exposed, Nova never locks, unlocks or opens anything by voice: it che
    ```
    HA_TOKEN=the-token
    ```
-4. Put Home Assistant's address under Settings on the settings page, or in `~/.config/nova/config.yaml`:
+4. Put Home Assistant's address under Everything else on the settings page, or in `~/.config/nova/config.yaml`:
 
    ```yaml
    home_assistant:
@@ -318,7 +318,7 @@ Odds are only said where Home Assistant looked them up, which it does for a team
 
 Home Assistant has to have three things, by these names: `sensor.football_teams`, the followed teams with their matches; `input_text.football_teams`, a text box of their names, separated by commas; and `shell_command.football_ask`, which answers a question about any team or competition. They live in Home Assistant's own configuration, not in this repository, and [docs/decisions/0014](docs/decisions/0014-football.md) says what each holds, and [0015](docs/decisions/0015-football-round-two.md) what round two adds to them: the line-ups question and BBC Sport's matches; [0016](docs/decisions/0016-football-what-happened.md) adds the question of what happened in a match, and the goals, penalties and red cards each match in an answer carries; [0018](docs/decisions/0018-football-older-games.md) adds the other team to the match question, with the seasons its answer looked through and the team it found, and a day further back than a team's last few matches; [0019](docs/decisions/0019-football-gaps.md) closes the gaps parked along the way (odds said only where looked for, a national side not found, the same team twice, a goal ruled out and the names of competitions); [0021](docs/decisions/0021-football-last-gaps.md) closes the last ones, and adds to the match answer the month BBC Sport's pages were read back to (`bbc_since`); [0023](docs/decisions/0023-football-did-you-mean.md) adds, where no meeting is found, the nearest names among the team's opponents (`nearest`). Without the sensor, Nova says football isn't set up in Home Assistant.
 
-Teams are followed on the settings page, in the Football section after Batteries, or by voice - "follow Arsenal", "unfollow Arsenal" - which is usually a few seconds and can take up to about a minute, as Home Assistant looks the team up. For each team you follow, Nova says on the default satellite, after the announcement sound, when its match is about to start (15 minutes before, unless you change it on the page under Settings, Football), each goal, half time, the second half starting and full time, within about two minutes. A score which goes down is said as a goal ruled out only once a reading about two minutes later (110 seconds or more after the first one which showed it) still shows it, as two of Home Assistant's readings a minute apart can both carry one old copy of the match; or, if the reading which ends the match, written after the first which showed it, shows it too, as no reading follows full time and one at full time is never an old copy of the match in play - so a goal ruled out just before full time is said once, before "Full time.", and where full time shows the higher score again, not at all. Each of the five is a switch for each team, used straight away. Nothing is said in quiet hours (ntfy's `quiet_from` and `quiet_until`), while Home Assistant says you're out, or for what happened while Nova wasn't watching for more than five minutes; what can't be said is dropped, not held. `config.yaml`'s `football` section has how often Nova looks, how old Home Assistant's football may be, and the minutes before kick-off.
+Teams are followed on the settings page, in the Football section (in the Daily group), or by voice - "follow Arsenal", "unfollow Arsenal" - which is usually a few seconds and can take up to about a minute, as Home Assistant looks the team up. For each team you follow, Nova says on the default satellite, after the announcement sound, when its match is about to start (15 minutes before, unless you change it on the page, in the Football section), each goal, half time, the second half starting and full time, within about two minutes. A score which goes down is said as a goal ruled out only once a reading about two minutes later (110 seconds or more after the first one which showed it) still shows it, as two of Home Assistant's readings a minute apart can both carry one old copy of the match; or, if the reading which ends the match, written after the first which showed it, shows it too, as no reading follows full time and one at full time is never an old copy of the match in play - so a goal ruled out just before full time is said once, before "Full time.", and where full time shows the higher score again, not at all. Each of the five is a switch for each team, used straight away. Nothing is said in quiet hours (ntfy's `quiet_from` and `quiet_until`), while Home Assistant says you're out, or for what happened while Nova wasn't watching for more than five minutes; what can't be said is dropped, not held. `config.yaml`'s `football` section has how often Nova looks, how old Home Assistant's football may be, and the minutes before kick-off.
 
 A match which is called off (postponed, cancelled or abandoned) is said as that, in plain words, wherever a followed team's match is: Home Assistant keeps a called-off match of today or tomorrow in the sensor, with its phase `off` and its clock the source's word, and Nova says "South Shields v Harborough Town, National League North, tonight at 7:45 PM, is postponed." ("is cancelled", "was abandoned", or "is off" for any other word; "tonight" from five in the evening, "today" earlier, "tomorrow" for one at the head of the team's next fixtures) in a team's answer and the overview, in place of the team having no fixtures, and never with odds, a ground or a score. It also says it by itself, once, when the match's 15-minute warning would have come ("South Shields' match against Harborough Town tonight is postponed."), under the Starting switch, with the same quiet hours and the same rule about you being out, and instead of that warning, which a called-off match never gets. A match found called off only after its kick-off is said once when first seen, if its kick-off was today; one abandoned while Nova is watching it in play is said once as abandoned, and never gets "Full time." or a goal ruled out, but only once a reading about two minutes after the first one which showed it off (110 seconds or more) still shows it, as a score which goes down is held, so that a single reading which is an old copy or a glitch says nothing. A match which was said to be off isn't given the 15-minute warning if a later look shows it still to be played, and one which is moved to another day and called off again is said again. Asked for line-ups with no team named, when the only match today is called off, Nova says so from what Home Assistant gave ("... is postponed. No line-ups are listed for it.") instead of asking for another day's, and a called-off match never outranks another followed team's match which is on or over; in the overview a called-off match of tomorrow is its own part ("Tomorrow: ...") and doesn't take the place of the team's next match which is on. What has been said is kept with the rest of what Nova has seen of the match, so a restart doesn't say it again, and a match which comes back and is called off again the same day isn't said twice. [docs/decisions/0024](docs/decisions/0024-football-called-off.md) has the design.
 
@@ -354,7 +354,7 @@ Nova can also be a device of its own in Home Assistant, set up on the brain, thr
    ```
    MQTT_PASSWORD=the-password
    ```
-3. Say where the broker is under Settings on the settings page (its host, port and user, used once Nova restarts), or in the brain's `~/.config/nova/config.yaml`. The host is Home Assistant's own address on your home network, not its web address:
+3. Say where the broker is under Everything else on the settings page (its host, port and user, used once Nova restarts), or in the brain's `~/.config/nova/config.yaml`. The host is Home Assistant's own address on your home network, not its web address:
 
    ```yaml
    mqtt:
@@ -385,7 +385,7 @@ Say on Nova is a second box beside it: whatever is typed is said out loud on tha
    ```
    NTFY_TOKEN=the-token
    ```
-3. Say which topic is which under Settings on the settings page, or in the brain's `~/.config/nova/config.yaml`:
+3. Say which topic is which in the settings page's Notifications section, or in the brain's `~/.config/nova/config.yaml`:
 
    ```yaml
    ntfy:

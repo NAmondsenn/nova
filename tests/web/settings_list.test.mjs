@@ -323,8 +323,10 @@ test("a restart needed is Status's", () => {
   assert.deepEqual(attention({ restart: true }), ["status: Nova needs a restart to use what's been saved"]);
 });
 
-test("a settings problem is Everything else's, in its own words", () => {
-  assert.deepEqual(attention({ settingsProblem: "mqtt.port isn't a number" }), ["else: mqtt.port isn't a number"]);
+test("a settings problem is Everything else's, in a sentence of the page's own and never the problem's words", () => {
+  // What Nova says of the file is a parser's message or a path, which the settings blocks say.
+  assert.deepEqual(attention({ settingsProblem: "[Errno 13] Permission denied: '/made/up/config.yaml'" }),
+                   ["else: Nova can't read its saved settings"]);
 });
 
 test("a default satellite which isn't connected is Satellites'", () => {
@@ -363,7 +365,7 @@ test("what needs attention comes in the contract's order", () => {
   };
   assert.deepEqual(attention(all), [
     "status: Nova needs a restart to use what's been saved",
-    "else: Bad setting",
+    "else: Nova can't read its saved settings",
     "satellites: The bedroom satellite isn't connected",
     "batteries: Tablet is at 14%",
     "calendars: Sign in to Google",

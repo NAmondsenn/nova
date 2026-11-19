@@ -216,7 +216,9 @@
     const found = [];
     if (!view) return found;
     if (view.restart) found.push({ section: "status", text: "Nova needs a restart to use what's been saved" });
-    if (view.settingsProblem) found.push({ section: "else", text: view.settingsProblem });
+    // In words of the page's own: what Nova says of the file is a parser's message or a path to it,
+    // which the top of each section's settings says in full.
+    if (view.settingsProblem) found.push({ section: "else", text: "Nova can't read its saved settings" });
     const away = (view.satellites || []).find((satellite) => satellite.isDefault && !satellite.connected);
     if (away) found.push({ section: "satellites", text: `The ${away.name} satellite isn't connected` });
     for (const battery of view.batteries || []) {

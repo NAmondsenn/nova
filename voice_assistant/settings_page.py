@@ -190,8 +190,9 @@ NO_GOOGLE = "Google's client ID and secret go under Keys, then restart Nova."
 # Said of the music when Nova's config isn't known, so neither player can be blamed - the
 # page's own words for it, in settings.js.
 NO_PLAYER = "Nova has no music player set up. Choose one in Settings, under Music."
-# What the page says of the parts which need Home Assistant, before it is set up.
-NO_HOME = "Nova isn't connected to Home Assistant. Add its address in Settings, and its token in Keys."
+# What the page says of the parts which need Home Assistant, before it is set up - the page's own
+# words for it too, in settings.js.
+NO_HOME = "Nova isn't connected to Home Assistant. Add its address under Everything else, and its token in Keys."
 CANT_REACH_HOME = "Nova can't reach Home Assistant just now."
 # What the page says when Google no longer takes Nova's sign-in, or its client.
 SIGN_IN_AGAIN = "Nova needs signing in to Google again."

@@ -32,6 +32,7 @@ class Node {
     this.dataset = {};
     this.style = {};
     this.listeners = {};
+    this.attributes = new Map();
     this.classes = new Set();
     const classes = this.classes;
     this.classList = {
@@ -67,9 +68,17 @@ class Node {
     (this.listeners[kind] ||= []).push(listener);
   }
 
-  setAttribute() {}
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
 
-  removeAttribute() {}
+  getAttribute(name) {
+    return this.attributes.has(name) ? this.attributes.get(name) : null;
+  }
+
+  removeAttribute(name) {
+    this.attributes.delete(name);
+  }
 
   querySelector() {
     return null;
@@ -108,8 +117,10 @@ const STATE = {
 
 // The page's scripts over a stand-in page, at the address `hash` (whose history entry has the
 // state `entry`, as a reloaded one does) and logged in or, with `loggedIn` false, through NPM
-// and not yet; on a wide screen if `wide`. `state` is what Nova says of itself.
-function page({ hash = "", entry = null, loggedIn = true, wide = false, state = STATE } = {}) {
+// and not yet; on a wide screen if `wide`. `before` are the history's entries under this one,
+// each { state, hash }, which belong to another load of a document - going back to one is a
+// whole new load, not a popstate. `state` is what Nova says of itself.
+function page({ hash = "", entry = null, before = [], loggedIn = true, wide = false, state = STATE } = {}) {
   const nodes = new Map();
   const document = {
     hidden: false,
@@ -127,8 +138,8 @@ function page({ hash = "", entry = null, loggedIn = true, wide = false, state = 
   // The address and the history, as the browser keeps them: the entries, which is the
   // current one, and what the page did to them, in words.
   const location = { hash, pathname: "/settings", search: "" };
-  const entries = [{ state: entry, hash }];
-  let at = 0;
+  const entries = [...before.map((one) => ({ ...one, other: true })), { state: entry, hash }];
+  let at = before.length;
   const done = [];
   const hashOf = (url) => (url.includes("#") ? url.slice(url.indexOf("#")) : "");
   const history = {
@@ -155,13 +166,16 @@ function page({ hash = "", entry = null, loggedIn = true, wide = false, state = 
   const scrolls = [];
   const window = {
     scrollY: 0,
-    matchMedia: () => ({ matches: wide }),
+    matchMedia: () => ({ matches: wide, addEventListener() {} }),
     scrollTo(left, top) {
       scrolls.push(top);
       window.scrollY = top;
     },
     addEventListener(kind, listener) {
       (windowListeners[kind] ||= []).push(listener);
+    },
+    removeEventListener(kind, listener) {
+      windowListeners[kind] = (windowListeners[kind] || []).filter((one) => one !== listener);
     },
   };
   const login = { route: loggedIn ? "direct" : "npm", logged_in: loggedIn, password_set: true, page: "one" };
@@ -209,12 +223,32 @@ function page({ hash = "", entry = null, loggedIn = true, wide = false, state = 
     focusedOnRow(id) {
       return focused === this.row(id);
     },
-    // The browser going back one entry, and telling the page.
+    // The browser going back one entry, and telling the page - or, at an entry of another load,
+    // loading that afresh, which the page is never told of and loses everything unsaved to.
     arrive() {
       at -= 1;
       location.hash = entries[at].hash;
+      if (entries[at].other) {
+        done.push("full load");
+        return;
+      }
       for (const listener of windowListeners.popstate || []) listener({});
     },
+    // An address in this document typed, or gone Forward to: a new entry with the state
+    // given, which the browser tells the page of as it does a Back.
+    visit(to, state = null) {
+      entries.splice(at + 1, entries.length, { state, hash: to });
+      at += 1;
+      location.hash = to;
+      for (const listener of windowListeners.popstate || []) listener({});
+    },
+    // An event the browser sends the window.
+    fire(kind, event = {}) {
+      for (const listener of windowListeners[kind] || []) listener(event);
+    },
+    // Each entry's state, in words: "none", "ours" with this load's mark, or "other".
+    written: () => entries.map((one) => (one.state == null ? "none"
+      : one.state.nova === vm.runInContext("PAGE_LOAD", context) ? "ours" : "other")).join(","),
     // The sections which are open: they've the class which CSS shows them by.
     shown: () => SECTION_IDS.filter((id) => node(`section-${id}`).classes.has("open")).join(","),
   };
@@ -295,14 +329,78 @@ test("loading at #music opens it above the bare page, so Back goes to the list a
   assert.equal(shown.focusedOnRow("music"), true);
 });
 
-test("loading at #music again after a reload inside the section pushes nothing", async () => {
-  const shown = page({ hash: "#music", entry: { nova: true } });
+test("a reload inside a section is taken as a link, so Back stays in the page and keeps what's unsaved", async () => {
+  // The entry under the section's is the list of the load before the reload: going back to it would
+  // load the page afresh. Another load's mark, and the mark of the page before this one, alike.
+  for (const entry of [{ nova: "0123abcd" }, { nova: true }]) {
+    const shown = page({ hash: "#music", entry, before: [{ state: null, hash: "" }] });
+    await arrived(shown);
+    assert.equal(shown.body.dataset.open, "music");
+    assert.equal(shown.done.join("|"), "replace /settings|push #music");
+    // The old list's entry, then this load's bare page under its own section's.
+    assert.equal(shown.written(), "none,none,ours");
+    await shown.node("back").click();
+    shown.arrive();
+    assert.equal(shown.done.join("|"), "replace /settings|push #music|back");
+    assert.equal(shown.body.dataset.open, undefined);
+    assert.equal(shown.focusedOnRow("music"), true);
+  }
+});
+
+test("a tap with a section open marks the entry it takes the place of as this load's", async () => {
+  const shown = page({ wide: true });
   await arrived(shown);
-  assert.equal(shown.body.dataset.open, "music");
-  assert.equal(shown.done.join("|"), "");
-  // Its entry is the page's own, so #back goes back to the entry before it.
+  await shown.row("music").click();
+  await shown.row("clock").click();
+  assert.equal(shown.written(), "none,ours");
+});
+
+test("'All of Nova' goes back only to an entry of this load's, and otherwise makes the address the bare page", async () => {
+  // A section's address typed in, and an entry with another load's mark gone Forward to: neither
+  // is this load's, so what's under it may not be the page.
+  for (const state of [null, { nova: "0123abcd" }]) {
+    const shown = page();
+    await arrived(shown);
+    shown.context.window.scrollY = 200;
+    shown.visit("#music", state);
+    assert.equal(shown.body.dataset.open, "music");
+    await shown.node("back").click();
+    assert.equal(shown.done.join("|"), "replace /settings");
+    assert.equal(shown.body.dataset.open, undefined);
+    assert.equal(shown.focusedOnRow("music"), true);
+    // And the next opens as usual.
+    await shown.row("clock").click();
+    await shown.node("back").click();
+    assert.equal(shown.done.join("|"), "replace /settings|push #clock|back");
+  }
+});
+
+test("a page brought back from the browser's cache can go back again, though it was told of no arrival", async () => {
+  const shown = page();
+  await arrived(shown);
+  await shown.row("music").click();
   await shown.node("back").click();
-  assert.equal(shown.done.join("|"), "back");
+  // Shown again from the back/forward cache, with no popstate.
+  shown.fire("pageshow", { persisted: true });
+  await shown.node("back").click();
+  assert.equal(shown.done.join("|"), "push #music|back|back");
+});
+
+test("the open section's row is the current one, and Status's on a wide screen with none open", async () => {
+  const current = (shown) => SECTION_IDS.filter((id) => shown.row(id).getAttribute("aria-current") === "true").join(",");
+  const narrow = page();
+  await arrived(narrow);
+  assert.equal(current(narrow), "");
+  await narrow.row("music").click();
+  assert.equal(current(narrow), "music");
+  const wide = page({ wide: true });
+  await arrived(wide);
+  assert.equal(current(wide), "status");
+  await wide.row("music").click();
+  assert.equal(current(wide), "music");
+  await wide.node("back").click();
+  wide.arrive();
+  assert.equal(current(wide), "status");
 });
 
 test("with a section open, tapping another takes its entry's place, so #back still goes to the list", async () => {
@@ -435,4 +533,11 @@ test("the page has exactly one section for each of the list's, and no other", ()
     assert.equal(HTML.includes(`<h2 class="heading" id="${id}-title" tabindex="-1">`), true, id);
     assert.equal(HTML.includes(`aria-labelledby="${id}-title"`), true, id);
   }
+});
+
+test("every id the script asks the page for by name is in the page, exactly once", () => {
+  const asked = new Set([...SCRIPT.matchAll(/getElementById\("([^"]+)"\)/g)].map((one) => one[1]));
+  assert.equal(asked.size > 50, true);
+  const wrong = [...asked].filter((id) => HTML.split(`id="${id}"`).length - 1 !== 1);
+  assert.equal(wrong.join(","), "");
 });

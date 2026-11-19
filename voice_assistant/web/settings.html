@@ -67,6 +67,9 @@
         <div id="attention" class="list"></div>
         <input type="search" id="find" placeholder="Search Nova's page" aria-label="Search Nova's page"
                autocomplete="off" autocapitalize="none" spellcheck="false">
+        <!-- What a search found, said to a screen reader as the results change: kept in the page, as
+             a place to be read out from has to be there before what it says. -->
+        <p class="visually-hidden" id="find-said" aria-live="polite"></p>
         <div id="rows"></div>
       </nav>
 
@@ -300,7 +303,9 @@
         <section id="section-satellites" data-section="satellites" aria-labelledby="satellites-title">
           <h2 class="heading" id="satellites-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-microphone"></use></svg>Satellites</h2>
           <ul class="list satellites" id="satellites"></ul>
-          <div class="chips" id="satellite-choice" role="group" aria-label="Look after" hidden></div>
+          <!-- With more than one satellite: which the page's Devices, Sound and Timers are for. -->
+          <h3 class="subheading" id="satellite-choice-title" hidden>This page looks after</h3>
+          <div class="chips" id="satellite-choice" role="group" aria-labelledby="satellite-choice-title" hidden></div>
           <!-- A satellite's password, just made: put straight into the text here and
                nowhere else, and gone from the page once the panel's closed. -->
           <div class="panel password" id="password-panel" hidden>

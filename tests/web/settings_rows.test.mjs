@@ -153,8 +153,7 @@ class Node {
   }
 
   closest(selector) {
-    const name = selector.slice(1);
-    for (let node = this; node; node = node.parent) if (node.classes.has(name)) return node;
+    for (let node = this; node; node = node.parent) if (node.matches(selector)) return node;
     return null;
   }
 
@@ -189,6 +188,10 @@ class Node {
 
   focus() {
     active = this;
+  }
+
+  blur() {
+    if (active === this) active = null;
   }
 
   scrollIntoView(how) {
@@ -253,6 +256,7 @@ function page(answers = {}) {
   for (const [id, block] of blocks) block.setAttribute("data-settings", id);
   const everything = () => [...roots].flatMap((root) => [root, ...descendants(root)]);
   const timers = [];
+  const listeners = {};
   const document = {
     hidden: false,
     body: new Node("body"),
@@ -271,7 +275,9 @@ function page(answers = {}) {
     createElementNS: (namespace, tag) => new Node(tag),
     querySelector: (selector) => everything().find((one) => one.matches(selector)) || null,
     querySelectorAll: (selector) => everything().filter((one) => one.matches(selector)),
-    addEventListener() {},
+    addEventListener(kind, listener) {
+      (listeners[kind] ||= []).push(listener);
+    },
   };
   // Each section holds its settings' block, as the HTML has it, and the list its three parts.
   for (const id of SECTION_IDS) {
@@ -282,7 +288,8 @@ function page(answers = {}) {
                                          document.getElementById("rows"));
   const given = { state: STATE, music: MUSIC, home: HOME, batteries: BATTERIES, football: FOOTBALL, calendars: CALENDARS,
                   ...answers };
-  const window = { scrollY: 0, matchMedia: () => ({ matches: false }), scrollTo() {}, addEventListener() {} };
+  const window = { scrollY: 0, matchMedia: () => ({ matches: false, addEventListener() {} }), scrollTo() {},
+                   addEventListener() {}, removeEventListener() {} };
   const answer = (body) => (body === null
     ? { ok: false, status: 500, json: async () => ({}), text: async () => "broken" }
     : { ok: true, status: 200, json: async () => body, text: async () => "" });
@@ -350,6 +357,16 @@ function page(answers = {}) {
       box.value = text;
       for (const listener of box.listeners.input || []) listener({});
     },
+    // A key pressed in the search box.
+    press(key) {
+      for (const listener of node("find").listeners.keydown || []) listener({ key });
+    },
+    // An event the browser sends the document.
+    fire(kind) {
+      for (const listener of listeners[kind] || []) listener({});
+    },
+    // What has the focus now.
+    focused: () => active,
     // Let go of every timer which waits the time given.
     wait(milliseconds) {
       for (const one of timers) {
@@ -573,7 +590,7 @@ test("saved settings which can't be read leave the setting-based lines empty, as
                                 settings: [timeOf("ntfy.quiet_from", "23:00"), timeOf("ntfy.quiet_until", "07:00"), yesNo("web_search.enabled", true)] } });
   await shown.context.load();
   assert.equal(`${shown.line("notifications")}|${shown.line("claude")}`, "|");
-  assert.equal(shown.attention().join("|"), "else: line 3 is wrong");
+  assert.equal(shown.attention().join("|"), "else: Nova can't read its saved settings");
 });
 
 test("the clock displays row says how many there are and nothing of connection, whatever the clock server is doing", async () => {
@@ -639,10 +656,17 @@ function withWords(shown) {
     shown.node(`section-${id}`).append(made);
     return made;
   };
+  // The microphone's mute, a label and its switch in a row of a list, as the page has them.
+  const microphone = own("satellites", "li", "");
+  const mute = Object.assign(new Node("label"), { htmlFor: "mute" });
+  mute.textContent = "Mute the microphone";
+  const muteControl = Object.assign(new Node("input"), { id: "mute" });
+  microphone.append(mute, muteControl);
   return {
     heading: own("status", "h3", "Recent problems"),
-    mute: own("satellites", "label", "Mute the microphone", { htmlFor: "mute" }),
-    muteControl: own("satellites", "input", "", { id: "mute" }),
+    microphone,
+    mute,
+    muteControl,
     loose: own("satellites", "label", "Loose label", { htmlFor: "" }),
     add: own("satellites", "button", "Add a satellite"),
     placeholder: own("satellites", "input", "", { placeholder: "Its Pi's machine name, e.g. bedroom" }),
@@ -740,17 +764,103 @@ test("a search reads each section's own words from the page: headings, labels, b
   assert.equal(found("mute alarm"), ": ");
   // A setting's label is listed with its setting, once.
   assert.equal(found("ntfy quiet from"), "notifications: Quiet hours start at");
-  // A label's hit is its control, which a visually hidden label would leave nothing to mark by; a
-  // label with no control is itself the target.
+  // A label's hit is its control, which a visually hidden label would leave nothing to mark by. What
+  // is marked is the row the control is in, not the control, whose own look the mark would paint
+  // over; the focus goes to the control itself. A label with no control is itself the target.
   shown.type("mute");
   await shown.click(shown.hits()[0]);
   assert.equal(shown.body.dataset.open, "satellites");
-  assert.equal(words.muteControl.classes.has("found"), true);
-  assert.equal(words.muteControl.scrolled, "center");
+  assert.equal(words.microphone.classes.has("found"), true);
+  assert.equal(words.microphone.scrolled, "center");
+  assert.equal(words.muteControl.classes.has("found"), false);
   assert.equal(words.mute.classes.has("found"), false);
+  assert.equal(shown.focused() === words.muteControl, true);
   shown.type("loose label");
   await shown.click(shown.hits()[0]);
   assert.equal(words.loose.classes.has("found"), true);
+  assert.equal(words.microphone.classes.has("found"), false);
+  assert.equal(shown.focused() === words.loose, true);
+});
+
+test("a button with no words of its own is found by its accessible name", async () => {
+  const shown = page();
+  await shown.loadAll();
+  const next = Object.assign(new Node("button"), {});
+  next.setAttribute("aria-label", "Next song");
+  shown.node("section-music").append(next);
+  shown.type("next song");
+  assert.equal(`${shown.rows().join(",")}: ${shown.hits().map((one) => one.textContent).join("|")}`, "music: Next song");
+});
+
+test("a found setting is marked by its field, and the focus is on its input", async () => {
+  const shown = page({ state: { ...STATE, settings: QUIET } });
+  await shown.loadAll();
+  shown.type("quiet hours end");
+  await shown.click(shown.hits()[0]);
+  const input = shown.node("setting-ntfy.quiet_until");
+  assert.equal(input.closest(".field").classes.has("found"), true);
+  assert.equal(input.classes.has("found"), false);
+  assert.equal(shown.focused() === input, true);
+});
+
+test("Enter in the search box lets go of it, so a phone's keyboard closes over the results", async () => {
+  const shown = page();
+  await shown.loadAll();
+  shown.node("find").focus();
+  shown.type("music");
+  shown.press("a");
+  assert.equal(shown.focused() === shown.node("find"), true);
+  shown.press("Enter");
+  assert.equal(shown.focused(), null);
+  assert.equal(shown.rows().join(","), "music");
+});
+
+test("how many sections a search found is said to a screen reader, and nothing once the box is empty", async () => {
+  const shown = page({ state: { ...STATE, settings: QUIET } });
+  await shown.loadAll();
+  const said = () => shown.node("find-said").textContent;
+  shown.type("quiet");
+  assert.equal(said(), "1 section found");
+  shown.type("a");
+  assert.equal(said(), `${shown.rows().length} sections found`);
+  shown.type("zzz");
+  assert.equal(said(), "Nothing on Nova's page matches that.");
+  shown.type("");
+  assert.equal(said(), "");
+});
+
+test("closing a section whose row isn't in the search's results puts the focus on the search box", async () => {
+  const shown = page({ state: { ...STATE, settings: QUIET } });
+  await shown.loadAll();
+  shown.type("quiet");
+  // Opened from somewhere other than the results: an attention row, say.
+  shown.context.openSection("memory");
+  assert.equal(shown.focused() === shown.node("memory-title"), true);
+  await shown.click(shown.node("back"));
+  assert.equal(shown.body.dataset.open, undefined);
+  assert.equal(shown.focused() === shown.node("find"), true);
+});
+
+test("the list is drawn again as the page comes back into view, so a line with a time in it is judged afresh", async () => {
+  const shown = page();
+  await shown.loadAll();
+  assert.equal(shown.line("memory"), "Nothing remembered");
+  shown.set("stateSaid", { ...STATE, memories: ["a", "b", "c"] });
+  shown.fire("visibilitychange");
+  assert.equal(shown.line("memory"), "3 things remembered");
+});
+
+test("the choice of satellite to look after has its caption, shown and hidden with it", async () => {
+  const two = [{ name: "bedroom", connected: true, default: true, travels: false },
+               { name: "kitchen", connected: true, default: false, travels: false }];
+  const shown = page({ state: { ...STATE, satellites: two, satellite: "bedroom" } });
+  await shown.context.load();
+  assert.equal(shown.node("satellite-choice").hidden, false);
+  assert.equal(shown.node("satellite-choice-title").hidden, false);
+  shown.given.state = { ...STATE, satellites: two.slice(0, 1), satellite: "bedroom" };
+  await shown.context.load();
+  assert.equal(shown.node("satellite-choice").hidden, true);
+  assert.equal(shown.node("satellite-choice-title").hidden, true);
 });
 
 test("a setting is found by the words of its key too, though its label alone is shown", async () => {

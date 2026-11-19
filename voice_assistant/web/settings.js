@@ -128,6 +128,9 @@ const FEWEST_PROBLEMS = 3;
 
 // Said in the Music section when there's no player and Nova doesn't say why.
 const NO_PLAYER = "Nova has no music player set up. Choose one in Settings, under Music.";
+// Said where Home Assistant is needed, with no answer of Nova's to say instead - settings_page.py's
+// NO_HOME, word for word.
+const NO_HOME = "Nova isn't connected to Home Assistant. Add its address under Everything else, and its token in Keys.";
 
 // What Nova's doing, in words. While it waits, it's waiting for its wake word, which
 // /api/state says.
@@ -159,6 +162,15 @@ const FOUND_FOR = 2000;
 const SETTINGS_HINTS = { journeys: "Places are your zones in Home Assistant." };
 
 const DAY = 24 * 60 * 60 * 1000;
+
+// The screens wide enough for the list and a section side by side, as settings.css has them.
+const WIDE = "(min-width: 1180px)";
+
+// This load of the page, made afresh by each: the mark on every history entry it makes. An entry
+// with no mark, or another load's, may have under it an entry of a document gone before - after a
+// reload, say - which Back would load afresh, losing what's unsaved, rather than tell this one of.
+// Not a secret, so Math.random will do.
+const PAGE_LOAD = Math.random().toString(16).slice(2, 10);
 
 let activity = "idle";
 let wakeWord = "Hey Nova";
@@ -974,6 +986,7 @@ function showSatellites(state) {
 
   const choice = document.getElementById("satellite-choice");
   choice.hidden = satellites.length < 2;
+  document.getElementById("satellite-choice-title").hidden = choice.hidden;
   drawIfChanged("satellite-choice", [satellites.map((satellite) => satellite.name), state.satellite], () => {
     choice.replaceChildren(...satellites.map((satellite) => {
       const chip = element("button", satellite.name, "button quiet");
@@ -1811,8 +1824,7 @@ function showHome() {
   const routines = document.getElementById("home-routines");
   // Without Home Assistant, the lights say how to connect it, and there are no scripts or scenes.
   if (!home.available || !home.success) {
-    const why = home.available ? home.message
-      : "Nova isn't connected to Home Assistant. Add its address in Settings, and its token in Keys.";
+    const why = home.available ? home.message : NO_HOME;
     drawIfChanged("lights", why, () => {
       for (const id of Object.keys(lights)) delete lights[id];
       document.getElementById("lights").replaceChildren(emptyRow(why));
@@ -2809,7 +2821,28 @@ function countChanges() {
   const shown = Boolean(changed.length) || offerRestart;
   document.getElementById("settings").hidden = !shown;
   document.body.classList.toggle("save-bar-shown", shown);
+  askBeforeLeaving(changed.length > 0);
   return changed;
+}
+
+// Whether the browser is asked to check before the page is left: a reload, a link, a Back
+// out of the page.
+let askingBeforeLeaving = false;
+
+// Asks the browser to check with the user before the page is left, as what's unsaved would be lost.
+function checkBeforeLeaving(event) {
+  event.preventDefault();
+  // What older browsers look for instead; none shows the words.
+  event.returnValue = "";
+}
+
+// Asks before the page is left only while something is unsaved: a page which asks is never kept
+// in the browser's back/forward cache, so it is not asked the rest of the time.
+function askBeforeLeaving(unsaved) {
+  if (unsaved === askingBeforeLeaving) return;
+  askingBeforeLeaving = unsaved;
+  if (unsaved) window.addEventListener("beforeunload", checkBeforeLeaving);
+  else window.removeEventListener("beforeunload", checkBeforeLeaving);
 }
 
 // Says that Nova's saved settings can't be read, if they can't, at the top of each section's
@@ -2985,10 +3018,26 @@ function setUpList() {
   useRows(buttons);
   const find = document.getElementById("find");
   find.addEventListener("input", () => showFound(find.value));
+  // Enter lets go of the box, so a phone's keyboard closes and the results are there to see.
+  find.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") find.blur();
+  });
   document.getElementById("back").addEventListener("click", closeSection);
   window.addEventListener("popstate", () => {
     goingBack = false;
     showAddress("back");
+  });
+  // A page brought back from the browser's back/forward cache is told of no popstate, so a Back it
+  // was waiting on is let go of here.
+  window.addEventListener("pageshow", () => {
+    goingBack = false;
+  });
+  // Status is the one showing beside the list only on a wide screen, which a window can become.
+  window.matchMedia(WIDE).addEventListener("change", markRows);
+  // Back in view, a line with a time in it - a problem within the hour - is judged afresh at once,
+  // rather than at the next load.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) drawList();
   });
 }
 
@@ -3166,12 +3215,13 @@ function isHidden(one, section) {
 }
 
 // What a search looks through, as NovaList.search has it: each section's name and line, each
-// setting's label with its field as the target, and each section's own words as the page stands,
+// setting's label with its input as the target, and each section's own words as the page stands,
 // with the element as the target (a label's control, where it has one, as a label can be hidden
 // from sight). A setting is found by its label and by the words of its key too, "quiet hours
-// start at ntfy quiet from", though only the label is shown. A hidden or empty element is passed
-// over, as is a setting's own label, which is listed once with its setting; the same words twice
-// in a section, once.
+// start at ntfy quiet from", though only the label is shown. A button with no words of its own -
+// Previous song, a remove button - is found by its accessible name. A hidden or empty element is
+// passed over, as is a setting's own label, which is listed once with its setting; the same words
+// twice in a section, once.
 function searchEntries() {
   const lines = NovaList.lines(currentView(), Date.now() / 1000);
   const entries = [];
@@ -3194,12 +3244,12 @@ function searchEntries() {
         const input = document.getElementById(one.htmlFor);
         const label = labelWords(one);
         const key = one.htmlFor.slice("setting-".length).replace(/[._]/g, " ");
-        add(section.id, "setting", `${label} ${key}`, input ? input.closest(".field") || input : one, label);
+        add(section.id, "setting", `${label} ${key}`, input || one, label);
       } else if (typeof one.htmlFor === "string") {
         const control = one.htmlFor ? document.getElementById(one.htmlFor) : null;
         add(section.id, "control", labelWords(one), control || one);
       } else {
-        add(section.id, "control", one.textContent.trim(), one);
+        add(section.id, "control", one.textContent.trim() || (one.getAttribute("aria-label") || "").trim(), one);
       }
     }
   }
@@ -3210,21 +3260,28 @@ function searchEntries() {
 let marked = null;
 let markedTimer = null;
 
-// Opens the section a hit is in, with the hit scrolled to the middle of the screen and marked
-// for a moment. A hit whose element has since been drawn again isn't in the page, and only
-// the section is opened.
+// What is marked for a hit: the field, row or panel it is in - a mark on a switch would paint over
+// the switch's own look - or the hit itself, in none.
+const MARKED_BY = ".field, li, .panel";
+
+// Opens the section a hit is in, with what holds it scrolled to the middle of the screen and marked
+// for a moment, and the focus on the hit itself, so a keyboard or a screen reader is at what was
+// looked for. A hit whose element has since been drawn again isn't in the page, and only the
+// section is opened.
 function openFound(id, target) {
   openSection(id);
   if (!target || target.isConnected === false) return;
   clearTimeout(markedTimer);
   if (marked) marked.classList.remove("found");
-  target.scrollIntoView({ block: "center" });
-  target.classList.add("found");
-  marked = target;
+  const shown = target.closest(MARKED_BY) || target;
+  shown.scrollIntoView({ block: "center" });
+  shown.classList.add("found");
+  marked = shown;
   markedTimer = setTimeout(() => {
-    target.classList.remove("found");
-    if (marked === target) marked = null;
+    shown.classList.remove("found");
+    if (marked === shown) marked = null;
   }, FOUND_FOR);
+  target.focus({ preventScroll: true });
 }
 
 // A smaller row under a section's own, for a setting or control found in it.
@@ -3252,6 +3309,9 @@ function useRows(buttons) {
 function showFound(query) {
   if (!plainRows) return;
   const rows = document.getElementById("rows");
+  // What a screen reader is told of the results, from a place kept in the page, as one made with
+  // them isn't read out.
+  let said = "";
   if (!NovaList.words(query).length) {
     rows.replaceChildren(...plainRows.groups);
     useRows(plainRows.buttons);
@@ -3269,13 +3329,15 @@ function showFound(query) {
       const group = element("div", undefined, "row-group");
       group.append(list);
       rows.replaceChildren(group);
+      said = `${counted(found.length, "section", "sections")} found`;
     } else {
-      const none = element("p", "Nothing on Nova's page matches that.", "panel note");
-      none.setAttribute("role", "status");
-      rows.replaceChildren(none);
+      said = "Nothing on Nova's page matches that.";
+      rows.replaceChildren(element("p", said, "panel note"));
     }
     useRows(buttons);
   }
+  const telling = document.getElementById("find-said");
+  if (telling.textContent !== said) telling.textContent = said;
   // The rows now in the page were drawn while the others were out of it, or are new.
   drawLines(NovaList.lines(currentView(), Date.now() / 1000));
 }
@@ -3293,15 +3355,20 @@ function showOnly(id) {
   // are measured again as Status comes into view, for "Show all" to be right. Only then: with
   // Status still hidden it would only undo a "Show all", and before Nova has been heard from
   // it would say there are no problems. With nothing open Status is in view on a wide screen.
-  const statusShown = id ? id === "status" : window.matchMedia("(min-width: 1180px)").matches;
+  const statusShown = id ? id === "status" : window.matchMedia(WIDE).matches;
   if (statusShown && statusDrawn) showProblems();
 }
 
+// Marks the row of the section on show: the open one's, or Status's while none is open, which is
+// in view beside the list on a wide screen. Its look is CSS's, shown only there; that it is the
+// current one is said only where it is in view - the open section's at every width, Status's
+// only on a wide screen.
 function markRows() {
   const open = openSectionId();
+  const current = open || (window.matchMedia(WIDE).matches ? "status" : null);
   for (const [id, row] of rowButtons) {
     row.classList.toggle("showing", id === (open || "status"));
-    if (id === open) row.setAttribute("aria-current", "true");
+    if (id === current) row.setAttribute("aria-current", "true");
     else row.removeAttribute("aria-current");
   }
 }
@@ -3313,23 +3380,25 @@ function markRows() {
 // The history keeps one entry of the page's own above the list however many sections are
 // opened one after another, as on a wide screen, where the list stays beside them: a tap
 // with one already open takes that entry's place rather than adding to it, so Back goes to
-// the list, and a second Back leaves the page. A link to a section has no entry of the
-// page's own above the list yet, so one is made, with the link's entry made the bare page
-// under it - unless the page was reloaded inside a section, whose entry is already there.
+// the list, and a second Back leaves the page. A link to a section has no entry of this
+// load's above the list yet, so one is made, with the link's entry made the bare page under
+// it. A reload inside a section is taken as a link too: the entry under its own is the list
+// of the load before, which Back would load afresh, losing what's unsaved.
 //
 // While the page is locked nothing opens: the address is looked at again once it's let in.
 function openSection(id, how = "tap") {
   const section = document.getElementById(`section-${id}`);
   if (locked || !section || !NovaList.SECTIONS.some((one) => one.id === id) || openSectionId() === id) return;
   if (!openSectionId()) listScroll = window.scrollY;
-  // Marked as the page's own, so closing knows going back reaches the list, not another site.
+  // Marked as this load's, so closing knows going back reaches this load's list, not another
+  // site or a load gone before.
   if (how === "tap" && openSectionId()) {
-    history.replaceState({ nova: true }, "", `#${id}`);
+    history.replaceState({ nova: PAGE_LOAD }, "", `#${id}`);
   } else if (how === "tap") {
-    history.pushState({ nova: true }, "", `#${id}`);
-  } else if (how === "load" && !(history.state && history.state.nova)) {
+    history.pushState({ nova: PAGE_LOAD }, "", `#${id}`);
+  } else if (how === "load" && !thisLoads()) {
     history.replaceState(null, "", location.pathname + location.search);
-    history.pushState({ nova: true }, "", `#${id}`);
+    history.pushState({ nova: PAGE_LOAD }, "", `#${id}`);
   }
   showOnly(id);
   window.scrollTo(0, 0);
@@ -3337,23 +3406,30 @@ function openSection(id, how = "tap") {
   if (heading) heading.focus({ preventScroll: true });
 }
 
+// Whether the history entry the page is at was made by this load of it.
+function thisLoads() {
+  return Boolean(history.state) && history.state.nova === PAGE_LOAD;
+}
+
 // Shows the list again, as it was scrolled to, with the focus on the row of the section
-// which was open.
+// which was open - or, with a search's results showing and the row not among them, on the
+// search box.
 function showList(was) {
   showOnly(null);
   window.scrollTo(0, listScroll);
-  const row = rowButtons.get(was);
-  if (row) row.focus({ preventScroll: true });
+  const row = rowButtons.get(was) || document.getElementById("find");
+  row.focus({ preventScroll: true });
 }
 
-// Closes the open section. Going back in the history, if the section was pushed there, shows
-// the list as the browser's Back does, through popstate; one with no entry of the page's own
-// (the history was cut from under it) has nothing of the page's before it, so going back
-// would leave the page, and the address is made the bare page instead.
+// Closes the open section. Going back in the history, if this load pushed the section there,
+// shows the list as the browser's Back does, through popstate. An entry which isn't this load's
+// - an address typed in, or the history cut from under it - may have nothing of this load's
+// before it, and going back would leave the page or load it afresh, so the address is made the
+// bare page instead.
 function closeSection() {
   const was = openSectionId();
   if (!was || goingBack) return;
-  if (history.state && history.state.nova) {
+  if (thisLoads()) {
     goingBack = true;
     history.back();
     return;
@@ -3396,7 +3472,8 @@ function setUpSettings() {
       showNight();
     });
   }
-  document.getElementById("settings").addEventListener("submit", async (event) => {
+  const form = document.getElementById("settings");
+  form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const changed = countChanges();
     if (!changed.length) return;
@@ -3408,6 +3485,14 @@ function setUpSettings() {
       offerRestart = Boolean(result.restart_needed);
       restartSaid = result.message || "Saved. Some of it is used once Nova restarts.";
       countChanges();
+      // The bar gone, a focus which was in it - or which the save button let go of as it was
+      // turned off - would drop to the page's body: it goes where reading carries on instead.
+      // Saved with Enter in a field, the field keeps it.
+      const held = document.activeElement;
+      if (form.hidden && (!held || held === document.body || form.contains(held))) {
+        const open = openSectionId();
+        document.getElementById(open ? `${open}-title` : "find").focus({ preventScroll: true });
+      }
     } else {
       // In the save bar too, where it's still in view once the toast has gone.
       const unsaved = document.getElementById("unsaved");
