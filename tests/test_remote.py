@@ -5,6 +5,7 @@ against a fake satellite over a socketpair, which reads what the brain sends wit
 real protocol. Needs numpy installed (as it is on the Pi), and is skipped anywhere it isn't.
 """
 
+import json
 import logging
 import select
 import socket
@@ -349,6 +350,24 @@ def test_what_plays_reaches_the_satellite_with_its_cover_only_when_given(pair):
          "cover": False},
         {"type": "now_playing", "state": "stopped", "track": "", "artist": "", "album": ""}]
     assert fake.payloads("now_playing") == [b"jpeg", b"", b"", b""]
+
+
+def test_long_names_in_any_script_are_cut_to_fit_one_line(pair):
+    # A character outside the Basic Multilingual Plane is 12 bytes of JSON, as a pair of
+    # \u escapes - so 500 of each, uncut, would be far past the line the satellite reads,
+    # and it would drop the connection.
+    satellite, fake, serving = pair
+    note = "\U0001F3B5"
+    assert satellite.send_now_playing("playing", note * 500, note * 500, note * 500, cover=b"jpeg")
+    assert wait_for(lambda: fake.messages("now_playing"))
+    [message] = fake.messages("now_playing")
+    assert message["track"] == message["artist"] == message["album"] == note * remote.MOST_TEXT
+    assert len(json.dumps(message).encode()) + 1 <= protocol.MAX_LINE
+    assert fake.payloads("now_playing") == [b"jpeg"]
+    # And the connection carries on.
+    fake.say("ping")
+    assert wait_for(lambda: fake.messages("pong"))
+    assert satellite.connected
 
 
 def test_a_follow_up_is_heard_until_the_brain_stops_listening(pair):
