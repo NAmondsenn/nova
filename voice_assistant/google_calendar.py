@@ -156,6 +156,7 @@ SAME_AS = {"work": ("working", "shift", "shifts"), "uni": ("university", "lectur
 CANT_REACH_GOOGLE = "I can't reach Google's calendar right now."
 NO_SUCH_CALENDAR = "I haven't got a calendar called that."
 DAY_GONE = "That day's already gone - which day did you mean?"
+HAS_GUESTS = "That has guests. Change it in Google Calendar."
 NO_ANSWER = "Google didn't answer in time"
 LOST = "I lost Google partway through"
 TROUBLE = "Google had trouble"
@@ -1190,7 +1191,8 @@ class GoogleCalendar:
         """
         Changes a repeating event from one of its times on: the series itself from its first,
         else the series ended just before this one and a new one started from it, with the change -
-        as Google Calendar's "this and following events" does, so the times before it stay.
+        as Google Calendar's "this and following events" does, so the times before it stay. A
+        series with guests isn't split, as the new one wouldn't have them: that's said, and left.
 
         Args:
             found: The time, as _to_change gives it.
@@ -1239,6 +1241,13 @@ class GoogleCalendar:
                 return {"success": True, "message": message,
                         "undo": _undo(new_name or summary, lambda: self._send_once("PATCH", series_url, back),
                                       f"Put {summary} back as it was.", f"I can't tell whether {summary} was put back.")}
+            # The new series is a copy with none of the guests (see COPIED), so cutting the old one would
+            # take their future times away - and the Meet link they join by. Left to Google Calendar, which
+            # splits a series with its guests and asks them.
+            attendees = series.get("attendees")
+            if isinstance(attendees, list) and any(not (isinstance(each, dict) and each.get("self") is True)
+                                                   for each in attendees):
+                return {"success": False, "message": HAS_GUESTS}
             # A COUNT counts from the series' first time, so the new series' is what was left of it.
             counted = any(re.search(r"[:;]COUNT=", rule, re.IGNORECASE) for rule in rules
                           if rule.upper().startswith("RRULE:"))

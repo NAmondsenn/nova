@@ -1932,9 +1932,9 @@ def _occurrence(summary, series_id, start, end, meant=None):
     return _own(summary, start, end, f"{series_id}_{stamp}", recurringEventId=series_id, originalStartTime=_when(meant))
 
 
-def _series(summary, series_id, start, end, *rules):
+def _series(summary, series_id, start, end, *rules, **more):
     """A repeating event itself, as events.get gives it - its first time, and its rules."""
-    return _own(summary, start, end, series_id, recurrence=list(rules))
+    return _own(summary, start, end, series_id, recurrence=list(rules), **more)
 
 
 # Gym every Tuesday at 6 PM from the 3rd of November, ten times, but not the 10th.
@@ -2715,6 +2715,39 @@ def test_from_this_one_on_with_a_time_alone_splits_at_the_next_time(for_changing
     calendar.change("gym", start="19:00", end="20:30", following=True, today=NOVEMBER_21)
     assert calendar._session.sent[1]["json"]["end"] == {"dateTime": "2026-11-24T20:30:00+00:00",
                                                         "timeZone": "Europe/London"}
+
+
+def test_a_series_with_guests_isnt_split_from_this_one_on(for_changing):
+    # A new series from this one on has no guests, so cutting the old one would take their future times
+    # away. Nothing is cut, added or put back - only the series is read.
+    me, friend = {"email": "me@example.com", "self": True}, {"email": "friend@example.com"}
+    guests = _series("Gym", "made-up-gym", "2026-11-03T18:00:00Z", "2026-11-03T19:00:00Z", *GYM_RULES,
+                     attendees=[me, friend])
+    said = {"success": False, "message": "That has guests. Change it in Google Calendar."}
+    for asked in ({"start": "2026-11-24 19:00"}, {"start": "19:00"}, {"summary": "Gym class"},
+                  {"start": "19:00", "summary": "Gym class"}):
+        calendar = for_changing(**_splitting(**{GYM_URL: [guests]}))
+        assert calendar.change("gym", following=True, today=NOVEMBER_21, **asked) == said, asked
+        assert calendar._session.sent == [], asked
+        assert f"{GYM_URL}/instances" not in [url for url, _ in calendar._session.asked], asked
+
+    # Only himself on it is no guest, and that day's alone, or from the first one on, is still changed:
+    # neither makes a new series, so the guests stay on it.
+    alone = _series("Gym", "made-up-gym", "2026-11-03T18:00:00Z", "2026-11-03T19:00:00Z", *GYM_RULES, attendees=[me])
+    calendar = for_changing(**_splitting(**{GYM_URL: [alone], f"PATCH {GYM_URL}": [alone]}))
+    assert _said(calendar.change("gym", start="19:00", following=True, today=NOVEMBER_21))["success"]
+    assert [each["method"] for each in calendar._session.sent] == ["PATCH", "POST"]
+
+    first = _series("Gym", "made-up-gym", "2026-11-24T18:00:00+00:00", "2026-11-24T19:00:00+00:00", *GYM_RULES,
+                    attendees=[me, friend])
+    calendar = for_changing(personal=[GYM_24TH, GYM_1ST], answers={GYM_URL: [first], f"PATCH {GYM_URL}": [first]})
+    assert _said(calendar.change("gym", summary="Gym class", following=True, today=NOVEMBER_21))["success"]
+    assert [each["method"] for each in calendar._session.sent] == ["PATCH"]
+
+    tuesday = _event_url("calendar-personal", GYM_24TH["id"])
+    calendar = for_changing(personal=[GYM_24TH], answers={f"PATCH {tuesday}": [CHANGED]})
+    assert _said(calendar.change("gym", summary="Gym class", today=NOVEMBER_21))["success"]
+    assert GYM_URL not in [url for url, _ in calendar._session.asked]
 
 
 def test_a_split_that_fails_puts_the_old_series_back(for_changing):
