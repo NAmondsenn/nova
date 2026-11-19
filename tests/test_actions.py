@@ -2562,3 +2562,16 @@ def test_save_note_with_nothing_to_write_or_a_notes_which_fails_says_so():
 
     result = ActionExecutor(notes=broken).execute(Action("save_note", {"title": "Bins", "text": "Green"}))
     assert (result.ok, result.say) == (False, "I couldn't save the note.")
+
+
+def test_a_notes_text_is_only_logged_as_its_length():
+    note = Action("save_note", {"title": "Bins", "text": "Green on Tuesday."}, from_model=True)
+    shown = note.for_log()
+    assert shown == Action("save_note", {"title": "Bins", "text": "<17 characters>"}, from_model=True)
+    assert "Green" not in repr(shown) and "Bins" in repr(shown)
+    # A copy: what's saved is the whole of it.
+    assert note.params["text"] == "Green on Tuesday."
+    # Whatever the model gave for it, none of that is shown; and other tools, and other parameters, are.
+    assert Action("save_note", {"text": 5}).for_log().params == {"text": "<not logged>"}
+    other = Action("set_timer", {"label": "Take the bins out", "text": "kept"})
+    assert other.for_log() is other

@@ -881,3 +881,15 @@ def test_what_the_journey_rules_mustnt_catch_is_left_alone(text):
     # still give, and none is a journey.
     actions = _actions(text)
     assert actions is None or all(action.tool != "journey" for action in actions)
+
+
+def test_what_a_local_rule_asks_for_is_logged_without_a_notes_text(caplog):
+    # No local rule makes a note, as "make a note" is Claude's to word - but the line which says
+    # what was handled shouldn't be a way to put a note's text in the log if one ever does.
+    intents = LocalIntents()
+    intents._rules.insert(0, ("jot", lambda found: LocalIntents._result(
+        "Okay.", [Action("save_note", {"title": "Jot", "text": "The secret of the bins."})])))
+    with caplog.at_level("INFO"):
+        result = intents.match("Jot.")
+    assert result["actions"][0].params["text"] == "The secret of the bins."
+    assert "secret" not in caplog.text and "save_note" in caplog.text and "'title': 'Jot'" in caplog.text

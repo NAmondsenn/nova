@@ -18,7 +18,7 @@ import inspect
 import logging
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -104,6 +104,12 @@ APP_COMMAND_STARTS = ("command_", "kiosk_")
 NOT_A_COMMAND = "\u200b"
 
 
+# The (tool, parameter) pairs whose value is never logged, only how long it is - see Action.for_log.
+# A note's text is the user's own writing, or notes Claude made for them, and the lines which say
+# what was asked for are kept with the transcripts: without this every note would be in backend.log.
+NOT_LOGGED = {("save_note", "text")}
+
+
 @dataclass
 class Action:
     """
@@ -118,6 +124,19 @@ class Action:
     tool: str
     params: Dict[str, Any] = field(default_factory=dict)
     from_model: bool = False
+
+    def for_log(self) -> "Action":
+        """
+        Returns:
+            This action, or a copy with the value of each parameter in NOT_LOGGED said as its
+            length - "<17 characters>", or "<not logged>" when it isn't text - to put in a log
+            line in place of it. Never what's run, which is this one whole.
+        """
+        hidden = {name for tool, name in NOT_LOGGED if tool == self.tool} & set(self.params)
+        if not hidden:
+            return self
+        return replace(self, params={name: (f"<{len(value)} characters>" if isinstance(value, str) else "<not logged>")
+                                     if name in hidden else value for name, value in self.params.items()})
 
 
 @dataclass

@@ -508,8 +508,10 @@ class LocalIntents:
                     result["actions"] and all(action.tool in only for action in result["actions"])):
                 continue
             if result is not None:
-                logger.info(f"Handled locally: '{text}'" + (f" (actions: {result['actions']})"
-                                                            if result["actions"] else ""), extra=TRANSCRIPT)
+                # Without a note's text, which is never logged - see actions.NOT_LOGGED.
+                asked = [action.for_log() for action in result["actions"]]
+                logger.info(f"Handled locally: '{text}'" + (f" (actions: {asked})" if asked else ""),
+                            extra=TRANSCRIPT)
                 return result
 
         # A lone word which is the wake word run into a command, tried as the command - only
