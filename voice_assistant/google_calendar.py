@@ -166,6 +166,7 @@ CANT_REACH_GOOGLE = "I can't reach Google's calendar right now."
 NO_SUCH_CALENDAR = "I haven't got a calendar called that."
 DAY_GONE = "That day's already gone - which day did you mean?"
 HAS_GUESTS = "That has guests. Change it in Google Calendar."
+RULES_UNREADABLE = "Google's answer for that repeating event didn't make sense, so I've left it as it was."
 NO_ANSWER = "Google didn't answer in time"
 LOST = "I lost Google partway through"
 TROUBLE = "Google had trouble"
@@ -1036,6 +1037,10 @@ class GoogleCalendar:
         except _NotSure as e:
             logger.warning(f"Couldn't tell whether Google removed an event: {e}")
             return {"success": False, "message": f"I can't tell whether {summary} was removed."}
+        except _SeriesUnreadable:
+            # Raised before anything is written, so it's still as it was.
+            logger.error("Couldn't read a repeating event's rules, so it's left as it was")
+            return {"success": False, "message": RULES_UNREADABLE}
         except READ_FAILURES as e:
             if _gone(e):
                 logger.info("An event to remove was already gone from Google's calendar")
@@ -1058,7 +1063,7 @@ class GoogleCalendar:
             of it deleted on their own deleted again.
 
         Raises:
-            The same as _cancelled_from and _send_once, and ValueError if the series has no rules.
+            The same as _cancelled_from and _send_once, and _SeriesUnreadable if the series has no rules.
         """
         summary = found["summary"]
         calendar_id = found["calendar_id"]
@@ -1066,7 +1071,7 @@ class GoogleCalendar:
         series = self._get(series_url, {})
         rules = series.get("recurrence")
         if not isinstance(rules, list) or not all(isinstance(rule, str) for rule in rules):
-            raise ValueError("The series has no rules")
+            raise _SeriesUnreadable("The series has no rules")
         # By when this one was meant to be, which the series' rules make it - not where it's
         # been moved to since.
         this = _google_when(found["event"].get("originalStartTime") or found["event"]["start"])
@@ -1252,7 +1257,7 @@ class GoogleCalendar:
             series = self._get(series_url, {})
             rules = series.get("recurrence")
             if not isinstance(rules, list) or not all(isinstance(rule, str) for rule in rules):
-                raise ValueError("The series has no rules")
+                raise _SeriesUnreadable("The series has no rules")
             # By when this one was meant to be, which the series' rules make it - not where it's
             # been moved to since.
             this = _google_when(found["event"].get("originalStartTime") or found["event"]["start"])
@@ -1297,6 +1302,10 @@ class GoogleCalendar:
             logger.warning(f"Couldn't tell whether Google changed a repeating event: {e}")
             return {"success": False, "message": f"I can't tell whether {summary} was changed, so check Google "
                                                  "Calendar."}
+        except _SeriesUnreadable:
+            # Raised before anything is written, so it's still as it was.
+            logger.error("Couldn't read a repeating event's rules, so it's left as it was")
+            return {"success": False, "message": RULES_UNREADABLE}
         except READ_FAILURES as e:
             return _change_failed(e, summary)
         # The series is cut short now, so whatever happens to the new one, it's never left that
@@ -1716,6 +1725,10 @@ class _NotSure(Exception):
         self.said = said
 
 
+class _SeriesUnreadable(ValueError):
+    """A repeating event's rules can't be used: Google gave none, or none of the times the new series needs."""
+
+
 # What reading the calendar can fail with: no sign-in, Google out of reach or refusing,
 # or an answer of the wrong shape.
 READ_FAILURES = (SignInNeeded, requests.RequestException, ValueError, KeyError, TypeError)
@@ -1863,7 +1876,7 @@ def _rules_left(rules: List[str], before: int) -> List[str]:
         "COUNT=6" - and an UNTIL, and EXDATE and RDATE lines, kept as they are.
 
     Raises:
-        ValueError: If a COUNT can't be read, or has no times left.
+        _SeriesUnreadable: If a COUNT can't be read, or has no times left.
     """
     left = []
     for rule in rules:
@@ -1872,9 +1885,12 @@ def _rules_left(rules: List[str], before: int) -> List[str]:
             for index, part in enumerate(parts):
                 name, _, value = part.partition("=")
                 if name.upper() == "COUNT":
-                    count = int(value) - before
+                    try:
+                        count = int(value) - before
+                    except ValueError as e:
+                        raise _SeriesUnreadable("A COUNT isn't a number") from e
                     if count < 1:
-                        raise ValueError("The series has no times left")
+                        raise _SeriesUnreadable("The series has no times left")
                     parts[index] = f"{name}={count}"
             rule = rule[:len("RRULE:")] + ";".join(parts)
         left.append(rule)

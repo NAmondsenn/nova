@@ -3146,6 +3146,31 @@ def test_when_the_days_deleted_on_their_own_cant_be_read_nothing_is_changed(for_
     assert calendar._session.sent == []
 
 
+def test_a_series_whose_rules_cant_be_used_is_left_as_it_was_and_said_so(for_changing):
+    said = {"success": False, "message": "Google's answer for that repeating event didn't make sense, so I've left "
+                                         "it as it was."}
+    # No rules at all, or not a list of them - which Google's answer for a repeating event always has.
+    for series in ({key: value for key, value in GYM.items() if key != "recurrence"}, {**GYM, "recurrence": "RRULE"},
+                   {**GYM, "recurrence": [7]}):
+        for ask in (lambda calendar: calendar.remove("gym", following=True, today=NOVEMBER_21),
+                    lambda calendar: calendar.change("gym", start="2026-11-24 19:00", following=True,
+                                                     today=NOVEMBER_21)):
+            calendar = for_changing(**_splitting(**{GYM_URL: [series]}))
+            assert ask(calendar) == said, series
+            assert calendar._session.sent == []
+
+    # A COUNT with no times left once those before the split are taken off - or which isn't a number: the
+    # split is refused before anything is sent.
+    for rule in ("RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=3", "RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=many"):
+        counted = _series("Gym", "made-up-gym", "2026-11-03T18:00:00Z", "2026-11-03T19:00:00Z", rule)
+        calendar = for_changing(**_splitting(**{GYM_URL: [counted]}))
+        assert calendar.change("gym", start="2026-11-24 19:00", following=True, today=NOVEMBER_21) == said, rule
+        assert calendar._session.sent == []
+        # Just a cut, which has no times to count, is made all the same.
+        calendar = for_changing(**_splitting(**{GYM_URL: [counted], f"PATCH {GYM_URL}": [counted]}))
+        assert calendar.remove("gym", following=True, today=NOVEMBER_21)["success"] is True
+
+
 def test_a_split_that_fails_puts_the_days_deleted_on_their_own_back_to_deleted(for_changing):
     new_failed = _refused(400, "invalid")
     answers = {GYM_INSTANCES: [GYM_FROM_THE_24TH, _events_page(*BEFORE_THE_24TH)], f"PATCH {GYM_URL}": [GYM, GYM],
