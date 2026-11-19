@@ -141,16 +141,29 @@ LIST_LEAD = r"(?:to|on|onto) (?!do\b)"
 ALWAYS_POINTS_BACK = {"it", "this", "that", "them", "these", "those"}
 
 
+# A song said only by where it is - "the last song", "the song before", "the one before", "the one
+# playing" - is the one playing or just played, which a playlist is for, never a to-do list. Its words are
+# the song's, which "one" is when a pointer is with it, and the pointers: "the song of the summer" and "a
+# new song" are named, so still things for a list, and "one egg" is a thing.
+SONG_WORDS = {"song", "track", "tune", "one"}
+SONG_POINTERS = {"last", "previous", "before", "earlier", "prior", "current", "playing", "played", "next"}
+# The song playing said as a question - "add what's playing to Gym".
+WHATS_PLAYING = re.compile(r"(?:what(?:['\u2019]s| is)|whats) playing")
+
+
 def points_back(item: str) -> bool:
     """
-    Whether a thing said for a list only points back, to what the conversation so far says.
+    Whether a thing said for a list only points back, to what the conversation so far says - or at a song
+    by where it is, as "the last song" does.
 
     Args:
         item: The thing as it was said, e.g. "the other one".
     """
     words = item.split()
     rest = [word for word in words if word not in ("the", "my", "some")]
-    return bool(ALWAYS_POINTS_BACK & set(words)) or (bool(rest) and all(word in PRONOUNS for word in rest))
+    return (bool(ALWAYS_POINTS_BACK & set(words)) or (bool(rest) and all(word in PRONOUNS for word in rest))
+            or (bool(SONG_WORDS & set(rest)) and all(word in SONG_WORDS | SONG_POINTERS for word in rest))
+            or WHATS_PLAYING.fullmatch(item) is not None)
 
 
 def not_a_list(said: Optional[str]) -> bool:

@@ -37,6 +37,7 @@ from voice_assistant.recording import RATE, AudioFeed
 from voice_assistant.remote import RemoteSatellite
 from voice_assistant.routines import Routines
 from voice_assistant.satellite_rooms import SatelliteRooms
+from voice_assistant.undo import LastChange
 from voice_assistant.vad import LoudnessDetector
 
 
@@ -260,7 +261,7 @@ def brain(tmp_path, monkeypatch, make_config):
                            routines=Routines(path=str(tmp_path / "routines.json")), ntfy=None, weather=None,
                            batteries=None, lists=None, pc=None, registry=None, calendar=None, media=None,
                            downloads=None, football=None, listening=None, wrapped_store=None, usage=None, new_music_playlist=None,
-                           journeys=None,
+                           playlist_changes=None, journeys=None, last_change=LastChange(),
                            tts=FakePiper(), stt=FakeSpeechToText(), sounds_folder=Path(paths.SOUNDS_DIR))
 
 
@@ -352,6 +353,17 @@ def test_a_wake_is_recorded_heard_and_answered_through_the_satellite(brain, conn
     pi.go()
     thread.join(2)
     assert not thread.is_alive()
+
+
+def test_every_session_changes_playlists_with_the_brains_one(brain, connect, make_session):
+    brain.playlist_changes = object()
+    assert make_session().actions.playlist_changes is brain.playlist_changes
+
+
+def test_every_session_undoes_from_the_brains_one_slot(brain, connect, make_session):
+    # One "undo that" for the house: a change by voice at one satellite is the last thing done at every other.
+    assert make_session().actions.last_change is brain.last_change
+    assert make_session().actions.last_change is make_session().actions.last_change
 
 
 def test_a_timer_set_through_a_satellite_rings_on_it(brain, connect, make_session):

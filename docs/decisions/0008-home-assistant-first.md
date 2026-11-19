@@ -195,7 +195,7 @@ The user's standing rules apply, especially two:
 | Ring my phone (8) | `notify.mobile_app_*` | Only if the app's own connection on the home Wi-Fi is on - otherwise it needs Google's push service | The app's own ring | Notifies only |
 | Sending to the Mac or tablet (9) | `notify.mobile_app_*` | As for ringing; the phone's ntfy as today | Home Assistant's, except the phone (the user's call) | Notifies only |
 | What's on, and activities (10, 11) | A read of Google's calendars | No | Not through Home Assistant - the user's choice (answer 2) | Reads only |
-| Adding to the calendar (10) | Claude, then Google's calendar | No | The same | Adds only; never changes or deletes |
+| Adding to the calendar (10) | Claude, then Google's calendar | No | The same | Adds only; never changes or deletes - changed by 0030 |
 | Lists: one thing added, ticked off (12) | Assist, then `todo.add_item` or `todo.update_item` | Works | Home Assistant's own lists | Never deletes |
 | Lists: several things (12) | Claude, then `todo.add_item` | Added as one item, as said | The same | The same |
 | Lists: reading (12) | `todo.get_items`, a read | Works | The same | Reads only |

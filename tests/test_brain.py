@@ -50,14 +50,16 @@ from voice_assistant.listening import Listening
 from voice_assistant.wrapped import WrappedStore, WrappedWatcher
 from voice_assistant.media_watch import MediaWatcher
 from voice_assistant.music_device import MusicDevice
-from voice_assistant.navidrome import NavidromeLibrary
+from voice_assistant.navidrome import NavidromeLibrary, normalise
 from voice_assistant.new_music import NewMusicPlaylist
 from voice_assistant.ntfy import Alert
+from voice_assistant.playlist_changes import PlaylistChanges
 from voice_assistant.recording import RATE
 from voice_assistant.remote import RemoteSatellite
 from voice_assistant.satellite_passwords import SatellitePasswords
 from voice_assistant.satellite_rooms import SatelliteRooms
 from voice_assistant.soulsync import SoulSync
+from voice_assistant.undo import LastChange
 from voice_assistant.usage import UsageLog
 from voice_assistant.usage_device import UsageDevice
 from voice_assistant.vad import LoudnessDetector
@@ -3054,6 +3056,35 @@ def test_the_top_artists_are_followed_while_the_brain_runs(make_brain, tmp_path,
     assert running == [True]
     assert not any(thread.name == "following" for thread in threading.enumerate())
     assert watcher._thread is None
+
+
+def test_playlist_changes_are_made_once_with_soulsync_and_the_new_music_playlist_as_they_are_now(
+        make_brain, tmp_path, monkeypatch):
+    monkeypatch.setenv("SOULSYNC_API_KEY", "made-up-key")
+    brain = make_brain(new_music={"playlist": "Discovery Shuffle"}, soulsync={"url": "http://soulsync.local:8008"})
+    changes = brain.playlist_changes
+    assert isinstance(changes, PlaylistChanges)
+
+    # SoulSync as it is set up now.
+    soulsync = changes._soulsync()
+    assert isinstance(soulsync, SoulSync) and soulsync.url == "http://soulsync.local:8008"
+    brain.apply_settings({("soulsync", "url"): ""})
+    assert changes._soulsync() is None
+
+    # The id Nova recorded for the playlist it makes under the name set now - none before it's made one.
+    assert changes._new_music_id() is None
+    (tmp_path / "new_music.json").write_text(json.dumps({"id": "made-up-id", "name": normalise("Discovery Shuffle")}))
+    assert changes._new_music_id() == "made-up-id"
+    brain.apply_settings({("new_music", "playlist"): "Fresh Finds"})
+    assert changes._new_music_id() is None
+    brain.apply_settings({("new_music", "playlist"): ""})
+    assert changes._new_music_id() is None
+
+
+def test_the_brain_keeps_the_one_slot_undo_that_takes_for_every_satellite(make_brain):
+    brain = make_brain()
+    assert isinstance(brain.last_change, LastChange)
+    assert make_brain().last_change is not brain.last_change
 
 
 def test_the_new_music_playlist_is_kept_while_the_brain_runs(make_brain, tmp_path, monkeypatch):
