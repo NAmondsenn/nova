@@ -24,7 +24,7 @@ np = pytest.importorskip("numpy")
 pytest.importorskip("soxr")
 
 from voice_assistant import clock as clock_module
-from voice_assistant import ha_device, music, network, paths, protocol, satellite_link, spotify_controller
+from voice_assistant import ha_device, music, network, notes, paths, protocol, satellite_link, spotify_controller
 from voice_assistant import session as session_module
 from voice_assistant.actions import Action
 from voice_assistant.brain import Brain
@@ -259,6 +259,7 @@ def brain(tmp_path, monkeypatch, make_config):
                            rooms=SatelliteRooms(str(tmp_path / "satellite_rooms.json")),
                            ring_on=lambda name: name, room_of=lambda name: [name], room_sessions=lambda name: [],
                            spoken_name=lambda name: name,
+                           names_satellite=lambda said: False,
                            routines=Routines(path=str(tmp_path / "routines.json")), ntfy=None, weather=None,
                            batteries=None, lists=None, pc=None, registry=None, calendar=None, media=None,
                            downloads=None, football=None, listening=None, wrapped_store=None, usage=None, new_music_playlist=None,
@@ -888,6 +889,288 @@ def test_a_satellite_alone_holds_only_its_own(make_session, brain):
     pi._handle_interaction = lambda feed, timeline, pre_roll=None, pressed=False: None
     pi._converse({"talked_over": False, "feed": AudioFeed()})
     assert held == [("hold", "pi"), ("release", "pi")]
+
+
+# Moving the music to another satellite, and playing something there
+
+class MovingPlayback:
+    """One song 'playing' on a satellite, paused or not until it's stopped."""
+
+    sample_rate = 48000
+
+    def __init__(self, paused):
+        self.paused = paused
+        self.stopped = False
+        self.position = 0
+        self.duration = 200.0
+        self._done = threading.Event()
+
+    def wait(self, timeout=None):
+        return self._done.wait(timeout)
+
+    def stop(self):
+        self.stopped = True
+        self._done.set()
+
+
+class MovingSpeaker:
+    """A satellite's speaker, keeping each song it was asked to play."""
+
+    sample_rate = 48000
+
+    def __init__(self):
+        self.started = []
+
+    def play_stream(self, song, volume=1.0, kind="reply", paused=False, most_ahead=None):
+        self.started.append(MovingPlayback(paused))
+        return self.started[-1]
+
+
+def _with_navidrome(session):
+    """Gives a session a real Navidrome player on a speaker of its own, returning the speaker."""
+    speaker = MovingSpeaker()
+    player = NavidromePlayer("http://navidrome.local:4533", "nova", "secret", speaker, session.volume)
+    # The song itself stands in for its audio.
+    player._decode = lambda song, start=0.0: song
+    session.music_player = session.actions.music = player
+    session.music = music.MusicHold(player)
+    return speaker
+
+
+def test_move_during_a_reply_waits_for_it_and_the_source_stays_quiet(brain, connect, make_session):
+    # Talking to the Pi, with the PC in the same room - both held while he's heard.
+    pi, pc = make_session(connect("bedroom")[0]), make_session(connect("pc")[0])
+    pi_speaker, pc_speaker = _with_navidrome(pi), _with_navidrome(pc)
+    sessions, spoken = {"bedroom": pi, "pc": pc}, {"bedroom": "the Pi", "pc": "the PC"}
+    brain.room_sessions = lambda name: [pi, pc] if name == "bedroom" else [pc, pi]
+    brain.connected_sessions = lambda: [pi, pc]
+    brain.session_for = sessions.get
+    brain.find_satellite = lambda said: ("pc", None)
+    brain.spoken_name = spoken.get
+    brain.move_music = MethodType(Brain.move_music, brain)
+
+    songs = [{"id": str(number), "title": f"Song {number}", "artist": "Band"} for number in range(1, 4)]
+    pi.music_player._start(songs)
+    assert wait_for(lambda: pi_speaker.started and not pi_speaker.started[0].paused)
+    pi.conversation = ScriptedConversation()
+    moved, during = [], []
+
+    def answer(feed, timeline, pre_roll=None, pressed=False):
+        moved.append(pi.actions.execute(Action("move_music", {"to": "the PC"})))
+        # The reply isn't over, so the PC has the song ready but is not playing it.
+        during.append(wait_for(lambda: pc_speaker.started and pc_speaker.started[-1].paused))
+        return None
+
+    pi._handle_interaction = answer
+    pi._converse({"talked_over": False, "feed": AudioFeed()})
+
+    assert [(result.ok, result.say) for result in moved] == [(True, "Moved to the PC.")]
+    assert during == [True]
+    # Let go at the end of the conversation, the PC plays on from the first song, and the Pi has none.
+    pi.music.wait(), pc.music.wait()
+    assert wait_for(lambda: not pc_speaker.started[-1].paused)
+    assert len(pc_speaker.started) == 1 and pc.music_player.is_playing()
+    assert not pi.music_player.has_music() and not pi.music_player.is_playing()
+    assert len(pi_speaker.started) == 1 and pi_speaker.started[0].stopped
+
+
+def test_elsewhere_gives_the_named_sessions_executor(brain, connect, make_session):
+    pi, pc = make_session(connect("bedroom")[0]), make_session(connect("pc")[0])
+    named = {"the Pi": "bedroom", "the PC": "pc", "the Mac": "mac"}
+    brain.find_satellite = lambda said: (named[said], None) if said in named else (None, f"Which one: {said}?")
+    brain.session_for = {"bedroom": pi, "pc": pc}.get
+    brain.spoken_name = {"mac": "the Mac"}.get
+    asked = []
+    brain.move_music = lambda spoken_at, said: asked.append((spoken_at, said)) or {"success": True, "message": "Moved."}
+
+    assert pi.actions.elsewhere("the PC") == (pc.actions, None)
+    # Itself too, which the executor takes for "here".
+    assert pi.actions.elsewhere("the Pi") == (pi.actions, None)
+    # One which is away, or no one at all, as the brain says it.
+    assert pi.actions.elsewhere("the Mac") == (None, "The Mac isn't connected.")
+    assert pi.actions.elsewhere("the phone") == (None, "Which one: the phone?")
+    # A move is asked of the brain from the satellite spoken to.
+    assert pi.actions.mover("the PC") == {"success": True, "message": "Moved."}
+    assert asked == [("bedroom", "the PC")]
+
+
+def test_a_sessions_actions_know_how_a_satellite_is_called_and_how_to_wait_for_its_music(brain, make_session):
+    session = make_session()
+    brain.spoken_name = {"bedroom": "the Pi", "pc": "the PC"}.get
+    assert session.actions.spoken_name("pc") == "the PC"
+    waited = []
+    session.music = SimpleNamespace(wait=lambda: waited.append("waited"))
+    session.actions.settled()
+    assert waited == ["waited"]
+
+
+@pytest.mark.parametrize("in_one_room", [True, False])
+def test_playing_on_another_satellite_pauses_the_rooms_own_music_for_good_when_it_shares_the_room(
+        brain, connect, make_session, in_one_room):
+    # At the Pi, with Drake asked for on the PC: in the same room, the Pi's own song is paused, as "pause"
+    # would, and stays so once the reply is over - and in another room it carries on, as it did.
+    pi, pc = make_session(connect("bedroom")[0]), make_session(connect("pc")[0])
+    pi_speaker, pc_speaker = _with_navidrome(pi), _with_navidrome(pc)
+    sessions, spoken = {"bedroom": pi, "pc": pc}, {"bedroom": "the Pi", "pc": "the PC"}
+    brain.room_sessions = lambda name: [pi, pc] if in_one_room else [pi]
+    brain.session_for = sessions.get
+    brain.find_satellite = lambda said: ("pc", None)
+    brain.spoken_name = spoken.get
+    songs = [{"id": str(number), "title": f"Song {number}", "artist": "Band"} for number in range(1, 4)]
+
+    def play(query=None, search_type=None):
+        pc.music_player._start(songs)
+        return {"success": True, "message": f"Playing {query}"}
+
+    pc.music_player.play = play
+    pi.music_player._start(songs)
+    assert wait_for(lambda: pi_speaker.started and not pi_speaker.started[0].paused)
+    pi.conversation = ScriptedConversation()
+    played = []
+
+    def answer(feed, timeline, pre_roll=None, pressed=False):
+        # As the conversation does before it runs what was asked for.
+        pi.music.wait()
+        played.append(pi.actions.execute(Action("play_music", {"query": "Drake", "on": "the PC"})))
+        return None
+
+    pi._handle_interaction = answer
+    pi._converse({"talked_over": False, "feed": AudioFeed()})
+
+    assert [(result.ok, result.say) for result in played] == [(True, "Playing Drake on the PC.")]
+    pi.music.wait(), pc.music.wait()
+    assert wait_for(lambda: pc_speaker.started and not pc_speaker.started[-1].paused)
+    if in_one_room:
+        # Still queued, so it can be carried on, but paused for good.
+        assert pi.music_player.has_music() and not pi.music_player.is_playing()
+        assert pi_speaker.started[0].paused and not pi_speaker.started[0].stopped
+    else:
+        assert wait_for(lambda: pi.music_player.is_playing() and not pi_speaker.started[0].paused)
+    assert len(pi_speaker.started) == 1
+
+
+# Notes saved at a computer
+
+def _at_the_pc(brain, connect, make_session, answers=None, saves_notes=True):
+    """
+    A session for the PC, which says it saves notes unless told it doesn't, with the notes
+    its satellite was asked to save - each a title and text - which it answers from answers.
+
+    Returns:
+        The session, and the notes the satellite was asked to save.
+    """
+    satellite, _ = connect("pc")
+    satellite.saves_notes = saves_notes
+    asked = []
+
+    def save_note(title, text, wait=5.0):
+        asked.append((title, text))
+        return answers.pop(0) if answers else {"file": "Bins.txt"}
+
+    satellite.save_note = save_note
+    brain.spoken_name = {"pc": "the PC", "bedroom": "the Pi"}.get
+    return make_session(satellite), asked
+
+
+def _note(session, title="Bins", text="Green on Tuesday."):
+    return session.actions.execute(Action("save_note", {"title": title, "text": text}, from_model=True))
+
+
+def test_save_note_reply_names_the_file_without_extension(brain, connect, make_session):
+    session, asked = _at_the_pc(brain, connect, make_session, [{"file": "Bins.txt"}, {"file": "Bins (2).txt"},
+                                                                {"file": "Bins.txt.txt"}, {"file": "Notes"}])
+    assert "save_note" in {tool["name"] for tool in session.actions.tool_schemas()}
+    result = _note(session)
+    assert (result.ok, result.say, result.confirm) == (True, "Saved to your Downloads as Bins.", "speak")
+    assert asked == [("Bins", "Green on Tuesday.")]
+    # Only a final ".txt" goes: the " (2)" is part of the name.
+    assert _note(session).say == "Saved to your Downloads as Bins (2)."
+    assert _note(session).say == "Saved to your Downloads as Bins.txt."
+    assert _note(session).say == "Saved to your Downloads as Notes."
+
+
+def test_save_note_error_is_said(brain, connect, make_session):
+    session, _ = _at_the_pc(brain, connect, make_session,
+                            [{"error": "There's no Downloads folder to save it in."}])
+    result = _note(session)
+    assert (result.ok, result.say) == (
+        False, "I couldn't save it on the PC: There's no Downloads folder to save it in.")
+
+
+def test_save_note_no_answer(brain, connect, make_session):
+    # None is no answer in time, or the satellite going.
+    session, asked = _at_the_pc(brain, connect, make_session, [None])
+    result = _note(session)
+    assert (result.ok, result.say) == (False, "The PC didn't answer, so the note wasn't saved.")
+    assert asked == [("Bins", "Green on Tuesday.")]
+
+
+def test_a_note_too_long_is_refused_before_anything_is_sent(brain, connect, make_session):
+    session, asked = _at_the_pc(brain, connect, make_session)
+    result = _note(session, text="x" * (notes.MOST_TEXT + 1))
+    assert (result.ok, result.say) == (False, "I couldn't save it on the PC: That note's too long to save.")
+    assert asked == []
+    # The most there is, is sent.
+    assert _note(session, text="x" * notes.MOST_TEXT).ok and len(asked) == 1
+
+
+def test_a_note_which_cant_be_looked_up_by_name_is_still_saved(brain, connect, make_session):
+    # The name is only wanted to say it couldn't, so a note saved isn't reported lost over it.
+    session, asked = _at_the_pc(brain, connect, make_session)
+
+    def broken(name):
+        raise OSError("the satellites can't be read")
+
+    brain.spoken_name = broken
+    result = _note(session)
+    assert (result.ok, result.say) == (True, "Saved to your Downloads as Bins.")
+    assert len(asked) == 1
+
+
+def test_a_note_is_saved_through_the_satellite_and_its_text_is_never_logged(brain, connect, make_session, caplog):
+    satellite, pi = connect("pc")
+    satellite.saves_notes = True
+    brain.spoken_name = {"pc": "the PC"}.get
+    session = make_session(satellite)
+    done = []
+    caplog.set_level(logging.DEBUG)
+    thread = threading.Thread(target=lambda: done.append(_note(session, "Bins", "Green on Tuesday, secret.")))
+    thread.start()
+    assert wait_for(lambda: pi.messages("save_note"))
+    # As the PC's satellite answers, with the file as it was made.
+    pi.say("note_saved", id=pi.messages("save_note")[0]["id"], file="Bins (2).txt")
+    thread.join(5)
+
+    assert [(result.ok, result.say) for result in done] == [(True, "Saved to your Downloads as Bins (2).")]
+    sent = [(message, payload) for message, payload in pi.received if message["type"] == "save_note"]
+    assert [(message["title"], payload) for message, payload in sent] == [("Bins", b"Green on Tuesday, secret.")]
+    # The title and the file are fine to log - never what it says.
+    assert "secret" not in caplog.text
+    assert "Bins (2).txt" in caplog.text
+
+
+def test_pi_session_has_no_notes_tool(brain, connect, make_session):
+    # A satellite which doesn't say it saves notes - the Pi, or one from before there were any.
+    session, _ = _at_the_pc(brain, connect, make_session, saves_notes=False)
+    assert session.actions.notes is None
+    assert "save_note" not in {tool["name"] for tool in session.actions.tool_schemas()}
+    # Asked for by name anyway, it's refused rather than sent anywhere.
+    result = _note(session)
+    assert result.ok is False and result.say
+    # And one which does is offered it.
+    pc, _ = _at_the_pc(brain, connect, make_session)
+    assert pc.actions.notes is not None
+
+
+def test_add_to_my_notes_is_still_the_list_at_the_pc(brain, connect, make_session):
+    session, asked = _at_the_pc(brain, connect, make_session)
+    # As it is once Home Assistant is set up: the lists are its.
+    session.intents.home = object()
+    for said in ("Add milk to my notes.", "Add milk to notes.", "Put milk on my notes list."):
+        result = session.intents.match(said)
+        assert [action.tool for action in result["actions"]] == ["add_to_list"], said
+        assert result["actions"][0].params["item"] == "milk"
+    assert asked == []
 
 
 def test_closing_lets_go_of_the_device_the_music_and_the_satellites_sounds_once_in_order(make_session):
@@ -1683,6 +1966,13 @@ def test_a_typed_request_waits_for_an_announcement_being_said(brain, connect, ma
     assert brain.tts.said == ["The washing's done.", "It's ten o'clock."]
     pi.go()
     thread.join(5)
+
+
+def test_only_a_wake_word_satellite_gets_playlist_tiles(make_session, connect):
+    assert make_session()._device_controls().playlist_tiles is True
+    satellite, _ = connect(name="pc", hostname="pc.local")
+    satellite.push_to_talk = True
+    assert make_session(satellite)._device_controls().playlist_tiles is False
 
 
 def test_the_device_is_given_ask(make_session):

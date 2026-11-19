@@ -196,6 +196,347 @@ def test_resume_prefers_its_own_paused_music(make_executor):
     assert pc.calls == ["play"] and pi.calls == []
 
 
+# Moving the music, and playing on another satellite
+
+class QueryPlayer:
+    """
+    A satellite's Navidrome player, which notes what it's asked to play, and was playing before the
+    assistant was spoken to if it's told so - as music held for a reply is, see MusicHold.
+    """
+
+    name = "Navidrome"
+    needs_internet = False
+
+    def __init__(self, was_playing=False, events=None):
+        self.calls = []
+        self.was_playing_before = was_playing
+        self.resume_cancelled = False
+        self.events = events if events is not None else []
+
+    def was_playing(self):
+        return self.was_playing_before
+
+    def hand_over(self):
+        # What only Navidrome's player has: one which stream of its own to pause, rather than the account's.
+        return None
+
+    def pause(self):
+        self.calls.append("pause")
+        return {"success": True, "message": "Paused", "chime": True}
+
+    def cancel_resume(self):
+        self.resume_cancelled = True
+
+    def play(self, query=None, search_type=None):
+        self.calls.append(("play", query, search_type))
+        self.events.append("played")
+        return {"success": True, "message": f"Playing {query}"}
+
+    def play_playlist(self, name):
+        self.calls.append(("play_playlist", name))
+        self.events.append("played")
+        return {"success": True, "message": f"Playing {name}"}
+
+
+def _pair(make_executor, in_one_room):
+    """
+    The Pi's executor, which hears "the PC" as another satellite and "the Pi" as itself, and
+    the PC's - with the moves the Pi was asked for, what happened to the PC's player, and each
+    one's player. The Pi was playing before it was spoken to, and so was the PC. With
+    in_one_room, the two are in the user's room along with a third which wasn't playing.
+    """
+    events, moves = [], []
+    pi_player, pc_player, third_player = (QueryPlayer(was_playing=True, events=events),
+                                          QueryPlayer(was_playing=True, events=events), QueryPlayer())
+    pc = make_executor(pc_player, satellite="pc")
+    pc.spoken_name = lambda name: "the PC"
+
+    def elsewhere(said):
+        if said == "the PC":
+            return pc, None
+        if said == "the Pi":
+            return pi, None
+        if said == "the Mac":
+            return None, "The Mac isn't connected."
+        return None, f"There's no satellite called {said}."
+
+    def mover(said):
+        moves.append(said)
+        return {"success": True, "message": "Moved to the PC."}
+
+    room = [pi_player, pc_player, third_player] if in_one_room else [pi_player]
+    pi = make_executor(pi_player, satellite="bedroom", mover=mover, elsewhere=elsewhere, room_players=lambda: room)
+    return SimpleNamespace(pi=pi, pc=pc, pi_player=pi_player, pc_player=pc_player, third_player=third_player,
+                           moves=moves, events=events)
+
+
+@pytest.fixture
+def pair(make_executor):
+    """The Pi and the PC, in rooms of their own."""
+    return _pair(make_executor, in_one_room=False)
+
+
+@pytest.fixture
+def roomed(make_executor):
+    """The Pi and the PC, in the same room."""
+    return _pair(make_executor, in_one_room=True)
+
+
+def test_move_music_tool_calls_the_mover(pair):
+    result = pair.pi.execute(Action("move_music", {"to": "the PC"}, from_model=True))
+    assert (result.ok, result.say) == (True, "Moved to the PC.")
+    assert pair.moves == ["the PC"]
+
+    # What the brain says of a move which couldn't be done is said as it is.
+    pair.pi.mover = lambda said: {"success": False, "message": "It's already on the PC."}
+    result = pair.pi.execute(Action("move_music", {"to": "the PC"}))
+    assert (result.ok, result.say) == (False, "It's already on the PC.")
+
+    # A mover which fails is said, not raised.
+    def broken(said):
+        raise OSError("the brain's lost it")
+
+    pair.pi.mover = broken
+    result = pair.pi.execute(Action("move_music", {"to": "the PC"}))
+    assert result.ok is False and result.say
+
+
+def test_move_music_is_offered_with_the_satellite_to_name(pair, make_executor):
+    schemas = {schema["name"]: schema for schema in pair.pi.tool_schemas()}
+    assert schemas["move_music"]["input_schema"]["required"] == ["to"]
+    assert "play it on my Pi" in schemas["move_music"]["description"]
+    # Only for naming somewhere other than here: never required.
+    for name in ("play_music", "play_playlist"):
+        schema = schemas[name]["input_schema"]
+        assert "on" in schema["properties"] and "on" not in schema["required"]
+        assert "other than here" in schema["properties"]["on"]["description"]
+        # With no query it's the music playing now which goes there, not the other way about.
+        assert "moves the music that's playing now to there" in schema["properties"]["on"]["description"]
+    # Without a way to move it, and without music, it isn't offered.
+    assert "move_music" not in {schema["name"] for schema in ActionExecutor(clock=object()).tool_schemas()}
+
+
+def test_play_music_on_another_satellite_plays_there(pair):
+    result = pair.pi.execute(Action("play_music", {"query": "Drake", "search_type": "artist", "on": "the PC"}))
+    # Said where he is, as he can't hear the PC's room.
+    assert (result.ok, result.say, result.confirm) == (True, "Playing Drake on the PC.", "speak")
+    assert pair.pc_player.calls == [("play", "Drake", "artist")]
+    # This one's player isn't touched - it's in another room - and nothing is moved.
+    assert pair.pi_player.calls == [] and not pair.pi_player.resume_cancelled and pair.moves == []
+
+
+def test_play_music_on_with_no_query_moves(pair):
+    result = pair.pi.execute(Action("play_music", {"on": "the PC"}))
+    assert (result.ok, result.say) == (True, "Moved to the PC.")
+    assert pair.moves == ["the PC"] and pair.pi_player.calls == [] and pair.pc_player.calls == []
+
+
+def _with_nothing_to_move(pair):
+    """What the brain says when there's no music anywhere to move: the sentence, and the flag for it."""
+    pair.pi.mover = lambda words: pair.moves.append(words) or {
+        "success": False, "message": "There's no music to move.", "nothing_to_move": True}
+    pair.pc_player.play = lambda query=None, search_type=None: pair.pc_player.calls.append(("play", query)) or {
+        "success": True, "message": "Playing your liked songs"}
+
+
+def test_play_music_on_with_no_query_and_nothing_to_move_plays_there(pair):
+    # "Play something on the PC" with nothing on anywhere is the PC's own bare "play", said where he is.
+    _with_nothing_to_move(pair)
+    result = pair.pi.execute(Action("play_music", {"on": "the PC"}))
+    assert (result.ok, result.say, result.confirm) == (True, "Playing your liked songs on the PC.", "speak")
+    assert pair.pc_player.calls == [("play", None)]
+    # The move was asked first, and this one's player is left alone.
+    assert pair.moves == ["the PC"] and pair.pi_player.calls == []
+
+
+def test_play_music_on_with_no_query_and_music_to_move_still_moves(pair):
+    # Moving wins: the brain found music, so says "Moved to the PC." and nothing is started over it.
+    _with_nothing_to_move(pair)
+    pair.pi.mover = lambda words: pair.moves.append(words) or {"success": True, "message": "Moved to the PC."}
+    result = pair.pi.execute(Action("play_music", {"on": "the PC"}))
+    assert (result.ok, result.say) == (True, "Moved to the PC.")
+    assert pair.pc_player.calls == [] and pair.pi_player.calls == []
+
+
+def test_play_music_on_with_nothing_to_move_to_one_which_cant_be_played_on_says_why(pair):
+    # There's nothing to start anything on, so it's why it can't be started which is said, not the move's.
+    _with_nothing_to_move(pair)
+    for on, said in (("the Mac", "The Mac isn't connected."), ("the phone", "There's no satellite called the phone.")):
+        result = pair.pi.execute(Action("play_music", {"on": on}))
+        assert (result.ok, result.say) == (False, said)
+    assert pair.pc_player.calls == [] and pair.pi_player.calls == []
+
+
+def test_play_music_on_this_satellite_plays_here(pair):
+    pair.pi.execute(Action("play_music", {"query": "Drake", "on": "the Pi"}))
+    assert pair.pi_player.calls == [("play", "Drake", None)] and pair.pc_player.calls == []
+    # With no query it carries on what's paused here, as without "on", and isn't a move.
+    pair.pi.execute(Action("play_music", {"on": "the Pi"}))
+    assert pair.pi_player.calls[-1] == ("play", None, None) and pair.moves == []
+
+
+def test_play_music_on_unknown_says_why(pair):
+    for on, said in (("the Mac", "The Mac isn't connected."), ("the phone", "There's no satellite called the phone.")):
+        result = pair.pi.execute(Action("play_music", {"query": "Drake", "on": on}))
+        assert (result.ok, result.say) == (False, said)
+    assert pair.pi_player.calls == [] and pair.pc_player.calls == [] and pair.moves == []
+
+
+def test_play_music_on_with_no_query_is_a_move_even_to_one_which_cant_be_found(pair):
+    # What the brain says of the move is said, as the brain has the copy for it.
+    said = "The Mac isn't connected, so the music's staying on the Pi."
+    pair.pi.mover = lambda words: pair.moves.append(words) or {"success": False, "message": said}
+    for on in ("the Mac", "the phone"):
+        result = pair.pi.execute(Action("play_music", {"on": on}))
+        assert (result.ok, result.say) == (False, said)
+    assert pair.moves == ["the Mac", "the phone"]
+    assert pair.pi_player.calls == [] and pair.pc_player.calls == []
+
+
+def test_play_playlist_on_another_satellite(pair):
+    result = pair.pi.execute(Action("play_playlist", {"name": "Gym", "on": "the PC"}))
+    assert (result.ok, result.say) == (True, "Playing Gym on the PC.")
+    assert pair.pc_player.calls == [("play_playlist", "Gym")] and pair.pi_player.calls == []
+
+    pair.pi.execute(Action("play_playlist", {"name": "Gym", "on": "the Pi"}))
+    assert pair.pi_player.calls == [("play_playlist", "Gym")]
+    result = pair.pi.execute(Action("play_playlist", {"name": "Gym", "on": "the Mac"}))
+    assert (result.ok, result.say) == (False, "The Mac isn't connected.")
+
+
+def test_a_failure_on_another_satellite_is_said_and_not_raised(pair):
+    def lost(said):
+        raise OSError("the brain's lost it")
+
+    # The brain can't look it up, or the other satellite's player gives way.
+    pair.pi.elsewhere = lost
+    for tool, params in (("play_music", {"query": "Drake"}), ("play_playlist", {"name": "Gym"})):
+        result = pair.pi.execute(Action(tool, {**params, "on": "the PC"}))
+        assert result.ok is False and result.say
+    assert pair.pi_player.calls == []
+    # With nothing to play it's the brain's move, which looks it up for itself.
+    pair.pi.execute(Action("play_music", {"on": "the PC"}))
+    assert pair.moves == ["the PC"]
+
+    pair.pi.elsewhere = lambda said: (pair.pc, None)
+    pair.pc_player.play = lost
+    result = pair.pi.execute(Action("play_music", {"query": "Drake", "on": "the PC"}))
+    assert result.ok is False and result.say
+
+    # Or what it waits for first.
+    del pair.pc_player.play
+    pair.pc.settled = lambda: lost("the PC")
+    result = pair.pi.execute(Action("play_music", {"query": "Drake", "on": "the PC"}))
+    assert result.ok is False and result.say and pair.pc_player.calls == []
+
+
+def test_another_satellite_with_no_music_says_so(pair, make_executor):
+    pair.pi.elsewhere = lambda said: (make_executor(None, satellite="pc"), None)
+    result = pair.pi.execute(Action("play_music", {"query": "Drake", "on": "the PC"}))
+    assert (result.ok, result.say) == (False, "The music isn't available right now.")
+
+
+def test_playing_elsewhere_waits_for_what_is_on_its_way_to_that_satellite_first(pair):
+    # As a move does: a pause which is still on its way mustn't land after the music is asked for.
+    pair.pc.settled = lambda: pair.events.append("settled")
+    pair.pi.execute(Action("play_music", {"query": "Drake", "on": "the PC"}))
+    pair.pi.execute(Action("play_playlist", {"name": "Gym", "on": "the PC"}))
+    assert pair.events == ["settled", "played", "settled", "played"]
+
+
+def test_what_isnt_a_start_isnt_said_to_be_playing_elsewhere(pair, make_executor):
+    # Navidrome hasn't got it: what's said is the offer, or that it's on its way, where he is.
+    player = QueryPlayer()
+    player.play = lambda query=None, search_type=None: {"success": False, "missing": True,
+                                                        "message": "I couldn't find Drake on Navidrome."}
+    offers = [{"success": True, "message": "I'm already getting Drake."},
+              {"success": True, "message": "I haven't got Drake. Shall I download it?",
+               "ask_first": Action("request_download", {"query": "Drake"})}]
+    other = make_executor(player, satellite="pc", downloads=SimpleNamespace(offer=lambda query, kind: offers.pop(0)))
+    other.spoken_name = lambda name: "the PC"
+    pair.pi.elsewhere = lambda said: (other, None)
+
+    result = pair.pi.execute(Action("play_music", {"query": "Drake", "search_type": "track", "on": "the PC"}))
+    assert (result.ok, result.say) == (True, "I'm already getting Drake.")
+    result = pair.pi.execute(Action("play_music", {"query": "Drake", "search_type": "track", "on": "the PC"}))
+    assert (result.ok, result.say) == (True, "I haven't got Drake. Shall I download it?")
+    assert result.ask_first == Action("request_download", {"query": "Drake"})
+
+
+@pytest.mark.parametrize("tool, params", [("play_music", {"query": "Drake"}), ("play_playlist", {"name": "Gym"})])
+def test_playing_on_one_in_the_room_pauses_the_rooms_other_music_and_keeps_it_paused(roomed, tool, params):
+    result = roomed.pi.execute(Action(tool, {**params, "on": "the PC"}))
+    assert result.ok and result.say.endswith(" on the PC.")
+    # As a spoken "pause" does: paused, and not brought back once the reply is over.
+    assert roomed.pi_player.calls == ["pause"] and roomed.pi_player.resume_cancelled
+    # The PC's is what's playing now, though it was before too, and a third which wasn't playing is left alone.
+    assert "pause" not in roomed.pc_player.calls and not roomed.pc_player.resume_cancelled
+    assert roomed.third_player.calls == [] and not roomed.third_player.resume_cancelled
+
+
+class OneStream:
+    """Spotify's one stream for the whole account, which plays on one device at a time."""
+
+    def __init__(self):
+        self.device = "bedroom"
+        self.paused = False
+
+
+class OneStreamPlayer:
+    """Spotify's controller on one satellite: its pause stops whichever device the account is playing on."""
+
+    name = "Spotify"
+    needs_internet = False
+
+    def __init__(self, stream, device):
+        self.stream, self.device = stream, device
+        self.resume_cancelled = False
+
+    def was_playing(self):
+        return True
+
+    def pause(self):
+        self.stream.paused = True
+        return {"success": True, "message": "Paused", "chime": True}
+
+    def cancel_resume(self):
+        self.resume_cancelled = True
+
+    def play(self, query=None, search_type=None):
+        self.stream.device, self.stream.paused = self.device, False
+        return {"success": True, "message": f"Playing {query}"}
+
+
+def test_playing_on_one_in_the_room_never_pauses_spotifys_one_stream(make_executor):
+    # Starting it on the PC took the account's stream from the Pi already: pausing "the Pi's" music would
+    # pause the PC's, and nothing would bring it back.
+    stream = OneStream()
+    pi_player, pc_player = OneStreamPlayer(stream, "bedroom"), OneStreamPlayer(stream, "pc")
+    pc = make_executor(pc_player, satellite="pc")
+    pc.spoken_name = lambda name: "the PC"
+    pi = make_executor(pi_player, satellite="bedroom", elsewhere=lambda said: (pc, None),
+                       room_players=lambda: [pi_player, pc_player])
+
+    result = pi.execute(Action("play_music", {"query": "Drake", "on": "the PC"}))
+
+    assert (result.ok, result.say) == (True, "Playing Drake on the PC.")
+    assert stream.device == "pc" and not stream.paused
+    assert not pi_player.resume_cancelled and not pc_player.resume_cancelled
+
+
+def test_a_play_elsewhere_which_didnt_start_leaves_the_rooms_music_playing(roomed):
+    roomed.pc_player.play = lambda query=None, search_type=None: {"success": False, "message": "Navidrome is down."}
+    result = roomed.pi.execute(Action("play_music", {"query": "Drake", "on": "the PC"}))
+    assert (result.ok, result.say) == (False, "Navidrome is down.")
+    assert roomed.pi_player.calls == [] and not roomed.pi_player.resume_cancelled
+
+
+def test_on_means_nothing_to_an_executor_with_no_other_satellites(make_executor):
+    player = QueryPlayer()
+    make_executor(player).execute(Action("play_music", {"query": "Drake", "on": "the PC"}))
+    assert player.calls == [("play", "Drake", None)]
+
+
 @pytest.mark.parametrize("params, repeat", [
     ({"hour": 7, "minute": 0}, None),
     ({"hour": 7, "minute": 0, "repeat": "weekdays"}, "weekdays"),
@@ -2492,6 +2833,84 @@ def test_without_home_assistant_journeys_say_so():
     for tool in ("journey", "set_leave_reminder"):
         result = executor.execute(Action(tool, {"place": "Work"}))
         assert (result.ok, result.say) == (False, "Journeys need Home Assistant.")
+
+
+# Notes saved on the computer the user is at
+
+def test_save_note_offered_only_with_notes():
+    # The Pi, and any satellite which can't save a note, has no way to, so isn't offered one.
+    assert "save_note" not in {tool["name"] for tool in ActionExecutor(clock=object()).tool_schemas()}
+    schemas = {tool["name"]: tool for tool in ActionExecutor(notes=lambda title, text: {}).tool_schemas()}
+    assert schemas["save_note"]["input_schema"]["required"] == ["title", "text"]
+    assert set(schemas["save_note"]["input_schema"]["properties"]) == {"title", "text"}
+
+
+def test_save_note_passes_title_and_text():
+    saved = []
+
+    def notes(title, text):
+        saved.append((title, text))
+        return {"success": True, "message": "Saved to your Downloads as Bins."}
+
+    result = ActionExecutor(notes=notes).execute(
+        Action("save_note", {"title": "Bins", "text": "Green on Tuesday.", "extra": "ignored"}, from_model=True))
+    assert (result.ok, result.say, result.confirm) == (True, "Saved to your Downloads as Bins.", "speak")
+    assert saved == [("Bins", "Green on Tuesday.")]
+    # What the session says of a note it couldn't save is said as it is.
+    refused = ActionExecutor(notes=lambda title, text: {"success": False, "message": "The PC didn't answer."})
+    result = refused.execute(Action("save_note", {"title": "Bins", "text": "Green on Tuesday."}))
+    assert (result.ok, result.say) == (False, "The PC didn't answer.")
+
+
+def test_save_note_description_keeps_the_list_apart():
+    schemas = {tool["name"]: tool for tool in ActionExecutor(notes=lambda title, text: {}).tool_schemas()}
+    description = schemas["save_note"]["description"]
+    # "Add milk to my notes" is the notes list, which has a tool of its own.
+    assert "'Add X to my notes' is the notes list" in description and "manage_list" in description
+    assert "400 words" in description
+    for words in ("make a note", "take a note", "write this down", "write me notes on", "Downloads"):
+        assert words in description
+
+
+def test_save_note_asked_for_without_a_way_to_save_one_says_so():
+    # It can be asked for by name, offered or not, as at the Pi.
+    result = ActionExecutor().execute(Action("save_note", {"title": "Bins", "text": "Green on Tuesday."}))
+    assert result.ok is False and result.say
+
+
+def test_save_note_with_nothing_to_write_or_a_notes_which_fails_says_so():
+    saved = []
+    executor = ActionExecutor(notes=lambda title, text: saved.append(title))
+    # Nothing is saved for words which weren't given, whatever type the model gave.
+    for text in ("", "  ", None, 5):
+        result = executor.execute(Action("save_note", {"title": "Bins", "text": text}))
+        assert (result.ok, result.say) == (False, "I didn't catch what to write.")
+    assert saved == []
+
+    # A title which isn't words is left for the satellite to name, as it does an empty one.
+    ActionExecutor(notes=lambda title, text: saved.append(title) or {"success": True}).execute(
+        Action("save_note", {"title": None, "text": "Green on Tuesday."}))
+    assert saved == [""]
+
+    # The session's end is another machine, never the end of this request.
+    def broken(title, text):
+        raise OSError("the satellite's lost it")
+
+    result = ActionExecutor(notes=broken).execute(Action("save_note", {"title": "Bins", "text": "Green"}))
+    assert (result.ok, result.say) == (False, "I couldn't save the note.")
+
+
+def test_a_notes_text_is_only_logged_as_its_length():
+    note = Action("save_note", {"title": "Bins", "text": "Green on Tuesday."}, from_model=True)
+    shown = note.for_log()
+    assert shown == Action("save_note", {"title": "Bins", "text": "<17 characters>"}, from_model=True)
+    assert "Green" not in repr(shown) and "Bins" in repr(shown)
+    # A copy: what's saved is the whole of it.
+    assert note.params["text"] == "Green on Tuesday."
+    # Whatever the model gave for it, none of that is shown; and other tools, and other parameters, are.
+    assert Action("save_note", {"text": 5}).for_log().params == {"text": "<not logged>"}
+    other = Action("set_timer", {"label": "Take the bins out", "text": "kept"})
+    assert other.for_log() is other
 
 
 # Playlists and liked songs - see playlist_changes.py

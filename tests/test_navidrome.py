@@ -9,7 +9,9 @@ import copy
 import hashlib
 import io
 import logging
+import os
 import shutil
+import subprocess
 import threading
 import time
 import wave
@@ -61,6 +63,9 @@ class FakeNavidrome:
 
 class FakePlayback:
     """One song 'playing' - finished when the test says, or when stopped."""
+
+    # What a RemotePlayback says its position is counted in.
+    sample_rate = 48000
 
     def __init__(self, song, volume, paused):
         self.song = song
@@ -126,7 +131,7 @@ def make_player(tmp_path, monkeypatch):
         player = NavidromePlayer("http://navidrome.local:4533/", "nova", "secret", speaker, VolumeControl())
         player._session = FakeNavidrome(answers or {})
         # The song itself stands in for its audio, so the fake speaker knows which it is.
-        player._decode = lambda song: song
+        player._decode = lambda song, start=0.0: song
         player.speaker_started = speaker.started
         return player
 
@@ -1063,6 +1068,306 @@ def test_the_volume_changes_the_song_playing(make_player):
     assert playing.volume == pytest.approx(0.2) and player.get_volume() == 20
 
 
+# Handing the music to another player
+
+def _state(**changes):
+    """What hand_over gives, for a test which hasn't a player to hand it over."""
+    return {"queue": list(SONGS), "unshuffled": list(SONGS), "index": 0, "position": 0.0,
+            "repeat": "off", "shuffle": False, **changes}
+
+
+class FakeFfmpeg:
+    """Stands in for ffmpeg, which hears what it was asked and 'decodes' one frame of silence."""
+
+    asked: list = []
+
+    def __init__(self, command, **kwargs):
+        FakeFfmpeg.asked.append(command)
+        read, write = os.pipe()
+        os.write(write, bytes(8))
+        os.close(write)
+        self.stdin, self.stdout, self.stderr = io.BytesIO(), os.fdopen(read, "rb"), io.BytesIO()
+
+    def poll(self):
+        return 0
+
+    def wait(self):
+        return 0
+
+
+def _decoding(player, monkeypatch):
+    """
+    Has the player decode for real, but through a fake ffmpeg, and returns how ffmpeg is
+    asked to start each song, and which song each is - see _decoded.
+    """
+
+    class Download:
+        def iter_content(self, size):
+            return iter(())
+
+        def close(self):
+            pass
+
+    FakeFfmpeg.asked = []
+    opened = []
+    del player._decode
+    monkeypatch.setattr(player, "_open_song", lambda song_id: opened.append(song_id) or Download())
+    monkeypatch.setattr(subprocess, "Popen", FakeFfmpeg)
+    return opened
+
+
+def _decoded(player, count):
+    """Waits for this many songs to have started, and has the speaker decode them, as it plays them."""
+    _until(lambda: len(player.speaker_started) >= count)
+    for playback in player.speaker_started[:count]:
+        if not getattr(playback, "decoded", False):
+            playback.decoded = True
+            list(playback.song)
+    return FakeFfmpeg.asked
+
+
+def _seeks(command):
+    """The seconds a decode was asked to start at - after the input - or None, from its start."""
+    after = command[command.index("pipe:0") + 1:]
+    return float(after[1]) if after[:1] == ["-ss"] else None
+
+
+def test_has_music_and_is_playing(make_player):
+    player = make_player()
+    assert not player.has_music() and not player.is_playing()
+
+    player._start(SONGS[:1])
+    playing = _playing(player)
+    assert player.has_music() and player.is_playing()
+
+    player.pause()
+    assert player.has_music() and not player.is_playing()
+
+    # Held for the assistant to talk, music which was playing still is, as it carries on after.
+    player.play()
+    player.pause_for_speech()
+    assert playing.paused and player.is_playing()
+    player.resume_after_speech()
+
+    player.pause()
+    player.pause_for_speech()
+    assert player.has_music() and not player.is_playing()
+    player.resume_after_speech()
+
+    player.play()
+    playing.finish()
+    _until(lambda: not player.has_music())
+    assert not player.is_playing()
+
+
+def test_hand_over_gives_queue_place_and_modes(make_player):
+    player = make_player()
+    player._start(SONGS)
+    _playing(player)
+    player.skip()
+    _until(lambda: len(player.speaker_started) == 2)
+    player.shuffle(True)
+    player.repeat("track")
+    shuffled = list(player._queue)
+    player.speaker_started[1].position = int(12.5 * FakeSpeaker.sample_rate)
+
+    state = player.hand_over()
+    assert state == {"queue": shuffled, "unshuffled": SONGS, "index": 1, "position": 12.5,
+                     "repeat": "track", "shuffle": True}
+    assert shuffled[:2] == [SONGS[0], SONGS[1]]
+
+
+def test_hand_over_with_nothing_is_none(make_player):
+    player = make_player()
+    assert player.hand_over() is None
+
+    # Nor has a queue which has run out any music to hand over.
+    player._start(SONGS[:1])
+    _playing(player).finish()
+    _until(lambda: not player.has_music())
+    assert player.hand_over() is None
+
+
+def test_hand_over_empties_and_stops_this_player(make_player):
+    player = make_player()
+    player._start(SONGS)
+    playing = _playing(player)
+    player.pause_for_speech()
+
+    assert player.hand_over() is not None
+    assert playing.stopped and not player.has_music() and not player.is_playing() and not player.was_playing()
+    assert player.now_playing() is None
+
+    # Carrying on after the reply has nothing to play, nor does anything start by itself.
+    player.resume_after_speech()
+    time.sleep(0.1)
+    assert len(player.speaker_started) == 1 and not player.has_music()
+
+
+def test_take_over_starts_at_the_place(make_player, monkeypatch):
+    player = make_player()
+    opened = _decoding(player, monkeypatch)
+    state = _state(index=2, position=61.5)
+
+    assert player.take_over(state) == {"success": True, "message": "Playing"}
+    asked = _decoded(player, 1)
+    assert opened == ["3"] and _seeks(asked[0]) == pytest.approx(61.5)
+    assert asked[0][asked[0].index("pipe:0") - 1:][:3] == ["-i", "pipe:0", "-ss"]
+
+    # The songs after it start at their beginning, and the lists are the player's own.
+    player.speaker_started[0].finish()
+    asked = _decoded(player, 2)
+    assert opened == ["3", "4"] and _seeks(asked[1]) is None
+    assert player._queue is not state["queue"] and player._unshuffled is not state["unshuffled"]
+
+
+def test_a_song_taken_over_and_repeated_starts_again_from_the_beginning(make_player, monkeypatch):
+    player = make_player()
+    opened = _decoding(player, monkeypatch)
+    player.take_over(_state(index=1, position=30.0, repeat="track"))
+    _decoded(player, 1)
+    player.speaker_started[0].finish()
+    asked = _decoded(player, 2)
+    assert opened == ["2", "2"] and _seeks(asked[0]) == pytest.approx(30.0) and _seeks(asked[1]) is None
+
+
+def test_hand_over_twice_counts_the_first_offset(make_player):
+    # Moved at 60 seconds, then moved again 10 seconds on: the song is 70 seconds in.
+    first, second = make_player(), make_player()
+    first.take_over(_state(position=60.0))
+    _playing(first).position = 10 * FakeSpeaker.sample_rate
+    state = first.hand_over()
+    assert state["position"] == pytest.approx(70.0)
+
+    second.take_over(state)
+    _playing(second).position = 5 * FakeSpeaker.sample_rate
+    assert second.hand_over()["position"] == pytest.approx(75.0)
+
+
+def test_hand_over_before_the_song_has_started_gives_where_it_will_start(make_player):
+    # Held, the player's own thread can't have started the song yet, and what the old
+    # one had played is no part of where this one will be.
+    player = make_player()
+    player._start(SONGS)
+    _playing(player).position = 30 * FakeSpeaker.sample_rate
+    with player._lock:
+        player.take_over(_state(index=1, position=60.0))
+        assert player.hand_over()["position"] == pytest.approx(60.0)
+
+
+def test_the_next_song_starts_with_nothing_played(make_player):
+    # Between one song finishing and the next starting, how far the first got is no part of the next.
+    player = make_player()
+    places = []
+    player._decode = lambda song, start=0.0: places.append(player.now_playing()["position"]) or song
+    player._start(SONGS)
+    first = _playing(player)
+    first.position = 150 * FakeSpeaker.sample_rate
+    first.finish()
+    _until(lambda: len(places) == 2)
+    assert places == [0.0, 0.0]
+
+
+def test_the_page_counts_from_where_a_song_was_taken_over(make_player):
+    player = make_player()
+    player.take_over(_state(position=60.0))
+    _playing(player).position = 5 * FakeSpeaker.sample_rate
+    assert player.now_playing()["position"] == pytest.approx(65.0)
+
+
+def test_previous_straight_after_a_take_over_starts_the_song_again(make_player):
+    # The song is 60 seconds in, not 0, so the one before isn't what's wanted.
+    player = make_player()
+    player.take_over(_state(index=1, position=60.0))
+    _playing(player)
+    assert player.previous()["message"] == "Starting it again"
+    _until(lambda: len(player.speaker_started) == 2)
+    assert player.speaker_started[1].song["id"] == "2"
+
+
+def test_previous_once_the_queue_has_run_out_plays_the_last_song_again(make_player):
+    player = make_player()
+    player._start(SONGS[:2])
+    _playing(player)
+    player.skip()
+    _until(lambda: len(player.speaker_started) == 2)
+    player.speaker_started[1].position = 100 * FakeSpeaker.sample_rate
+    player.speaker_started[1].finish()
+    _until(lambda: not player.has_music())
+
+    assert player.previous()["message"] == "Starting it again"
+    _until(lambda: len(player.speaker_started) == 3)
+    assert player.speaker_started[2].song["id"] == "2"
+
+
+def test_previous_once_a_taken_over_queue_has_run_out_plays_the_last_song_again(make_player):
+    # Only a second of it played here, but it began 60 seconds in, so it was a long way through.
+    player = make_player()
+    player.take_over(_state(queue=SONGS[:2], unshuffled=SONGS[:2], index=1, position=60.0))
+    playing = _playing(player)
+    playing.position = FakeSpeaker.sample_rate
+    playing.finish()
+    _until(lambda: not player.has_music())
+
+    assert player.previous()["message"] == "Starting it again"
+    _until(lambda: len(player.speaker_started) == 2)
+    assert player.speaker_started[1].song["id"] == "2"
+
+
+def test_a_speaker_which_cant_say_how_far_it_got_counts_nothing_played(make_player):
+    player = make_player()
+    player._start(SONGS)
+    playing = _playing(player)
+    del playing.position
+    assert player.hand_over()["position"] == 0.0
+
+
+def test_take_over_during_a_reply_waits(make_player):
+    player = make_player()
+    player.pause_for_speech()
+    assert player.take_over(_state(position=20.0))["success"]
+    playing = _playing(player)
+    assert playing.paused
+
+    player.resume_after_speech()
+    assert not playing.paused
+
+
+def test_paused_music_plays_once_taken_over(make_player):
+    first, second = make_player(), make_player()
+    first._start(SONGS)
+    _playing(first)
+    first.pause()
+    second._start(SONGS[:1])
+    waiting = _playing(second)
+    second.pause()
+
+    second.take_over(first.hand_over())
+    _until(lambda: len(second.speaker_started) == 2)
+    assert waiting.stopped and not second.speaker_started[1].paused and second.is_playing()
+
+
+def test_skip_after_take_over_starts_the_next_at_zero(make_player, monkeypatch):
+    player = make_player()
+    opened = _decoding(player, monkeypatch)
+    player.take_over(_state(position=45.0))
+    _decoded(player, 1)
+    player.skip()
+    asked = _decoded(player, 2)
+    assert opened == ["1", "2"] and _seeks(asked[0]) == pytest.approx(45.0) and _seeks(asked[1]) is None
+
+
+def test_a_jump_before_the_song_has_started_drops_the_offset(make_player, monkeypatch):
+    player = make_player()
+    opened = _decoding(player, monkeypatch)
+    with player._lock:
+        player.take_over(_state(position=45.0))
+        player.skip()
+    asked = _decoded(player, 1)
+    assert opened == ["2"] and _seeks(asked[0]) is None
+    assert player.hand_over()["position"] == 0.0
+
+
 # Real audio
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
@@ -1089,6 +1394,28 @@ def test_a_song_is_decoded_to_stereo_at_the_speakers_rate(make_player, monkeypat
     audio = np.concatenate(pieces)
     assert audio.shape[1] == 2 and abs(len(audio) - 48000) < 2000
     assert np.allclose(audio[:, 0], audio[:, 1])
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_a_song_is_decoded_from_where_it_was_taken_over(make_player, monkeypatch):
+    sound = io.BytesIO()
+    with wave.open(sound, "wb") as file:
+        file.setnchannels(1)
+        file.setsampwidth(2)
+        file.setframerate(22050)
+        file.writeframes((np.sin(np.arange(22050) / 10) * 10000).astype("<i2").tobytes())
+
+    class Download:
+        def iter_content(self, size):
+            yield sound.getvalue()
+
+        def close(self):
+            pass
+
+    player = make_player()
+    monkeypatch.setattr(player, "_open_song", lambda song_id: Download())
+    audio = np.concatenate(list(NavidromePlayer._decode(player, {"id": "1", "title": "Tone"}, 0.75)))
+    assert abs(len(audio) - 12000) < 2000
 
 
 def test_music_stopped_before_talking_stays_stopped(make_player):

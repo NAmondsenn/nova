@@ -308,6 +308,28 @@ def test_every_tool_call_is_run_not_just_the_first(llm):
     assert [action.tool for action in result["actions"]] == ["control_playback", "set_timer"]
 
 
+def test_a_notes_text_is_given_to_be_saved_but_never_logged(llm, caplog):
+    # Transcripts are kept by default, and "write me notes on ..." is words which are Claude's own
+    # and nowhere else - so the log says what was called and how long the note was, not what it says.
+    text = "Green on Tuesday, blue on Friday. A secret of the bins."
+    llm.client = FakeClient(_reply("Okay.", _tool("save_note", title="Bins", text=text)))
+    with caplog.at_level("DEBUG"):
+        result = llm.process_query("make a note called bins")
+
+    assert result["actions"] == [Action("save_note", {"title": "Bins", "text": text}, from_model=True)]
+    assert "secret" not in caplog.text and "Green on Tuesday" not in caplog.text
+    logged = [record.getMessage() for record in caplog.records if record.getMessage().startswith("LLM response")]
+    assert len(logged) == 1 and "save_note" in logged[0] and "'title': 'Bins'" in logged[0]
+    assert f"<{len(text)} characters>" in logged[0]
+
+
+def test_what_isnt_a_notes_text_is_logged_as_it_was(llm, caplog):
+    llm.client = FakeClient(_reply("Okay.", _tool("set_timer", duration_seconds=600, label="Take the bins out")))
+    with caplog.at_level("INFO"):
+        llm.process_query("set a ten minute timer called take the bins out")
+    assert "'label': 'Take the bins out'" in caplog.text
+
+
 # Reading before answering
 
 SUNSET = "Sun next setting (sensor.sun_next_setting): 2026-10-20 17:52"

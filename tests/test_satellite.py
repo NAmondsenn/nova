@@ -14,6 +14,7 @@ import queue
 import socket
 import threading
 import time
+import types
 import wave
 from functools import partial
 
@@ -24,6 +25,7 @@ np = pytest.importorskip("numpy")
 import satellite
 from voice_assistant import fallback, paths, protocol, satellite_link, wake_clips
 from voice_assistant.fallback import AlarmCopy, Phrase, StateCopy
+from voice_assistant.notes import NoteRefused
 from voice_assistant.press import PressListener
 from voice_assistant.wake_clips import WakeClips
 from voice_assistant.windows_media import UNCHANGED
@@ -339,6 +341,9 @@ def make(tmp_path, monkeypatch, make_config):
     monkeypatch.setattr(satellite, "WakeWordDetector", FakeWake)
     monkeypatch.setattr(satellite, "PressListener", FakePress)
     monkeypatch.setattr(satellite, "make_echo_canceller", lambda config, rate: None)
+    # A Pi, as most of these tests are of one, and never the real machine's Downloads folder.
+    monkeypatch.setattr(satellite, "machine_kind", lambda: "pi")
+    monkeypatch.setattr(satellite, "downloads_folder", lambda: None)
     monkeypatch.setattr(satellite, "AlarmCopy", partial(AlarmCopy, str(tmp_path / "alarm_copy.json")))
     monkeypatch.setattr(satellite, "StateCopy", partial(StateCopy, str(tmp_path / "state.json")))
     monkeypatch.setattr(satellite, "Phrase", partial(Phrase, str(tmp_path / "phrase.wav"), PHRASE))
@@ -1322,7 +1327,8 @@ def test_the_away_report_is_sent_on_connecting(brain, make, tmp_path):
                                        "ringing": ["alarm-1@1729587600"]}]
     assert brain.hellos == [{"name": "bedroom", "hostname": socket.gethostname(), "sample_rate": 48000,
                              "unclean": True, "speaker": None,
-                             "push_to_talk": False, "media_controls": False}]
+                             "push_to_talk": False, "machine": "pi", "saves_notes": False,
+                             "media_controls": False}]
 
 
 def test_the_satellite_tells_the_brain_its_spotify_speaker(brain, make):
@@ -2123,6 +2129,260 @@ def test_wake_word_satellite_hello_is_unchanged(brain, make):
     make()
     assert wait_for(lambda: brain.hellos)
     assert brain.hellos[0]["push_to_talk"] is False
+
+
+# The machine, and notes saved in its Downloads folder
+
+@pytest.fixture
+def downloads(tmp_path, monkeypatch):
+    """A PC with a Downloads folder of its own, which notes are saved in."""
+    folder = tmp_path / "Downloads"
+    folder.mkdir()
+    monkeypatch.setattr(satellite, "machine_kind", lambda: "pc")
+    monkeypatch.setattr(satellite, "downloads_folder", lambda: str(folder))
+    return folder
+
+
+def note_answers(brain):
+    return brain.messages("note_saved")
+
+
+def test_hello_carries_machine_and_notes(brain, make, downloads):
+    make()
+    assert wait_for(lambda: brain.hellos)
+    assert brain.hellos[0]["machine"] == "pc" and brain.hellos[0]["saves_notes"] is True
+
+
+def test_hello_says_no_notes_where_there_is_no_downloads_folder(brain, make, monkeypatch):
+    # The Pi: it says what it is, and has no notes tool.
+    monkeypatch.setattr(satellite, "machine_kind", lambda: "pi")
+    monkeypatch.setattr(satellite, "downloads_folder", lambda: None)
+    make()
+    assert wait_for(lambda: brain.hellos)
+    assert brain.hellos[0]["machine"] == "pi" and brain.hellos[0]["saves_notes"] is False
+
+
+def test_a_downloads_lookup_which_fails_gives_a_hello_which_saves_no_notes(brain, make, monkeypatch, caplog):
+    # The Windows lookup has never run on real Windows: whatever it raises, the satellite
+    # still starts and connects, and says it doesn't save notes.
+    def fails():
+        raise ValueError("Windows said something odd")
+
+    monkeypatch.setattr(satellite, "machine_kind", lambda: "pc")
+    monkeypatch.setattr(satellite, "downloads_folder", fails)
+    with caplog.at_level(logging.WARNING):
+        make()
+        assert wait_for(lambda: brain.hellos)
+    assert brain.hellos[0]["machine"] == "pc" and brain.hellos[0]["saves_notes"] is False
+    assert caplog.text.count("Windows said something odd") == 1
+
+
+def test_a_machine_which_cant_be_told_is_unknown_not_a_stopped_satellite(brain, make, monkeypatch, caplog):
+    def fails():
+        raise OSError("no such thing")
+
+    monkeypatch.setattr(satellite, "machine_kind", fails)
+    monkeypatch.setattr(satellite, "downloads_folder", fails)
+    with caplog.at_level(logging.WARNING):
+        made = make()
+        assert wait_for(lambda: connected(made))
+    assert brain.hellos[0]["machine"] is None and brain.hellos[0]["saves_notes"] is False
+
+
+def test_save_note_writes_and_answers(brain, make, downloads):
+    made = make()
+    assert wait_for(lambda: connected(made))
+
+    brain.say("save_note", "Bins: green on Tuesday\nblue on Friday".encode(), id="note-7", title="Bins")
+
+    assert wait_for(lambda: note_answers(brain))
+    assert note_answers(brain) == [{"type": "note_saved", "id": "note-7", "file": "Bins.txt"}]
+    assert (downloads / "Bins.txt").read_bytes() == b"Bins: green on Tuesday\nblue on Friday"
+
+
+def test_a_taken_name_is_numbered_not_overwritten(brain, make, downloads):
+    (downloads / "Bins.txt").write_text("mine")
+    made = make()
+    assert wait_for(lambda: connected(made))
+
+    brain.say("save_note", b"new", id="note-1", title="Bins")
+
+    assert wait_for(lambda: note_answers(brain))
+    assert note_answers(brain)[0]["file"] == "Bins (2).txt"
+    assert (downloads / "Bins.txt").read_text() == "mine"
+
+
+def test_the_longest_note_arrives_whole(brain, make, downloads):
+    made = make()
+    assert wait_for(lambda: connected(made))
+    # 50,000 characters of two and three bytes each: far more than a line of JSON may hold.
+    text = "\u00e9\u4e2d" * 25_000
+
+    brain.say("save_note", text.encode(), id="note-1", title="Long")
+
+    assert wait_for(lambda: note_answers(brain))
+    assert note_answers(brain)[0]["file"] == "Long.txt"
+    assert (downloads / "Long.txt").read_bytes().decode() == text
+
+
+def test_save_note_ends_lines_as_the_machine_does(brain, make, downloads, monkeypatch):
+    # Windows' Notepad wants \r\n. Only the satellite's own sys is changed, so nothing else notices.
+    monkeypatch.setattr(satellite, "sys", types.SimpleNamespace(platform="win32"))
+    made = make()
+    assert wait_for(lambda: connected(made))
+
+    brain.say("save_note", b"one\ntwo", id="note-1", title="Lines")
+
+    assert wait_for(lambda: note_answers(brain))
+    assert (downloads / "Lines.txt").read_bytes() == b"one\r\ntwo"
+
+
+def test_save_note_refusal_is_answered(brain, make, downloads, monkeypatch):
+    def refuse(folder, title, text, windows):
+        raise NoteRefused("That note's too long to save.")
+
+    monkeypatch.setattr(satellite, "save_note", refuse)
+    made = make()
+    assert wait_for(lambda: connected(made))
+
+    brain.say("save_note", b"x", id="note-1", title="Bins")
+
+    assert wait_for(lambda: note_answers(brain))
+    assert note_answers(brain) == [{"type": "note_saved", "id": "note-1", "error": "That note's too long to save."}]
+
+
+def test_save_note_without_downloads_answers_an_error(brain, make, monkeypatch):
+    monkeypatch.setattr(satellite, "machine_kind", lambda: "pi")
+    monkeypatch.setattr(satellite, "downloads_folder", lambda: None)
+    made = make()
+    assert wait_for(lambda: connected(made))
+
+    brain.say("save_note", b"x", id="note-1", title="Bins")
+
+    assert wait_for(lambda: note_answers(brain))
+    assert note_answers(brain) == [{"type": "note_saved", "id": "note-1",
+                                    "error": "There's no Downloads folder to save it in."}]
+
+
+def test_save_note_looks_for_the_folder_when_asked_not_when_it_started(brain, make, tmp_path, monkeypatch):
+    # It was there for the hello, and has been moved since - or wasn't, and has been made.
+    folder = {"now": str(tmp_path)}
+    monkeypatch.setattr(satellite, "machine_kind", lambda: "pc")
+    monkeypatch.setattr(satellite, "downloads_folder", lambda: folder["now"])
+    made = make()
+    assert wait_for(lambda: connected(made))
+    assert brain.hellos[0]["saves_notes"] is True
+
+    folder["now"] = None
+    brain.say("save_note", b"x", id="note-1", title="Gone")
+    assert wait_for(lambda: len(note_answers(brain)) == 1)
+    assert note_answers(brain)[0]["error"] == "There's no Downloads folder to save it in."
+    assert not (tmp_path / "Gone.txt").exists()
+
+    folder["now"] = str(tmp_path)
+    brain.say("save_note", b"x", id="note-2", title="Back")
+    assert wait_for(lambda: len(note_answers(brain)) == 2)
+    assert note_answers(brain)[1] == {"type": "note_saved", "id": "note-2", "file": "Back.txt"}
+
+
+def test_a_downloads_lookup_which_fails_when_a_note_comes_is_answered(brain, make, downloads, monkeypatch):
+    def fails():
+        raise OSError("Windows said something odd")
+
+    made = make()
+    assert wait_for(lambda: connected(made))
+    monkeypatch.setattr(satellite, "downloads_folder", fails)
+
+    brain.say("save_note", b"x", id="note-1", title="Bins")
+
+    assert wait_for(lambda: note_answers(brain))
+    assert note_answers(brain) == [{"type": "note_saved", "id": "note-1",
+                                    "error": "There's no Downloads folder to save it in."}]
+
+
+def test_a_note_which_fails_unexpectedly_is_answered(brain, make, downloads, monkeypatch):
+    def fails(folder, title, text, windows):
+        raise RuntimeError("something nobody planned for")
+
+    monkeypatch.setattr(satellite, "save_note", fails)
+    made = make()
+    assert wait_for(lambda: connected(made))
+
+    brain.say("save_note", b"x", id="note-1", title="Bins")
+
+    assert wait_for(lambda: note_answers(brain))
+    assert note_answers(brain) == [{"type": "note_saved", "id": "note-1", "error": "The file couldn't be written."}]
+
+
+def test_a_note_which_isnt_text_is_answered(brain, make, downloads):
+    made = make()
+    assert wait_for(lambda: connected(made))
+
+    brain.say("save_note", b"\xff\xfe", id="note-1", title="Bins")
+
+    assert wait_for(lambda: note_answers(brain))
+    assert note_answers(brain) == [{"type": "note_saved", "id": "note-1", "error": "The file couldn't be written."}]
+    assert list(downloads.iterdir()) == []
+
+
+def test_a_note_without_an_id_is_dropped_and_the_satellite_goes_on(brain, make, downloads, caplog):
+    made = make()
+    assert wait_for(lambda: connected(made))
+
+    with caplog.at_level(logging.WARNING):
+        brain.say("save_note", b"x", title="Bins")
+        brain.say("save_note", b"y", id="note-2", title="Next")
+        assert wait_for(lambda: note_answers(brain))
+    # Nobody could be told, so nothing was written for the first - and the next is saved.
+    assert note_answers(brain) == [{"type": "note_saved", "id": "note-2", "file": "Next.txt"}]
+    assert not (downloads / "Bins.txt").exists()
+    assert "without an id" in caplog.text
+
+
+def test_save_note_is_done_off_the_links_own_thread(brain, make, downloads, monkeypatch):
+    # The link's reader is what hears the brain, and answers its pings: it never waits on the disk.
+    ran_on = []
+
+    def save(folder, title, text, windows):
+        ran_on.append(threading.current_thread().name)
+        return "Bins.txt"
+
+    monkeypatch.setattr(satellite, "save_note", save)
+    made = make()
+    assert wait_for(lambda: connected(made))
+
+    brain.say("save_note", b"x", id="note-1", title="Bins")
+
+    assert wait_for(lambda: note_answers(brain))
+    assert ran_on and ran_on[0] != "satellite-link"
+
+
+@pytest.mark.parametrize("how", ["saves", "refuses", "fails"])
+def test_save_note_never_logs_the_text(brain, make, downloads, monkeypatch, caplog, how):
+    secret = "my-bank-pin-is-4921"
+    if how == "refuses":
+        def save(folder, title, text, windows):
+            raise NoteRefused("That note's too long to save.")
+
+        monkeypatch.setattr(satellite, "save_note", save)
+    elif how == "fails":
+        def save(folder, title, text, windows):
+            # As an exception can, by carrying what it was handed.
+            raise RuntimeError(f"couldn't write {text}")
+
+        monkeypatch.setattr(satellite, "save_note", save)
+    made = make()
+    assert wait_for(lambda: connected(made))
+
+    with caplog.at_level(logging.DEBUG):
+        brain.say("save_note", secret.encode(), id="note-1", title="Pin")
+        assert wait_for(lambda: note_answers(brain))
+        # The answer is logged just after it's sent.
+        time.sleep(0.1)
+
+    assert secret not in caplog.text
+    if how == "saves":
+        assert "Saved a note as Pin.txt" in caplog.text
 
 
 def quiet_until_said(brain, made, on):

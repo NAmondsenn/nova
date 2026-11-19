@@ -12,6 +12,7 @@ import threading
 import pytest
 
 from voice_assistant import protocol
+from voice_assistant.machine import MACHINES
 
 
 def test_a_message_and_its_audio_arrive_as_sent():
@@ -111,7 +112,8 @@ def test_the_handshake_admits_a_satellite_which_knows_its_password():
 
     assert outcome["brain"] == {"name": "bedroom", "hostname": "home-assistant",
                                 "sample_rate": 48000, "unclean": False, "speaker": None,
-                                "push_to_talk": False, "media_controls": False}
+                                "push_to_talk": False, "machine": None, "saves_notes": False,
+                                "media_controls": False}
     assert outcome["satellite"] is None
     assert sent == ["challenge", "ready"]
 
@@ -182,6 +184,42 @@ def test_admit_reads_push_to_talk():
     assert _admitted(push_to_talk=True)["push_to_talk"] is True
     assert _admitted()["push_to_talk"] is False
     assert _admitted(push_to_talk=False)["push_to_talk"] is False
+
+
+def test_hello_says_the_machine_and_notes():
+    hello = _hello_sent(machine="pc", saves_notes=True)
+    assert hello["machine"] == "pc" and hello["saves_notes"] is True
+    admitted = _admitted(machine="pc", saves_notes=True)
+    assert admitted["machine"] == "pc" and admitted["saves_notes"] is True
+
+
+def test_hello_leaves_them_out_when_unknown():
+    # So an old brain, which has never heard of either, is sent just the hello it always was.
+    for hello in (_hello_sent(), _hello_sent(machine=None, saves_notes=False)):
+        assert "machine" not in hello and "saves_notes" not in hello
+    # A machine which saves no notes still says what it is.
+    hello = _hello_sent(machine="pi")
+    assert hello["machine"] == "pi" and "saves_notes" not in hello
+
+
+@pytest.mark.parametrize("machine", [5, "toaster", "", None, True, ["pc"], "PC"],
+                         ids=["number", "unknown kind", "empty", "null", "true", "list", "capitals"])
+def test_odd_machine_or_notes_values_are_unknown_not_refused(machine):
+    # An extra, like the speaker: never the reason a satellite can't connect.
+    admitted = _admitted(machine=machine, saves_notes="yes")
+    assert admitted["machine"] is None and admitted["saves_notes"] is False
+    for saves_notes in (1, 0, None, "true", ["x"]):
+        assert _admitted(saves_notes=saves_notes)["saves_notes"] is False
+
+
+def test_every_machine_the_brain_knows_is_admitted():
+    for machine in MACHINES:
+        assert _admitted(machine=machine)["machine"] == machine
+
+
+def test_old_hello_is_still_admitted():
+    admitted = _admitted()
+    assert admitted["machine"] is None and admitted["saves_notes"] is False
 
 
 @pytest.mark.parametrize("said", ["yes", 1, 0, None, ["x"]], ids=["text", "one", "zero", "null", "list"])
@@ -257,6 +295,7 @@ def test_a_hello_without_a_speaker_still_connects():
     for speaker in ("x" * 200, 7, "", None, True, ["Bedroom Pi"], "Bedroom\nPi", "Bedroom\x00Pi"):
         assert _admitted(speaker=speaker) == {"name": "bedroom", "hostname": "h", "sample_rate": 48000,
                                               "unclean": False, "speaker": None, "push_to_talk": False,
+                                              "machine": None, "saves_notes": False,
                                               "media_controls": False}
     # Up to 64 characters, of any language.
     assert _admitted(speaker="x" * 64)["speaker"] == "x" * 64

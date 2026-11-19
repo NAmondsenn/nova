@@ -915,15 +915,20 @@ function showProblems() {
   }
 }
 
-// Each satellite, which is the default, and whether it's connected - with a way to
-// give it a new password, and a choice of which to look after below, when there's
-// more than one.
+// What a satellite says it runs on, in words. A Linux computer which isn't a Pi, and one which
+// doesn't say, have none: there's no word for what it is that would help.
+const MACHINES = { pi: "Raspberry Pi", pc: "PC", mac: "Mac" };
+
+// Each satellite, which is the default, what machine it is and whether it saves notes,
+// and whether it's connected - with the other names he gives it, a way to give it a new
+// password, and a choice of which to look after below, when there's more than one.
 function showSatellites(state) {
   const buttons = new Map();
   const rows = satellites.map((satellite) => {
     const row = element("li");
     const what = element("span", undefined, "what");
     what.append(satellite.name);
+    if (MACHINES[satellite.machine]) what.append(element("span", MACHINES[satellite.machine], "badge"));
     if (satellite.push_to_talk) what.append(element("span", "push-to-talk", "badge"));
     // What belongs to no satellite - ntfy's alerts, say - goes to this one.
     if (satellite.default) what.append(element("span", "Default", "badge"));
@@ -932,7 +937,26 @@ function showSatellites(state) {
         : satellite.push_to_talk ? "Waiting for a key press" : "Listening for its wake word"))
         : "Not connected", "detail"));
     if (satellite.spotify_speaker) what.append(element("span", `Spotify plays on ${satellite.spotify_speaker}`, "detail"));
+    if (satellite.saves_notes) what.append(element("span", "Saves notes to its Downloads", "detail"));
     const actions = element("span", undefined, "actions");
+    // What else it's called, as one line of names apart by commas, which the brain trims and checks. The
+    // label holds the box, as it holds the switch below. Sent as it's left, and the rows drawn again
+    // whatever the data says, as a refused or unsaved change would otherwise stay in the box as typed.
+    const called = element("label", undefined, "choice called");
+    const calledBox = element("input");
+    Object.assign(calledBox, { type: "text", value: (satellite.called || []).join(", "), autocomplete: "off",
+                               spellcheck: false, placeholder: "e.g. Desk, Study" });
+    calledBox.addEventListener("change", () =>
+      change("/api/satellites/called", { name: satellite.name, called: calledBox.value }, () => {
+        delete drawn.satellites;
+        return load();
+      }));
+    // Enter ends the typing, as leaving the box does, as a battery's mark does.
+    calledBox.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") calledBox.blur();
+    });
+    called.append(element("span", "Also called"), calledBox);
+    actions.append(called);
     // Whether its journeys start from where the phone is. The label holds the switch, so
     // no id is needed to join them, as a satellite's name may have a space in it.
     const travels = element("label", undefined, "choice");
@@ -976,7 +1000,10 @@ function showSatellites(state) {
   drawIfChanged("satellites", [satellites, none], () => {
     // Not while a switch or button is held down: the row drawn again under the pointer
     // loses the click, if it's slow enough to land just after a satellite's state changed.
+    // Nor while names are being typed, which a satellite starting to speak would wipe.
     // Nothing is marked as drawn then, so the next look tries again.
+    const typing = document.activeElement;
+    if (typing && typing.type === "text" && document.getElementById("satellites").contains(typing)) return false;
     if (document.getElementById("satellites").querySelector(":active")) return false;
     document.getElementById("satellites").replaceChildren(...(rows.length ? rows : [emptyRow(none)]));
     renewButtons = buttons;

@@ -156,6 +156,9 @@ class DeviceControls:
     # for one which has none. One left out couldn't be read. Network calls, so only made on
     # the music thread.
     playlist_covers: Optional[Callable[[List[str]], Dict[str, Optional[Tuple[bytes, str]]]]] = None
+    # Whether this device gets a tile per playlist. Only the satellite whose Nova view shows
+    # them should: two devices both named Nova race for each new tile's entity id.
+    playlist_tiles: bool = True
 
 
 def _slug(text: str) -> str:
@@ -248,6 +251,8 @@ class NovaDevice:
         self._announced_tile_types: List[str] = []
         # How many tiles Home Assistant was last told of, so ones gone since can be removed.
         self._announced_tile_count = 0
+        # Whether a device without tiles has removed those of an earlier run - see discovery.
+        self._tiles_cleared = False
         self._discovery_topic = f"{DISCOVERY_PREFIX}/device/{self.node_id}/config"
 
         self._client = None
@@ -437,7 +442,8 @@ class NovaDevice:
             controls["playlist"] = {"p": "select", "name": "Playlist", "command_topic": self._playlist_set,
                                     "state_topic": self._playlist, "options": playlists,
                                     "icon": "mdi:playlist-music", "default_entity_id": f"select.{slug}_playlist"}
-        tile_types = [self._tile_pictures.get(name, (b"", DEFAULT_COVER_TYPE))[1] for name in playlists[:PLAYLIST_TILES]]
+        tiles = playlists[:PLAYLIST_TILES] if self.controls.playlist_tiles else []
+        tile_types = [self._tile_pictures.get(name, (b"", DEFAULT_COVER_TYPE))[1] for name in tiles]
         for n, (name, kind) in enumerate(zip(playlists, tile_types), start=1):
             # A tile per playlist: its cover, and a button which plays it - both named after
             # the playlist, so the view shows its name without knowing the list.
@@ -451,6 +457,10 @@ class NovaDevice:
                                                "default_entity_id": f"image.{slug}_playlist_{n}"}
         # Tiles there were before and aren't now: Home Assistant only removes a component of a
         # device which it's sent as its platform alone, once, before it's left out.
+        # A device without tiles removes, once, any it had from before - a satellite's earlier run.
+        if not self.controls.playlist_tiles and not self._tiles_cleared:
+            self._announced_tile_count = PLAYLIST_TILES
+            self._tiles_cleared = True
         for n in range(len(tile_types) + 1, self._announced_tile_count + 1):
             controls[f"playlist_{n}"] = {"p": "button"}
             controls[f"playlist_{n}_cover"] = {"p": "image"}
@@ -705,7 +715,7 @@ class NovaDevice:
         Reads the cover of each playlist with a tile, again at every refresh, since a
         playlist's cover follows what's in it. One which can't be had keeps the last.
         """
-        if self.controls.playlist_covers is None:
+        if self.controls.playlist_covers is None or not self.controls.playlist_tiles:
             return
         names = self._playlists[:PLAYLIST_TILES]
         try:
@@ -726,7 +736,7 @@ class NovaDevice:
     def _announce_if_stale(self):
         """Announces the device again if the playlists or the cover's type aren't what it was last announced with."""
         tile_types = [self._tile_pictures.get(name, (b"", DEFAULT_COVER_TYPE))[1]
-                      for name in self._playlists[:PLAYLIST_TILES]]
+                      for name in (self._playlists[:PLAYLIST_TILES] if self.controls.playlist_tiles else [])]
         if self._connected and (self._playlists != self._announced_playlists
                                 or self._cover_type != self._announced_cover_type
                                 or tile_types != self._announced_tile_types):
@@ -790,7 +800,7 @@ class NovaDevice:
         between the refreshes which read them - and an empty picture for a tile number no
         playlist has now, so a removed tile's cover isn't kept by the broker.
         """
-        names = self._playlists[:PLAYLIST_TILES]
+        names = self._playlists[:PLAYLIST_TILES] if self.controls.playlist_tiles else []
         for n in range(1, PLAYLIST_TILES + 1):
             picture = self._tile_pictures.get(names[n - 1], (b"", DEFAULT_COVER_TYPE)) if n <= len(names) else (b"", "")
             self._send(self._tile_cover[n], picture[0])

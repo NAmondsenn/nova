@@ -1476,6 +1476,18 @@ input[type="range"]:focus-visible::-moz-range-thumb {
   min-height: 44px;
 }
 
+/* "Also called": its words, then the box for the names, across the whole of the actions so
+   there's room to type them. */
+.satellites .called { flex: 1 1 100%; }
+
+.satellites .called span { flex: none; }
+
+.satellites .called input {
+  flex: 1 1 200px;
+  width: auto;
+  min-height: 44px;
+}
+
 .satellites .button {
   min-width: 44px;
   min-height: 44px;

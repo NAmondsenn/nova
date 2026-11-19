@@ -290,6 +290,18 @@ def test_the_satellite_says_it_is_push_to_talk():
         theirs.close()
 
 
+def test_hello_fields_kept():
+    ours, theirs = socket.socketpair()
+    try:
+        said = RemoteSatellite(satellite_link.Stream(ours), dict(HELLO, machine="pc", saves_notes=True))
+        assert said.machine == "pc" and said.saves_notes is True
+        silent = RemoteSatellite(satellite_link.Stream(ours), dict(HELLO))
+        assert silent.machine is None and silent.saves_notes is False
+    finally:
+        ours.close()
+        theirs.close()
+
+
 def test_the_satellite_says_it_has_media_controls():
     ours, theirs = socket.socketpair()
     try:
@@ -298,6 +310,168 @@ def test_the_satellite_says_it_has_media_controls():
     finally:
         ours.close()
         theirs.close()
+
+
+@pytest.fixture
+def answer_notes():
+    """
+    Gives a test a way to have a fake satellite answer each save_note it's sent, with the same id and
+    the answer given. The answering ends with the test - left to poll for ever, each would wake 200
+    times a second through every test which follows.
+    """
+    over = threading.Event()
+    threads = []
+
+    def answer(fake, **answer):
+        def answering():
+            seen = 0
+            while not over.is_set():
+                if len(fake.messages("save_note")) > seen:
+                    seen += 1
+                    try:
+                        fake.say("note_saved", id=fake.messages("save_note")[seen - 1]["id"], **answer)
+                    except OSError:
+                        return
+                over.wait(0.005)
+
+        threads.append(threading.Thread(target=answering, daemon=True, name="answering"))
+        threads[-1].start()
+
+    yield answer
+    over.set()
+    for thread in threads:
+        thread.join(2)
+    assert not any(thread.is_alive() for thread in threads)
+
+
+def test_save_note_sends_and_returns_the_answer(pair, answer_notes):
+    satellite, fake, serving = pair
+    answer_notes(fake, file="Bins.txt")
+
+    assert satellite.save_note("Bins", "green on Tuesday") == {"file": "Bins.txt"}
+
+    (message,), (text,) = fake.messages("save_note"), fake.payloads("save_note")
+    assert message["title"] == "Bins" and isinstance(message["id"], str)
+    # The text goes as the message's payload, as a line of JSON is only 4096 bytes long.
+    assert text.decode() == "green on Tuesday"
+    assert "text" not in message
+
+
+def test_save_note_returns_the_satellites_reason(pair, answer_notes):
+    satellite, fake, serving = pair
+    answer_notes(fake, error="There's no Downloads folder to save it in.")
+
+    assert satellite.save_note("Bins", "x") == {"error": "There's no Downloads folder to save it in."}
+
+
+def test_the_longest_note_and_a_hostile_title_still_make_a_message_the_satellite_can_read(pair, answer_notes):
+    # A note's text is up to 50,000 characters - 200,000 bytes of UTF-8 at worst - and
+    # a title may be anything, but a line of JSON may not be over protocol.MAX_LINE. An
+    # emoji is the worst, as it's 12 bytes there.
+    satellite, fake, serving = pair
+    answer_notes(fake, file="x.txt")
+    text = "\u00e9\u4e2d" * 25_000
+
+    assert satellite.save_note("\U0001F600" * 500, text) == {"file": "x.txt"}
+
+    (message,), (payload,) = fake.messages("save_note"), fake.payloads("save_note")
+    assert payload.decode() == text
+    assert len(message["title"]) <= remote.MOST_TITLE_SENT
+
+
+def test_a_note_with_a_character_which_cant_be_encoded_still_reaches_the_satellite_to_refuse(pair, answer_notes):
+    # A lone surrogate from a broken reply: it's the satellite, with notes.save_note,
+    # which says it can't be written, as it says it for anything else.
+    satellite, fake, serving = pair
+    answer_notes(fake, error="The file couldn't be written.")
+
+    assert satellite.save_note("Bins", "a\ud800b") == {"error": "The file couldn't be written."}
+    assert fake.payloads("save_note")[0].decode("utf-8", "surrogatepass") == "a\ud800b"
+
+
+def test_save_note_gives_up_after_the_wait(pair, caplog):
+    satellite, fake, serving = pair
+    started = time.monotonic()
+
+    assert satellite.save_note("Bins", "x", wait=0.2) is None
+    assert 0.2 <= time.monotonic() - started < 2
+    # An answer which comes too late is ignored, and neither an error nor kept.
+    id = fake.messages("save_note")[0]["id"]
+    with caplog.at_level(logging.WARNING):
+        fake.say("note_saved", id=id, file="Bins.txt")
+        fake.say("ping")
+        assert wait_for(lambda: fake.messages("pong"))
+    assert caplog.records == []
+    assert satellite._note_waits == {}
+
+
+def test_notes_are_told_apart_by_their_ids(pair):
+    satellite, fake, serving = pair
+    results = {}
+
+    def ask(title):
+        results[title] = satellite.save_note(title, "x", wait=5)
+
+    threads = [threading.Thread(target=ask, args=(title,)) for title in ("one", "two")]
+    for thread in threads:
+        thread.start()
+    assert wait_for(lambda: len(fake.messages("save_note")) == 2)
+    # Answered the other way round to how they were asked.
+    for message in reversed(fake.messages("save_note")):
+        fake.say("note_saved", id=message["id"], file=f"{message['title']}.txt")
+    for thread in threads:
+        thread.join(5)
+    assert results == {"one": {"file": "one.txt"}, "two": {"file": "two.txt"}}
+
+
+def test_an_answer_for_another_note_doesnt_end_the_wait(pair):
+    satellite, fake, serving = pair
+    results = []
+    thread = threading.Thread(target=lambda: results.append(satellite.save_note("Bins", "x", wait=0.3)))
+    thread.start()
+    assert wait_for(lambda: fake.messages("save_note"))
+    fake.say("note_saved", id="note-nobody-asked-for", file="Other.txt")
+    thread.join(5)
+    assert results == [None]
+
+
+def test_an_answer_which_says_nothing_is_ignored(pair, caplog):
+    satellite, fake, serving = pair
+    results = []
+    thread = threading.Thread(target=lambda: results.append(satellite.save_note("Bins", "x", wait=0.3)))
+    thread.start()
+    assert wait_for(lambda: fake.messages("save_note"))
+    with caplog.at_level(logging.WARNING):
+        fake.say("note_saved", id=fake.messages("save_note")[0]["id"], file=5)
+        thread.join(5)
+    assert results == [None]
+    assert "without saying" in caplog.text
+
+
+def test_save_note_ends_when_the_satellite_goes(pair):
+    satellite, fake, serving = pair
+    results = []
+    started = time.monotonic()
+    thread = threading.Thread(target=lambda: results.append(satellite.save_note("Bins", "x", wait=30)))
+    thread.start()
+    assert wait_for(lambda: fake.messages("save_note"))
+
+    fake.go()
+    thread.join(5)
+
+    assert results == [None]
+    assert time.monotonic() - started < 5
+    assert satellite._note_waits == {}
+
+
+def test_a_note_for_a_satellite_which_has_gone_isnt_waited_for(pair):
+    satellite, fake, serving = pair
+    satellite.close()
+    started = time.monotonic()
+
+    assert satellite.save_note("Bins", "x", wait=30) is None
+    assert time.monotonic() - started < 2
+    assert fake.messages("save_note") == []
 
 
 def test_the_buttons_of_windows_media_controls_are_passed_on():

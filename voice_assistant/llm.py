@@ -721,7 +721,9 @@ class LLMHandler:
             if len(self.history) > self.history_length:
                 self.history = self.history[-self.history_length:]
 
-            logger.info(f"LLM response: '{response_text}'" + (f" (actions: {actions})" if actions else ""),
+            # Without a note's text, which is never logged - see actions.NOT_LOGGED.
+            asked = [action.for_log() for action in actions]
+            logger.info(f"LLM response: '{response_text}'" + (f" (actions: {asked})" if actions else ""),
                         extra=TRANSCRIPT)
 
             # Returns a dictionary containing the model's response, the actions it asked for, and whether the transaction was successful

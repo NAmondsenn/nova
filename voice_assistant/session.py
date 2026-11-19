@@ -37,6 +37,7 @@ from voice_assistant.media_controls import NowPlayingFeed
 from voice_assistant.logging_setup import transcripts_logged
 from voice_assistant.music import MusicHold, make_player
 from voice_assistant.network import online
+from voice_assistant.notes import MOST_TEXT, TOO_LONG
 from voice_assistant.recording import RATE, AudioFeed, record_until_silence
 from voice_assistant.remote import RemoteSatellite
 from voice_assistant.settings_page import change_volume, volume_levels
@@ -307,7 +308,12 @@ class Session:
                                       new_music=brain.new_music_playlist, journeys=brain.journeys,
                                       playlist_changes=brain.playlist_changes, ring_on=brain.ring_on,
                                       room_of=brain.room_of, room_players=self._room_players,
-                                      last_change=brain.last_change)
+                                      last_change=brain.last_change,
+                                      mover=lambda said: brain.move_music(self.satellite.name, said),
+                                      elsewhere=self._elsewhere,
+                                      spoken_name=lambda name: brain.spoken_name(name),
+                                      settled=lambda: self.music.wait(),
+                                      notes=self._save_note if satellite.saves_notes else None)
 
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.
@@ -315,7 +321,7 @@ class Session:
         self.intents = LocalIntents(clock=brain.clock, ntfy=brain.ntfy, home=self.home,
                                     activities=brain.calendar.activity_words if brain.calendar else None,
                                     football=brain.football.known_as if brain.football else None,
-                                    wake_word=self.wake_word)
+                                    wake_word=self.wake_word, names_satellite=brain.names_satellite)
 
         # The satellite as a device of its own in Home Assistant, over MQTT, or None
         # until mqtt.host is set - see ha_device.py. It's named after the satellite's
@@ -913,6 +919,65 @@ class Session:
         except Exception as e:
             logger.error(f"Couldn't look up the room, so acting alone: {e}")
             return [self]
+
+    def _elsewhere(self, said: str) -> Tuple[Optional[ActionExecutor], Optional[str]]:
+        """
+        Finds the actions of the satellite some words name, for playing something there.
+
+        Args:
+            said: The words for it, e.g. "the PC".
+
+        Returns:
+            Its session's actions and None - this session's own, if it's the one named; or
+            None and what to say, if the words name none or more than one, or the one named
+            isn't connected.
+        """
+        name, problem = self.brain.find_satellite(said)
+        if name is None:
+            return None, problem
+        session = self.brain.session_for(name)
+        if session is None:
+            away = self.brain.spoken_name(name)
+            return None, f"{away[:1].upper() + away[1:]} isn't connected."
+        return session.actions, None
+
+    def _save_note(self, title: str, text: str) -> Dict:
+        """
+        Has the satellite save a note in its Downloads folder, for the user at it.
+
+        Args:
+            title: What to call the note.
+            text: What it says. Never logged.
+
+        Returns:
+            Dict with 'success' and the 'message' to say - "Saved to your Downloads as Bins.",
+            or why it wasn't saved.
+        """
+        # The satellite refuses it too, but a runaway reply shouldn't have to cross the link first.
+        if len(text) > MOST_TEXT:
+            return self._note_not_saved(TOO_LONG)
+        saved = self.satellite.save_note(title, text)
+        if saved is None:
+            there = self.brain.spoken_name(self.satellite.name)
+            return {"success": False, "message": f"{there[:1].upper() + there[1:]} didn't answer, so the note "
+                                                  f"wasn't saved."}
+        if "error" in saved:
+            return self._note_not_saved(saved["error"])
+        file = saved["file"]
+        logger.info(f"Saved the note {title!r} on the {self.satellite.name} satellite as {file}")
+        # As a browser says a download: the name it's known by, which has no ".txt" to say.
+        return {"success": True, "message": f"Saved to your Downloads as {file.removesuffix('.txt')}."}
+
+    def _note_not_saved(self, why: str) -> Dict:
+        """
+        Args:
+            why: The sentence to say for it, e.g. "There's no Downloads folder to save it in."
+
+        Returns:
+            Dict with 'success' False and the 'message' to say, with where it was to be saved.
+        """
+        return {"success": False,
+                "message": f"I couldn't save it on {self.brain.spoken_name(self.satellite.name)}: {why}"}
 
     def _room_players(self) -> List:
         """
@@ -1715,6 +1780,10 @@ class Session:
             playlists=(lambda: self.music_player.playlists()) if player else None,
             playlist_covers=((lambda names: self.music_player.playlist_covers(names))
                              if player and hasattr(player, "playlist_covers") else None),
+            # Only a wake-word satellite - the room's own speaker, whose Nova view shows them - gets
+            # playlist tiles; a push-to-talk one like the PC doesn't, so the two devices, both named
+            # Nova, never race for a new tile's entity id.
+            playlist_tiles=not self.satellite.push_to_talk,
             playback=self._playback_from_home_assistant if player else None,
             play_playlist=self._playlist_from_home_assistant if player else None,
             # The Ask Nova box, whose replies are said here and never sent back.

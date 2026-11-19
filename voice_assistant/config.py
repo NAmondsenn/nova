@@ -408,11 +408,6 @@ def check(settings: Dict, defaults: Dict, path: str) -> List[str]:
             problem = limit_problem(section, name, value) if value is not None else None
             if problem:
                 raise ConfigError(f"{path}: '{section}.{name}' {problem}, not {value!r}")
-            if (section, name) == ("backend", "names") and value is not None and not (
-                    isinstance(value, dict) and all(isinstance(key, str) and isinstance(spoken, str) and spoken.strip()
-                                                    for key, spoken in value.items())):
-                raise ConfigError(f"{path}: 'backend.names' should give each satellite's name some words, "
-                                  f"like pc: \"Nathaniel's PC\", not {value!r}")
             choices = CHOICES.get((section, name))
             if choices and str(value).lower() not in choices:
                 raise ConfigError(f"{path}: '{section}.{name}' should be one of {', '.join(choices)}, not {value!r}")
