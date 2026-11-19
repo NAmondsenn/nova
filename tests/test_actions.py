@@ -328,6 +328,42 @@ def test_play_music_on_with_no_query_moves(pair):
     assert pair.moves == ["the PC"] and pair.pi_player.calls == [] and pair.pc_player.calls == []
 
 
+def _with_nothing_to_move(pair):
+    """What the brain says when there's no music anywhere to move: the sentence, and the flag for it."""
+    pair.pi.mover = lambda words: pair.moves.append(words) or {
+        "success": False, "message": "There's no music to move.", "nothing_to_move": True}
+    pair.pc_player.play = lambda query=None, search_type=None: pair.pc_player.calls.append(("play", query)) or {
+        "success": True, "message": "Playing your liked songs"}
+
+
+def test_play_music_on_with_no_query_and_nothing_to_move_plays_there(pair):
+    # "Play something on the PC" with nothing on anywhere is the PC's own bare "play", said where he is.
+    _with_nothing_to_move(pair)
+    result = pair.pi.execute(Action("play_music", {"on": "the PC"}))
+    assert (result.ok, result.say, result.confirm) == (True, "Playing your liked songs on the PC.", "speak")
+    assert pair.pc_player.calls == [("play", None)]
+    # The move was asked first, and this one's player is left alone.
+    assert pair.moves == ["the PC"] and pair.pi_player.calls == []
+
+
+def test_play_music_on_with_no_query_and_music_to_move_still_moves(pair):
+    # Moving wins: the brain found music, so says "Moved to the PC." and nothing is started over it.
+    _with_nothing_to_move(pair)
+    pair.pi.mover = lambda words: pair.moves.append(words) or {"success": True, "message": "Moved to the PC."}
+    result = pair.pi.execute(Action("play_music", {"on": "the PC"}))
+    assert (result.ok, result.say) == (True, "Moved to the PC.")
+    assert pair.pc_player.calls == [] and pair.pi_player.calls == []
+
+
+def test_play_music_on_with_nothing_to_move_to_one_which_cant_be_played_on_says_why(pair):
+    # There's nothing to start anything on, so it's why it can't be started which is said, not the move's.
+    _with_nothing_to_move(pair)
+    for on, said in (("the Mac", "The Mac isn't connected."), ("the phone", "There's no satellite called the phone.")):
+        result = pair.pi.execute(Action("play_music", {"on": on}))
+        assert (result.ok, result.say) == (False, said)
+    assert pair.pc_player.calls == [] and pair.pi_player.calls == []
+
+
 def test_play_music_on_this_satellite_plays_here(pair):
     pair.pi.execute(Action("play_music", {"query": "Drake", "on": "the Pi"}))
     assert pair.pi_player.calls == [("play", "Drake", None)] and pair.pc_player.calls == []

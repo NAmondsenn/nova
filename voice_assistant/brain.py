@@ -973,7 +973,9 @@ class Brain:
             said: The words for where to, e.g. "the PC".
 
         Returns:
-            Dict with 'success' and the 'message' to say - "Moved to the PC.", or why not.
+            Dict with 'success' and the 'message' to say - "Moved to the PC.", or why not. Also
+            'nothing_to_move' (True) when it's because there's no music anywhere to move, for a
+            play on another satellite to start some there instead - without reading the message.
         """
         name, problem = self.find_satellite(said)
         if name is None:
@@ -984,7 +986,9 @@ class Brain:
         if source is None:
             here = self.session_for(spoken_at)
             can_move = here is None or here.music_player is None or hasattr(here.music_player, "hand_over")
-            return {"success": False, "message": NO_MUSIC_TO_MOVE if can_move else MOVING_NEEDS_NAVIDROME}
+            if not can_move:
+                return {"success": False, "message": MOVING_NEEDS_NAVIDROME}
+            return {"success": False, "message": NO_MUSIC_TO_MOVE, "nothing_to_move": True}
         there, from_here = self.spoken_name(name), self.spoken_name(source.satellite.name)
         if name == source.satellite.name:
             # A pause on its way lands first, so what's said is of the music as it is.
@@ -1012,7 +1016,7 @@ class Brain:
             logger.warning(f"The {source.satellite.name} satellite couldn't hand its music over: {e}")
             return stays
         if state is None:
-            return {"success": False, "message": NO_MUSIC_TO_MOVE}
+            return {"success": False, "message": NO_MUSIC_TO_MOVE, "nothing_to_move": True}
         try:
             taken = target.music_player.take_over(state)
         except Exception as e:

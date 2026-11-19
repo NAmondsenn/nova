@@ -77,7 +77,7 @@ ON_ANOTHER_SATELLITE = {
     "description": (
         "Only when the user names somewhere other than here to play it - 'on the PC', 'on my Pi' - as they said "
         "it, e.g. 'the PC'. Leave this out when they don't, which plays here. With no query, it moves the music "
-        "that's playing now to there, as move_music does."
+        "that's playing now to there, as move_music does - or, when none is playing anywhere, starts some there."
     ),
 }
 
@@ -625,9 +625,17 @@ class ActionExecutor:
         other, failure = self._named(on)
         if not query and (other is not None or failure is not None):
             # Nothing new to play, so it's the music playing now which is wanted there - and it's the
-            # brain's to say if there's none, or it can't go: "The PC isn't connected, so the music's
-            # staying on the Pi.", rather than the lookup's "The PC isn't connected.".
-            return self.move_music(on)
+            # brain's to say if it can't go: "The PC isn't connected, so the music's staying on the Pi.",
+            # rather than the lookup's "The PC isn't connected.".
+            moved = self.move_music(on)
+            if not moved.get("nothing_to_move"):
+                return moved
+            # With none anywhere to move, "play something on the PC" means the PC's own bare "play": it
+            # carries on or plays the liked songs, which is said where he is as any play elsewhere is. It's
+            # the lookup which says why if there's no PC to play on, not "There's no music to move.".
+            if other is None:
+                return failure
+            return self._play_on(other, "play_music", {"query": None, "search_type": search_type}, on)
         if failure:
             return failure
         if other is not None:

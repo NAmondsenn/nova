@@ -792,7 +792,8 @@ def test_move_leaves_music_on_a_satellite_which_has_gone(moving):
     # Still in the brain's list as its connection ends, but no longer there to move music from.
     moving.brain.sessions["pc"].satellite.connected = False
     moving.add("mac")
-    assert moving.brain.move_music("bedroom", "the Mac") == {"success": False, "message": "There's no music to move."}
+    assert moving.brain.move_music("bedroom", "the Mac") == {
+        "success": False, "message": "There's no music to move.", "nothing_to_move": True}
     assert moving.moved() == []
 
 
@@ -807,8 +808,31 @@ def test_move_with_two_equals_takes_the_first_connected(moving):
 def test_move_with_no_music_says_so(moving):
     moving.add("bedroom")
     moving.add("pc")
-    assert moving.brain.move_music("bedroom", "the PC") == {"success": False, "message": "There's no music to move."}
+    # Flagged, so a play on the PC with nothing to move can start music there without reading the words.
+    assert moving.brain.move_music("bedroom", "the PC") == {
+        "success": False, "message": "There's no music to move.", "nothing_to_move": True}
     assert moving.moved() == []
+
+
+def test_move_with_music_which_isnt_there_to_hand_over_is_flagged_as_nothing_to_move(moving):
+    # It had music when looked at, and none by the time it was asked to give it up.
+    class Emptied(MovingPlayer):
+        def hand_over(self):
+            self.happened.append(("hand_over", self.name))
+            return None
+
+    moving.add("bedroom", player=Emptied("bedroom", moving.happened, music=True, playing=True))
+    moving.add("pc")
+    assert moving.brain.move_music("bedroom", "the PC") == {
+        "success": False, "message": "There's no music to move.", "nothing_to_move": True}
+    assert [event[:2] for event in moving.moved()] == [("hand_over", "bedroom")]
+
+
+def test_moves_which_fail_for_other_reasons_are_not_flagged_as_nothing_to_move(moving):
+    moving.add("bedroom", music=True)
+    # Not connected, and no such satellite: moves which could be wanted, or answered, as they are.
+    for said in ("the PC", "the phone"):
+        assert "nothing_to_move" not in moving.brain.move_music("bedroom", said)
 
 
 def test_move_to_itself_says_already(moving):
