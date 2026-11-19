@@ -583,6 +583,16 @@ class ActionExecutor:
             return self.music
         return next((player for player in others if self._has_paused_music(player)), self.music)
 
+    def _song_player(self):
+        """
+        The music player whose song a playlist change is about: the first in the user's room which is
+        playing, as pausing acts on it - else the one a bare "play" would carry on, which has music paused,
+        whoever paused it - else this one.
+        """
+        playing = next((player for player in [self.music] + self._others_in_room() if player and player.was_playing()),
+                       None)
+        return playing or self._resumes()
+
     @staticmethod
     def _has_paused_music(player) -> bool:
         """
@@ -869,9 +879,10 @@ class ActionExecutor:
         """
         The music player a playlist change is about, and the song on it - or why there isn't one to change.
 
-        The player is the first of the room's playing, as pausing is, so what's changed is the song which is
-        heard - and Navidrome is checked on it, not on this satellite's own player, which in a room may be
-        another. Only Navidrome has playlists Nova can change.
+        The player is the first of the room's playing, as pausing is - else the room's paused one, as a bare
+        "play" carries on, for a song paused is the one playing, whoever paused it - so what's changed is the
+        song which is heard, and Navidrome is checked on it, not on this satellite's own player, which in a
+        room may be another. Only Navidrome has playlists Nova can change.
 
         Args:
             which: "this" for the song playing, "last" for the one before it; anything else is "this".
@@ -885,7 +896,7 @@ class ActionExecutor:
         offline = self._music_offline()
         if offline:
             return None, None, offline
-        player = self._playing_in_room()[0]
+        player = self._song_player()
         if getattr(player, "name", None) != "Navidrome":
             return None, None, {"success": False, "message": "Changing playlists only works with Navidrome."}
         if not needs_song:

@@ -2482,6 +2482,10 @@ class SongPlayer:
     def was_playing(self):
         return self.playing
 
+    def now_playing(self):
+        song = self.songs["this"]
+        return None if song is None else {"track": song["title"], "playing": self.playing}
+
 
 class RecordingPlaylistChanges:
     """Stands in for PlaylistChanges, noting each call as (what, library, ...) and answering with the reply given."""
@@ -2596,6 +2600,29 @@ def test_navidrome_is_checked_on_the_player_whose_song_is_used(make_executor):
     result = executor.execute(Action("like_song", {}, from_model=True))
     assert (result.ok, result.say) == (False, "Changing playlists only works with Navidrome.")
     assert changes.calls == []
+
+
+def test_a_song_paused_on_another_satellite_in_the_room_is_the_one_changed(make_executor):
+    # "Playing or paused, whoever paused it": paused on the other satellite, with nothing on this one.
+    here, there = SongPlayer(this=None, last=None, playing=False), SongPlayer(playing=False)
+    changes = RecordingPlaylistChanges()
+    executor = make_executor(here, playlist_changes=changes, room_players=lambda: [here, there])
+    assert executor.execute(Action("add_to_playlists", {"playlists": ["Gym"]}, from_model=True)).ok
+    assert changes.calls == [("add", there, ENDLESS, ["Gym"])]
+    assert here.read == [] and there.read == ["this"]
+
+    # Music playing in the room is still the one heard before one paused, and this satellite's own
+    # paused music is this one's, as a bare "play" carries it on.
+    here, there = SongPlayer(playing=False), SongPlayer(this=BEFORE, last=ENDLESS, playing=True)
+    changes = RecordingPlaylistChanges()
+    executor = make_executor(here, playlist_changes=changes, room_players=lambda: [here, there])
+    executor.execute(Action("like_song", {}, from_model=True))
+    assert changes.calls == [("like", there, BEFORE, True)]
+    here, there = SongPlayer(playing=False), SongPlayer(this=BEFORE, last=ENDLESS, playing=False)
+    changes = RecordingPlaylistChanges()
+    executor = make_executor(here, playlist_changes=changes, room_players=lambda: [here, there])
+    executor.execute(Action("like_song", {}, from_model=True))
+    assert changes.calls == [("like", here, ENDLESS, True)]
 
 
 def test_without_playlist_changes_set_up_each_tool_says_so(make_executor):
