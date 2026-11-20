@@ -193,6 +193,19 @@ class SystemVolume:
 
         return bool(self._do(work, JOB_WAIT))
 
+    def microphone_muted(self) -> bool:
+        """
+        Whether Windows' default microphone is muted now, by anything.
+
+        Raises:
+            RuntimeError: There's no volume to change here.
+            TimeoutError or OSError: Windows didn't answer, or refused - or there's no microphone.
+        """
+        if self._backend is None:
+            raise RuntimeError("Windows' volume can't be reached")
+        backend = self._backend
+        return bool(self._do(lambda: backend.microphone().muted(), JOB_WAIT))
+
     def unmute_microphone_if_muted(self) -> bool:
         """
         Unmutes Windows' default microphone if it's muted, as a press of the key starts listening.

@@ -373,6 +373,8 @@ class Satellite:
         self._mic_until: Optional[float] = self._load_mic_mute() if self.system_volume is not None else None
         self._mic_held_open = False
         self._mic_changed = threading.Event()
+        # Whether looking at Windows' microphone has failed, so it's only logged the once.
+        self._mic_look_failed = False
         # The things this computer can open, by id, with what launches each - which never
         # leaves it. Built on a thread of its own, and read by the computer requests'.
         self._apps: Dict[str, Dict] = {}
@@ -1373,8 +1375,40 @@ class Satellite:
             if until is not None and time.time() >= until:
                 self._mic_mute_ran_out(until)
                 continue
+            if until is not None and self._mic_on_by_hand(until):
+                continue
             # In slices, looking at the clock again after each, as the PC may sleep meanwhile.
             self._mic_changed.wait(None if until is None else min(until - time.time(), MIC_LOOK_EVERY))
+
+    def _mic_on_by_hand(self, until: float) -> bool:
+        """
+        Ends Nova's mute of Windows' microphone, with nothing played, if he has turned the
+        microphone back on himself (his mic's touch button, or Windows) - so a mute of his own
+        after that isn't undone when the hour would have run out. Not while a press's turn
+        holds it open. Looked at once each slice of the wait for the hour.
+
+        Args:
+            until: When the mute is due to run out, so one changed since is left alone.
+
+        Returns:
+            Whether the mute was ended.
+        """
+        with self._mic_lock:
+            if self._mic_until != until or self._mic_held_open:
+                return False
+            try:
+                muted = self.system_volume.microphone_muted()
+            except Exception as e:
+                # Once, rather than every 30 seconds; the hour runs out as it would have.
+                if not self._mic_look_failed:
+                    logger.warning(f"Couldn't look at whether Windows' microphone is muted ({type(e).__name__})")
+                    self._mic_look_failed = True
+                return False
+            if muted:
+                return False
+            self._keep_mic_mute(None)
+        logger.info("Windows' microphone was turned back on by hand, so Nova's mute of it is over")
+        return True
 
     def _mic_mute_ran_out(self, until: float):
         """

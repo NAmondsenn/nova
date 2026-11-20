@@ -29,6 +29,7 @@ class FakeEndpoint:
         self._level = level
 
     def muted(self):
+        self.threads.add(threading.current_thread().name)
         return self._muted
 
     def set_mute(self, mute):
@@ -171,6 +172,13 @@ def test_the_microphone_is_muted_and_unmuted_on_its_own_thread(volume, endpoint,
     assert microphone.threads == {"windows-volume"}
     # The output is left as it was.
     assert endpoint._muted is False and endpoint.threads == set()
+
+
+def test_microphone_muted_reads_it_on_its_own_thread(volume, microphone):
+    assert volume.microphone_muted() is False
+    microphone._muted = True
+    assert volume.microphone_muted() is True
+    assert microphone.threads == {"windows-volume"}
 
 
 def test_unmute_microphone_if_muted_only_unmutes_a_muted_one(volume, endpoint, microphone):
