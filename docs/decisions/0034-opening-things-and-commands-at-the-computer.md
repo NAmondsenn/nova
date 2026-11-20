@@ -22,7 +22,7 @@
 
 **My calls (his to overturn).** From the spec:
 
-- "Start X" is an opening word only when X is an item on the list. "Play X" stays music.
+- "Start X" is an opening word only when X is an item on the list, by its whole name (see the final rulings). "Play X" stays music.
 - At the Pi, "open X" with no device named uses the only satellite that opens things, and says where.
 - Close acts on every window of that program; Steam and Discord minimise to the tray, as their X does.
 - The list refreshes every 10 minutes and at start; there is no refresh button.
@@ -45,12 +45,22 @@ From the build (rulings while it was made):
 - Refusals say "I can't find X on <its spoken name>." using 0032's names, so nothing is hard-coded to a person.
 - With no device named, the local open and close rules count only an exact or "Also called" match, plus a single every-word fit when spoken at a computer. A partial or ambiguous request falls through to Assist or Claude, whose tools still ask "Which one". Why: "open the windows", "start the music" and "open the garage" must keep their meaning. The cost is that some partial names go through Claude, which is slower.
 - Search words are in the transcript line "Handled locally" as he said them (the existing transcript design, off with transcripts); the spec's host-only rule covers addresses Nova builds.
+- Ruling D, bringing things to the front. The throwaway foreground test on the PC (the plan's Task 0) was not run, as there was no named job for it. The satellite was built on the likely answer: `AllowSetForegroundWindow(ASFW_ANY)` before the launch, then the new (or the browser's) window restored with `SW_RESTORE` and raised with `SetForegroundWindow`, joining the input of the thread in front with `AttachThreadInput` for a moment if Windows refuses. Check 48 is the first real test of it. The cost if it's wrong: things open but only flash in the taskbar until it's changed.
+
+From the final review (rulings for the last fixes):
+
+- **Close by the name in the list.** A game's window is often named nothing like the game ("FortniteClient-Win64-Shipping"), so "close Fortnite" found nothing. The satellite now lists a window under its name in the list of things to open when its exe lies in that Epic or Steam game's install folder; the folders stay on the PC and are never sent. Its own name still closes it too. The cost: a few path checks per window, every 3 seconds.
+- **Search at the Pi.** A plain "search for X" at a satellite which doesn't open things (the Pi) goes to Claude's own web search and is answered aloud, as before. It opens the browser on the PC only with the PC named ("search for X on the PC") or with Google said ("search Google for X", "google X", "look up X on Google"). At the PC, every form opens the browser. "Search for it" (or "that", "this") always goes to Claude, which knows what it was. The cost: "search for X" at the Pi no longer opens the PC.
+- **A named device's volume.** "Volume down on the Pi", said elsewhere, changes the Pi's music if its music is playing now, else its Nova voice. Before, it went by whether the music had been paused for him to speak, which is only true of the satellite he spoke to. The cost: none expected.
+- **"Start" needs the whole name.** With no device named, the single app with every word said counts only after "open", "launch" or "load up", never "start", so "start the music" at the PC keeps its meaning (check 58). "Start" opens an app by its whole name or his own name for it. The cost: "start rocket" goes to Claude rather than opening Rocket League.
+
+Smaller fixes from the same review: matching a request against a computer's list never asks Home Assistant (only the reply "Your PC's off." does), so an asleep PC's apps still match from the Pi; a named computer that has just connected says "I'm still finding the apps on ..."; a bare power word at one of several PCs acts on the HASS.Agent PC chosen for it; "quit it" and "exit that" never close the window in front (only "close this" does), and "restart it" isn't a power word; a removed satellite's apps are forgotten; a Start menu shortcut whose AppID is a `steam://` or Epic link is launched as that link; the PC keeps its switch and "Also called" box on the settings page after a brain restart.
 
 **Things to know.**
 
 - A satellite given a room-like name ("Bedroom") would take "set the bedroom to 30" as a volume for it.
 - Windows mute at the PC silences Nova's own PC sounds too; alarms ring on the Pi (0026), so they are still heard.
-- Several smaller points were left, listed in the ledger (for example: partial fits for "start" at the PC, "search for it" searching the word "it", a stale "Also called" name still claiming "go to <name>.com").
+- Several smaller points were left, listed in the ledger (for example a stale "Also called" name still claiming "go to <name>.com").
 
 **The reason for Windows volume going through the satellite, checked live.** At 01:53 on 20 November 2026 (brain's clock), a read-only GET of `media_player.windows_pc` on the brain showed `state: unavailable`, `volume_level: None`, `is_volume_muted: None`. The PC was off, so this neither confirms nor refutes the earlier reading. The reason stands on HASS.Agent's reading of `volume_level: 0.0` on 19 November while the PC was on and not muted, which was the evidence when this was designed; to be re-read with the PC on (check 62).
 
