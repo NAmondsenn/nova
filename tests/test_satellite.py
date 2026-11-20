@@ -28,6 +28,7 @@ from voice_assistant.fallback import AlarmCopy, Phrase, StateCopy
 from voice_assistant.notes import NoteRefused
 from voice_assistant.press import PressListener
 from voice_assistant.screen_orb import LINGER
+from voice_assistant.shortcut import Shortcut
 from voice_assistant.wake_clips import WakeClips
 from voice_assistant.windows_media import UNCHANGED
 
@@ -363,10 +364,10 @@ def make(tmp_path, monkeypatch, make_config):
         thread.start()
         running.append((made, thread))
 
-    def make(name="bedroom", start=True, **sections):
+    def make(name="bedroom", start=True, tray=None, **sections):
         config = make_config(audio={"sample_rate": 48000, "pre_roll": 0.3},
                              backend={"address": "nova:10400", "satellite": name}, **sections)
-        made = satellite.Satellite(config)
+        made = satellite.Satellite(config, tray=tray)
         made.latency_file = str(tmp_path / "latency.jsonl")
         # Filled with the exit code once run() ends.
         made.exited = []
@@ -3691,3 +3692,400 @@ def test_the_orb_is_closed_with_the_satellite(brain, make, pc, orbs):
     assert orb.closed
     # Given up on part way, the recording leaves nothing showing.
     assert orb.shown[-1] == "hidden"
+
+
+# Nova's tray icon, its menu and its shortcut - see voice_assistant/tray.py
+
+class FakeTray:
+    """
+    Stands in for Tray, keeping what it was told. Like the real one it reads the state as soon
+    as it exists, so a satellite which makes it before it has the state to give fails here.
+    """
+
+    available = True
+    made = []
+
+    def __init__(self, read_state, on_choice, on_shortcut, on_taken, icons):
+        self.read_state = read_state
+        self.on_choice = on_choice
+        self.on_shortcut = on_shortcut
+        self.on_taken = on_taken
+        self.icons = icons
+        self.shortcuts = []
+        self.changes = []
+        self.closes = 0
+        self.first_state = read_state(False)
+        FakeTray.made.append(self)
+
+    def changed(self):
+        self.changes.append(time.monotonic())
+
+    def set_shortcut(self, shortcut):
+        self.shortcuts.append(shortcut)
+
+    def close(self):
+        self.closes += 1
+
+
+class UnavailableTray(FakeTray):
+    available = False
+
+
+def tray_pressable(brain, make, **sections):
+    """A push-to-talk satellite with a fake tray, which has reached the brain."""
+    made = pressable(brain, make, tray=FakeTray, **sections)
+    assert made.tray is not None
+    return made
+
+
+def app_warnings(caplog, field):
+    return [record for record in caplog.records if f"app {field}" in record.getMessage()]
+
+
+def test_the_tray_is_made_with_the_icons_and_reads_the_state_as_it_is_made(brain, make):
+    made = tray_pressable(brain, make)
+    assert made.tray.icons == satellite.ICONS_FOLDER
+    assert os.path.isfile(os.path.join(made.tray.icons, "nova.ico"))
+    assert made.tray.on_shortcut == made._pressed and made.tray.on_choice == made._menu_chosen
+    # Read before the brain was reached, with nothing known yet.
+    assert made.tray.first_state.connected is False and made.tray.first_state.playing is None
+
+
+def test_an_unavailable_tray_is_dropped(brain, make):
+    made = pressable(brain, make, tray=UnavailableTray)
+    assert made.tray is None
+
+
+def test_a_wake_word_satellite_makes_no_tray(brain, make):
+    FakeTray.made = []
+    made = make(tray=FakeTray)
+    assert wait_for(lambda: connected(made))
+    assert made.tray is None and FakeTray.made == []
+
+
+def test_a_push_to_talk_satellite_off_windows_makes_none_unless_given_one(brain, make):
+    made = pressable(brain, make)
+    assert made.tray is None
+
+
+def test_the_tray_is_told_when_the_brain_is_reached_and_lost(brain, make):
+    made = tray_pressable(brain, make)
+    tray = made.tray
+    assert wait_for(lambda: tray.changes)
+    assert made._app_state().connected is True
+    told = len(tray.changes)
+    brain.drop()
+    assert wait_for(lambda: len(tray.changes) > told)
+    assert made._app_state().connected is False
+
+
+def test_now_playing_sets_playing_even_without_media_controls(brain, make):
+    made = tray_pressable(brain, make)
+    assert made.media is None
+    assert made._app_state().playing is None
+    for state, playing in (("playing", True), ("paused", False), ("playing", True), ("stopped", False)):
+        told = len(made.tray.changes)
+        brain.say("now_playing", state=state)
+        assert wait_for(lambda: made._app_state().playing is playing and len(made.tray.changes) > told)
+
+
+def test_a_now_playing_which_makes_no_sense_leaves_playing_alone(brain, make):
+    made = tray_pressable(brain, make)
+    brain.say("now_playing", state="playing")
+    assert wait_for(lambda: made._app_state().playing is True)
+    brain.say("now_playing", state="rewinding")
+    brain.say("state", volumes={}, muted=False)
+    assert wait_for(lambda: made.state.muted is False)
+    assert made._app_state().playing is True
+
+
+def test_the_state_is_muted_while_windows_microphone_is(brain, make, pc, monkeypatch):
+    monkeypatch.setattr(satellite, "SystemVolume", MutedMicVolume)
+    made = tray_pressable(brain, make)
+    assert made._app_state().mic_muted is True
+    made.system_volume.mic_muted = False
+    assert made._app_state(True).mic_muted is False
+
+
+def test_the_state_is_not_muted_while_windows_microphone_is_on(brain, make, pc):
+    made = tray_pressable(brain, make)
+    assert made._app_state().mic_muted is False
+
+
+def test_a_press_holding_the_microphone_open_still_counts_as_muted(brain, make, pc, monkeypatch):
+    monkeypatch.setattr(satellite, "SystemVolume", MutedMicVolume)
+    made = tray_pressable(brain, make)
+    made._pressed()
+    assert wait_for(lambda: made._mic_held_open)
+    # On for the turn, and muted again at its end.
+    assert made.system_volume.mic_muted is False
+    assert made._app_state().mic_muted is True
+    assert made._app_state(True).mic_muted is True
+    brain.say("stop_listening")
+    brain.say("allow", kind="reply")
+    assert wait_for(lambda: not made._mic_held_open)
+    assert made._app_state().mic_muted is True
+    assert made.system_volume.mic_muted is True
+
+
+def test_a_mute_by_hand_reaches_the_tray_within_the_watch(brain, make, pc, monkeypatch):
+    monkeypatch.setattr(satellite, "MIC_WATCH", 0.02)
+    made = tray_pressable(brain, make)
+    assert made._app_state().mic_muted is False
+    told = len(made.tray.changes)
+    made.system_volume.mic_muted = True
+    assert wait_for(lambda: made._app_state().mic_muted is True and len(made.tray.changes) > told)
+    # And back, the same way.
+    told = len(made.tray.changes)
+    made.system_volume.mic_muted = False
+    assert wait_for(lambda: made._app_state().mic_muted is False and len(made.tray.changes) > told)
+
+
+def test_a_mute_by_voice_reaches_the_tray_at_once(brain, make, pc, monkeypatch):
+    # The watch is far off, so only the mute itself can have told it.
+    monkeypatch.setattr(satellite, "MIC_WATCH", 1000)
+    made = tray_pressable(brain, make)
+    told = len(made.tray.changes)
+    assert ask_computer(brain, "m1", action="mic", mute=True)["muted"] is True
+    assert made._app_state().mic_muted is True and len(made.tray.changes) > told
+
+
+def test_the_watch_looks_only_when_there_is_a_tray(brain, make, pc, monkeypatch):
+    monkeypatch.setattr(satellite, "MIC_WATCH", 0.02)
+    made = pressable(brain, make)
+    assert made.tray is None
+    looks = []
+    made.system_volume.microphone_muted = lambda: looks.append(1) or False
+    time.sleep(0.2)
+    assert looks == []
+
+
+def test_opening_the_menu_looks_at_the_microphone_afresh(brain, make, pc, monkeypatch):
+    monkeypatch.setattr(satellite, "MIC_WATCH", 1000)
+    made = tray_pressable(brain, make)
+    looks = []
+    volume = made.system_volume
+    volume.microphone_muted = lambda: looks.append(1) or volume.mic_muted
+    volume.mic_muted = True
+    # Taken from the last look, which was before it was muted: nothing is asked.
+    assert made._app_state().mic_muted is False and looks == []
+    told = len(made.tray.changes)
+    assert made._app_state(True).mic_muted is True and looks == [1]
+    # That look is now what it shows, and the icon is told.
+    assert made._app_state().mic_muted is True and looks == [1]
+    assert len(made.tray.changes) > told
+
+
+def test_a_microphone_that_cant_be_read_is_none(brain, make, pc, caplog):
+    made = tray_pressable(brain, make)
+    made.system_volume.mic_fail = True
+    with caplog.at_level(logging.WARNING):
+        assert made._app_state(True).mic_muted is None
+        assert made._app_state(True).mic_muted is None
+    assert made._app_state().mic_muted is None
+    # Once, however often it's looked at.
+    assert len([record for record in caplog.records if "Couldn't look at whether" in record.getMessage()]) == 1
+
+
+def test_no_windows_volume_means_the_microphone_is_none(brain, make):
+    made = tray_pressable(brain, make)
+    assert made.system_volume is None
+    assert made._app_state().mic_muted is None and made._app_state(True).mic_muted is None
+
+
+def test_the_watch_stops_with_the_satellite(brain, make, pc, monkeypatch):
+    monkeypatch.setattr(satellite, "MIC_WATCH", 0.02)
+    made = tray_pressable(brain, make)
+    made.stop()
+    assert wait_for(lambda: made.exited)
+    assert wait_for(lambda: not [thread for thread in threading.enumerate() if thread.name == "tray-mic"])
+
+
+def test_the_default_shortcut_is_registered_at_the_start(brain, make):
+    made = tray_pressable(brain, make)
+    assert made.tray.shortcuts == [Shortcut(("ctrl", "alt"), "n")]
+    assert made._app_state().shortcut == "Ctrl+Alt+N"
+
+
+def test_app_from_the_brain_sets_the_shortcut_page_and_minutes(brain, make):
+    made = tray_pressable(brain, make)
+    assert made._app_state().page is False
+    told = len(made.tray.changes)
+    brain.say("state", volumes={}, muted=False,
+              app={"shortcut": "Ctrl+Shift+F5", "page": "https://nova.example", "mic_mute_minutes": 30})
+    assert wait_for(lambda: made._page is not None)
+    assert made.tray.shortcuts[-1] == Shortcut(("ctrl", "shift"), "f5")
+    assert made._page == "https://nova.example" and made._mic_minutes == 30
+    state = made._app_state()
+    assert state.shortcut == "Ctrl+Shift+F5" and state.page is True
+    assert len(made.tray.changes) > told
+    brain.say("state", volumes={}, muted=False, app={"shortcut": " ctrl + alt + n ", "page": "bbc.co.uk"})
+    assert wait_for(lambda: made._page == "https://bbc.co.uk")
+    assert made.tray.shortcuts[-1] == Shortcut(("ctrl", "alt"), "n")
+    assert made._app_state().shortcut == "Ctrl+Alt+N" and made._mic_minutes == 30
+
+
+def test_one_bad_field_of_app_leaves_the_others_taken(brain, make, caplog):
+    made = tray_pressable(brain, make)
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            brain.say("state", volumes={}, muted=False,
+                      app={"shortcut": 5, "page": "https://nova.example", "mic_mute_minutes": 30})
+        assert wait_for(lambda: made._mic_minutes == 30)
+        brain.say("state", volumes={}, muted=False, app={"shortcut": "Ctrl+A+B"})
+        brain.say("state", volumes={}, muted=False, app={"mic_mute_minutes": 0, "page": "https://nova.example"})
+        brain.say("state", volumes={}, muted=False, app={"mic_mute_minutes": True})
+        brain.say("state", volumes={}, muted=False)
+        assert wait_for(lambda: len(app_warnings(caplog, "mic_mute_minutes")) == 2)
+    assert made._page == "https://nova.example" and made._mic_minutes == 30
+    # Left as it was, and logged once for each value.
+    assert made.tray.shortcuts == [Shortcut(("ctrl", "alt"), "n")]
+    assert made._app_state().shortcut == "Ctrl+Alt+N"
+    assert len(app_warnings(caplog, "shortcut")) == 2
+    assert app_warnings(caplog, "page") == []
+
+
+@pytest.mark.parametrize("page", ["file:///c:/x", "javascript:alert(1)", "http://nova.example", "https://a b", 5, ["https://x.y"]])
+def test_a_page_which_isnt_a_web_address_is_refused(brain, make, caplog, page):
+    made = tray_pressable(brain, make)
+    with caplog.at_level(logging.WARNING):
+        brain.say("state", volumes={}, muted=False, app={"page": page, "mic_mute_minutes": 45})
+        assert wait_for(lambda: made._mic_minutes == 45)
+        assert made._page is None and made._app_state().page is False
+        assert len(app_warnings(caplog, "page")) == 1
+        brain.say("state", volumes={}, muted=False, app={"page": "https://nova.example"})
+        assert wait_for(lambda: made._page is not None)
+        brain.say("state", volumes={}, muted=False, app={"page": page, "mic_mute_minutes": 46})
+        assert wait_for(lambda: made._mic_minutes == 46)
+    # Left as it was.
+    assert made._page == "https://nova.example" and made._app_state().page is True
+
+
+def test_an_empty_page_clears_it(brain, make):
+    made = tray_pressable(brain, make)
+    brain.say("state", volumes={}, muted=False, app={"page": "https://nova.example"})
+    assert wait_for(lambda: made._app_state().page)
+    brain.say("state", volumes={}, muted=False, app={"page": ""})
+    assert wait_for(lambda: not made._app_state().page)
+    assert made._page is None
+
+
+def test_an_empty_shortcut_from_the_brain_means_none(brain, make):
+    made = tray_pressable(brain, make)
+    brain.say("state", volumes={}, muted=False, app={"shortcut": ""})
+    assert wait_for(lambda: made.tray.shortcuts[-1] is None)
+    assert made._app_state().shortcut is None
+
+
+def test_no_app_from_an_old_brain_leaves_the_default_shortcut(brain, make):
+    made = tray_pressable(brain, make)
+    brain.say("state", volumes={}, muted=False)
+    assert wait_for(lambda: made.state.muted is False)
+    assert made.tray.shortcuts == [Shortcut(("ctrl", "alt"), "n")]
+    assert made._app_state().shortcut == "Ctrl+Alt+N" and made._app_state().page is False
+
+
+def test_an_app_which_isnt_an_object_is_refused_once(brain, make, caplog):
+    made = tray_pressable(brain, make)
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            brain.say("state", volumes={}, muted=False, app="on")
+        brain.say("state", volumes={}, muted=False, app={"mic_mute_minutes": 7})
+        assert wait_for(lambda: made._mic_minutes == 7)
+    assert len(app_warnings(caplog, "app")) == 1
+
+
+def test_the_shortcut_is_a_press(brain, make):
+    made = tray_pressable(brain, make)
+    made.tray.on_shortcut()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    assert brain.messages("wake")[0]["pressed"] is True
+    assert made.speaker.files() == [os.path.join(made.sounds_folder, "listening.wav")]
+    brain.say("stop_listening")
+
+
+def test_taken_reaches_the_state_and_the_brain(brain, make):
+    made = tray_pressable(brain, make)
+    assert made._app_state().shortcut == "Ctrl+Alt+N"
+    # Said as the brain was reached, so what follows is what changed.
+    assert wait_for(lambda: brain.messages("shortcut_taken") == [{"type": "shortcut_taken", "taken": False}])
+    told = len(made.tray.changes)
+    made.tray.on_taken(True)
+    assert made._app_state().shortcut is None
+    assert wait_for(lambda: brain.messages("shortcut_taken")[1:] == [{"type": "shortcut_taken", "taken": True}])
+    assert len(made.tray.changes) > told
+    made.tray.on_taken(False)
+    assert made._app_state().shortcut == "Ctrl+Alt+N"
+    assert wait_for(lambda: [message["taken"] for message in brain.messages("shortcut_taken")] == [False, True, False])
+
+
+def test_taken_said_again_is_not_sent_again(brain, make):
+    made = tray_pressable(brain, make)
+    assert wait_for(lambda: brain.messages("shortcut_taken"))
+    made.tray.on_taken(True)
+    made.tray.on_taken(True)
+    assert wait_for(lambda: len(brain.messages("shortcut_taken")) == 2)
+    time.sleep(0.1)
+    # The one from connecting, and the one change.
+    assert [message["taken"] for message in brain.messages("shortcut_taken")] == [False, True]
+
+
+def test_taken_is_told_to_the_brain_again_on_each_connection(brain, make):
+    made = tray_pressable(brain, make)
+    # Whether taken or not: the first connection says it is not.
+    assert wait_for(lambda: brain.messages("shortcut_taken") == [{"type": "shortcut_taken", "taken": False}])
+    made.tray.on_taken(True)
+    assert wait_for(lambda: len(brain.messages("shortcut_taken")) == 2)
+    # The brain goes, and comes back as a new one which has heard nothing.
+    brain.received.clear()
+    brain.sockets[-1].shutdown(socket.SHUT_RDWR)
+    assert wait_for(lambda: len(brain.hellos) == 2 and connected(made))
+    assert wait_for(lambda: brain.messages("shortcut_taken") == [{"type": "shortcut_taken", "taken": True}])
+
+
+def test_a_satellite_with_no_tray_says_nothing_of_the_shortcut(brain, make):
+    made = pressable(brain, make)
+    brain.say("state", volumes={}, muted=False, app={"shortcut": "Ctrl+Alt+M"})
+    assert wait_for(lambda: made._app_state().shortcut == "Ctrl+Alt+M")
+    assert brain.messages("shortcut_taken") == []
+
+
+def test_at_logon_follows_the_mark(brain, make, tmp_path, monkeypatch):
+    mark = tmp_path / "no_logon_start"
+    monkeypatch.setattr(satellite, "NO_LOGON_MARK", str(mark))
+    made = tray_pressable(brain, make)
+    assert made._app_state().at_logon is True
+    mark.write_text("")
+    assert made._app_state().at_logon is False
+    mark.unlink()
+    assert made._app_state().at_logon is True
+
+
+def test_a_menu_choice_is_only_logged_for_now(brain, make, caplog):
+    made = tray_pressable(brain, make)
+    with caplog.at_level(logging.DEBUG):
+        made.tray.on_choice("quit")
+    assert "quit" in caplog.text
+    assert made.exited == []
+
+
+def test_the_tray_is_closed_as_the_satellite_stops(brain, make):
+    made = tray_pressable(brain, make)
+    tray = made.tray
+    # As Quit does from the tray's own thread: closed already, and closed again by the clean up.
+    tray.close()
+    made.stop()
+    assert wait_for(lambda: made.exited)
+    assert tray.closes == 2
+
+
+def test_the_tray_is_closed_after_the_link_and_before_the_speaker(brain, make):
+    made = tray_pressable(brain, make)
+    order = []
+    link_stop, speaker_close = made.link.stop, made.speaker.close
+    made.link.stop = lambda: (order.append("link"), link_stop())
+    made.tray.close = lambda: order.append("tray")
+    made.speaker.close = lambda: (order.append("speaker"), speaker_close())
+    made.stop()
+    assert wait_for(lambda: made.exited)
+    assert order == ["link", "tray", "speaker"]
