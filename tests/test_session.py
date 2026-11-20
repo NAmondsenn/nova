@@ -1457,6 +1457,120 @@ def test_volume_named_at_another_satellite_is_changed_and_beeped_there(brain, co
     assert not pi.muted
 
 
+# "Mute" means the microphone (20 Nov)
+
+@pytest.fixture
+def pi_and_pc(brain, connect, make_session):
+    """
+    The Pi ("bedroom", listening for its wake word) and the PC (push-to-talk), both connected, with the
+    brain finding, naming and ringing on them as the real Brain does - the PC's room's always-on one
+    being the Pi, the default.
+    """
+    pi, pc = make_session(connect("bedroom")[0]), make_session(connect("pc")[0])
+    sessions = {"bedroom": pi, "pc": pc}
+    _brain_choosing_notes(brain, sessions)
+    brain.default_satellite = lambda: "bedroom"
+    brain.ring_on = MethodType(Brain.ring_on, brain)
+    return SimpleNamespace(pi=pi, pc=pc, sessions=sessions)
+
+
+def test_mute_at_the_pi_mutes_the_pi(pi_and_pc):
+    pi, pc = pi_and_pc.pi, pi_and_pc.pc
+    result = pi.actions.execute(Action("mute_microphone", {"muted": True}))
+    assert (result.ok, result.say) == (True, "Microphone off.")
+    assert pi.muted and not pc.muted
+    # The settings page's and Home Assistant's mute, so its switch shows it.
+    assert pi._device_controls().muted()
+    assert pi.actions.execute(Action("mute_microphone", {"muted": False})).say == "Microphone on."
+    assert not pi.muted
+    # Spoken words reach it the same way.
+    pi.actions.execute(pi.intents.match("Stop listening.")["actions"][0])
+    assert pi.muted
+
+
+def test_mute_at_the_pc_mutes_the_rooms_always_on_pi(pi_and_pc, brain):
+    pi, pc = pi_and_pc.pi, pi_and_pc.pc
+    result = pc.actions.execute(Action("mute_microphone", {"muted": True}))
+    assert (result.ok, result.say) == (True, "The Pi's microphone is off.")
+    assert pi.muted and not pc.muted
+    # Back on from the PC, by name.
+    result = pc.actions.execute(Action("mute_microphone", {"muted": False, "where": "the Pi"}))
+    assert (result.ok, result.say) == (True, "The Pi's microphone is on.")
+    assert not pi.muted
+    # A name he gave it is said as he wrote it, capitalised to start the sentence.
+    brain.rooms.set_called("bedroom", ["bedroom Pi"])
+    assert pc.actions.execute(Action("mute_microphone", {"muted": True})).say == "Bedroom Pi's microphone is off."
+    assert pi.muted
+
+
+def test_mute_the_pc_says_it_only_listens_on_the_key(pi_and_pc, brain):
+    pi, pc = pi_and_pc.pi, pi_and_pc.pc
+    for session in (pi, pc):
+        result = session.actions.execute(Action("mute_microphone", {"muted": True, "where": "the PC"}))
+        assert not result.ok
+        assert result.say == "The PC only listens while you hold the key, so there's nothing to mute."
+    assert not pi.muted and not pc.muted
+    # And with no always-on satellite to stand in for it, the PC's own plain "mute" says the same.
+    brain.default_satellite = lambda: "pc"
+    result = pc.actions.execute(Action("mute_microphone", {"muted": True}))
+    assert result.say == "The PC only listens while you hold the key, so there's nothing to mute."
+    assert not pi.muted and not pc.muted
+
+
+@pytest.fixture
+def pi_ringing(brain, monkeypatch):
+    """An alarm ringing on the Pi ("bedroom"), which the clock dismisses where it's asked to."""
+    ringing = {"bedroom"}
+
+    def dismiss(satellite=None):
+        ringing.discard(satellite)
+        return {"success": True, "message": "Okay."}
+
+    monkeypatch.setattr(brain.clock, "is_ringing", lambda satellite=None: satellite in ringing)
+    monkeypatch.setattr(brain.clock, "dismiss", dismiss)
+    return ringing
+
+
+def test_stop_listening_while_the_pi_rings_stops_it_first(pi_and_pc, pi_ringing):
+    # Muted with the alarm still going, the Pi couldn't hear "Nova, stop", and it would climb to full volume.
+    pi = pi_and_pc.pi
+    result = pi.actions.execute(pi.intents.match("Stop listening.")["actions"][0])
+    assert (result.ok, result.say) == (True, "Stopped, and microphone off.")
+    assert pi_ringing == set() and pi.muted
+
+
+def test_mute_at_the_pc_while_the_pi_rings_stops_it_first(pi_and_pc, pi_ringing, brain):
+    pi, pc = pi_and_pc.pi, pi_and_pc.pc
+    result = pc.actions.execute(pc.intents.match("Mute.")["actions"][0])
+    assert (result.ok, result.say) == (True, "Stopped, and the Pi's microphone is off.")
+    assert pi_ringing == set() and pi.muted and not pc.muted
+    # A name he gave it keeps its own case mid-sentence.
+    pi.set_muted(False)
+    pi_ringing.add("bedroom")
+    brain.rooms.set_called("bedroom", ["Bedroom Pi"])
+    assert pc.actions.execute(Action("mute_microphone", {"muted": True})).say == \
+        "Stopped, and Bedroom Pi's microphone is off."
+
+
+def test_unmute_leaves_a_ring_alone(pi_and_pc, pi_ringing):
+    pi_and_pc.pi.set_muted(True)
+    result = pi_and_pc.pc.actions.execute(Action("mute_microphone", {"muted": False, "where": "the Pi"}))
+    assert result.say == "The Pi's microphone is on." and pi_ringing == {"bedroom"}
+
+
+def test_mute_a_satellite_not_connected_says_so(pi_and_pc, brain):
+    pi, pc = pi_and_pc.pi, pi_and_pc.pc
+    brain.session_for = {"pc": pc}.get
+    result = pc.actions.execute(Action("mute_microphone", {"muted": True}))
+    assert (result.ok, result.say) == (False, "Nova isn't running on the Pi.")
+    result = pc.actions.execute(Action("mute_microphone", {"muted": False, "where": "the Pi"}))
+    assert (result.ok, result.say) == (False, "Nova isn't running on the Pi.")
+    # Words naming no satellite say what there is.
+    result = pc.actions.execute(Action("mute_microphone", {"muted": True, "where": "the toaster"}))
+    assert not result.ok and result.say.startswith("There's no satellite called the toaster.")
+    assert not pi.muted
+
+
 def test_volumes_are_kept_per_satellite_and_sent_to_it(brain, connect, make_session):
     bedroom, bedroom_pi = connect("bedroom", "bedroom-pi")
     kitchen, kitchen_pi = connect("kitchen", "kitchen-pi")

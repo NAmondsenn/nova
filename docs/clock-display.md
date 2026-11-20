@@ -56,6 +56,7 @@ Only the clock itself can show these:
 - A swipe left or right changes page, and a tap moves to the next. Neither makes Nova listen.
 - Quick taps, one after another and at the very edge of the screen too, never show the blob.
 - Holding a finger makes Nova listen through the satellite's microphone (the blob appears, with its glowing lobes and aura, and what Nova heard shows under it), and lifting it ends the recording. Also while Nova is muted: the page then shows a "Muted" mark when it isn't being held.
+- The microphone in the bottom right corner shows whether the satellite's microphone is on (a plain microphone) or muted (crossed out in red, with "Muted"). A tap on it mutes or unmutes it at once, as the settings page's switch does, and the settings page and Home Assistant show the change; a tap anywhere else still turns the page.
 - The volume buttons change Nova's volume, a step at a time: the music's while Nova's own music plays on that satellite, otherwise its voice, and never the alarms'. If they do nothing, look in the page's console (Fully's web content debugging lets Chrome on a computer show it) for "Blocked by the page's policy" (a "securitypolicyviolation"): Fully runs the buttons' handlers as text, which the page's Content-Security-Policy may turn down on this build. Whether a press also changes the clock's own volume doesn't matter, as its speaker isn't used.
 - Brightness follows the slider on the settings page.
 - Music started on the satellite takes the clock to Now playing, and, once it stops, back to Home after the delay set.
