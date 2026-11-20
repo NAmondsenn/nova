@@ -1564,6 +1564,25 @@ def test_a_push_to_talk_satellite_is_sent_its_screen_orb(brain, connect, make_se
     assert "screen_orb" not in bedroom_pi.messages("state")[-1]
 
 
+@pytest.mark.parametrize("written, sent", [
+    # config.yaml takes a choice in any case, but the satellite takes only the page's own
+    # words - and refuses the whole setting, its "on" with it, for one it doesn't know.
+    ({"screen_orb_place": "Top Left"}, {"on": True, "place": "top left", "size": "medium"}),
+    ({"screen_orb": False, "screen_orb_place": " Top Left "}, {"on": False, "place": "top left", "size": "medium"}),
+    ({"screen_orb_size": "enormous"}, {"on": True, "place": "bottom centre", "size": "medium"}),
+    # Left empty by hand, which is no answer, rather than off.
+    ({"screen_orb": None}, {"on": True, "place": "bottom centre", "size": "medium"}),
+])
+def test_a_screen_orb_written_by_hand_is_sent_as_the_satellite_takes_it(brain, connect, make_session, written, sent):
+    pc, pc_link = connect("pc", "pc.local")
+    pc.push_to_talk = True
+    session = make_session(pc)
+    brain.config.apply({("computer", name): value for name, value in written.items()})
+    session.send_state()
+    assert wait_for(lambda: pc_link.messages("state"))
+    assert pc_link.messages("state")[-1]["screen_orb"] == sent
+
+
 def test_mute_is_kept_per_satellite_and_sent_to_it(brain, connect, make_session):
     bedroom, bedroom_pi = connect("bedroom", "bedroom-pi")
     kitchen, kitchen_pi = connect("kitchen", "kitchen-pi")

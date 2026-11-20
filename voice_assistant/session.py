@@ -28,6 +28,7 @@ from voice_assistant import paths, storage
 from voice_assistant.actions import ActionExecutor
 from voice_assistant.clock_ringing import heard_in
 from voice_assistant.computers import ComputerControl, ComputerHooks
+from voice_assistant.config import CHOICES
 from voice_assistant.conversation import NOT_CAUGHT, Conversation
 from voice_assistant.ha_device import DeviceControls, NovaDevice
 from voice_assistant.home_assistant import HomeAssistant
@@ -161,6 +162,22 @@ def _number(value, default: float) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return default
     return value
+
+
+def _orb_choice(computer: Dict, name: str) -> str:
+    """
+    Where the PC's orb sits, or how big it is, as one of the settings page's own words.
+
+    Args:
+        computer: The computer section of the settings, as it is now.
+        name: "place" or "size", for screen_orb_place or screen_orb_size.
+
+    Returns:
+        The setting in lower case, without spaces round it, if that is one of its choices -
+        else its default, for one left empty or anything config.yaml would have refused.
+    """
+    value = str(computer.get(f"screen_orb_{name}")).strip().lower()
+    return value if value in CHOICES[("computer", f"screen_orb_{name}")] else DEFAULT_SCREEN_ORB[name]
 
 
 class Session:
@@ -475,9 +492,14 @@ class Session:
         if not self.satellite.push_to_talk:
             return None
         computer = self.brain.config.section("computer")
-        return {"on": bool(computer.get("screen_orb", DEFAULT_SCREEN_ORB["on"])),
-                "place": computer.get("screen_orb_place", DEFAULT_SCREEN_ORB["place"]),
-                "size": computer.get("screen_orb_size", DEFAULT_SCREEN_ORB["size"])}
+        # Sent as the satellite takes them, which is only as the settings page writes them.
+        # config.yaml takes a choice in any case, so "Top Left" written by hand is sent as
+        # "top left" - the satellite would refuse the whole setting for it, its "on" with
+        # it, and a "screen_orb: false" beside it would go unheeded. An "on" left empty is
+        # no answer, so it's the default rather than off.
+        on = computer.get("screen_orb")
+        return {"on": on if isinstance(on, bool) else DEFAULT_SCREEN_ORB["on"],
+                "place": _orb_choice(computer, "place"), "size": _orb_choice(computer, "size")}
 
     def _wake_confidence(self, playing: List[str]) -> float:
         """
