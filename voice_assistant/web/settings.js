@@ -938,6 +938,7 @@ function showSatellites(state) {
         : "Not connected", "detail"));
     if (satellite.spotify_speaker) what.append(element("span", `Spotify plays on ${satellite.spotify_speaker}`, "detail"));
     if (satellite.saves_notes) what.append(element("span", "Saves notes to its Downloads", "detail"));
+    if (satellite.opens) what.append(element("span", `Found ${satellite.apps_found} apps and games.`, "detail"));
     const actions = element("span", undefined, "actions");
     // What else it's called, as one line of names apart by commas, which the brain trims and checks. The
     // label holds the box, as it holds the switch below. Sent as it's left, and the rows drawn again
@@ -957,6 +958,62 @@ function showSatellites(state) {
     });
     called.append(element("span", "Also called"), calledBox);
     actions.append(called);
+    // Only for one which has said it opens things. The same as the names above: sent as the text is
+    // left, which the brain checks against the apps it found, and the rows drawn again whatever
+    // it says. The names are shown as they're kept, in lower case without marks.
+    if (satellite.opens) {
+      const opens = element("label", undefined, "choice");
+      const opensBox = element("input");
+      Object.assign(opensBox, { type: "checkbox", checked: Boolean(satellite.opens_on) });
+      opensBox.setAttribute("role", "switch");
+      opensBox.addEventListener("change", () =>
+        change("/api/satellites/opens", { name: satellite.name, on: opensBox.checked }, () => {
+          delete drawn.satellites;
+          return load();
+        }));
+      opens.append(element("span", "Opens apps and pages"), opensBox);
+      actions.append(opens);
+      const appNames = element("label", undefined, "choice called");
+      const appNamesBox = element("input");
+      Object.assign(appNamesBox, {
+        type: "text", autocomplete: "off", spellcheck: false, placeholder: "GTA = Grand Theft Auto V Enhanced",
+        value: Object.entries(satellite.app_names || {}).map(([alias, app]) => `${alias} = ${app}`).join(", "),
+      });
+      appNamesBox.addEventListener("change", () =>
+        change("/api/satellites/app-names", { name: satellite.name, text: appNamesBox.value }, () => {
+          delete drawn.satellites;
+          return load();
+        }));
+      appNamesBox.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") appNamesBox.blur();
+      });
+      appNames.append(element("span", "Apps also called"), appNamesBox);
+      actions.append(appNames);
+      // Which HASS.Agent PC it is, only when Home Assistant has more than one: with one, it is that one.
+      if ((satellite.pcs || []).length > 1) {
+        const pc = element("label", undefined, "choice");
+        const wrap = element("span", undefined, "select");
+        const select = element("select");
+        const none = element("option", "Not chosen");
+        none.value = "";
+        none.disabled = true;
+        select.append(none);
+        for (const each of satellite.pcs) {
+          const option = element("option", each.name);
+          option.value = each.device;
+          select.append(option);
+        }
+        select.value = satellite.pc_device || "";
+        select.addEventListener("change", () =>
+          change("/api/satellites/pc", { name: satellite.name, device: select.value }, () => {
+            delete drawn.satellites;
+            return load();
+          }));
+        wrap.append(select, icon("i-chevron"));
+        pc.append(element("span", "HASS.Agent PC"), wrap);
+        actions.append(pc);
+      }
+    }
     // Whether its journeys start from where the phone is. The label holds the switch, so
     // no id is needed to join them, as a satellite's name may have a space in it.
     const travels = element("label", undefined, "choice");

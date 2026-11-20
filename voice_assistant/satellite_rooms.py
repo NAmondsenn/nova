@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 
 def _blank() -> Dict:
     """Returns the entry of a satellite nothing is known of, with every field the file keeps."""
-    return {"push_to_talk": False, "area": None, "machine": None, "saves_notes": False, "called": []}
+    return {"push_to_talk": False, "area": None, "machine": None, "saves_notes": False, "called": [],
+            "opens_things": True, "app_names": {}, "pc_device": None}
 
 
 def _names(stored: Any) -> List[str]:
@@ -33,6 +34,13 @@ def _names(stored: Any) -> List[str]:
     if isinstance(stored, list) and all(isinstance(each, str) for each in stored):
         return list(stored)
     return []
+
+
+def _aliases(stored: Any) -> Dict[str, str]:
+    """Returns the app names read from the file, or none if what's there isn't text for text."""
+    if isinstance(stored, dict) and all(isinstance(key, str) and isinstance(each, str) for key, each in stored.items()):
+        return dict(stored)
+    return {}
 
 
 class SatelliteRooms:
@@ -67,7 +75,11 @@ class SatelliteRooms:
         self._known = {name: {"push_to_talk": each["push_to_talk"], "area": each.get("area"),
                               "machine": each.get("machine") if each.get("machine") in MACHINES else None,
                               "saves_notes": each.get("saves_notes") is True,
-                              "called": _names(each.get("called"))}
+                              "called": _names(each.get("called")),
+                              # On unless he turned it off, so a file from before has it on.
+                              "opens_things": each.get("opens_things") is not False,
+                              "app_names": _aliases(each.get("app_names")),
+                              "pc_device": each.get("pc_device") if isinstance(each.get("pc_device"), str) else None}
                        for name, each in stored.items()}
 
     def _save(self):
@@ -136,6 +148,57 @@ class SatelliteRooms:
             save_json(self.path, {**self._known, name: updated}, indent=2)
             self._known[name] = updated
 
+    def _set_field(self, name: str, field: str, value: Any):
+        """
+        Saves one field of a satellite, as set_called does.
+
+        Raises:
+            OSError: If it couldn't be saved. It isn't kept in memory either then.
+        """
+        with self._lock:
+            updated = {**self._known.get(name, _blank()), field: value}
+            save_json(self.path, {**self._known, name: updated}, indent=2)
+            self._known[name] = updated
+
+    def set_opens_things(self, name: str, on: bool):
+        """
+        Notes whether he lets a satellite open apps and pages, as the settings page saves it.
+
+        Args:
+            name: The satellite's name.
+            on: Whether it may.
+
+        Raises:
+            OSError: If it couldn't be saved.
+        """
+        self._set_field(name, "opens_things", on)
+
+    def set_app_names(self, name: str, names: Dict[str, str]):
+        """
+        Notes the short names he has given a satellite's apps, as the settings page saves them.
+
+        Args:
+            name: The satellite's name.
+            names: Each name as plain gives it, to the app's name as the satellite lists it - none to clear them.
+
+        Raises:
+            OSError: If they couldn't be saved.
+        """
+        self._set_field(name, "app_names", dict(names))
+
+    def set_pc_device(self, name: str, device: Optional[str]):
+        """
+        Notes which HASS.Agent PC a satellite is, as the settings page saves it.
+
+        Args:
+            name: The satellite's name.
+            device: The PC's Home Assistant device id, or None for none chosen.
+
+        Raises:
+            OSError: If it couldn't be saved.
+        """
+        self._set_field(name, "pc_device", device)
+
     def push_to_talk(self, name: str) -> bool:
         """Returns whether a satellite records on a press of a key - False for one not known."""
         with self._lock:
@@ -155,6 +218,21 @@ class SatelliteRooms:
         """Returns the other names he has given a satellite - none for one not known or never given any."""
         with self._lock:
             return list(self._known.get(name, {}).get("called", []))
+
+    def opens_things(self, name: str) -> bool:
+        """Returns whether he lets a satellite open apps and pages - True unless he turned it off, and for one not known."""
+        with self._lock:
+            return self._known.get(name, {}).get("opens_things", True)
+
+    def app_names(self, name: str) -> Dict[str, str]:
+        """Returns the short names he has given a satellite's apps, as plain name to app name - none if never given any."""
+        with self._lock:
+            return dict(self._known.get(name, {}).get("app_names", {}))
+
+    def pc_device(self, name: str) -> Optional[str]:
+        """Returns the device id of the HASS.Agent PC he chose for a satellite, or None if he hasn't."""
+        with self._lock:
+            return self._known.get(name, {}).get("pc_device")
 
     def area(self, name: str) -> Optional[str]:
         """Returns the room a satellite is in, or None if it isn't known."""

@@ -36,6 +36,7 @@ from voice_assistant import google_calendar, spotify_controller
 from voice_assistant.brain import Brain
 from voice_assistant.choices import ChoiceStore
 from voice_assistant.clock import Clock
+from voice_assistant.computers import Computers
 from voice_assistant.config import Config
 from voice_assistant.displays import Displays
 from voice_assistant.downloads import Downloads
@@ -56,8 +57,10 @@ from voice_assistant.wrapped import WrappedStore
 
 LOGIN = "you@example.com"
 
-# What the page says of a satellite nothing is known of: not what machine it is, what else it's called, or whether it saves notes.
-UNKNOWN = {"machine": None, "called": [], "saves_notes": False}
+# What the page says of a satellite nothing is known of: not what machine it is, what else it's called, whether it
+# saves notes or opens things, or which PC it is.
+UNKNOWN = {"machine": None, "called": [], "saves_notes": False, "opens": False, "opens_on": True, "apps_found": 0,
+           "app_names": {}, "pcs": [], "pc_device": None}
 
 
 class FakeVolume:
@@ -265,6 +268,15 @@ class FakeRooms:
     def called(self, name):
         return []
 
+    def opens_things(self, name):
+        return True
+
+    def app_names(self, name):
+        return {}
+
+    def pc_device(self, name):
+        return None
+
 
 class FakeBrain:
     """Stands in for the brain: what every satellite shares, and the sessions of those connected."""
@@ -278,6 +290,7 @@ class FakeBrain:
         self.football = self.football_watcher = self.wrapped_store = self.journeys = None
         self.displays, self.display_server = NoDisplays(), None
         self.rooms = FakeRooms()
+        self.computers = Computers()
         self._night = Ntfy("")
         self.ran = []
         for name, part in parts.items():
@@ -2561,6 +2574,119 @@ def test_satellites_say_machine_called_and_notes(files, tmp_path):
         "bedroom": ("pi", [], False), "pc": ("pc", ["Desk", "computer"], True), "lab": ("linux", [], False),
         # One the brain has never seen says nothing of itself.
         "garage": (None, [], False)}
+
+
+APPS = [{"id": "a1", "name": "Grand Theft Auto V Enhanced", "kind": "game"},
+        {"id": "a2", "name": "EA SPORTS FC™ 25", "kind": "game"},
+        {"id": "a3", "name": "Overwatch", "kind": "game"}, {"id": "a4", "name": "Overwatch 2", "kind": "game"}]
+
+
+class FakePCs:
+    """Stands in for PCPower, listing the PCs the registry has."""
+
+    def __init__(self, *devices):
+        self.devices = devices
+
+    def overview(self):
+        return {"pcs": [{"device": each, "name": each.title(), "wake": None} for each in self.devices], "buttons": []}
+
+
+def _opening(tmp_path, *pcs):
+    """A page over a real rooms with a PC which has said it opens things, and a Mac which hasn't."""
+    rooms = _rooms(tmp_path, ("pc", "pc", True), ("mac", "mac", True))
+    page = _page(sessions={"pc": FakeSession(), "mac": FakeSession()}, rooms=rooms, pc=FakePCs(*pcs))
+    page.brain.computers.set_apps("pc", APPS)
+    return page
+
+
+def test_satellites_say_whether_they_open_things_and_what_they_found(files, tmp_path):
+    page = _opening(tmp_path)
+    page.brain.rooms.set_app_names("pc", {"gta": "Grand Theft Auto V Enhanced"})
+    shown = {each["name"]: each for each in page.state()["satellites"]}
+    # Whether it has ever said it opens things is the page's "opens"; whether he's left it on is "opens_on".
+    assert (shown["pc"]["opens"], shown["pc"]["opens_on"], shown["pc"]["apps_found"]) == (True, True, 4)
+    assert shown["pc"]["app_names"] == {"gta": "Grand Theft Auto V Enhanced"}
+    assert (shown["mac"]["opens"], shown["mac"]["apps_found"]) == (False, 0)
+
+
+def test_set_opens_saves_the_switch(files, tmp_path, caplog):
+    page = _opening(tmp_path)
+    with caplog.at_level(logging.INFO):
+        assert page.set_opens("pc", False, LOGIN) == {"success": True, "message": "pc won't open things now."}
+    assert page.brain.rooms.opens_things("pc") is False
+    assert f"Settings page: {LOGIN} stopped the pc satellite opening things" in caplog.text
+    assert page.set_opens("pc", True, LOGIN)["message"] == "pc opens things now."
+    assert page.brain.rooms.opens_things("pc") is True
+    assert page.set_opens("ghost", True, LOGIN)["success"] is False
+    assert page.set_opens("pc", "false", LOGIN) == {"success": False, "message": "That didn't make sense."}
+
+
+def test_app_names_saved_and_checked(files, tmp_path, caplog):
+    page = _opening(tmp_path)
+    rooms = page.brain.rooms
+    with caplog.at_level(logging.INFO):
+        said = page.set_app_names("pc", " GTA = Grand Theft Auto V Enhanced, FC = ea sports fc 25 ,", LOGIN)
+    assert said == {"success": True, "message": "pc has 2 other names for apps."}
+    # Kept as said by the alias's plain form, with the app's name as it's listed.
+    assert rooms.app_names("pc") == {"gta": "Grand Theft Auto V Enhanced", "fc": "EA SPORTS FC™ 25"}
+    assert page.state()["satellites"][0]["app_names"] == rooms.app_names("pc")
+    # An app it doesn't have, one which fits several, or a pair with no right side is refused: nothing is saved.
+    kept = dict(rooms.app_names("pc"))
+    assert page.set_app_names("pc", "GTA = Grand Theft Auto V Enhanced, X = Doom", LOGIN) == {
+        "success": False, "message": "I can't find Doom on pc."}
+    assert page.set_app_names("pc", "OW = overwatch", LOGIN)["success"] is True
+    assert page.set_app_names("pc", "kept = Overwatch 2, X = Overwatc", LOGIN)["success"] is False
+    assert page.set_app_names("pc", "GTA", LOGIN)["success"] is False
+    assert page.set_app_names("pc", "= Overwatch", LOGIN)["success"] is False
+    assert rooms.app_names("pc") == {"ow": "Overwatch"}
+    assert kept != rooms.app_names("pc")
+    # Empty clears them.
+    assert page.set_app_names("pc", "", LOGIN) == {"success": True, "message": "pc has no other names for apps now."}
+    assert rooms.app_names("pc") == {}
+    assert page.set_app_names("ghost", "GTA = Overwatch", LOGIN)["success"] is False
+    assert page.set_app_names("pc", 3, LOGIN) == {"success": False, "message": "That didn't make sense."}
+
+
+def test_app_names_are_limited_in_number_and_length(files, tmp_path):
+    page = _opening(tmp_path)
+    many = ", ".join(f"n{index} = Overwatch" for index in range(31))
+    assert page.set_app_names("pc", many, LOGIN) == {"success": False, "message": "That's more than 30 names."}
+    assert page.set_app_names("pc", f"{'x' * 41} = Overwatch", LOGIN) == {
+        "success": False, "message": "A name can't be more than 40 characters."}
+    assert page.set_app_names("pc", ", ".join(f"n{index} = Overwatch" for index in range(30)), LOGIN)["success"] is True
+    assert page.set_app_names("pc", f"{'x' * 40} = Overwatch", LOGIN)["success"] is True
+    assert page.brain.rooms.app_names("pc") == {"x" * 40: "Overwatch"}
+
+
+def test_the_pc_choice_is_shown_only_with_more_than_one_pc(files, tmp_path, caplog):
+    one = _opening(tmp_path, "desk")
+    # With one PC, that is the PC whatever is saved and there is nothing to choose from.
+    one.brain.rooms.set_pc_device("pc", "gone")
+    shown = one.state()["satellites"][0]
+    assert (shown["pc_device"], shown["pcs"]) == ("desk", [])
+    two = _opening(tmp_path, "desk", "laptop")
+    shown = two.state()["satellites"][0]
+    assert (shown["pc_device"], [each["device"] for each in shown["pcs"]]) == (None, ["desk", "laptop"])
+    with caplog.at_level(logging.INFO):
+        assert two.set_pc("pc", "laptop", LOGIN) == {"success": True, "message": "pc is the Laptop PC now."}
+    assert two.state()["satellites"][0]["pc_device"] == "laptop"
+    assert two.set_pc("pc", "nowhere", LOGIN)["success"] is False
+    assert two.brain.rooms.pc_device("pc") == "laptop"
+    assert two.set_pc("pc", None, LOGIN)["success"] is False
+    # Without Home Assistant there is no choice, and the page still draws.
+    two.brain.pc = None
+    assert two.state()["satellites"][0]["pcs"] == []
+
+
+def test_the_search_site_is_on_the_page_as_a_choice_used_straight_away(files):
+    page, _ = _running(files)
+    shown = {setting["key"]: setting for setting in page.state()["settings"]}
+    site = shown["computer.search_site"]
+    assert site["label"] == "Search site for 'search for' on a computer" and site["choices"] == [
+        "google", "duckduckgo", "bing"]
+    assert site["value"] == "google"
+    assert page.save_settings({"computer.search_site": "bing"}, LOGIN)["message"] == "Saved. It's used straight away."
+    assert page.save_settings({"computer.search_site": "yahoo"}, LOGIN)["success"] is False
 
 
 def test_set_called_saves_trimmed_names(files, tmp_path, caplog):

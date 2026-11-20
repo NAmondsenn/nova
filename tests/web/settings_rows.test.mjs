@@ -1130,3 +1130,71 @@ test("the list's rows are the sections in their groups, and a tap on one opens i
   await shown.click(row);
   assert.equal(shown.body.dataset.open, "memory");
 });
+
+// The opening row: what the brain says of a satellite which has said it opens apps and pages.
+const OPENING = [
+  { name: "pc", connected: true, default: false, travels: false, machine: "pc", called: [], saves_notes: true,
+    opens: true, opens_on: true, apps_found: 42, app_names: { gta: "Grand Theft Auto V Enhanced", fc: "EA SPORTS FC 25" },
+    pc_device: null, pcs: [] },
+  { name: "mac", connected: true, default: false, travels: false, machine: "mac", called: [], saves_notes: true,
+    opens: false, opens_on: true, apps_found: 0, app_names: {}, pc_device: null, pcs: [] },
+];
+// The box of the app names, which is the one with the placeholder, and the opening switch, by its words.
+const appNamesBox = (row) => row.querySelectorAll("input").find((one) => one.placeholder === "GTA = Grand Theft Auto V Enhanced");
+const opensSwitch = (row) => row.querySelectorAll("label").find((one) => one.textContent.startsWith("Opens apps and pages"));
+
+test("opens row shown only when satellite.opens", async () => {
+  const shown = page({ state: { ...STATE, satellites: OPENING, satellite: null } });
+  await shown.context.load();
+  const row = satelliteRow(shown, "pc");
+  const label = opensSwitch(row);
+  assert.equal(label.querySelector("input").checked, true);
+  assert.equal(label.querySelector("input").getAttribute("role"), "switch");
+  assert.ok(detailsOf(row).includes("Found 42 apps and games."));
+  const box = appNamesBox(row);
+  assert.equal(box.value, "gta = Grand Theft Auto V Enhanced, fc = EA SPORTS FC 25");
+  assert.equal(box.parent.textContent.startsWith("Apps also called"), true);
+  // One which has never said it opens things shows none of it.
+  const mac = satelliteRow(shown, "mac");
+  assert.equal(`${opensSwitch(mac)} ${appNamesBox(mac)} ${detailsOf(mac).some((one) => one.startsWith("Found"))}`,
+               "undefined undefined false");
+});
+
+test("the opening switch and the app names are sent as they are changed", async () => {
+  const shown = page({ state: { ...STATE, satellites: OPENING, satellite: null } });
+  await shown.context.load();
+  const posts = posting(shown);
+  const row = satelliteRow(shown, "pc");
+  const box = opensSwitch(row).querySelector("input");
+  box.checked = false;
+  for (const listener of box.listeners.change || []) await listener({});
+  const names = appNamesBox(satelliteRow(shown, "pc"));
+  names.value = "GTA = Grand Theft Auto V Enhanced ";
+  for (const listener of names.listeners.change || []) await listener({});
+  assert.equal(JSON.stringify(posts), JSON.stringify([
+    { path: "/api/satellites/opens", name: "pc", on: false },
+    { path: "/api/satellites/app-names", name: "pc", text: "GTA = Grand Theft Auto V Enhanced " }]));
+});
+
+test("a PC choice is shown only when the brain lists more than one PC", async () => {
+  const two = [{ ...OPENING[0], pcs: [{ device: "desk", name: "Desk" }, { device: "laptop", name: "Laptop" }], pc_device: "laptop" },
+               OPENING[1]];
+  const shown = page({ state: { ...STATE, satellites: two, satellite: null } });
+  await shown.context.load();
+  const choose = (row) => {
+    const label = row.querySelectorAll("label").find((one) => one.textContent.startsWith("HASS.Agent PC"));
+    return label ? label.querySelector("select") : undefined;
+  };
+  const select = choose(satelliteRow(shown, "pc"));
+  assert.equal(select.value, "laptop");
+  assert.equal(select.querySelectorAll("option").map((one) => one.textContent).join("|"), "Not chosen|Desk|Laptop");
+  assert.equal(choose(satelliteRow(shown, "mac")), undefined);
+  const posts = posting(shown);
+  select.value = "desk";
+  for (const listener of select.listeners.change || []) await listener({});
+  assert.equal(JSON.stringify(posts), JSON.stringify([{ path: "/api/satellites/pc", name: "pc", device: "desk" }]));
+  // With one PC there is nothing to choose from.
+  const one = page({ state: { ...STATE, satellites: OPENING, satellite: null } });
+  await one.context.load();
+  assert.equal(choose(satelliteRow(one, "pc")), undefined);
+});
