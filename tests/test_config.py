@@ -868,3 +868,20 @@ def test_a_search_site_which_isnt_google_duckduckgo_or_bing_is_refused(tmp_path)
     with pytest.raises(ConfigError) as caught:
         Config(path=str(tmp_path / "config.yaml"))
     assert "'computer.search_site' should be one of google, duckduckgo, bing, not 'yahoo'" in str(caught.value)
+
+
+def test_the_screen_orbs_place_and_size_are_choices(tmp_path):
+    places = "bottom centre, bottom left, bottom right, top centre, top left, top right"
+    (tmp_path / "config.yaml").write_text("computer:\n  screen_orb_place: middle\n")
+    with pytest.raises(ConfigError) as caught:
+        Config(path=str(tmp_path / "config.yaml"))
+    assert f"'computer.screen_orb_place' should be one of {places}, not 'middle'" in str(caught.value)
+
+    (tmp_path / "config.yaml").write_text("computer:\n  screen_orb_size: huge\n")
+    with pytest.raises(ConfigError) as caught:
+        Config(path=str(tmp_path / "config.yaml"))
+    assert "'computer.screen_orb_size' should be one of small, medium, large, not 'huge'" in str(caught.value)
+
+    computer = Config(path=str(tmp_path / "none.yaml")).section("computer")
+    assert (computer["screen_orb"], computer["screen_orb_place"], computer["screen_orb_size"]) == (
+        True, "bottom centre", "medium")

@@ -823,6 +823,20 @@ def test_the_voice_check_goes_with_the_state_only_when_given(pair):
         ({"type": "state", "volumes": volumes, "muted": True, "voice_check": 0}, b"")]
 
 
+def test_the_screen_orb_goes_with_the_state_only_when_given(pair):
+    # Just another field, so a satellite which doesn't show one - or an older one - is sent its state as it was.
+    satellite, fake, serving = pair
+    volumes = {"general": 0.5, "alarm": 1.0, "music": 0.3}
+    orb = {"on": True, "place": "top left", "size": "small"}
+
+    satellite.set_state(volumes, False)
+    satellite.set_state(volumes, False, screen_orb=orb)
+
+    assert wait_for(lambda: len(fake.received) == 2)
+    assert fake.received == [({"type": "state", "volumes": volumes, "muted": False}, b""),
+                             ({"type": "state", "volumes": volumes, "muted": False, "screen_orb": orb}, b"")]
+
+
 def test_messages_sent_from_several_threads_arrive_whole_and_in_order():
     # Music, speech and the session's own messages are all sent from threads of their own.
     satellite, fake, serving = connect(Chunky)

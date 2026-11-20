@@ -3646,6 +3646,18 @@ def test_a_voice_check_saved_is_sent_to_each_satellite(brain, connect, monkeypat
     assert bedroom.messages("state")[1]["voice_check"] == kitchen.messages("state")[1]["voice_check"] == 0.5
 
 
+def test_a_screen_orb_setting_saved_is_sent_to_each_satellite(brain, connect):
+    serving(brain)
+    bedroom, kitchen = connect(brain), connect(brain, "kitchen", KITCHEN)
+    connected(brain)
+    connected(brain, "kitchen")
+    assert wait_for(lambda: bedroom.messages("state") and kitchen.messages("state"))
+
+    # With no restart, as each of the other settings sent in the state is.
+    assert brain.apply_settings({("computer", "screen_orb_place"): "top left"}) == []
+    assert wait_for(lambda: len(bedroom.messages("state")) == len(kitchen.messages("state")) == 2)
+
+
 def test_other_settings_saved_send_the_satellites_nothing(brain, connect):
     serving(brain)
     bedroom = connect(brain)

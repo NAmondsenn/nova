@@ -44,7 +44,9 @@ and what the brain sends a satellite:
     silence  {"kind": ...}
     allow  {"kind": ...}
     state  {"volumes": {"general": ..., "alarm": ..., "music": ...}, "muted": ..., "longest_request"?: seconds,
-            "wake_confidence"?: 0-1, "voice_check"?: 0-0.99}
+            "wake_confidence"?: 0-1, "voice_check"?: 0-0.99,
+            "screen_orb"?: {"on": ..., "place": ..., "size": ...}  (a push-to-talk satellite only: whether
+            and where on its screen to show Nova's orb, and how big)}
     alarms  {"entries": [{"id": ..., "due": ..., "kind": ..., "sound": ...}]}
     phrase  {"rate": ...}  (payload)
     away_settled  (once the brain has saved what away said)

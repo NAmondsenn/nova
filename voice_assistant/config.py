@@ -35,6 +35,9 @@ CHOICES = {
     ("satellite", "trigger"): ("wake_word", "push_to_talk"),
     ("journeys", "distance_unit"): ("miles", "km"),
     ("computer", "search_site"): ("google", "duckduckgo", "bing"),
+    ("computer", "screen_orb_place"): ("bottom centre", "bottom left", "bottom right",
+                                       "top centre", "top left", "top right"),
+    ("computer", "screen_orb_size"): ("small", "medium", "large"),
 }
 # Battery marks are percentages, and how many each kind of device has - the settings page
 # allows no other number. The battery watcher can't check every 0 seconds or call a

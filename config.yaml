@@ -154,6 +154,15 @@ conversation:
 # One of google, duckduckgo or bing. Used straight away.
 computer:
   search_site: google
+  # Whether a computer with a press to talk shows Nova's orb on its screen while Nova listens
+  # and speaks. Used straight away.
+  screen_orb: true
+  # Where on the screen the orb sits: bottom centre, bottom left, bottom right, top centre,
+  # top left or top right. Used straight away.
+  screen_orb_place: bottom centre
+  # How big the orb is: small, medium or large (48, 64 or 96 pixels across at 100% scaling).
+  # Used straight away.
+  screen_orb_size: medium
 
 # Web search is only used when the query explicitly asks for it
 # (e.g. "search for..."), so normal replies stay fast and free.

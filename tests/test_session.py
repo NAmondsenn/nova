@@ -1397,6 +1397,27 @@ def test_the_session_sends_its_satellite_the_longest_request(brain, connect, mak
     assert pi.messages("state")[-1]["longest_request"] == 22.0
 
 
+def test_a_push_to_talk_satellite_is_sent_its_screen_orb(brain, connect, make_session):
+    pc, pc_link = connect("pc", "pc.local")
+    pc.push_to_talk = True
+    session = make_session(pc)
+    session.send_state()
+    assert wait_for(lambda: pc_link.messages("state"))
+    assert pc_link.messages("state")[-1]["screen_orb"] == {"on": True, "place": "bottom centre", "size": "medium"}
+
+    # Read as it is sent, so a save reaches the PC with no restart.
+    brain.config.apply({("computer", "screen_orb_size"): "large"})
+    session.send_state()
+    assert wait_for(lambda: len(pc_link.messages("state")) == 2)
+    assert pc_link.messages("state")[-1]["screen_orb"] == {"on": True, "place": "bottom centre", "size": "large"}
+
+    # Only a PC with a press to listen for has an orb to show.
+    bedroom, bedroom_pi = connect()
+    make_session(bedroom).send_state()
+    assert wait_for(lambda: bedroom_pi.messages("state"))
+    assert "screen_orb" not in bedroom_pi.messages("state")[-1]
+
+
 def test_mute_is_kept_per_satellite_and_sent_to_it(brain, connect, make_session):
     bedroom, bedroom_pi = connect("bedroom", "bedroom-pi")
     kitchen, kitchen_pi = connect("kitchen", "kitchen-pi")
@@ -3219,7 +3240,7 @@ def test_two_states_sent_at_once_arrive_in_the_order_they_were_read(brain, conne
     brain.media = _playing()
     sent, sending, carry_on = [], threading.Event(), threading.Event()
 
-    def set_state(volumes, muted, longest_request=None, wake_confidence=None, voice_check=None):
+    def set_state(volumes, muted, longest_request=None, wake_confidence=None, voice_check=None, screen_orb=None):
         # The first send stalls on the way, as one to a satellite slow to read can.
         if not sending.is_set():
             sending.set()

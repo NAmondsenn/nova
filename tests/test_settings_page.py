@@ -2711,6 +2711,25 @@ def test_the_search_site_is_on_the_page_as_a_choice_used_straight_away(files):
     assert page.save_settings({"computer.search_site": "yahoo"}, LOGIN)["success"] is False
 
 
+def test_the_screen_orb_settings_are_on_the_page_used_straight_away(files):
+    page, _ = _running(files)
+    shown = {setting["key"]: setting for setting in page.state()["settings"]}
+    orb = shown["computer.screen_orb"]
+    assert orb["label"] == "Show Nova on the computer's screen while it listens and speaks"
+    assert (orb["kind"], orb["value"]) == ("yes/no", True)
+    place = shown["computer.screen_orb_place"]
+    assert place["label"] == "Where on the screen" and place["value"] == "bottom centre"
+    assert place["choices"] == ["bottom centre", "bottom left", "bottom right", "top centre", "top left", "top right"]
+    size = shown["computer.screen_orb_size"]
+    assert size["label"] == "Size on the screen" and size["value"] == "medium"
+    assert size["choices"] == ["small", "medium", "large"]
+
+    for key, value in (("computer.screen_orb", False), ("computer.screen_orb_place", "top left"),
+                       ("computer.screen_orb_size", "large")):
+        assert page.save_settings({key: value}, LOGIN)["message"] == "Saved. It's used straight away.", key
+    assert page.save_settings({"computer.screen_orb_place": "middle"}, LOGIN)["success"] is False
+
+
 def test_set_called_saves_trimmed_names(files, tmp_path, caplog):
     rooms = _rooms(tmp_path, ("bedroom", "pi", False))
     page = _page(rooms=rooms)

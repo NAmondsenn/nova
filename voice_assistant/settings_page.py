@@ -133,6 +133,10 @@ EDITABLE = [
     ("journeys", "distance_unit", "Distances said in", "now"),
     # Read at each "search for" on a computer.
     ("computer", "search_site", "Search site for 'search for' on a computer", "now"),
+    # Sent to a push-to-talk satellite with its state, so a save reaches it at once - see Session.send_state.
+    ("computer", "screen_orb", "Show Nova on the computer's screen while it listens and speaks", "now"),
+    ("computer", "screen_orb_place", "Where on the screen", "now"),
+    ("computer", "screen_orb_size", "Size on the screen", "now"),
     ("home_assistant", "url", "Home Assistant's address", "restart"),
     ("ntfy", "url", "Your ntfy server", "restart"),
     ("ntfy", "alerts", "Topics read out as they arrive, separated by commas", "restart"),

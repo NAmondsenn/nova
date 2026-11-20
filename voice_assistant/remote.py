@@ -714,7 +714,8 @@ class RemoteSatellite:
         self.send("stop_listening", **({} if recording is None else {"recording": recording}))
 
     def set_state(self, volumes: Dict[str, float], muted: bool, longest_request: Optional[float] = None,
-                  wake_confidence: Optional[float] = None, voice_check: Optional[float] = None) -> bool:
+                  wake_confidence: Optional[float] = None, voice_check: Optional[float] = None,
+                  screen_orb: Optional[Dict] = None) -> bool:
         """
         Sends the satellite its volumes and its mute, which the brain owns - for it to
         mute its wake word by, and ring its alarms by while it can't reach the brain.
@@ -730,6 +731,10 @@ class RemoteSatellite:
             voice_check: How sure, from 0 to 0.99, it must be that a wake word is in the
                 user's voice, 0 being no check, or None to leave it as it is - an older
                 satellite ignores it.
+            screen_orb: Whether and where on its screen to show Nova's orb, and how big -
+                {"on": bool, "place": str, "size": str} - or None to leave it as it is. Only
+                a satellite with a screen to show it on is given it, and one which doesn't
+                know it ignores it.
 
         Returns:
             Whether it was sent.
@@ -739,6 +744,8 @@ class RemoteSatellite:
             fields["wake_confidence"] = wake_confidence
         if voice_check is not None:
             fields["voice_check"] = voice_check
+        if screen_orb is not None:
+            fields["screen_orb"] = screen_orb
         return self.send("state", volumes=volumes, muted=muted, **fields)
 
     def send_alarms(self, entries: List[Dict]) -> bool:

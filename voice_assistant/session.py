@@ -51,6 +51,10 @@ from voice_assistant.wake_phrase import DEFAULT_WAKE_WORD, strip_wake_word
 
 logger = logging.getLogger(__name__)
 
+# What the PC's orb is shown as if config.yaml has been left without its settings, the same
+# as config.yaml starts them.
+DEFAULT_SCREEN_ORB = {"on": True, "place": "bottom centre", "size": "medium"}
+
 # How long a session waits for a wake word before checking its satellite is still
 # there, in seconds - the satellite's wakes never say it has gone.
 WAKE_CHECK = 0.5
@@ -429,7 +433,8 @@ class Session:
         how sure to be of its wake word and of the user's voice, which aren't the
         satellite's to keep but are sent here so a save on the settings page can reach
         it in the same way - see Brain.apply_settings - as can something starting or
-        stopping in its room.
+        stopping in its room. A push-to-talk satellite is also sent how to show Nova's
+        orb on its screen, the only kind which has one.
 
         Returns:
             Whether it was sent.
@@ -452,7 +457,23 @@ class Session:
                     logger.info(f"Nothing's playing in the {self.satellite.name} satellite's room now, "
                                 f"so its wake word needs {wake_confidence:g}")
             return self.satellite.set_state(volumes, self._muted, self.thresholds.get("recording_timeout", 15.0),
-                                            wake_confidence=wake_confidence, voice_check=voice_check)
+                                            wake_confidence=wake_confidence, voice_check=voice_check,
+                                            screen_orb=self._screen_orb())
+
+    def _screen_orb(self) -> Optional[Dict]:
+        """
+        Returns:
+            How the satellite should show Nova's orb on its screen - {"on", "place",
+            "size"}, as the settings are now so a save reaches it with no restart - or
+            None for a satellite which listens for a wake word, which has no screen
+            to show it on.
+        """
+        if not self.satellite.push_to_talk:
+            return None
+        computer = self.brain.config.section("computer")
+        return {"on": bool(computer.get("screen_orb", DEFAULT_SCREEN_ORB["on"])),
+                "place": computer.get("screen_orb_place", DEFAULT_SCREEN_ORB["place"]),
+                "size": computer.get("screen_orb_size", DEFAULT_SCREEN_ORB["size"])}
 
     def _wake_confidence(self, playing: List[str]) -> float:
         """
