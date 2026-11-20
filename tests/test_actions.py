@@ -400,6 +400,11 @@ def test_mute_which_asks_the_mic_or_the_audio(pc_and_pi):
     assert result.ask_first.chosen("unmute the audio") == Action("set_volume", {"mute": False})
     assert result.ask_first.chosen("sound") == Action("set_volume", {"mute": False})
     assert result.ask_first.chosen("both") is None and result.ask_first.chosen("the mic and the lights") is None
+    # The other verb is no answer: "mute the audio" after "Unmute." is a fresh request.
+    assert result.ask_first.chosen("mute the audio") is None and result.ask_first.chosen("mute the mic") is None
+    muting = pc_and_pi.pc.actions.execute(Action("mute_which", {"muted": True})).ask_first
+    assert muting.chosen("mute the audio") == Action("set_volume", {"mute": True})
+    assert muting.chosen("unmute the mic") is None
 
 
 def test_mute_at_pc(pc_and_pi):

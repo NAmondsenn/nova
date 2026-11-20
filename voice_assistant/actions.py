@@ -189,9 +189,11 @@ class Choice:
         return next((action for pattern, action in self.answers if re.fullmatch(pattern, said)), None)
 
 
-# The answers to "The mic or the audio?" - "the mic", "microphone", "mute the sound".
-MIC_ANSWER = r"(?:(?:un)?mute )?(?:the |my )?(?:mic|microphone)"
-SOUND_ANSWER = r"(?:(?:un)?mute )?(?:the |my )?(?:audio|sound)"
+# The answers to "The mic or the audio?" - "the mic", "microphone", "mute the sound" - each with the
+# question's own verb, if one is said: "mute the audio" isn't an answer to "Unmute.", so it's a
+# fresh request.
+MIC_ANSWER = r"(?:{verb} )?(?:the |my )?(?:mic|microphone)"
+SOUND_ANSWER = r"(?:{verb} )?(?:the |my )?(?:audio|sound)"
 # Asked at the PC of a plain "mute" or "unmute", which could be either (his ruling, 20 Nov).
 MIC_OR_AUDIO = "The mic or the audio?"
 
@@ -1642,9 +1644,10 @@ class ActionExecutor:
     )
     def mute_which(self, muted: bool):
         muted = bool(muted)
+        verb = "mute" if muted else "unmute"
         return {"success": True, "message": MIC_OR_AUDIO, "ask_first": Choice((
-            (MIC_ANSWER, Action("mute_computer_mic", {"muted": muted})),
-            (SOUND_ANSWER, Action("set_volume", {"mute": muted})),
+            (MIC_ANSWER.format(verb=verb), Action("mute_computer_mic", {"muted": muted})),
+            (SOUND_ANSWER.format(verb=verb), Action("set_volume", {"mute": muted})),
         ))}
 
     @staticmethod
