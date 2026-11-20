@@ -1094,6 +1094,15 @@ def test_the_playlists_soulsync_remakes_are_named(soulsync, http):
     assert http.timeouts == [REQUEST_TIMEOUT]
 
 
+def test_a_remade_playlist_without_a_name_is_skipped(soulsync, http):
+    # A row with no name, an empty one or one which isn't an object can't be matched to anything, so it's left out
+    # rather than named "None" - and the others are still given.
+    http.pages[REMADE] = FakeResponse(200, {"playlists": [
+        {"id": "daily_mix_1", "kind": "daily_mix", "track_count": 50}, {"id": "x", "name": ""}, {"name": None},
+        "Hidden Gems", {"name": "Hidden Gems"}]})
+    assert soulsync.remade_playlists() == ["Hidden Gems"]
+
+
 def test_the_mirrors_say_which_navidrome_playlist_each_writes(soulsync, http):
     http.pages[MIRRORS] = FakeResponse(200, [_mirror(3, "Gym", "p1"), _mirror(4, "Road Trip", None, "append")])
     assert soulsync.mirrors() == [{"id": 3, "server_playlist_id": "p1", "sync_name": "Gym", "sync_mode": None},

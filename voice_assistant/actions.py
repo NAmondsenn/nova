@@ -367,6 +367,11 @@ def _things(items: Any) -> List[str]:
     return [item.strip() for item in items if isinstance(item, str) and item.strip()]
 
 
+def _playlist_names(playlists: Any) -> List[str]:
+    """The playlists the model gave - a list of names, or a single name on its own: ["gym", "car"] or "gym"."""
+    return _things([playlists] if isinstance(playlists, str) else playlists)
+
+
 class ActionExecutor:
     """Runs an Action against the part of the assistant it's for."""
 
@@ -637,10 +642,10 @@ class ActionExecutor:
         accepted = list(inspect.signature(method).parameters)[1:]
         params = {name: value for name, value in action.params.items() if name in accepted}
         reply = method(self, **params)
-        self._keep_or_note(action.tool, method, reply)
+        self._keep_or_note(method, reply)
         return reply if isinstance(reply, ActionResult) else ActionResult.from_reply(reply)
 
-    def _keep_or_note(self, name: str, method: Callable, reply: Union[Dict, ActionResult]) -> None:
+    def _keep_or_note(self, method: Callable, reply: Union[Dict, ActionResult]) -> None:
         """
         Keeps a change which has just been made for "undo that", or notes that something
         else was done since the last one - "undo that" only reaches a change which was
@@ -654,13 +659,13 @@ class ActionExecutor:
         whose ok counts as success but which can't carry an undo.
 
         Args:
-            name: The tool's name.
             method: The tool.
             reply: What it answered.
         """
         # Undoing touches nothing more: taking the change emptied the slot if it worked, and a
-        # refusal - "I've left it" - leaves it as it was, to be said the same again.
-        if name == "undo_last_change":
+        # refusal - "I've left it" - leaves it as it was, to be said the same again. Whatever an
+        # undo's reply holds, it is never kept: an undo can't itself be undone.
+        if method is ActionExecutor.undo_last_change:
             return
         if isinstance(reply, ActionResult):
             succeeded, undo = reply.ok, None
@@ -1143,6 +1148,10 @@ class ActionExecutor:
         song which is heard, and Navidrome is checked on it, not on this satellite's own player, which in a
         room may be another. Only Navidrome has playlists Nova can change.
 
+        With no song wanted, nothing is heard to follow, so the player is this satellite's own if it is
+        Navidrome, else the first in the room which is - never one of another service's which happens to be
+        paused, which would refuse "make a playlist called Chill" for a Navidrome right beside it.
+
         Args:
             which: "this" for the song playing, "last" for the one before it; anything else is "this".
             needs_song: False when no song is wanted, as for making an empty playlist.
@@ -1155,7 +1164,11 @@ class ActionExecutor:
         offline = self._music_offline()
         if offline:
             return None, None, offline
-        player = self._song_player()
+        if needs_song:
+            player = self._song_player()
+        else:
+            player = next((each for each in [self.music] + self._others_in_room()
+                           if getattr(each, "name", None) == "Navidrome"), None)
         if getattr(player, "name", None) != "Navidrome":
             return None, None, {"success": False, "message": "Changing playlists only works with Navidrome."}
         if not needs_song:
@@ -1184,7 +1197,7 @@ class ActionExecutor:
     )
     def add_to_playlists(self, playlists: Optional[List[str]] = None, song: Optional[str] = None):
         player, found, refusal = self._song_to_change(song)
-        return refusal or self.playlist_changes.add(player, found, _things(playlists))
+        return refusal or self.playlist_changes.add(player, found, _playlist_names(playlists))
 
     @tool(
         "Take the song playing off one or more of the user's playlists, for 'take this off Gym', 'remove this from "
@@ -1201,7 +1214,7 @@ class ActionExecutor:
     )
     def take_off_playlists(self, playlists: Optional[List[str]] = None, song: Optional[str] = None):
         player, found, refusal = self._song_to_change(song)
-        return refusal or self.playlist_changes.remove(player, found, _things(playlists))
+        return refusal or self.playlist_changes.remove(player, found, _playlist_names(playlists))
 
     @tool(
         "Make a new playlist, only for 'make a playlist called X' or 'add this to a new playlist called X' - for "
@@ -1246,8 +1259,11 @@ class ActionExecutor:
         player, _, refusal = self._song_to_change(None, needs_song=False)
         if refusal:
             return refusal
-        wanted = song if isinstance(song, dict) and song.get("id") else None
-        return self.playlist_changes.make(player, name or "", wanted)
+        # A song carried without its id is no song to put on it: said, rather than an empty playlist made
+        # which the user didn't ask for.
+        if song is not None and not (isinstance(song, dict) and song.get("id")):
+            return {"success": False, "message": "I've lost which song that was."}
+        return self.playlist_changes.make(player, name or "", song)
 
     # Timers, reminders and alarms
 

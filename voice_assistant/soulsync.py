@@ -368,7 +368,7 @@ def pick_track(candidates: List[Dict], title: str, artist: Optional[str]) -> Opt
 
 def _ask(send: Callable, url: str, timeout: float, **request) -> Tuple[int, Any]:
     """
-    One request to SoulSync, through a session's post, get or delete.
+    One request to SoulSync, through a session's post, get, patch or delete.
 
     Args:
         send: The session's method, e.g. session.post.
@@ -743,7 +743,7 @@ class SoulSync:
                  "sync_mode": row["sync_mode"] if isinstance(row.get("sync_mode"), str) else None}
                 for row in answer]
 
-    def set_append(self, mirror_id: int):
+    def set_append(self, mirror_id: int) -> None:
         """
         Switches a mirror to append only, so SoulSync's next sync adds to the playlist rather than
         replacing what it holds - and a song Nova added stays.

@@ -233,6 +233,17 @@ def test_the_closest_playlist_being_remade_is_refused_not_the_next(library):
     assert library.called("playlist_entries") == []
 
 
+def test_loose_wording_which_fits_a_remade_playlist_best_never_adds_to_another(library):
+    # "My daily mix" fits both Daily Mixes better than Mix Tape, which isn't remade and so could be added to:
+    # the closest is judged, and refused, and nothing goes on the other.
+    library.playlist("Daily Mix 1")
+    library.playlist("Daily Mix 2")
+    mix_tape = library.playlist("Mix Tape")
+    reply = Built(FakeSoulSync(remade=["Daily Mix 1", "Daily Mix 2"])).changes.add(library, SONG, ["my daily mix"])
+    assert reply == {"success": False, "message": "SoulSync remakes Daily Mix 1, so that wouldn't stay."}
+    assert library.called("add_songs") == [] and library.playlists[mix_tape]["songs"] == []
+
+
 def test_a_remade_playlist_is_refused_for_taking_a_song_off_too(library):
     library.playlist("Daily Mix 1", [SONG])
     reply = Built(FakeSoulSync(remade=["Daily Mix 1"])).changes.remove(library, SONG, ["daily mix"])
@@ -646,6 +657,29 @@ def test_an_undo_which_navidrome_fails_says_so_and_never_raises(library, error):
     removed = changes.remove(library, SONG, ["gym"])
     library.failures["add_songs"] = (2, error)
     assert removed["undo"]() == {"success": False, "message": NavidromeLibrary._failure_message(error)}
+
+
+@pytest.mark.parametrize("error", [DOWN, NavidromeError("broken"), ValueError("not Subsonic")])
+def test_an_undo_which_fails_on_the_second_playlist_says_what_it_did_to_the_first(library, error):
+    gym = library.playlist("Gym Bangers")
+    car = library.playlist("Car")
+    changes = Built().changes
+    failure = NavidromeLibrary._failure_message(error)
+
+    # An add taken back: Gym's is done, and Car's entries can't be read.
+    added = changes.add(library, SONG, ["gym", "car"])
+    library.failures["playlist_entries"] = (len(library.called("playlist_entries")) + 2, error)
+    undone = added["undo"]()
+    assert undone == {"success": True, "message": f"Took Song 1 back off Gym Bangers. {failure}"}
+    assert library.playlists[gym]["songs"] == [] and library.playlists[car]["songs"] == [SONG]
+
+    # A removal taken back: Gym's is put back, and Car's can't be.
+    library.playlists[gym]["songs"] = [dict(SONG)]
+    removed = changes.remove(library, SONG, ["gym", "car"])
+    library.failures["add_songs"] = (len(library.called("add_songs")) + 2, error)
+    undone = removed["undo"]()
+    assert undone == {"success": True, "message": f"Put Song 1 back on Gym Bangers. {failure}"}
+    assert library.playlists[gym]["songs"] == [SONG] and library.playlists[car]["songs"] == []
 
 
 def test_navidrome_failing_half_way_keeps_the_undo_of_what_was_done(library):

@@ -6,9 +6,9 @@ sign-in to Google. See docs/decisions/0008.
 
 The calendar comes straight from Google, not through Home Assistant - the user's
 answer 2 - so Nova signs in to Google itself (decision 10). It asks only for what it
-uses: the list of calendars, and reading and adding events. The sign-in is kept on
-the brain, readable by Nova's user only, never on a satellite. It's done on the
-settings page, under Calendars and lists - see settings_page.py - in place of 0008's
+uses: the list of calendars, and reading, adding, changing and removing events. The
+sign-in is kept on the brain, readable by Nova's user only, never on a satellite. It's
+done on the settings page, under Calendars and lists - see settings_page.py - in place of 0008's
 command on the brain, so there's only the one way in to keep safe (0009's decision 8).
 
 It's plain HTTPS with requests - an authorisation code with PKCE, from a "Desktop
@@ -38,6 +38,7 @@ import time
 from datetime import date, datetime, time as day_time, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
+from zoneinfo import ZoneInfo
 
 import requests
 import urllib3
@@ -45,6 +46,7 @@ import urllib3
 from voice_assistant import network, paths, storage
 from voice_assistant.choices import ChoiceStore
 from voice_assistant.clock import spoken_clock_time
+from voice_assistant.lists import joined
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +67,7 @@ SCOPES = [
 SCOPES_SAID = {
     "https://www.googleapis.com/auth/calendar.calendarlist.readonly": "see the list of your calendars",
     "https://www.googleapis.com/auth/calendar.events.readonly": "read your calendars' events",
-    "https://www.googleapis.com/auth/calendar.events.owned": "add events to your own calendars",
+    "https://www.googleapis.com/auth/calendar.events.owned": "add, change and remove events on your own calendars",
 }
 
 # The OAuth errors from Google's token address that only signing in again can put right:
@@ -137,6 +139,11 @@ EVENT_GONE = (404, 410)
 # back, or is in a new series.
 CANCELLED_LOOKED_FOR = timedelta(days=730)
 
+# How far past a split a time of a repeating event which was meant to be before it may have been moved, for
+# counting the times before it - two months. Google's timeMax bounds the start a time has now, not the one it
+# was meant to have, so a time moved on from before the split would be missed if it were read only up to it.
+MOVED_LATER_LOOKED_FOR = timedelta(days=60)
+
 # The most days named when some deleted on their own came back - "Tuesday, Wednesday, Thursday and 2 more".
 MOST_DAYS_SAID = 3
 
@@ -166,6 +173,7 @@ CANT_REACH_GOOGLE = "I can't reach Google's calendar right now."
 NO_SUCH_CALENDAR = "I haven't got a calendar called that."
 DAY_GONE = "That day's already gone - which day did you mean?"
 HAS_GUESTS = "That has guests. Change it in Google Calendar."
+RULES_UNREADABLE = "Google's answer for that repeating event didn't make sense, so I've left it as it was."
 NO_ANSWER = "Google didn't answer in time"
 LOST = "I lost Google partway through"
 TROUBLE = "Google had trouble"
@@ -600,8 +608,9 @@ class GoogleCalendar:
             max_age: Seconds the list read last is good for.
 
         Returns:
-            Each calendar as {"id", "name", "primary", "writable"} - writable for the user's
-            own, as calendar.events.owned only adds to those.
+            Each calendar as {"id", "name", "primary", "writable", "timeZone"} - writable for the
+            user's own, as calendar.events.owned only adds to those, and the zone Google keeps the
+            calendar in, e.g. "Europe/London", or None if it gave none.
 
         Raises:
             SignInNeeded: If there's no sign-in, or Google no longer accepts it.
@@ -622,11 +631,28 @@ class GoogleCalendar:
                     raise ValueError("A calendar in Google's list has no id")
                 listed.append({"id": entry["id"], "name": entry.get("summaryOverride") or entry.get("summary") or "",
                                "primary": entry.get("primary") is True,
-                               "writable": entry.get("accessRole") == "owner"})
+                               "writable": entry.get("accessRole") == "owner",
+                               "timeZone": entry["timeZone"] if isinstance(entry.get("timeZone"), str) else None})
             with self._reading:
                 if generation == self._generation:
                     self._known, self._known_at = listed, time.monotonic()
                     return list(listed)
+
+    def _calendar_zone(self, calendar_id: str) -> Optional[str]:
+        """
+        The zone Google keeps a calendar in, as its list gives it - which a repeating event at a
+        time of its own is expanded in, unless it has one of its own.
+
+        Args:
+            calendar_id: The calendar's id.
+
+        Returns:
+            The zone's name, e.g. "Europe/London" - or None if Google gave none.
+
+        Raises:
+            The same as calendars.
+        """
+        return next((each["timeZone"] for each in self.calendars() if each["id"] == calendar_id), None)
 
     def read_list_again(self):
         """
@@ -1036,6 +1062,10 @@ class GoogleCalendar:
         except _NotSure as e:
             logger.warning(f"Couldn't tell whether Google removed an event: {e}")
             return {"success": False, "message": f"I can't tell whether {summary} was removed."}
+        except _SeriesUnreadable:
+            # Raised before anything is written, so it's still as it was.
+            logger.error("Couldn't read a repeating event's rules, so it's left as it was")
+            return {"success": False, "message": RULES_UNREADABLE}
         except READ_FAILURES as e:
             if _gone(e):
                 logger.info("An event to remove was already gone from Google's calendar")
@@ -1058,7 +1088,7 @@ class GoogleCalendar:
             of it deleted on their own deleted again.
 
         Raises:
-            The same as _cancelled_from and _send_once, and ValueError if the series has no rules.
+            The same as _cancelled_from and _send_once, and _SeriesUnreadable if the series has no rules.
         """
         summary = found["summary"]
         calendar_id = found["calendar_id"]
@@ -1066,7 +1096,7 @@ class GoogleCalendar:
         series = self._get(series_url, {})
         rules = series.get("recurrence")
         if not isinstance(rules, list) or not all(isinstance(rule, str) for rule in rules):
-            raise ValueError("The series has no rules")
+            raise _SeriesUnreadable("The series has no rules")
         # By when this one was meant to be, which the series' rules make it - not where it's
         # been moved to since.
         this = _google_when(found["event"].get("originalStartTime") or found["event"]["start"])
@@ -1093,7 +1123,7 @@ class GoogleCalendar:
         undo = _undo(summary, put_back, f"Put {summary} back {on}.", f"I can't tell whether {summary} was put back.")
         return f"Removed {summary} {on}.", undo
 
-    def _confirm_or_copy(self, url: str, calendar_id: str, copy: Dict):
+    def _confirm_or_copy(self, url: str, calendar_id: str, copy: Dict) -> bool:
         """
         Puts an event removed back: set back to confirmed, so its reminders, guests and
         repeats come back with it - else, if Google won't, a copy added in its place.
@@ -1241,7 +1271,7 @@ class GoogleCalendar:
         on = f"from {spoken_day(_day_of(found), today)} on"
         if times:
             new = _read_event({"start": times[0]})
-            at = "all day" if new["all_day"] else spoken_clock_time(new["start"].hour, new["start"].minute).replace(":00", "")
+            at = "all day" if new["all_day"] else _clock_said(new["start"])
         if times and new_name:
             message = f"Moved {summary} to {at} {on} and renamed it {new_name}."
         elif times:
@@ -1252,15 +1282,23 @@ class GoogleCalendar:
             series = self._get(series_url, {})
             rules = series.get("recurrence")
             if not isinstance(rules, list) or not all(isinstance(rule, str) for rule in rules):
-                raise ValueError("The series has no rules")
+                raise _SeriesUnreadable("The series has no rules")
             # By when this one was meant to be, which the series' rules make it - not where it's
             # been moved to since.
             this = _google_when(found["event"].get("originalStartTime") or found["event"]["start"])
-            day = this.astimezone().date() if isinstance(this, datetime) else this
             # The new times - or for a new name alone, the series' own - on the day this one was
             # meant to be, in the zone the series repeats in, which Google needs of a repeating event.
-            moved = _in_zone(_on_day(times or (series["start"], series["end"]), day),
-                             (series["start"] or {}).get("timeZone"))
+            # The user's new times are on the clock where the user is, so the brain's zone; the series'
+            # own are on the clock of its own zone - or a series at 6 PM in New York, split from a day when
+            # only one of the two zones has changed its clocks, would start an hour out.
+            repeats_in = (series["start"] or {}).get("timeZone")
+            own = None if times else repeats_in
+            day = this.astimezone(_zone_named(own)).date() if isinstance(this, datetime) else this
+            moved = _on_day(times or (series["start"], series["end"]), day, own)
+            # A series all day has no zone, and Google needs one of a repeating event at a time: the calendar's.
+            if not repeats_in and "dateTime" in moved[0]:
+                repeats_in = self._calendar_zone(found["calendar_id"])
+            moved = _in_zone(moved, repeats_in)
             if this == _google_when(series["start"]):
                 changed, back = {}, {}
                 if times:
@@ -1297,6 +1335,10 @@ class GoogleCalendar:
             logger.warning(f"Couldn't tell whether Google changed a repeating event: {e}")
             return {"success": False, "message": f"I can't tell whether {summary} was changed, so check Google "
                                                  "Calendar."}
+        except _SeriesUnreadable:
+            # Raised before anything is written, so it's still as it was.
+            logger.error("Couldn't read a repeating event's rules, so it's left as it was")
+            return {"success": False, "message": RULES_UNREADABLE}
         except READ_FAILURES as e:
             return _change_failed(e, summary)
         # The series is cut short now, so whatever happens to the new one, it's never left that
@@ -1349,7 +1391,9 @@ class GoogleCalendar:
         """
         How many times of a repeating event were meant to be before one of them - for its COUNT,
         which counts every time its rule makes, so one deleted on its own counts too, and each
-        by when it was meant to be, wherever it's been moved since.
+        by when it was meant to be, wherever it's been moved since: one moved from before this one
+        to after it is read for by looking MOVED_LATER_LOOKED_FOR past it, and one moved further
+        than that isn't counted.
 
         Args:
             series_url: The series' address.
@@ -1363,7 +1407,8 @@ class GoogleCalendar:
         """
         until = _sort_key(this)
         listed = self._pages(f"{series_url}/instances",
-                             {"timeMax": until.isoformat(), "showDeleted": "true", "maxResults": EVENTS_PAGE})
+                             {"timeMax": (until + MOVED_LATER_LOOKED_FOR).isoformat(), "showDeleted": "true",
+                              "maxResults": EVENTS_PAGE})
         return sum(1 for each in listed if _sort_key(_google_when(each.get("originalStartTime") or each["start"])) < until)
 
     def _cancelled_from(self, series_url: str, this: Union[date, datetime]) -> List[Tuple[str, Union[date, datetime]]]:
@@ -1489,6 +1534,7 @@ class GoogleCalendar:
         if following and day is not None and day < today:
             return DAY_GONE
         first, days = (day, 1) if day else (today, SEARCH_DAYS)
+        named = []
         try:
             if isinstance(calendar, str) and calendar.strip():
                 named = self._calendars_named(calendar, self.calendars())
@@ -1515,12 +1561,15 @@ class GoogleCalendar:
         if following and len(series) == 1 and found[0]["recurring_id"]:
             found = found[:1]
         if not found:
-            return f"I can't find the {' '.join(words)} on your calendar{f' {_on(day, today)}' if day else ''}."
+            # On the calendar the user named, as it's said - "on Work" - else on their calendars as a whole.
+            where = f"on {joined([spoken_name(each) for each in named])}" if named else "on your calendar"
+            return f"I can't find the {' '.join(words)} {where}{f' {_on(day, today)}' if day else ''}."
         if len(found) > 1:
             # Named by their calendars too when they're on more than one - a lecture at 11 on
             # Uni and on the user's own would otherwise be said twice the same.
             several = len({event["calendar_id"] for event in found}) > 1
-            said = [_found_said(event, today) + (f", on {event['calendar']}" if several and event["calendar"] else "")
+            said = [_found_said(event, today, as_replied=True)
+                    + (f", on {event['calendar']}" if several and event["calendar"] else "")
                     for event in found[:MOST_FOUND]]
             if len(found) > MOST_FOUND:
                 said.append(f"{len(found) - MOST_FOUND} more")
@@ -1709,11 +1758,15 @@ class _NotSure(Exception):
     def __init__(self, said: str, why: str):
         """
         Args:
-            said: How it's said, before "so I can't tell whether ... was added".
+            said: How it's said, before "so I can't tell whether ... was added" - or removed, changed or put back.
             why: Why, for the log - without the event, or its calendar's id.
         """
         super().__init__(why)
         self.said = said
+
+
+class _SeriesUnreadable(ValueError):
+    """A repeating event's rules can't be used: Google gave none, or none of the times the new series needs."""
 
 
 # What reading the calendar can fail with: no sign-in, Google out of reach or refusing,
@@ -1765,7 +1818,7 @@ def _gone(error: Exception) -> bool:
     return isinstance(error, requests.HTTPError) and getattr(error.response, "status_code", None) in EVENT_GONE
 
 
-def _undo(summary: str, write: Callable[[], None], done: str, unclear: str) -> Callable[[], Dict]:
+def _undo(summary: str, write: Callable[[], Union[Dict, str, None]], done: str, unclear: str) -> Callable[[], Dict]:
     """
     How to take a change to the calendar back, for "undo that" - sent once, as the change was.
 
@@ -1829,17 +1882,29 @@ def _cut_rules(rules: List[str], before: Union[date, datetime]) -> List[str]:
             series, a date for an all-day one.
 
     Returns:
-        The rules, each RRULE ending before it.
+        The rules, each RRULE ending before it and each RDATE line with only the times before it.
+
+    Raises:
+        _SeriesUnreadable: If an RDATE time can't be read.
     """
     # Each RRULE loses its COUNT and UNTIL and ends just before `before`: a second before it, in UTC,
     # for a timed series ("UNTIL=20261124T085959Z"), the day before for an all-day one
-    # ("UNTIL=20261123"). EXDATE and RDATE lines are kept as they are.
+    # ("UNTIL=20261123"). An RDATE is a time added to the series, as a series imported has, which an UNTIL
+    # doesn't end: "RDATE;VALUE=DATE:20261119,20261126" cut at the 24th keeps the 19th and drops the 26th, or
+    # the line goes if no time is left, or "Removed Gym from Tuesday on" would not be true. EXDATE lines are
+    # kept as they are, since a time left out which is never made is no harm - and the undo puts the old
+    # rules back whole.
     if isinstance(before, datetime):
         until = (before.astimezone(timezone.utc) - timedelta(seconds=1)).strftime("%Y%m%dT%H%M%SZ")
     else:
         until = (before - timedelta(days=1)).strftime("%Y%m%d")
     cut = []
     for rule in rules:
+        if rule.upper().startswith(("RDATE:", "RDATE;")):
+            kept = _rdates_before(rule, before)
+            if kept:
+                cut.append(kept)
+            continue
         if not rule.upper().startswith("RRULE:"):
             cut.append(rule)
             continue
@@ -1847,6 +1912,51 @@ def _cut_rules(rules: List[str], before: Union[date, datetime]) -> List[str]:
                  if part.split("=", 1)[0].upper() not in ("COUNT", "UNTIL")]
         cut.append(rule[:len("RRULE:")] + ";".join(parts + [f"UNTIL={until}"]))
     return cut
+
+
+def _rdates_before(rule: str, before: Union[date, datetime]) -> Optional[str]:
+    """
+    An RDATE line of a repeating event's rules with only the times before one of its times left.
+
+    Args:
+        rule: The line as Google gives it - "RDATE;VALUE=DATE:20261119,20261126",
+            "RDATE;TZID=Europe/London:20261119T180000" or "RDATE:20261119T180000Z"; a time given as a
+            period, "start/end", is by its start.
+        before: The time they must be before, as the series' start is given.
+
+    Returns:
+        The line with those times - or None if there are none.
+
+    Raises:
+        _SeriesUnreadable: If a time can't be read.
+    """
+    head, _, values = rule.partition(":")
+    zone = next((value for name, _, value in (parameter.partition("=") for parameter in head.split(";")[1:])
+                 if name.upper() == "TZID"), None)
+    kept = []
+    for value in values.split(","):
+        start = value.strip().split("/", 1)[0]
+        try:
+            if re.fullmatch(r"\d{8}", start):
+                when = datetime.strptime(start, "%Y%m%d").date()
+            elif start.upper().endswith("Z"):
+                when = datetime.strptime(start[:-1], "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
+            else:
+                # A zone it names, else the local one, as a time with none is.
+                when = datetime.strptime(start, "%Y%m%dT%H%M%S")
+                when = when.replace(tzinfo=ZoneInfo(zone)) if zone else when.astimezone()
+        except (ValueError, KeyError, OSError) as e:
+            raise _SeriesUnreadable("An RDATE time can't be read") from e
+        # A day against a time is by the day the time is on, here.
+        if isinstance(before, datetime) and not isinstance(when, datetime):
+            late = when >= before.astimezone().date()
+        elif isinstance(when, datetime) and not isinstance(before, datetime):
+            late = when.astimezone().date() >= before
+        else:
+            late = when >= before
+        if not late:
+            kept.append(value)
+    return f"{head}:{','.join(kept)}" if kept else None
 
 
 def _rules_left(rules: List[str], before: int) -> List[str]:
@@ -1863,7 +1973,7 @@ def _rules_left(rules: List[str], before: int) -> List[str]:
         "COUNT=6" - and an UNTIL, and EXDATE and RDATE lines, kept as they are.
 
     Raises:
-        ValueError: If a COUNT can't be read, or has no times left.
+        _SeriesUnreadable: If a COUNT can't be read, or has no times left.
     """
     left = []
     for rule in rules:
@@ -1872,9 +1982,12 @@ def _rules_left(rules: List[str], before: int) -> List[str]:
             for index, part in enumerate(parts):
                 name, _, value = part.partition("=")
                 if name.upper() == "COUNT":
-                    count = int(value) - before
+                    try:
+                        count = int(value) - before
+                    except ValueError as e:
+                        raise _SeriesUnreadable("A COUNT isn't a number") from e
                     if count < 1:
-                        raise ValueError("The series has no times left")
+                        raise _SeriesUnreadable("The series has no times left")
                     parts[index] = f"{name}={count}"
             rule = rule[:len("RRULE:")] + ";".join(parts)
         left.append(rule)
@@ -1988,17 +2101,35 @@ def _moved_times(first: Union[date, datetime], last: Union[date, datetime, None]
     return {"dateTime": first.isoformat()}, {"dateTime": last.isoformat()}
 
 
-def _on_day(times: Tuple[Dict, Dict], day: date) -> Tuple[Dict, Dict]:
+def _zone_named(zone: Optional[str]) -> Optional[ZoneInfo]:
+    """A zone as Google names one - "Europe/London" - or None for the brain's own: none named, or one not loaded."""
+    try:
+        return ZoneInfo(zone) if zone else None
+    except (ValueError, KeyError, OSError):
+        return None
+
+
+def _on_day(times: Tuple[Dict, Dict], day: date, zone: Optional[str] = None) -> Tuple[Dict, Dict]:
     """
     A start and end, as Google gives them, put on another day - at the same time on the clock,
     for as long: a time of a series, as a new series from it starts.
+
+    Args:
+        times: The start and end.
+        day: The day to put them on.
+        zone: The zone whose clock it's the same time on, as Google names one - a series' own, for one in
+            another zone than the brain's. None for the brain's own zone, or when it can't be loaded.
     """
     start, end = times
     if "date" in start:
         return {"date": day.isoformat()}, {"date": (day + (_google_when(end) - _google_when(start))).isoformat()}
-    first, last = _google_when(start).astimezone(), _google_when(end)
-    moved = datetime.combine(day, first.time()).astimezone()
-    return {"dateTime": moved.isoformat()}, {"dateTime": (moved + (last - first)).astimezone().isoformat()}
+    where = _zone_named(zone)
+    first, last = _google_when(start).astimezone(where), _google_when(end)
+    moved = datetime.combine(day, first.time(), tzinfo=where)
+    moved = moved if where else moved.astimezone()
+    # Added to as a moment, not by the clock, so a change of the clocks in between doesn't change its length.
+    finished = (moved.astimezone(timezone.utc) + (last - first)).astimezone(where)
+    return {"dateTime": moved.isoformat()}, {"dateTime": finished.isoformat()}
 
 
 def _in_zone(times: Tuple[Dict, Dict], zone: Optional[str]) -> Tuple[Dict, Dict]:
@@ -2118,7 +2249,7 @@ def _added_when(start: Dict, today: date) -> str:
         at = ", all day"
     else:
         when = datetime.fromisoformat(start["dateTime"])
-        at = f" at {spoken_clock_time(when.hour, when.minute).replace(':00', '')}"
+        at = f" at {_clock_said(when)}"
     # A year on is the same day of the month - the 28th of February, from a 29th.
     year_on = today.replace(year=today.year + 1, day=28) if (today.month, today.day) == (2, 29) else \
         today.replace(year=today.year + 1)
@@ -2467,13 +2598,14 @@ def _overview(events: List[Dict], first: date, days: int, today: date) -> str:
     if len(others) > len(named):
         named.append(f"{len(others) - len(named)} more")
 
-    def joined(items: List[str]) -> str:
+    # With a comma before the "and" even for two, as these overviews are said - unlike joined's lists.
+    def listed(items: List[str]) -> str:
         return items[0] if len(items) == 1 else ", ".join(items[:-1]) + ", and " + items[-1]
 
     if not activities:
-        return f"{over}, you've got {joined(named)}."
-    said = f"{over}, you've got {joined(activities)}."
-    return f"{said} There's also {joined(named)}." if named else said
+        return f"{over}, you've got {listed(named)}."
+    said = f"{over}, you've got {listed(activities)}."
+    return f"{said} There's also {listed(named)}." if named else said
 
 
 def _event_said(event: Dict) -> str:
@@ -2506,10 +2638,28 @@ def describe_found(wanted: str, events: List[Dict], today: date) -> str:
     return f"You've got {listed}.{more}"
 
 
-def _found_said(event: Dict, today: date) -> str:
-    """One event found, as it's said: "Car MOT on Thursday, at 9:30 AM", "Holiday tomorrow, all day"."""
-    when = "all day" if event["all_day"] else f"at {spoken_clock_time(event['start'].hour, event['start'].minute)}"
+def _found_said(event: Dict, today: date, as_replied: bool = False) -> str:
+    """
+    One event found, as it's said: "Car MOT on Thursday, at 9:30 AM", "Holiday tomorrow, all day".
+
+    Args:
+        event: The event, as events gives it.
+        today: Today's date.
+        as_replied: Whether its time is said as every reply to a change says it - "at 3 PM", not "at 3:00 PM" -
+            for the list of those found when it's asked which one.
+    """
+    if event["all_day"]:
+        when = "all day"
+    elif as_replied:
+        when = f"at {_clock_said(event['start'])}"
+    else:
+        when = f"at {spoken_clock_time(event['start'].hour, event['start'].minute)}"
     return f"{event['summary']} {_on(_day_of(event), today)}, {when}"
+
+
+def _clock_said(when: datetime) -> str:
+    """A time as every reply to a change says it: "3 PM" on the hour, "10:30 AM" otherwise."""
+    return spoken_clock_time(when.hour, when.minute).replace(":00", "")
 
 
 def _day_of(event: Dict) -> date:
@@ -2552,4 +2702,4 @@ def _when_changed(event: Dict, today: date) -> str:
     if event["all_day"]:
         return f"{spoken_day(event['start'], today)}, all day"
     start = event["start"]
-    return f"{spoken_day(start.date(), today)} at {spoken_clock_time(start.hour, start.minute).replace(':00', '')}"
+    return f"{spoken_day(start.date(), today)} at {_clock_said(start)}"

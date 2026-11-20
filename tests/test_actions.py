@@ -1163,7 +1163,23 @@ def test_undo_that_runs_the_last_changes_undo_and_says_what_it_says():
     assert (result.ok, result.say) == (True, "Undone.")
     assert calendar.undone == 1
 
-    # Kept for one undo, and an undo can't itself be undone.
+    # Kept for one undo only.
+    result = executor.execute(UNDO_THAT)
+    assert (result.ok, result.say) == (False, NOTHING_TO_UNDO)
+    assert calendar.undone == 1
+
+
+def test_an_undo_cant_itself_be_undone():
+    class UndoingCalendar(ChangingCalendar):
+        def _undo(self):
+            self.undone += 1
+            # An undo which, wrongly, leaves a way to take itself back.
+            return {"success": True, "message": "Undone.", "undo": self._undo}
+
+    calendar = UndoingCalendar()
+    executor = ActionExecutor(calendar=calendar)
+    executor.execute(DENTIST)
+    assert executor.execute(UNDO_THAT).say == "Undone."
     result = executor.execute(UNDO_THAT)
     assert (result.ok, result.say) == (False, NOTHING_TO_UNDO)
     assert calendar.undone == 1
@@ -1277,7 +1293,6 @@ def test_a_failed_action_or_a_read_since_leaves_the_change_undoable():
     calendar.works = False
     assert executor.execute(DENTIST).ok is False
     assert executor.execute(Action("get_calendar", {"start": "Thursday"})).ok is False
-    assert executor.execute(Action("play_netflix")).ok is False
     # Something Home Assistant is only read from, to answer from.
     assert executor.execute(Action("home_status", {"about": "sunset"})).ok
 
@@ -3327,6 +3342,46 @@ def test_navidrome_is_checked_on_the_player_whose_song_is_used(make_executor):
     assert changes.calls == []
 
 
+def test_an_empty_playlist_is_made_on_a_navidrome_player_not_a_paused_spotify_one(make_executor):
+    # Nothing is heard to follow for an empty playlist, so a Spotify player paused in the room, which is the
+    # one a song would be taken from, mustn't refuse it while a Navidrome one is right there.
+    make = Action("make_playlist", {"name": "Chill"}, from_model=True)
+    offered = Action("make_offered_playlist", {"name": "Chill", "song": ENDLESS})
+    for action in (make, offered):
+        mine = SongPlayer(this=None, last=None, playing=False)
+        there = SongPlayer(name="Spotify", playing=False)
+        changes = RecordingPlaylistChanges()
+        executor = make_executor(mine, playlist_changes=changes, room_players=lambda: [mine, there])
+        assert executor.execute(action).ok, action.tool
+        assert changes.calls[0][1] is mine, action.tool
+
+    # This satellite's own Navidrome player is used even when the room's other one is the one playing.
+    mine, there = SongPlayer(playing=False), SongPlayer(playing=True)
+    changes = RecordingPlaylistChanges()
+    executor = make_executor(mine, playlist_changes=changes, room_players=lambda: [mine, there])
+    assert executor.execute(make).ok
+    assert changes.calls == [("make", mine, "Chill", None)]
+
+    # Else the room's first Navidrome player, skipping a Spotify one beside it.
+    mine = SongPlayer(name="Spotify", playing=False)
+    first, second = SongPlayer(name="Spotify", playing=True), SongPlayer(playing=False)
+    third = SongPlayer(playing=True)
+    changes = RecordingPlaylistChanges()
+    executor = make_executor(mine, playlist_changes=changes, room_players=lambda: [mine, first, second, third])
+    assert executor.execute(make).ok
+    assert changes.calls == [("make", second, "Chill", None)]
+
+    # And none of them Navidrome is still refused, as is a playlist made with a song on a Spotify player.
+    only = SongPlayer(name="Spotify", playing=False)
+    executor = make_executor(only, playlist_changes=RecordingPlaylistChanges(), room_players=lambda: [only])
+    assert executor.execute(make).say == "Changing playlists only works with Navidrome."
+    with_song = Action("make_playlist", {"name": "Chill", "with_song": True}, from_model=True)
+    spotify = SongPlayer(name="Spotify", playing=True)
+    mine = SongPlayer(playing=False)
+    executor = make_executor(mine, playlist_changes=RecordingPlaylistChanges(), room_players=lambda: [mine, spotify])
+    assert executor.execute(with_song).say == "Changing playlists only works with Navidrome."
+
+
 def test_a_song_paused_on_another_satellite_in_the_room_is_the_one_changed(make_executor):
     # "Playing or paused, whoever paused it": paused on the other satellite, with nothing on this one.
     here, there = SongPlayer(this=None, last=None, playing=False), SongPlayer(playing=False)
@@ -3413,9 +3468,31 @@ def test_the_offer_is_never_offered_to_claude(make_executor):
 def test_an_offer_without_a_song_to_put_on_it_makes_an_empty_playlist_rather_than_failing(make_executor):
     player, changes = SongPlayer(), RecordingPlaylistChanges()
     executor = make_executor(player, playlist_changes=changes)
-    executor.execute(Action("make_offered_playlist", {"name": "Jim"}))
-    executor.execute(Action("make_offered_playlist", {"name": "Jim", "song": {"title": "No id"}}))
-    assert changes.calls == [("make", player, "Jim", None)] * 2
+    assert executor.execute(Action("make_offered_playlist", {"name": "Jim"})).ok
+    assert changes.calls == [("make", player, "Jim", None)]
+
+
+def test_an_offer_whose_song_has_lost_its_id_is_refused_not_made_empty(make_executor):
+    # The offer was for a playlist with a song on it, so an empty one is not what the yes was for.
+    player, changes = SongPlayer(), RecordingPlaylistChanges()
+    executor = make_executor(player, playlist_changes=changes)
+    for song in ({"title": "No id"}, {"id": None, "title": "None"}, {"id": "", "title": "Empty"}, "Endless", {}):
+        result = executor.execute(Action("make_offered_playlist", {"name": "Jim", "song": song}))
+        assert (result.ok, result.say) == (False, "I've lost which song that was."), song
+    assert changes.calls == []
+
+
+def test_a_playlist_given_on_its_own_is_the_playlist_named(make_executor):
+    # Claude sometimes gives "Gym" where the tool takes ["Gym"].
+    player, changes = SongPlayer(), RecordingPlaylistChanges()
+    executor = make_executor(player, playlist_changes=changes)
+    executor.execute(Action("add_to_playlists", {"playlists": "Gym"}, from_model=True))
+    executor.execute(Action("take_off_playlists", {"playlists": " Gym "}, from_model=True))
+    assert changes.calls == [("add", player, ENDLESS, ["Gym"]), ("remove", player, ENDLESS, ["Gym"])]
+    # Nothing in it is still nothing, for the playlists to say.
+    executor.execute(Action("add_to_playlists", {"playlists": "  "}, from_model=True))
+    executor.execute(Action("add_to_playlists", {"playlists": 7}, from_model=True))
+    assert changes.calls[2:] == [("add", player, ENDLESS, []), ("add", player, ENDLESS, [])]
 
 
 def test_the_playlist_tools_are_described_for_claude(make_executor):

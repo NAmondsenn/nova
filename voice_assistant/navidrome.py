@@ -631,7 +631,11 @@ class NavidromeLibrary:
             return None
         playlists = self._call("getPlaylists").get("playlists", {}).get("playlist") or []
         return next((playlist for playlist in playlists if playlist.get("id") == playlist_id
-                     and str(playlist.get("owner") or "").casefold() == self.username.casefold()), None)
+                     and self._owns(playlist)), None)
+
+    def _owns(self, playlist: Dict) -> bool:
+        """Whether a playlist as Navidrome lists it is the signed-in user's own - as Nova only changes those."""
+        return str(playlist.get("owner") or "").casefold() == self.username.casefold()
 
     def make_playlist(self, name: str) -> str:
         """
@@ -659,8 +663,7 @@ class NavidromeLibrary:
         wanted = normalise(name)
         playlists = self._call("getPlaylists").get("playlists", {}).get("playlist") or []
         new = [playlist for playlist in playlists if playlist.get("id") not in before and wanted
-               and normalise(playlist.get("name") or "") == wanted
-               and str(playlist.get("owner") or "").casefold() == self.username.casefold()]
+               and normalise(playlist.get("name") or "") == wanted and self._owns(playlist)]
         if not new:
             raise NavidromeError("the playlist made wasn't found")
         # Newest by the time Navidrome gives it, else the last it lists.
@@ -701,8 +704,7 @@ class NavidromeLibrary:
             ValueError: If its answer couldn't be read.
         """
         playlists = self._call("getPlaylists").get("playlists", {}).get("playlist") or []
-        return [playlist for playlist in playlists
-                if str(playlist.get("owner") or "").casefold() == self.username.casefold()]
+        return [playlist for playlist in playlists if self._owns(playlist)]
 
     def playlist_entries(self, playlist_id: str) -> List[Dict]:
         """
@@ -1129,8 +1131,7 @@ class NavidromePlayer(NavidromeLibrary):
         elif exact:
             wanted = normalise(name)
             named = [found for found in playlists if wanted and normalise(found.get("name", "")) == wanted]
-            playlist = next((found for found in named if str(found.get("owner") or "").casefold()
-                             == self.username.casefold()), named[0] if named else None)
+            playlist = next((found for found in named if self._owns(found)), named[0] if named else None)
         else:
             playlist = closest_playlist(playlists, name)
         if not playlist:
@@ -1299,7 +1300,12 @@ class NavidromePlayer(NavidromeLibrary):
         Returns:
             The song as Navidrome describes it, or None - for "this" with nothing queued, or
             the queue run out; for "last" with no song before the one playing.
+
+        Raises:
+            ValueError: If which is anything but "this" or "last".
         """
+        if which not in ("this", "last"):
+            raise ValueError(f"No song is called {which!r}")
         with self._lock:
             place = self._index - 1 if which == "last" else self._index
             return self._queue[place] if 0 <= place < len(self._queue) else None

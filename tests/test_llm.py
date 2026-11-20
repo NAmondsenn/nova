@@ -1047,6 +1047,9 @@ def test_a_thinking_block_with_text_isnt_taken_for_empty(llm):
     ("Add milk to my to-do list.", "milk", "to do"),
     ("Add one egg to my list.", "one egg", "list"),
     ("Add the last of the bread to my list.", "the last of the bread", "list"),
+    # Speech-to-text sometimes gives a curly apostrophe, which is the same thing and not a space.
+    ("Add Mum\u2019s birthday card to my shopping list.", "mum's birthday card", "shopping"),
+    ("Add Mum\u2018s birthday card to my shopping list.", "mum's birthday card", "shopping"),
 ])
 def test_offline_several_things_are_added_as_one(llm, said, item, where):
     llm.client = FakeClient(_error(anthropic.APIConnectionError))
