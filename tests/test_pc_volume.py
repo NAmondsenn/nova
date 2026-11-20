@@ -130,3 +130,21 @@ def test_off_windows_there_is_no_volume(monkeypatch):
 def test_a_change_gives_up_before_the_brain_stops_waiting():
     # So the satellite's own "couldn't" reaches the brain, rather than the brain's.
     assert pc_volume.JOB_WAIT < remote.COMPUTER_WAIT
+
+
+def test_unmute_if_muted_unmutes_and_keeps_the_level(volume, endpoint):
+    endpoint._muted = True
+    assert volume.unmute_if_muted() is True
+    assert endpoint._muted is False and endpoint._level == 0.4
+
+
+def test_unmute_if_muted_changes_nothing_when_not_muted(volume, endpoint):
+    assert volume.unmute_if_muted() is False
+    assert endpoint._muted is False and endpoint._level == 0.4
+
+
+def test_unmute_if_muted_without_a_volume_raises():
+    made = SystemVolume(lambda: (_ for _ in ()).throw(OSError("none")))
+    with pytest.raises(RuntimeError):
+        made.unmute_if_muted()
+    made.close()

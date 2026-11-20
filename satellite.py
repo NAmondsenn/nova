@@ -581,6 +581,20 @@ class Satellite:
         logger.info("Pressed: listening")
         self._nudged.set()
 
+    def _unmute_windows(self):
+        """
+        Unmutes Windows as a press starts listening, so its sound and Nova's reply are
+        heard. Before the sound, and never in its way: a failure is logged and the press
+        goes on.
+        """
+        if self.system_volume is None:
+            return
+        try:
+            if self.system_volume.unmute_if_muted():
+                logger.info("Windows was muted, so it's unmuted for the press")
+        except Exception as e:
+            logger.warning(f"Couldn't check whether Windows is muted ({type(e).__name__})")
+
     def _keep_clip(self, score: float):
         """
         Hands the wake over to be kept, if that's switched on. A problem with a clip
@@ -687,6 +701,7 @@ class Satellite:
             # After the reply was stopped, which would have stopped this with it, as it's
             # the same kind of sound. Not when the brain can't be reached, which is told
             # the phrase and nothing else.
+            self._unmute_windows()
             self.speaker.play_file(os.path.join(self.sounds_folder, PRESS_SOUND),
                                    volume=self.state.volume("general"))
         ended = "dropped" if recording is None else self._send_recording(start, heard_at - start, recording)
