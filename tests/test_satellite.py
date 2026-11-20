@@ -3021,39 +3021,90 @@ def test_a_mute_which_ran_out_while_the_satellite_was_off_ends_as_it_starts(brai
     assert made.system_volume.mic_muted is False
 
 
-# A press while the microphone is muted: on for the recording, muted again after it.
+# A press while the microphone is muted: on for the turn, muted again when the brain ends it.
 
-def test_a_press_unmutes_a_muted_microphone_for_the_recording_only(brain, make, pc, caplog):
+def end_turn(brain):
+    """The brain's end of a turn, after any question and its answer."""
+    brain.say("allow", kind="announcement")
+
+
+def test_a_press_unmutes_a_muted_microphone_for_the_turn_only(brain, make, pc, caplog):
     caplog.set_level("INFO")
     made, order = press_on_pc(brain, make, mic_muted=True)
-    assert wait_for(lambda: "mic mute" in order)
-    # On before the press sound, which comes before any of the recording is sent; muted again
-    # once the brain ended it.
-    assert order == ["mic unmute", "chime", "mic mute"]
+    # On before the press sound, which comes before any of the recording is sent.
+    assert order == ["mic unmute", "chime"]
     assert made.system_volume.audio_before_mic_unmute == 0
-    assert made.system_volume.mic_muted is True
-    assert "Windows' microphone was muted, so it's unmuted for this recording" in caplog.text
+    assert "Windows' microphone was muted, so it's unmuted for this turn" in caplog.text
+    # Still on once the recording has ended: the turn isn't over until the brain says.
+    time.sleep(0.2)
+    assert made.system_volume.mic_muted is False
+    end_turn(brain)
+    assert wait_for(lambda: "mic mute" in order)
+    assert order == ["mic unmute", "chime", "mic mute"] and made.system_volume.mic_muted is True
     assert "Windows' microphone is muted again, as it was before the press" in caplog.text
 
 
-def test_a_press_ended_by_the_key_mutes_the_microphone_again(brain, make, pc):
-    made = pressable(brain, make)
-    made.system_volume.mic_muted = True
-    made._pressed()
-    assert wait_for(lambda: len(brain.recordings()) >= 2)
+def test_the_microphone_stays_on_for_the_answer_to_a_question(brain, make, pc):
+    # "The mic or the audio?", or "Shut down the PC?": heard without another press.
+    made, order = press_on_pc(brain, make, mic_muted=True)
+    assert wait_for(lambda: made._recording is None)
+    sent = len(brain.recordings())
+    brain.say("listen")
+    assert wait_for(lambda: len(brain.recordings()) >= sent + 2)
     assert made.system_volume.mic_muted is False
-    made._pressed()
-    assert wait_for(lambda: brain.messages("audio_end"))
+    brain.say("stop_listening")
+    time.sleep(0.2)
+    assert made.system_volume.mic_muted is False and made.system_volume.mic_changes == []
+    end_turn(brain)
     assert wait_for(lambda: made.system_volume.mic_muted is True)
     assert made.system_volume.mic_changes == [True]
 
 
-def test_a_press_cut_off_at_its_limit_mutes_the_microphone_again(brain, make, pc):
+def test_losing_the_brain_mid_turn_mutes_the_microphone_again(brain, make, pc):
+    made, order = press_on_pc(brain, make, mic_muted=True)
+    assert made.system_volume.mic_muted is False
+    brain.drop()
+    assert wait_for(lambda: made.system_volume.mic_muted is True)
+    assert made.system_volume.mic_changes == [True]
+
+
+def test_stopping_the_satellite_mid_turn_mutes_the_microphone_again(brain, make, pc):
+    made, order = press_on_pc(brain, make, mic_muted=True)
+    volume = made.system_volume
+    made.stop()
+    assert wait_for(lambda: made.exited)
+    assert volume.mic_muted is True and volume.closed
+
+
+def test_the_end_of_the_turn_before_doesnt_mute_a_press_still_recording(brain, make, pc):
     made = pressable(brain, make)
-    made.longest_request = 0.3
+    made.longest_request = 30
     made.system_volume.mic_muted = True
     made._pressed()
-    assert wait_for(lambda: brain.messages("audio_end") == [{"type": "audio_end", "reason": "limit"}])
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    # The allow of the turn before, arriving as this one began.
+    end_turn(brain)
+    time.sleep(0.2)
+    assert made.system_volume.mic_muted is False
+    brain.say("stop_listening")
+    end_turn(brain)
+    assert wait_for(lambda: made.system_volume.mic_muted is True)
+
+
+@pytest.mark.parametrize("ends", ["key", "limit"])
+def test_however_the_recording_ends_the_turns_end_mutes_the_microphone_again(brain, make, pc, ends):
+    made = pressable(brain, make)
+    made.longest_request = 0.3 if ends == "limit" else 30
+    made.system_volume.mic_muted = True
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    if ends == "key":
+        made._pressed()
+    assert wait_for(lambda: brain.messages("audio_end") == [{"type": "audio_end", "reason":
+                                                             "pressed" if ends == "key" else "limit"}])
+    time.sleep(0.2)
+    assert made.system_volume.mic_muted is False
+    end_turn(brain)
     assert wait_for(lambda: made.system_volume.mic_muted is True)
     assert made.system_volume.mic_unmutes == 1 and made.system_volume.mic_changes == [True]
 
@@ -3066,6 +3117,7 @@ def test_a_press_keeps_the_hour_of_a_mute_by_nova(brain, make, pc, monkeypatch):
     made._pressed()
     assert wait_for(lambda: len(brain.recordings()) >= 2)
     brain.say("stop_listening")
+    end_turn(brain)
     assert wait_for(lambda: made.system_volume.mic_changes == [True, True])
     assert made.system_volume.mic_muted is True and made._mic_until == until
 
@@ -3079,9 +3131,10 @@ def test_a_mute_running_out_during_a_press_leaves_the_microphone_on(brain, make,
     made._pressed()
     assert wait_for(lambda: len(brain.recordings()) >= 2)
     assert made._mic_held_open
-    # The hour runs out while he talks: its sound plays, and the recording's end leaves it on.
+    # The hour runs out while he talks: its sound plays, and the turn's end leaves it on.
     assert wait_for(lambda: mic_on_sounds(made))
     brain.say("stop_listening")
+    end_turn(brain)
     time.sleep(0.2)
     assert made.system_volume.mic_muted is False and made.system_volume.mic_changes == [True]
 
@@ -3091,10 +3144,10 @@ def test_unmuting_by_voice_after_a_press_leaves_the_microphone_on(brain, make, p
     made.system_volume.mic_muted = True
     made._pressed()
     assert wait_for(lambda: len(brain.recordings()) >= 2)
-    # Told before the recording has ended, as could only be by a race - the press's mute again
-    # is let go.
-    ask_computer(brain, "computer-1", action="mic", mute=False)
     brain.say("stop_listening")
+    # "Unmute the mic", said in the turn: the press's mute again is let go.
+    ask_computer(brain, "computer-1", action="mic", mute=False)
+    end_turn(brain)
     time.sleep(0.2)
     assert made.system_volume.mic_muted is False and made.system_volume.mic_changes == [False]
 

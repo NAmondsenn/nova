@@ -609,9 +609,9 @@ class Satellite:
     def _unmute_windows(self):
         """
         Unmutes Windows as a press starts listening, so its sound and Nova's reply are
-        heard - and its microphone, for this recording only, so Nova hears him (see
-        _mute_mic_again). Before the sound and the recording, and never in their way: a
-        failure is logged and the press goes on.
+        heard - and its microphone, for this turn only, so Nova hears him and his answer to
+        any question she asks (see _mute_mic_again). Before the sound and the recording, and
+        never in their way: a failure is logged and the press goes on.
         """
         if self.system_volume is None:
             return
@@ -631,14 +631,15 @@ class Satellite:
                 logger.warning(f"Couldn't check whether Windows' microphone is muted ({type(e).__name__})")
                 return
         if self._mic_held_open:
-            logger.info("Windows' microphone was muted, so it's unmuted for this recording")
+            logger.info("Windows' microphone was muted, so it's unmuted for this turn")
 
     def _mute_mic_again(self):
         """
-        Mutes Windows' microphone again once a press's recording has ended, however it ended,
-        if the press unmuted it - the hour of a mute by Nova carrying on as it was. Not if the
-        hour ran out meanwhile, or the brain has since been told to mute or unmute it, which
-        have each let it go.
+        Mutes Windows' microphone again once a press's turn is over - when the brain lets
+        announcements back (allow), after any question and its answer, or when the brain is
+        lost or the satellite stops - if the press unmuted it, the hour of a mute by Nova
+        carrying on as it was. Not if the hour ran out meanwhile, or the brain has since been
+        told to mute or unmute it, which have each let it go.
         """
         if self.system_volume is None:
             return
@@ -762,11 +763,7 @@ class Satellite:
             self._unmute_windows()
             self.speaker.play_file(os.path.join(self.sounds_folder, PRESS_SOUND),
                                    volume=self.state.volume("general"))
-        try:
-            ended = "dropped" if recording is None else self._send_recording(start, heard_at - start, recording)
-        finally:
-            if pressed:
-                self._mute_mic_again()
+        ended = "dropped" if recording is None else self._send_recording(start, heard_at - start, recording)
         with self._lock:
             # The brain asked to hear an answer while this was being sent, having
             # finished a question just as the wake word was said - and this recording,
@@ -919,7 +916,13 @@ class Satellite:
             if self._turn_open:
                 self._save_timeline()
             self._turn_open = False
+            # The end of the turn before, which came as a press began this one: its
+            # recording still has the microphone, and this turn's own end mutes it.
+            recording = self._recording
+            this_turn = recording is not None and not recording.is_set()
         self.speaker.allow(message["kind"])
+        if not this_turn:
+            self._mute_mic_again()
 
     def _play_sound(self, message: Dict, payload: bytes):
         kind = message.get("kind", "reply")
@@ -1529,6 +1532,8 @@ class Satellite:
         for each in playing:
             each.playback.stop()
             each.let_go()
+        # Nobody is left to end the turn which a press opened the microphone for.
+        self._mute_mic_again()
         if waiting:
             # After the brain's own sounds have stopped, so it isn't stopped with them.
             # It lets the alarms ring again too.
@@ -1587,6 +1592,8 @@ class Satellite:
         if self.media is not None:
             self.media.close()
         if self.system_volume is not None:
+            # Never left open by a press past the satellite's own end.
+            self._mute_mic_again()
             self.system_volume.close()
         self.ringer.quiet()
         with self._lock:
