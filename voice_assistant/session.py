@@ -317,7 +317,8 @@ class Session:
                                       settled=lambda: self.music.wait(),
                                       notes=self._save_note if satellite.saves_notes else None,
                                       computer=ComputerControl(brain, satellite.name), device=self._device,
-                                      at_pc=lambda: brain.rooms.machine(satellite.name) == "pc")
+                                      at_pc=lambda: brain.rooms.machine(satellite.name) == "pc",
+                                      pc_name=lambda: brain.pc_called(satellite.name))
 
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.

@@ -2484,6 +2484,19 @@ def test_the_pcs_power_words_are_deferred_only_at_a_pc():
     assert (result.say, result.after_said()) == ("Locking your PC.", {"success": True})
 
 
+def test_a_power_word_at_one_of_two_pcs_is_that_ones():
+    pc = FakePC()
+    at_desk = ActionExecutor(pc=pc, at_pc=lambda: True, pc_name=lambda: "Gaming PC")
+    at_desk.execute(Action("pc_power", {"action": "lock"}))
+    # One named is still the one named; and at the Pi none is chosen for it.
+    at_desk.execute(Action("pc_power", {"action": "lock", "name": "Desk PC"}))
+    ActionExecutor(pc=pc, pc_name=lambda: "Gaming PC").execute(Action("pc_power", {"action": "lock"}))
+    assert pc.asked == [("act", "lock", "Gaming PC"), ("act", "lock", "Desk PC"), ("act", "lock", None)]
+    # Asked to shut down, the yes presses that PC's button too.
+    result = at_desk.execute(Action("pc_power", {"action": "off"}))
+    assert result.ask_first.params == {"action": "off", "name": "Gaming PC"}
+
+
 def test_claude_cant_press_the_pcs_button_itself():
     pc = FakePC()
     executor = ActionExecutor(pc=pc)

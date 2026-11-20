@@ -1021,7 +1021,7 @@ class Brain:
         """
         if self.pc is not None and self.rooms.machine(name) == "pc":
             try:
-                status = self.pc.act("status", name=self._pc_called(name))
+                status = self.pc.act("status", name=self.pc_called(name))
             except HOME_FAILURES as e:
                 logger.warning(f"Couldn't ask Home Assistant whether the {name} satellite's PC is on: {e}")
                 status = {}
@@ -1030,11 +1030,12 @@ class Brain:
                 return "Your PC's off."
         return f"Nova isn't running on {self.spoken_name(name)}."
 
-    def _pc_called(self, name: str) -> Optional[str]:
+    def pc_called(self, name: str) -> Optional[str]:
         """
         The name Home Assistant has for the PC a satellite is, as chosen on the settings
         page - or None if none was, or it has gone, or Home Assistant can't be asked. With
-        one PC, PCPower takes that one whatever it's given.
+        one PC, PCPower takes that one whatever it's given. Asked when a power word is said
+        at the PC, so it's that PC which sleeps.
         """
         device = self.rooms.pc_device(name)
         if device is None:

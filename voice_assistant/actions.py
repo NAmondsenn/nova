@@ -381,7 +381,8 @@ class ActionExecutor:
                  settled: Optional[Callable[[], None]] = None,
                  notes: Optional[Callable[[str, str], Dict]] = None, computer=None,
                  device: Optional[Callable[[Optional[str]], Tuple[Optional[Any], Optional[str]]]] = None,
-                 at_pc: Callable[[], bool] = lambda: False):
+                 at_pc: Callable[[], bool] = lambda: False,
+                 pc_name: Callable[[], Optional[str]] = lambda: None):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -452,6 +453,8 @@ class ActionExecutor:
                 for its volume. None to act on this one's own volumes alone.
             at_pc: Whether the satellite spoken at is a PC, where the PC's power words wait to
                 be pressed until the reply has been said. Never, by default.
+            pc_name: The name Home Assistant has for the PC spoken at, as chosen for it on the
+                settings page, or None - so a power word said at one of several PCs is that one's.
         """
         self.music = music
         self.clock = clock
@@ -484,6 +487,7 @@ class ActionExecutor:
         self.computer = computer
         self.device = device
         self.at_pc = at_pc
+        self.pc_name = pc_name
         # The music's level before "mute", for "unmute" to put it back to - see _mute_music.
         self._level_before_mute: Optional[int] = None
         # What was last asked, and what the assistant said - or the last alert, and
@@ -2507,7 +2511,11 @@ class ActionExecutor:
         name={"type": "string", "description": "Which PC, as the user said it - only when they've been asked which."},
     )
     def pc_power(self, action: Optional[str] = None, name: Optional[str] = None):
-        return self.pc.act(action or "", name or None, defer=self.at_pc())
+        at_pc = self.at_pc()
+        # With no PC named, at a PC it's that one.
+        if at_pc and not name:
+            name = self.pc_name()
+        return self.pc.act(action or "", name or None, defer=at_pc)
 
     # Only ever run by the conversation, on the user's yes to pc_power's question - so Claude,
     # which isn't offered it, can't shut the PC down without one.
