@@ -115,6 +115,37 @@ def test_sleep_screen_off_and_lock_dont_ask(tmp_path):
     assert home.pressed == []
 
 
+def test_sleep_at_pc_pressed_after_reply(tmp_path):
+    # Checked and answered now, pressed only when the reply has been said.
+    power, home = _power(tmp_path, _snapshot(_pc()))
+    order = []
+    for action, said in (("sleep", "Putting your PC to sleep."), ("screen_off", "Turning your PC's screen off."),
+                         ("lock", "Locking your PC.")):
+        result = power.act(action, defer=True)
+        assert (result["success"], result["message"]) == (True, said)
+        order.append("say")
+        assert home.pressed == [] if action == "sleep" else True
+        assert result["after_said"]() == {"success": True, "message": said}
+        order.append("press")
+    assert order == ["say", "press"] * 3
+    assert home.pressed == ["button.desk_nap", "button.desk_dark", "button.desk_locked"]
+
+
+def test_sleep_at_pc_is_still_checked_before_replying(tmp_path):
+    power, home = _power(tmp_path, _snapshot(_pc()), on=False)
+    assert power.act("sleep", defer=True) == {"success": False, "message": "Your PC's off."}
+    stripped = {kind: entity for kind, entity in DESK_BUTTONS.items() if kind != "Sleep"}
+    power, home = _power(tmp_path, _snapshot(_pc(buttons=stripped)))
+    assert power.act("sleep", defer=True)["success"] is False and "after_said" not in power.act("sleep", defer=True)
+    assert home.pressed == []
+
+
+def test_sleep_from_pi_pressed_at_once(tmp_path):
+    power, home = _power(tmp_path, _snapshot(_pc()))
+    assert power.act("sleep", defer=False) == {"success": True, "message": "Putting your PC to sleep."}
+    assert home.pressed == ["button.desk_nap"]
+
+
 def test_shutting_down_and_restarting_ask_first_and_press_once_agreed(tmp_path):
     power, home = _power(tmp_path, _snapshot(_pc()))
     asked = power.act("off")

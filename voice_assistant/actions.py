@@ -195,6 +195,9 @@ class ActionResult:
             so kept from Claude when it was asked for locally (see Conversation.handle).
         ask_first: What to do if the user says yes to the question it asks - shutting
             the PC down, after "Shut down the PC?" - or None (see Conversation.handle).
+        after_said: Something to do once the reply has been said, not before - putting the PC
+            to sleep, so "Putting your PC to sleep." is heard - or None. Gives {"success",
+            "message"} (see Reply.after).
     """
     ok: bool
     say: str = ""
@@ -204,6 +207,7 @@ class ActionResult:
     understood: bool = True
     private: bool = False
     ask_first: Optional[Action] = None
+    after_said: Optional[Callable[[], Dict]] = None
 
     @classmethod
     def from_reply(cls, reply: Dict) -> "ActionResult":
@@ -221,7 +225,8 @@ class ActionResult:
         """
         ok = bool(reply.get("success"))
         say = reply.get("message") or ""
-        kept = {"private": bool(reply.get("private")), "ask_first": reply.get("ask_first")}
+        kept = {"private": bool(reply.get("private")), "ask_first": reply.get("ask_first"),
+                "after_said": reply.get("after_said")}
         if ok and reply.get("later"):
             return cls(ok, say, confirm="later", **kept)
         if ok and reply.get("silent"):
@@ -375,7 +380,8 @@ class ActionExecutor:
                  spoken_name: Callable[[str], str] = lambda name: name,
                  settled: Optional[Callable[[], None]] = None,
                  notes: Optional[Callable[[str, str], Dict]] = None, computer=None,
-                 device: Optional[Callable[[Optional[str]], Tuple[Optional[Any], Optional[str]]]] = None):
+                 device: Optional[Callable[[Optional[str]], Tuple[Optional[Any], Optional[str]]]] = None,
+                 at_pc: Callable[[], bool] = lambda: False):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -444,6 +450,8 @@ class ActionExecutor:
             device: Given the words for a satellite, or None for this one, gives its Session and
                 None - or None and what to say, when they name none, or one which isn't connected -
                 for its volume. None to act on this one's own volumes alone.
+            at_pc: Whether the satellite spoken at is a PC, where the PC's power words wait to
+                be pressed until the reply has been said. Never, by default.
         """
         self.music = music
         self.clock = clock
@@ -475,6 +483,7 @@ class ActionExecutor:
         self.notes = notes
         self.computer = computer
         self.device = device
+        self.at_pc = at_pc
         # The music's level before "mute", for "unmute" to put it back to - see _mute_music.
         self._level_before_mute: Optional[int] = None
         # What was last asked, and what the assistant said - or the last alert, and
@@ -2497,7 +2506,7 @@ class ActionExecutor:
         name={"type": "string", "description": "Which PC, as the user said it - only when they've been asked which."},
     )
     def pc_power(self, action: Optional[str] = None, name: Optional[str] = None):
-        return self.pc.act(action or "", name or None)
+        return self.pc.act(action or "", name or None, defer=self.at_pc())
 
     # Only ever run by the conversation, on the user's yes to pc_power's question - so Claude,
     # which isn't offered it, can't shut the PC down without one.

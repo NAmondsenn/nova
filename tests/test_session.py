@@ -662,6 +662,43 @@ def test_saying_the_wake_word_over_a_reply_stops_it(connect, make_session):
     assert timeline.notes["talked_over"] is True
 
 
+def test_what_is_left_until_after_the_reply_is_done_once_it_is_said(connect, make_session, monkeypatch):
+    session = make_session(connect()[0])
+    order = []
+    reply = Reply(say="Putting your PC to sleep.", after=[lambda: order.append("press") or {"success": True}])
+    monkeypatch.setattr(session, "_say", lambda message, timeline=None, listen=False: order.append("say"))
+    session.conversation = ScriptedConversation(reply)
+    session._reply_to("go to sleep", follow_up=False, timeline=FakeTimeline())
+    assert order == ["say", "press"]
+
+
+def test_after_runs_when_talked_over_or_nothing_is_said(connect, make_session, monkeypatch):
+    session = make_session(connect()[0])
+    ran = []
+    monkeypatch.setattr(session, "_say", lambda message, timeline=None, listen=False: {"talked_over": True})
+    after = [lambda: ran.append("press") or {"success": True}]
+    session.conversation = ScriptedConversation(Reply(say="Locking.", after=after), Reply(after=after))
+    session._reply_to("lock", follow_up=False, timeline=FakeTimeline())
+    session._reply_to("lock", follow_up=False, timeline=FakeTimeline())
+    assert ran == ["press", "press"]
+
+
+def test_after_failure_logged_not_raised(connect, make_session, monkeypatch, caplog):
+    session = make_session(connect()[0])
+    ran = []
+
+    def broken():
+        raise RuntimeError("secret detail")
+
+    monkeypatch.setattr(session, "_say", lambda message, timeline=None, listen=False: None)
+    session.conversation = ScriptedConversation(Reply(say="Locking.", after=[
+        broken, lambda: ran.append("next") or {"success": False, "message": "Couldn't."}]))
+    with caplog.at_level(logging.WARNING):
+        session._reply_to("lock", follow_up=False, timeline=FakeTimeline())
+    assert ran == ["next"]
+    assert "RuntimeError" in caplog.text and "secret detail" not in caplog.text
+
+
 def test_a_wake_word_heard_just_as_the_reply_ends_starts_the_next_request(connect, make_session):
     # Missed as a question finished, the recording of the new request was taken for
     # the answer.

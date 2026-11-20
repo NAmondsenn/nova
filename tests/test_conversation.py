@@ -362,6 +362,24 @@ def test_a_fall_through_inside_a_routine_is_answered_like_any_other_step():
     assert llm.asked == ["dim the lights"] and reply.sounds == [("success_chime.wav", "general")]
 
 
+def test_what_an_action_leaves_until_after_its_said_goes_with_the_reply():
+    def press():
+        return {"success": True, "message": "Putting your PC to sleep."}
+
+    assert ActionResult.from_reply({"success": True, "message": "x", "after_said": press}).after_said is press
+    intents = FakeIntents({"go to sleep": _answer("Okay.", Action("pc_power", {"action": "sleep"}))})
+    actions = FakeActions({"pc_power": ActionResult(True, "Putting your PC to sleep.", after_said=press)})
+    conversation = _conversation(intents=intents, llm=FakeLLM(), actions=actions,
+                                 routines=FakeRoutines({"name": "Night", "phrases": ["night"],
+                                                        "steps": ["go to sleep"]}))
+    reply = conversation.handle("go to sleep")
+    assert (reply.say, reply.after) == ("Putting your PC to sleep.", [press])
+    # A failure leaves nothing for after, and a routine carries its steps' along.
+    failed = FakeActions({"pc_power": ActionResult(False, "Your PC's off.", after_said=press)})
+    assert _conversation(intents=intents, llm=FakeLLM(), actions=failed).handle("go to sleep").after == []
+    assert conversation.handle("night").after == [press]
+
+
 def test_a_local_command_assist_understood_but_couldnt_do_stays_with_assist():
     # "Understood" is about Assist having matched a sentence, not about it having worked:
     # the lamp being unreachable isn't something Claude can do anything about.

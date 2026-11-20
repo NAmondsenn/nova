@@ -2463,7 +2463,7 @@ class FakePC:
     def __init__(self):
         self.asked = []
 
-    def act(self, action, name=None):
+    def act(self, action, name=None, defer=False):
         self.asked.append(("act", action, name))
         if action == "off":
             return {"success": True, "message": "Shut down the PC?",
@@ -2473,6 +2473,15 @@ class FakePC:
     def press(self, action, name=None):
         self.asked.append(("press", action, name))
         return {"success": True, "message": "Shutting down the PC."}
+
+
+def test_the_pcs_power_words_are_deferred_only_at_a_pc():
+    pc = FakePC()
+    pc.act = lambda action, name=None, defer=False: {"success": True, "message": "Locking your PC.",
+                                                    "after_said": (lambda: {"success": True}) if defer else None}
+    assert ActionExecutor(pc=pc).execute(Action("pc_power", {"action": "lock"})).after_said is None
+    result = ActionExecutor(pc=pc, at_pc=lambda: True).execute(Action("pc_power", {"action": "lock"}))
+    assert (result.say, result.after_said()) == ("Locking your PC.", {"success": True})
 
 
 def test_claude_cant_press_the_pcs_button_itself():

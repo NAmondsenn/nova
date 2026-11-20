@@ -316,7 +316,8 @@ class Session:
                                       spoken_name=lambda name: brain.spoken_name(name),
                                       settled=lambda: self.music.wait(),
                                       notes=self._save_note if satellite.saves_notes else None,
-                                      computer=ComputerControl(brain, satellite.name), device=self._device)
+                                      computer=ComputerControl(brain, satellite.name), device=self._device,
+                                      at_pc=lambda: brain.rooms.machine(satellite.name) == "pc")
 
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.
@@ -1318,14 +1319,34 @@ class Session:
             self._play_sound(sound, volume=self.volume.get(category))
         if reply.shown:
             self._show(f"{self.assistant_name}: {reply.shown}")
+        heard_over = None
         if reply.say:
             heard_over = self._say(reply.say, timeline=timeline, listen=True)
-            if heard_over is not None:
-                # Talked over, so the question goes unanswered - and anything typed for
-                # it is a fresh request, after the one just begun.
-                self._close_answer(keep=True)
-                return heard_over, bool(reply.listen_again)
+        # Once it's said, talked over or not - or when there was nothing to say.
+        self._run_after(reply.after)
+        if heard_over is not None:
+            # Talked over, so the question goes unanswered - and anything typed for
+            # it is a fresh request, after the one just begun.
+            self._close_answer(keep=True)
+            return heard_over, bool(reply.listen_again)
         return None, bool(reply.listen_again)
+
+    @staticmethod
+    def _run_after(after: List[Callable[[], Dict]]) -> None:
+        """
+        Does what was left until a reply had been said, each in turn, whatever happens to
+        the one before - logging a failure by its type, never raising it.
+
+        Args:
+            after: Each gives {"success", "message"}, which is logged only if it failed.
+        """
+        for step in after:
+            try:
+                result = step()
+                if not result.get("success"):
+                    logger.warning(f"Left until the reply was said, and failed: {result.get('message')}")
+            except Exception as e:
+                logger.warning(f"Left until the reply was said, and failed: {type(e).__name__}")
 
     def _say(self, message: str, timeline: Optional[Timeline] = None, listen: bool = False) -> Optional[Dict]:
         """
