@@ -7,7 +7,7 @@ draws the orb on the screen (voice_assistant/orb_drawing.py). The files are comm
 scripts/windows/icons/, and the build only copies them, so this is run by hand when the
 look changes:
 
-    PYTHONPATH=. python scripts/make_icons.py scripts/windows/icons
+    python scripts/make_icons.py scripts/windows/icons
 
 It needs numpy (as the orb does) and nothing else: the PNGs are written with zlib and
 struct, so it runs on the Windows PC as well as anywhere else. Next to the icons it writes
@@ -23,6 +23,11 @@ import zlib
 from typing import List, Sequence, Tuple
 
 import numpy as np
+
+# Add the project root to the path so the voice_assistant package imports work no matter
+# where the script is run from, as the other scripts do.
+PROJECT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_DIRECTORY)
 
 from voice_assistant.orb_drawing import OrbPainter
 
