@@ -11,3 +11,8 @@
 *.mp3 binary
 *.onnx binary
 *.woff2 binary
+
+# The icons the tray uses are written by scripts/make_icons.py and compared byte for
+# byte in a test, so they must never have their line endings converted either.
+*.ico binary
+*.png binary
