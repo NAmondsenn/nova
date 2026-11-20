@@ -1488,15 +1488,19 @@ def test_mute_at_the_pi_mutes_the_pi(pi_and_pc):
     assert pi.muted
 
 
-def test_mute_at_the_pc_mutes_the_rooms_always_on_pi(pi_and_pc):
+def test_mute_at_the_pc_mutes_the_rooms_always_on_pi(pi_and_pc, brain):
     pi, pc = pi_and_pc.pi, pi_and_pc.pc
     result = pc.actions.execute(Action("mute_microphone", {"muted": True}))
-    assert (result.ok, result.say) == (True, "Microphone off on the Pi.")
+    assert (result.ok, result.say) == (True, "The Pi's microphone is off.")
     assert pi.muted and not pc.muted
     # Back on from the PC, by name.
     result = pc.actions.execute(Action("mute_microphone", {"muted": False, "where": "the Pi"}))
-    assert (result.ok, result.say) == (True, "Microphone on on the Pi.")
+    assert (result.ok, result.say) == (True, "The Pi's microphone is on.")
     assert not pi.muted
+    # A name he gave it is said as he wrote it, capitalised to start the sentence.
+    brain.rooms.set_called("bedroom", ["bedroom Pi"])
+    assert pc.actions.execute(Action("mute_microphone", {"muted": True})).say == "Bedroom Pi's microphone is off."
+    assert pi.muted
 
 
 def test_mute_the_pc_says_it_only_listens_on_the_key(pi_and_pc, brain):

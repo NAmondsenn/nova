@@ -984,8 +984,8 @@ class Session:
                 (see Brain.ring_on) - the PC only listens while its key is held.
 
         Returns:
-            Dict with 'success' and what to say: "Microphone off.", with " on the Pi" when it's
-            another satellite's; or why not, when the words name none, or one which isn't connected
+            Dict with 'success' and what to say: "Microphone off." for this one, "The Pi's
+            microphone is off." for another; or why not, when the words name none, or one which isn't connected
             or which only listens on a press of its key.
         """
         here = self.satellite.name
@@ -1004,8 +1004,10 @@ class Session:
         if session is None:
             return {"success": False, "message": self.brain.not_connected(name)}
         session.set_muted(muted)
-        return {"success": True,
-                "message": f"Microphone {'off' if muted else 'on'}{'' if name == here else f' on {spoken}'}."}
+        state = "off" if muted else "on"
+        if name == here:
+            return {"success": True, "message": f"Microphone {state}."}
+        return {"success": True, "message": f"{spoken[:1].upper() + spoken[1:]}'s microphone is {state}."}
 
     def _save_note(self, title: str, text: str, where: Optional[str] = None) -> Dict:
         """
