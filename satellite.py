@@ -69,6 +69,11 @@ MIC_LOOK_EVERY = 30
 # Played when the PC's microphone comes back on by itself.
 MIC_ON_SOUND = "mic_on.wav"
 
+# Played, and heard to the end, before Windows is muted by voice, which would silence it; the longest
+# the wait for it goes on, in seconds (his ruling, 20 Nov: muting the sound sounds as the mic does).
+MUTE_SOUND = "mic_off.wav"
+MUTE_SOUND_WAIT = 1.5
+
 # The pieces a recording is sent in, in seconds of it - small, so the brain hears the
 # user as they speak, and can tell the moment they've stopped.
 PIECE_SECONDS = 0.1
@@ -1310,6 +1315,8 @@ class Satellite:
             change["level"] = level
         if isinstance(mute, bool):
             change["mute"] = mute
+        if change.get("mute") is True:
+            self._play_before_muting()
         try:
             now = self.system_volume.change(**change)
         except Exception as e:
@@ -1317,6 +1324,20 @@ class Satellite:
             return {"error": NO_VOLUME}
         logger.info(f"Windows' volume is at {now['level']} percent{', muted' if now['muted'] else ''}")
         return {"said": "Muted." if now["muted"] else f"Volume {now['level']} percent.", **now}
+
+    def _play_before_muting(self):
+        """
+        Plays mic_off.wav here and waits for it to end - for at most MUTE_SOUND_WAIT seconds - so
+        it's heard before Windows' mute, which would silence it. A sound which can't be played is
+        skipped: the mute goes ahead.
+        """
+        try:
+            playback = self.speaker.play_file(os.path.join(self.sounds_folder, MUTE_SOUND),
+                                              volume=self.state.volume("general"))
+            if playback is not None:
+                playback.wait(MUTE_SOUND_WAIT)
+        except Exception as e:
+            logger.warning(f"Couldn't play the sound before muting Windows ({type(e).__name__})")
 
     def _mute_microphone(self, message: Dict) -> Dict:
         """

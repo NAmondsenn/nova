@@ -194,6 +194,8 @@ class Choice:
 # fresh request.
 MIC_ANSWER = r"(?:{verb} )?(?:the |my )?(?:mic|microphone)"
 SOUND_ANSWER = r"(?:{verb} )?(?:the |my )?(?:audio|sound)"
+# Both at once, for an unmute only (his ruling, 20 Nov): "everything", "both", "all of it".
+EVERYTHING_ANSWER = r"(?:unmute )?(?:everything|both|all)(?: of (?:it|them))?"
 # Asked at the PC of a plain "mute" or "unmute", which could be either (his ruling, 20 Nov).
 MIC_OR_AUDIO = "The mic or the audio?"
 
@@ -1648,7 +1650,27 @@ class ActionExecutor:
         return {"success": True, "message": MIC_OR_AUDIO, "ask_first": Choice((
             (MIC_ANSWER.format(verb=verb), Action("mute_computer_mic", {"muted": muted})),
             (SOUND_ANSWER.format(verb=verb), Action("set_volume", {"mute": muted})),
+            *(() if muted else ((EVERYTHING_ANSWER, Action("unmute_everything")),)),
         ))}
+
+    # Only run by the local rules ("unmute everything", "unmute both") and the answer "everything" to
+    # "The mic or the audio?" - never "mute everything".
+    @tool(
+        "Unmute both the microphone and the sound of the computer the user is talking at.",
+        needs="computer_mic",
+        for_model=False,
+    )
+    def unmute_everything(self):
+        mic = self.computer.microphone(False)
+        sound = self._system_volume(None, None, None, False)
+        if mic.get("success") and sound.get("success"):
+            # One mic_on.wav for both, and no words.
+            return {"success": True, "message": "Microphone and audio on.", "sound": "mic_on.wav",
+                    "sound_category": "general"}
+        if not mic.get("success") and not sound.get("success"):
+            return {"success": False, "message": "I couldn't unmute the mic or the audio."}
+        failed, worked = ("mic", "audio") if sound.get("success") else ("audio", "mic")
+        return {"success": False, "message": f"The {worked} is on, but I couldn't unmute the {failed}."}
 
     @staticmethod
     def _with_beep(category: str, result: Dict) -> Dict:
@@ -1685,6 +1707,9 @@ class ActionExecutor:
             # the satellite he spoke to, which paused it for him.
             category = "music" if self._playing_now(target.actions.music) else "general"
         result = target.actions.set_volume(category, level, direction, amount, mute=mute)
+        if mute is not None:
+            # A mute or unmute is confirmed where he spoke, as the microphone's is.
+            return result
         sound = result.pop("sound", None)
         sound_category = result.pop("sound_category", "general")
         if sound:
@@ -1721,7 +1746,9 @@ class ActionExecutor:
 
         Returns:
             What ComputerControl.volume gave - "Volume 40 percent.", "Muted." - with the
-            volume beep, unless it has just been muted.
+            volume beep. A mute is confirmed by the satellite's own mic_off.wav (played before
+            Windows muted, so it's heard), an unmute by mic_on.wav: neither is spoken (his
+            ruling, 20 Nov).
         """
         if self.computer is None:
             return {"success": False, "message": UNAVAILABLE["volume"]}
@@ -1737,6 +1764,13 @@ class ActionExecutor:
             # Nothing to change, so the current level is reported instead.
             return {"success": True, "message": f"The general volume is at {self.volume.percent('general')} percent."}
         result = self.computer.volume(**change)
+        if result.get("success") and mute is not None:
+            if mute:
+                # The satellite has played mic_off.wav itself, before Windows muted: nothing more.
+                result["silent"] = True
+            else:
+                result["sound"], result["sound_category"] = "mic_on.wav", "general"
+            return result
         return result if result.get("muted") else self._with_beep("general", result)
 
     def _mute_music(self, mute: bool) -> Dict:
@@ -1761,11 +1795,29 @@ class ActionExecutor:
             # Muted twice, it's still the level before the first which comes back.
             if current:
                 self._level_before_mute = current
-            return self._with_beep("general", self.music.set_volume(0))
+            return self._with_mute_sound(True, self.music.set_volume(0))
         if self._level_before_mute is None:
             return {"success": True, "message": "The music isn't muted."}
         level, self._level_before_mute = self._level_before_mute, None
-        return self._with_beep("general", self.music.set_volume(level))
+        return self._with_mute_sound(False, self.music.set_volume(level))
+
+    @staticmethod
+    def _with_mute_sound(muted: bool, result: Dict) -> Dict:
+        """
+        Confirms a mute or unmute of the sound as the microphone's is - mic_off.wav or mic_on.wav,
+        not words (his ruling, 20 Nov). A failure is left to be said.
+
+        Args:
+            muted: True for a mute, False for an unmute.
+            result: What the music player returned.
+
+        Returns:
+            The result, with the sound attached if the change worked.
+        """
+        if result.get("success"):
+            result["sound"] = "mic_off.wav" if muted else "mic_on.wav"
+            result["sound_category"] = "general"
+        return result
 
     def _unnamed_volume_category(self) -> str:
         """
