@@ -998,11 +998,13 @@ def test_add_to_calendar_is_only_offered_once_google_is_set_up():
     executor = ActionExecutor(calendar=calendar)
     offered = {schema["name"]: schema for schema in executor.tool_schemas()}
     assert offered["add_to_calendar"]["description"] == (
-        "Add an event to the user's Google calendar, for 'put the dentist on Thursday at 3'. start and end are "
-        "local 'YYYY-MM-DD HH:MM', or 'YYYY-MM-DD' for all day; leave end out for an hour. Give calendar only "
-        "when the user names one, e.g. 'work'. Give repeat only when the user says it repeats - 'every weekday', "
-        "'every Tuesday', 'each month', 'every year' - and never otherwise: start is then the first one. "
-        "What was added is said for you, so just reply 'Okay.'")
+        "Add an event to the user's Google calendar, for 'put the dentist on Thursday at 3'. Never call this when "
+        "the user says remove, cancel, delete, take off or clear - remove_from_calendar is for those, even when the "
+        "rest of the sentence is garbled ('Remove, go to the dentist next Thursday' removes the dentist, it never "
+        "adds one). start and end are local 'YYYY-MM-DD HH:MM', or 'YYYY-MM-DD' for all day; leave end out for an "
+        "hour. Give calendar only when the user names one, e.g. 'work'. Give repeat only when the user says it "
+        "repeats - 'every weekday', 'every Tuesday', 'each month', 'every year' - and never otherwise: start is "
+        "then the first one. What was added is said for you, so just reply 'Okay.'")
     assert offered["add_to_calendar"]["input_schema"]["required"] == ["summary", "start"]
     assert set(offered["add_to_calendar"]["input_schema"]["properties"]) == {
         "summary", "start", "end", "all_day", "calendar", "repeat", "repeat_on", "repeat_every", "repeat_until",
@@ -1011,6 +1013,22 @@ def test_add_to_calendar_is_only_offered_once_google_is_set_up():
                                                          "calendar": "work"}, from_model=True))
     assert calendar.asked == ("Shift", "2026-10-31 09:00", None, None, "work", {})
     assert (result.ok, result.say) == (True, "Added Shift to Work, Saturday the 31st at 9 AM.")
+
+
+def test_adding_is_never_for_a_sentence_that_says_remove():
+    # A garbled "Remove, go to the dentist next Thursday" once made Claude add a dentist event.
+    class FakeCalendar:
+        def activity_calendars(self):
+            return {}
+
+    description = {schema["name"]: schema for schema in ActionExecutor(calendar=FakeCalendar()).tool_schemas()}[
+        "add_to_calendar"]["description"]
+    for words in ("Never call this when the user says remove, cancel, delete, take off or clear",
+                  "remove_from_calendar is for those", "even when the rest of the sentence is garbled",
+                  "'Remove, go to the dentist next Thursday' removes the dentist, it never adds one"):
+        assert words in description, words
+    # The ban comes before what the tool is told to do, where it's read first.
+    assert description.index("Never call this") < description.index("start and end are")
 
 
 def test_add_to_calendar_passes_a_repeat_on_and_only_when_it_is_given():

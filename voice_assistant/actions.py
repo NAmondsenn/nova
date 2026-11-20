@@ -2039,11 +2039,13 @@ class ActionExecutor:
                                    lambda first, days: self.calendar.activity(activity or "", first, days))
 
     @tool(
-        "Add an event to the user's Google calendar, for 'put the dentist on Thursday at 3'. start and end are "
-        "local 'YYYY-MM-DD HH:MM', or 'YYYY-MM-DD' for all day; leave end out for an hour. Give calendar only "
-        "when the user names one, e.g. 'work'. Give repeat only when the user says it repeats - 'every weekday', "
-        "'every Tuesday', 'each month', 'every year' - and never otherwise: start is then the first one. "
-        "What was added is said for you, so just reply 'Okay.'",
+        "Add an event to the user's Google calendar, for 'put the dentist on Thursday at 3'. Never call this when "
+        "the user says remove, cancel, delete, take off or clear - remove_from_calendar is for those, even when the "
+        "rest of the sentence is garbled ('Remove, go to the dentist next Thursday' removes the dentist, it never "
+        "adds one). start and end are local 'YYYY-MM-DD HH:MM', or 'YYYY-MM-DD' for all day; leave end out for an "
+        "hour. Give calendar only when the user names one, e.g. 'work'. Give repeat only when the user says it "
+        "repeats - 'every weekday', 'every Tuesday', 'each month', 'every year' - and never otherwise: start is "
+        "then the first one. What was added is said for you, so just reply 'Okay.'",
         needs="calendar",
         required=["summary", "start"],
         summary={"type": "string", "description": "What the event is, as it'd be written on the calendar, e.g. "
