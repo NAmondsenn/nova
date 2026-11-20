@@ -297,3 +297,39 @@ def test_a_file_from_before_opens_things_and_odd_values_are_read_as_the_defaults
     rooms = _rooms(tmp_path)
     assert rooms.opens_things("pc") is True and rooms.app_names("pc") == {} and rooms.pc_device("pc") is None
     assert rooms.opens_things("mac") is True and rooms.app_names("mac") == {} and rooms.pc_device("mac") is None
+
+
+def test_can_approve_defaults_on_for_a_pc_or_mac_only(tmp_path):
+    rooms = _rooms(tmp_path)
+    for name, machine in (("pc", "pc"), ("mac", "mac"), ("pi", "pi"), ("bare", None)):
+        rooms.seen(name, True, machine=machine)
+    assert [rooms.can_approve(n) for n in ("pc", "mac", "pi", "bare")] == [True, True, False, False]
+    assert rooms.can_approve("ghost") is False
+
+
+def test_can_approve_switch_outlasts_a_restart(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.seen("pc", True, machine="pc")
+    rooms.seen("pi", True, machine="pi")
+    rooms.set_can_approve("pc", False)
+    rooms.set_can_approve("pi", True)
+    again = _rooms(tmp_path)
+    assert again.can_approve("pc") is False and again.can_approve("pi") is True
+
+
+def test_approves_is_what_it_last_said(tmp_path):
+    rooms = _rooms(tmp_path)
+    assert rooms.approves("pc") is False
+    rooms.seen("pc", True, machine="pc", approves=True)
+    assert rooms.approves("pc") is True and _rooms(tmp_path).approves("pc") is True
+    rooms.seen("pc", True, machine="pc")
+    assert rooms.approves("pc") is False
+
+
+def test_an_older_file_reads_with_no_switch(tmp_path):
+    (tmp_path / "satellite_rooms.json").write_text(json.dumps({
+        "pc": {"push_to_talk": True, "area": None, "machine": "pc"},
+        "odd": {"push_to_talk": True, "area": None, "machine": "pi", "approves": "yes", "can_approve": "no"}}))
+    rooms = _rooms(tmp_path)
+    assert rooms.approves("pc") is False and rooms.can_approve("pc") is True
+    assert rooms.approves("odd") is False and rooms.can_approve("odd") is False

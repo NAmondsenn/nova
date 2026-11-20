@@ -26,7 +26,8 @@ logger = logging.getLogger(__name__)
 def _blank() -> Dict:
     """Returns the entry of a satellite nothing is known of, with every field the file keeps."""
     return {"push_to_talk": False, "area": None, "machine": None, "saves_notes": False, "called": [],
-            "opens_things": True, "app_names": {}, "pc_device": None}
+            "opens_things": True, "app_names": {}, "pc_device": None,
+            "approves": False, "can_approve": None}
 
 
 def _names(stored: Any) -> List[str]:
@@ -79,7 +80,10 @@ class SatelliteRooms:
                               # On unless he turned it off, so a file from before has it on.
                               "opens_things": each.get("opens_things") is not False,
                               "app_names": _aliases(each.get("app_names")),
-                              "pc_device": each.get("pc_device") if isinstance(each.get("pc_device"), str) else None}
+                              "pc_device": each.get("pc_device") if isinstance(each.get("pc_device"), str) else None,
+                              "approves": each.get("approves") is True,
+                              # None is no switch set, so the machine decides.
+                              "can_approve": each["can_approve"] if isinstance(each.get("can_approve"), bool) else None}
                        for name, each in stored.items()}
 
     def _save(self):
@@ -89,7 +93,8 @@ class SatelliteRooms:
         except (OSError, TypeError) as e:
             logger.error(f"Could not save the satellites' rooms: {e}")
 
-    def seen(self, name: str, push_to_talk: bool, machine: Optional[str] = None, saves_notes: bool = False):
+    def seen(self, name: str, push_to_talk: bool, machine: Optional[str] = None, saves_notes: bool = False,
+             approves: bool = False):
         """
         Notes what a satellite said it is as it connected. What it says now replaces
         what it said before, so a satellite which no longer says its machine is unknown.
@@ -100,8 +105,10 @@ class SatelliteRooms:
             machine: What kind of computer it runs on, one of machine.MACHINES - None if
                 it doesn't say.
             saves_notes: Whether it saves notes in a Downloads folder.
+            approves: Whether it can ask for a fingerprint to approve a big action.
         """
-        said = {"push_to_talk": push_to_talk, "machine": machine, "saves_notes": saves_notes}
+        said = {"push_to_talk": push_to_talk, "machine": machine, "saves_notes": saves_notes,
+                "approves": approves}
         with self._lock:
             each = self._known.get(name)
             if each is not None and all(each[key] == value for key, value in said.items()):
@@ -173,6 +180,19 @@ class SatelliteRooms:
         """
         self._set_field(name, "opens_things", on)
 
+    def set_can_approve(self, name: str, on: bool):
+        """
+        Notes whether he lets a satellite ask for his approval, as the settings page saves it.
+
+        Args:
+            name: The satellite's name.
+            on: Whether it may.
+
+        Raises:
+            OSError: If it couldn't be saved.
+        """
+        self._set_field(name, "can_approve", on)
+
     def set_app_names(self, name: str, names: Dict[str, str]):
         """
         Notes the short names he has given a satellite's apps, as the settings page saves them.
@@ -223,6 +243,22 @@ class SatelliteRooms:
         """Returns whether he lets a satellite open apps and pages - True unless he turned it off, and for one not known."""
         with self._lock:
             return self._known.get(name, {}).get("opens_things", True)
+
+    def approves(self, name: str) -> bool:
+        """Returns whether a satellite said it can ask for approval - False for one not known."""
+        with self._lock:
+            return self._known.get(name, {}).get("approves", False)
+
+    def can_approve(self, name: str) -> bool:
+        """
+        Returns whether a satellite is asked to approve big actions: what he set on the settings
+        page if he did, else only a PC or Mac, which have a screen and a sensor he is at.
+        """
+        with self._lock:
+            each = self._known.get(name, {})
+            if isinstance(each.get("can_approve"), bool):
+                return each["can_approve"]
+            return each.get("machine") in ("pc", "mac")
 
     def app_names(self, name: str) -> Dict[str, str]:
         """Returns the short names he has given a satellite's apps, as plain name to app name - none if never given any."""
