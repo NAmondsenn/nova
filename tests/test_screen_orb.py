@@ -2,15 +2,19 @@
 Screen Orb Test
 Checks what the PC's orb shows from what the satellite is doing - listening while a
 recording is sent, thinking until Nova's words start or its turn ends, speaking while
-they play, and hidden otherwise - where it sits on the screen, and how it fades and
-grows in and out over time, without any Windows: it is all plain Python.
+they play, and hidden otherwise - where it sits on the screen, how it fades and grows
+in and out over time, and how its window is drawn on a thread of its own, which
+never keeps the satellite waiting. None of it needs Windows: the window is a fake
+here.
 """
 
+import logging
 import threading
 import time
 
 import pytest
 
+from voice_assistant.orb_drawing import window_side
 from voice_assistant.screen_orb import (
     FADE,
     GROW,
@@ -20,6 +24,7 @@ from voice_assistant.screen_orb import (
     THINKING_SCALE,
     Fade,
     OrbStates,
+    ScreenOrb,
     place,
 )
 
@@ -439,3 +444,231 @@ def test_wanting_the_same_state_again_changes_nothing():
     fade.want("thinking", 0)
     fade.want("thinking", THINKING_MOST - 1)
     assert fade.step(THINKING_MOST + LINGER + FADE + 0.1) is None
+
+
+class FakeBackend:
+    """
+    Stands in for the orb's window: a 1920 x 1080 main screen with its taskbar along
+    the bottom, keeping each frame put up and each hide and destroy in the order they
+    came.
+    """
+
+    def __init__(self, scale=1.0):
+        self.scale = scale
+        self.puts = []
+        self.events = []
+        self._lock = threading.Lock()
+
+    def work_area(self):
+        return WORK_AREA
+
+    def dpi_scale(self):
+        return self.scale
+
+    def put(self, frame, x, y):
+        with self._lock:
+            self.puts.append((frame.shape, x, y))
+            self.events.append("put")
+
+    def hide(self):
+        with self._lock:
+            self.events.append("hide")
+
+    def pump(self):
+        pass
+
+    def destroy(self):
+        with self._lock:
+            self.events.append("destroy")
+
+    def after_last_hide(self):
+        """What has happened since the latest hide, or None if there has been none."""
+        with self._lock:
+            if "hide" not in self.events:
+                return None
+            last = len(self.events) - 1 - self.events[::-1].index("hide")
+            return self.events[last + 1:]
+
+
+def _until(happened, seconds):
+    """Waits up to that long for something to happen, and says whether it did."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if happened():
+            return True
+        time.sleep(0.01)
+    return happened()
+
+
+@pytest.fixture
+def orbs():
+    """Makes ScreenOrbs on fake windows, and closes each once the test is done."""
+    made = []
+
+    def make(backend):
+        orb = ScreenOrb(lambda: backend)
+        made.append(orb)
+        return orb
+
+    yield make
+    for orb in made:
+        orb.close()
+
+
+def _orb_threads():
+    """The orbs' own threads which are running."""
+    return [thread for thread in threading.enumerate() if thread.name == "screen-orb"]
+
+
+def test_off_windows_it_does_nothing():
+    before = _orb_threads()
+    orb = ScreenOrb()
+    assert orb.available is False
+    assert _orb_threads() == before
+    orb.show("listening")
+    orb.configure(False, "top left", "small")
+    orb.close()
+
+
+def test_listening_draws_frames_bottom_centre(orbs):
+    window = FakeBackend()
+    orb = orbs(window)
+    assert orb.available
+    orb.show("listening")
+    assert _until(lambda: len(window.puts) >= 5, 1)
+    assert set(window.puts) == {((111, 111, 4), 904, 917)}
+
+
+def test_hidden_stops_drawing(orbs):
+    window = FakeBackend()
+    orb = orbs(window)
+    orb.show("listening")
+    assert _until(lambda: window.puts, 1)
+    orb.show("hidden")
+    assert _until(lambda: window.after_last_hide() is not None, LINGER + FADE + 0.5)
+    time.sleep(0.5)
+    assert window.after_last_hide() == []
+
+
+def test_the_frame_follows_the_screens_scaling(orbs):
+    window = FakeBackend(scale=1.5)
+    orb = orbs(window)
+    orb.show("listening")
+    assert _until(lambda: len(window.puts) >= 3, 1)
+    # The medium orb's 64 px body is 96 px at 150%, and the margin 18 px.
+    side = window_side(96)
+    assert set(window.puts) == {((side, side, 4), (1920 - side) // 2, 1040 - 18 - side)}
+
+
+def test_configure_moves_resizes_and_switches_off(orbs):
+    window = FakeBackend()
+    orb = orbs(window)
+    orb.configure(True, "top right", "large")
+    orb.show("listening")
+    assert _until(lambda: len(window.puts) >= 3, 1)
+    side = window_side(96)
+    assert set(window.puts) == {((side, side, 4), 1920 - 12 - side, 12)}
+
+    # Off hides at once, well inside the linger a hide would wait, and nothing more is
+    # drawn, whatever is shown.
+    orb.configure(False, "top right", "large")
+    assert _until(lambda: window.after_last_hide() is not None, LINGER / 2)
+    orb.show("speaking")
+    time.sleep(0.3)
+    assert window.after_last_hide() == []
+
+    # On again, it shows what is shown next, where and how big it is now asked to be.
+    orb.configure(True, "bottom left", "small")
+    orb.show("listening")
+    assert _until(lambda: window.after_last_hide(), 1)
+    small = window_side(48)
+    assert window.puts[-1] == ((small, small, 4), 12, 1040 - 12 - small)
+
+
+def test_unknown_place_and_size_keep_the_defaults(orbs):
+    window = FakeBackend()
+    orb = orbs(window)
+    orb.configure(True, "middle of nowhere", "huge")
+    orb.show("listening")
+    assert _until(lambda: len(window.puts) >= 3, 1)
+    assert set(window.puts) == {((111, 111, 4), 904, 917)}
+
+
+class SlowBackend(FakeBackend):
+    """A window which takes a second to put up each frame."""
+
+    def __init__(self):
+        super().__init__()
+        self.putting = threading.Event()
+
+    def put(self, frame, x, y):
+        self.putting.set()
+        time.sleep(1)
+        super().put(frame, x, y)
+
+
+def test_show_never_waits(orbs):
+    window = SlowBackend()
+    orb = orbs(window)
+    orb.show("listening")
+    assert window.putting.wait(1)
+    for told in (lambda: orb.show("thinking"), lambda: orb.show("speaking"),
+                 lambda: orb.configure(True, "top left", "small"), lambda: orb.show("hidden")):
+        start = time.monotonic()
+        told()
+        assert time.monotonic() - start < 0.05
+
+
+class BrokenBackend(FakeBackend):
+    """A window which Windows refuses every frame of."""
+
+    def put(self, frame, x, y):
+        raise OSError("refused")
+
+
+def test_a_backend_which_fails_is_logged_once_and_goes_quiet(orbs, caplog):
+    caplog.set_level(logging.WARNING)
+    window = BrokenBackend()
+    orb = orbs(window)
+    assert orb.available
+    for state in ("listening", "thinking", "speaking", "hidden", "listening"):
+        orb.show(state)
+        time.sleep(0.05)
+    orb.configure(True, "top left", "small")
+    orb.show("speaking")
+    assert _until(lambda: "destroy" in window.events, 1)
+    time.sleep(0.1)
+    warnings = [record for record in caplog.records if record.name == "voice_assistant.screen_orb"]
+    assert len(warnings) == 1
+    assert "OSError" in warnings[0].getMessage()
+
+    # A window which can't be made at all leaves the orb unavailable, which is said once.
+    caplog.clear()
+
+    def refused():
+        raise OSError("no desktop")
+
+    orb = ScreenOrb(refused)
+    assert orb.available is False
+    orb.show("listening")
+    orb.configure(True, "top left", "small")
+    orb.close()
+    assert len([record for record in caplog.records if record.name == "voice_assistant.screen_orb"]) == 1
+
+
+def test_close_destroys_the_window_and_ends_the_thread():
+    before = _orb_threads()
+    window = FakeBackend()
+    orb = ScreenOrb(lambda: window)
+    orb.show("listening")
+    assert _until(lambda: window.puts, 1)
+    start = time.monotonic()
+    orb.close()
+    assert time.monotonic() - start < 2
+    assert window.events[-1] == "destroy"
+    assert _orb_threads() == before
+    # Anything told it after it is closed is ignored.
+    orb.show("speaking")
+    orb.configure(False, "top left", "small")
+    orb.close()
+    assert window.events.count("destroy") == 1
