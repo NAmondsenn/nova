@@ -23,7 +23,7 @@ import pytest
 np = pytest.importorskip("numpy")
 
 import satellite
-from voice_assistant import fallback, paths, protocol, satellite_link, wake_clips
+from voice_assistant import fallback, paths, protocol, satellite_link, storage, wake_clips
 from voice_assistant.fallback import AlarmCopy, Phrase, StateCopy
 from voice_assistant.notes import NoteRefused
 from voice_assistant.press import PressListener
@@ -336,6 +336,7 @@ def make(tmp_path, monkeypatch, make_config):
     monkeypatch.setenv("NOVA_BACKEND_TOKEN", PASSWORD)
     # Never the real data folder: running the satellite leaves a mark there.
     monkeypatch.setattr(satellite, "RUNNING_MARK", str(tmp_path / "running"))
+    monkeypatch.setattr(satellite, "MIC_MUTE_FILE", str(tmp_path / "mic_muted_until.json"))
     monkeypatch.setattr(satellite, "Microphone", FakeMicrophone)
     monkeypatch.setattr(satellite, "Speaker", FakeSpeaker)
     monkeypatch.setattr(satellite, "WakeWordDetector", FakeWake)
@@ -2622,6 +2623,13 @@ class FakeSystemVolume:
         self.unmutes = 0
         self.fail = False
         self.log = None
+        self.mic_muted = False
+        self.mic_unmutes = 0
+        self.mic_fail = False
+        self.mic_changes = []
+        # Counts the audio the brain has had, when given, so a test can see the microphone is unmuted before any.
+        self.recordings = None
+        self.audio_before_mic_unmute = None
 
     def unmute_if_muted(self):
         if self.fail:
@@ -2634,6 +2642,28 @@ class FakeSystemVolume:
             self.log.append("unmute")
         return True
 
+    def unmute_microphone_if_muted(self):
+        if self.mic_fail:
+            raise OSError("no microphone")
+        if not self.mic_muted:
+            return False
+        self.mic_muted = False
+        self.mic_unmutes += 1
+        if self.recordings is not None:
+            self.audio_before_mic_unmute = len(self.recordings())
+        if self.log is not None:
+            self.log.append("mic unmute")
+        return True
+
+    def mute_microphone(self, mute):
+        if self.mic_fail:
+            raise OSError("no microphone")
+        self.mic_changes.append(mute)
+        self.mic_muted = mute
+        if self.log is not None:
+            self.log.append("mic mute" if mute else "mic on")
+        return mute
+
     def change(self, **change):
         self.changes.append(change)
         return {"level": 30, "muted": change.get("mute") is True}
@@ -2644,6 +2674,14 @@ class FakeSystemVolume:
 
 class NoSystemVolume(FakeSystemVolume):
     available = False
+
+
+class MutedMicVolume(FakeSystemVolume):
+    """Windows' volume with its microphone muted, as Windows keeps it across a restart of the satellite."""
+
+    def __init__(self):
+        super().__init__()
+        self.mic_muted = True
 
 
 PC_APPS = [{"id": "aaaaaaaaaaaa", "name": "Fortnite", "kind": "epic",
@@ -2817,10 +2855,12 @@ def test_a_pc_which_opens_nothing_refuses_to(brain, make, pc, monkeypatch):
         "This computer's volume can't be changed."
 
 
-def press_on_pc(brain, make, muted=False, fail=False):
+def press_on_pc(brain, make, muted=False, fail=False, mic_muted=False, mic_fail=False):
     made = pressable(brain, make)
     made.system_volume.muted, made.system_volume.fail = muted, fail
+    made.system_volume.mic_muted, made.system_volume.mic_fail = mic_muted, mic_fail
     made.system_volume.log = order = []
+    made.system_volume.recordings = brain.recordings
     made.speaker.play_file = lambda *args, **kwargs: order.append("chime")
     made._pressed()
     assert wait_for(lambda: len(brain.recordings()) >= 2)
@@ -2867,6 +2907,208 @@ def test_a_press_still_chimes_when_windows_does_not_answer(brain, make, pc, capl
     made, order = press_on_pc(brain, make, muted=True, fail=True)
     assert order == ["chime"]
     assert "Couldn't check whether Windows is muted (TimeoutError)" in caplog.text
+
+
+def test_mic_mutes_and_unmutes_windows_microphone(brain, make, pc):
+    made = pressable(brain, make)
+    assert ask_computer(brain, "computer-1", action="mic", mute=True, minutes=60) == {
+        "type": "computer_done", "id": "computer-1", "said": "Microphone off.", "muted": True}
+    assert ask_computer(brain, "computer-2", action="mic", mute=False) == {
+        "type": "computer_done", "id": "computer-2", "said": "Microphone on.", "muted": False}
+    # Only a true or false, and minutes which are a whole number above 0: anything else is
+    # refused, and nothing changes.
+    for index, fields in enumerate(({"mute": "yes"}, {"mute": 1}, {"mute": None}, {"mute": True, "minutes": 0},
+                                    {"mute": True, "minutes": 2.5}, {"mute": True, "minutes": True})):
+        assert ask_computer(brain, f"computer-{index + 3}", action="mic", **fields)["error"] == \
+            "I can't do that on this computer."
+    assert made.system_volume.mic_changes == [True, False]
+    # The output's volume is left alone.
+    assert made.system_volume.changes == []
+
+
+def test_mic_says_why_not_when_windows_microphone_cant_be_reached(brain, make, pc, monkeypatch):
+    made = pressable(brain, make)
+    made.system_volume.mic_fail = True
+    assert ask_computer(brain, "computer-1", action="mic", mute=True)["error"] == \
+        "This computer's microphone can't be changed."
+    assert made._mic_until is None
+    monkeypatch.setattr(satellite, "SystemVolume", NoSystemVolume)
+    pressable(brain, make)
+    assert ask_computer(brain, "computer-2", action="mic", mute=True)["error"] == \
+        "This computer's microphone can't be changed."
+
+
+# His ruling of 20 Nov: a mute by Nova lasts computer.mic_mute_minutes, an hour by default.
+
+def mic_on_sounds(made):
+    return [name for name in made.speaker.files() if name.endswith("mic_on.wav")]
+
+
+def test_a_mute_by_nova_runs_out_and_the_microphone_comes_back_on_with_a_sound(brain, make, pc, monkeypatch,
+                                                                                caplog):
+    caplog.set_level("INFO")
+    monkeypatch.setattr(satellite, "MINUTE", 0.1)
+    made = pressable(brain, make)
+    ask_computer(brain, "computer-1", action="mic", mute=True, minutes=2)
+    assert made.system_volume.mic_muted is True and os.path.exists(satellite.MIC_MUTE_FILE)
+    time.sleep(0.1)
+    # Not yet.
+    assert made.system_volume.mic_muted is True and mic_on_sounds(made) == []
+    assert wait_for(lambda: mic_on_sounds(made))
+    assert made.system_volume.mic_muted is False and made.system_volume.mic_unmutes == 1
+    assert mic_on_sounds(made) == [os.path.join(made.sounds_folder, "mic_on.wav")]
+    assert not os.path.exists(satellite.MIC_MUTE_FILE)
+    assert "Nova's mute of Windows' microphone ran out, so it's back on" in caplog.text
+
+
+def test_a_mute_run_out_after_a_hand_unmute_does_nothing(brain, make, pc, monkeypatch, caplog):
+    caplog.set_level("INFO")
+    monkeypatch.setattr(satellite, "MINUTE", 0.05)
+    made = pressable(brain, make)
+    ask_computer(brain, "computer-1", action="mic", mute=True, minutes=1)
+    # His mic's own touch button, or Windows.
+    made.system_volume.mic_muted = False
+    assert wait_for(lambda: made._mic_until is None)
+    time.sleep(0.1)
+    assert mic_on_sounds(made) == [] and made.system_volume.mic_unmutes == 0
+    assert "ran out, but it was already on" in caplog.text
+
+
+def test_unmuting_by_voice_ends_the_mute_and_muting_again_starts_it_again(brain, make, pc, monkeypatch):
+    monkeypatch.setattr(satellite, "MINUTE", 0.1)
+    made = pressable(brain, make)
+    ask_computer(brain, "computer-1", action="mic", mute=True, minutes=1)
+    ask_computer(brain, "computer-2", action="mic", mute=False)
+    assert made._mic_until is None and not os.path.exists(satellite.MIC_MUTE_FILE)
+    time.sleep(0.2)
+    assert mic_on_sounds(made) == []
+
+    # A second mute starts the time again, from then.
+    ask_computer(brain, "computer-3", action="mic", mute=True, minutes=3)
+    first = made._mic_until
+    time.sleep(0.15)
+    ask_computer(brain, "computer-4", action="mic", mute=True, minutes=3)
+    assert made._mic_until >= first + 0.15
+    time.sleep(0.2)
+    # Past when the first would have run out, still muted.
+    assert made.system_volume.mic_muted is True and mic_on_sounds(made) == []
+    assert wait_for(lambda: mic_on_sounds(made))
+    assert made.system_volume.mic_muted is False
+
+
+def test_a_mute_by_nova_outlives_a_restart_of_the_satellite(brain, make, pc, monkeypatch):
+    monkeypatch.setattr(satellite, "MINUTE", 1)
+    made = pressable(brain, make)
+    ask_computer(brain, "computer-1", action="mic", mute=True, minutes=1)
+    until = made._mic_until
+    made.stop()
+    assert wait_for(lambda: made.exited)
+    assert storage.load_json(satellite.MIC_MUTE_FILE) == {"until": until}
+
+    # Windows has kept it muted meanwhile.
+    monkeypatch.setattr(satellite, "SystemVolume", MutedMicVolume)
+    again = pressable(brain, make)
+    assert again._mic_until == until and mic_on_sounds(again) == []
+    assert wait_for(lambda: mic_on_sounds(again))
+    assert again.system_volume.mic_muted is False and not os.path.exists(satellite.MIC_MUTE_FILE)
+
+
+def test_a_mute_which_ran_out_while_the_satellite_was_off_ends_as_it_starts(brain, make, pc, monkeypatch):
+    storage.save_json(satellite.MIC_MUTE_FILE, {"until": time.time() - 5})
+    monkeypatch.setattr(satellite, "SystemVolume", MutedMicVolume)
+    made = make(satellite={"trigger": "push_to_talk"})
+    assert wait_for(lambda: mic_on_sounds(made))
+    assert made.system_volume.mic_muted is False
+
+
+# A press while the microphone is muted: on for the recording, muted again after it.
+
+def test_a_press_unmutes_a_muted_microphone_for_the_recording_only(brain, make, pc, caplog):
+    caplog.set_level("INFO")
+    made, order = press_on_pc(brain, make, mic_muted=True)
+    assert wait_for(lambda: "mic mute" in order)
+    # On before the press sound, which comes before any of the recording is sent; muted again
+    # once the brain ended it.
+    assert order == ["mic unmute", "chime", "mic mute"]
+    assert made.system_volume.audio_before_mic_unmute == 0
+    assert made.system_volume.mic_muted is True
+    assert "Windows' microphone was muted, so it's unmuted for this recording" in caplog.text
+    assert "Windows' microphone is muted again, as it was before the press" in caplog.text
+
+
+def test_a_press_ended_by_the_key_mutes_the_microphone_again(brain, make, pc):
+    made = pressable(brain, make)
+    made.system_volume.mic_muted = True
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    assert made.system_volume.mic_muted is False
+    made._pressed()
+    assert wait_for(lambda: brain.messages("audio_end"))
+    assert wait_for(lambda: made.system_volume.mic_muted is True)
+    assert made.system_volume.mic_changes == [True]
+
+
+def test_a_press_cut_off_at_its_limit_mutes_the_microphone_again(brain, make, pc):
+    made = pressable(brain, make)
+    made.longest_request = 0.3
+    made.system_volume.mic_muted = True
+    made._pressed()
+    assert wait_for(lambda: brain.messages("audio_end") == [{"type": "audio_end", "reason": "limit"}])
+    assert wait_for(lambda: made.system_volume.mic_muted is True)
+    assert made.system_volume.mic_unmutes == 1 and made.system_volume.mic_changes == [True]
+
+
+def test_a_press_keeps_the_hour_of_a_mute_by_nova(brain, make, pc, monkeypatch):
+    monkeypatch.setattr(satellite, "MINUTE", 60)
+    made = pressable(brain, make)
+    ask_computer(brain, "computer-1", action="mic", mute=True, minutes=60)
+    until = made._mic_until
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    brain.say("stop_listening")
+    assert wait_for(lambda: made.system_volume.mic_changes == [True, True])
+    assert made.system_volume.mic_muted is True and made._mic_until == until
+
+
+def test_a_mute_running_out_during_a_press_leaves_the_microphone_on(brain, make, pc, monkeypatch):
+    monkeypatch.setattr(satellite, "MINUTE", 0.6)
+    made = pressable(brain, make)
+    ask_computer(brain, "computer-1", action="mic", mute=True, minutes=1)
+    # Long enough that it's the brain which ends it.
+    made.longest_request = 30
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    assert made._mic_held_open
+    # The hour runs out while he talks: its sound plays, and the recording's end leaves it on.
+    assert wait_for(lambda: mic_on_sounds(made))
+    brain.say("stop_listening")
+    time.sleep(0.2)
+    assert made.system_volume.mic_muted is False and made.system_volume.mic_changes == [True]
+
+
+def test_unmuting_by_voice_after_a_press_leaves_the_microphone_on(brain, make, pc):
+    made = pressable(brain, make)
+    made.system_volume.mic_muted = True
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    # Told before the recording has ended, as could only be by a race - the press's mute again
+    # is let go.
+    ask_computer(brain, "computer-1", action="mic", mute=False)
+    brain.say("stop_listening")
+    time.sleep(0.2)
+    assert made.system_volume.mic_muted is False and made.system_volume.mic_changes == [False]
+
+
+def test_a_press_leaves_the_microphone_alone_when_it_is_not_muted(brain, make, pc):
+    made, order = press_on_pc(brain, make)
+    time.sleep(0.1)
+    assert order == ["chime"] and made.system_volume.mic_unmutes == 0 and made.system_volume.mic_changes == []
+
+
+def test_a_press_goes_on_when_the_microphone_cant_be_reached(brain, make, pc, caplog):
+    made, order = press_on_pc(brain, make, muted=True, mic_fail=True)
+    assert order == ["unmute", "chime"]
+    assert "Couldn't check whether Windows' microphone is muted (OSError)" in caplog.text
 
 
 def test_the_system_volume_is_closed_with_the_satellite(brain, make, pc):

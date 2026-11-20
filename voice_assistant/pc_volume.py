@@ -3,7 +3,9 @@ PC Volume Module.
 
 Windows' own volume and mute, on the PC satellite - the master volume of the default
 output, which the volume keys change and which scales everything the PC plays, Nova
-included. See docs/superpowers/specs/2026-11-19-pc-open-close-and-commands-design.md.
+included - and the default microphone's mute, which every program hears through. See
+docs/superpowers/specs/2026-11-19-pc-open-close-and-commands-design.md and
+docs/superpowers/specs/2026-11-20-mute-means-the-microphone-design.md.
 
 It goes through Core Audio's IAudioEndpointVolume, by COM, with comtypes: the two short
 interfaces it needs are written out here rather than taken from another package.
@@ -164,12 +166,62 @@ class SystemVolume:
             RuntimeError: There's no volume to change here.
             TimeoutError or OSError: Windows didn't answer, or refused.
         """
+        return self._unmute(lambda backend: backend.endpoint())
+
+    def mute_microphone(self, mute: bool) -> bool:
+        """
+        Mutes or unmutes Windows' default microphone, for every program which listens to it.
+
+        Args:
+            mute: True to mute, False to unmute.
+
+        Returns:
+            Whether it's muted now, as Windows has it.
+
+        Raises:
+            RuntimeError: There's no volume to change here.
+            TimeoutError or OSError: Windows didn't answer, or refused - or there's no microphone.
+        """
         if self._backend is None:
             raise RuntimeError("Windows' volume can't be reached")
         backend = self._backend
 
         def work() -> bool:
-            endpoint = backend.endpoint()
+            microphone = backend.microphone()
+            microphone.set_mute(bool(mute))
+            return microphone.muted()
+
+        return bool(self._do(work, JOB_WAIT))
+
+    def unmute_microphone_if_muted(self) -> bool:
+        """
+        Unmutes Windows' default microphone if it's muted, as a press of the key starts listening.
+
+        Returns:
+            True if it was muted and now isn't, False if it wasn't muted.
+
+        Raises:
+            RuntimeError: There's no volume to change here.
+            TimeoutError or OSError: Windows didn't answer, or refused - or there's no microphone.
+        """
+        return self._unmute(lambda backend: backend.microphone())
+
+    def _unmute(self, which: Callable[[object], "_Endpoint"]) -> bool:
+        """
+        Unmutes an endpoint if it's muted, keeping its level as it is.
+
+        Args:
+            which: Gives the endpoint from the backend, on the owning thread - its output or its microphone.
+
+        Returns:
+            True if it was muted and now isn't, False if it wasn't muted.
+        """
+        if self._backend is None:
+            raise RuntimeError("Windows' volume can't be reached")
+        backend = self._backend
+
+        def work() -> bool:
+            endpoint = which(backend)
             if not endpoint.muted():
                 return False
             endpoint.set_mute(False)
@@ -184,7 +236,7 @@ class SystemVolume:
 
 
 class _Endpoint:
-    """The default output's master volume, as 0 to 1, and its mute."""
+    """A default endpoint's master volume, as 0 to 1, and its mute - the output's, or the microphone's."""
 
     def __init__(self, volume):
         self._volume = volume
@@ -214,8 +266,10 @@ class _CoreAudio:
     IID_ENUMERATOR = "{A95664D2-9614-4F35-A746-DE8DB63617E6}"
     IID_DEVICE = "{D666063F-1587-4E43-81F1-B948E807363F}"
     IID_ENDPOINT_VOLUME = "{5CDF2C82-841E-4546-9722-0CF74078229A}"
-    # Sound out, and the default device for it - the one the volume keys change.
+    # Sound out (eRender), sound in (eCapture), and the default device for each (eConsole) -
+    # the one the volume keys change, and the microphone programs hear unless told otherwise.
     RENDER = 0
+    CAPTURE = 1
     CONSOLE = 0
 
     def __init__(self):
@@ -282,6 +336,14 @@ class _CoreAudio:
 
     def endpoint(self) -> _Endpoint:
         """The default output's volume - looked up each time, as headphones plugged in change which it is."""
-        device = self._enumerator.GetDefaultAudioEndpoint(self.RENDER, self.CONSOLE)
+        return self._default(self.RENDER)
+
+    def microphone(self) -> _Endpoint:
+        """The default microphone's volume and mute - looked up each time, as a headset plugged in changes it."""
+        return self._default(self.CAPTURE)
+
+    def _default(self, flow: int) -> _Endpoint:
+        """The default endpoint for sound out or in, through the same IAudioEndpointVolume."""
+        device = self._enumerator.GetDefaultAudioEndpoint(flow, self.CONSOLE)
         activated = device.Activate(self._interface._iid_, self._clsctx, None)
         return _Endpoint(activated.QueryInterface(self._interface))

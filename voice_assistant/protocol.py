@@ -27,7 +27,8 @@ After the handshake, what a satellite sends the brain:
         satellite can open, kind one of APP_KINDS - from a satellite which said it opens things)
     windows  {}  (payload: a JSON list of the names of the windows open now)
     computer_done  {"id": ..., "said"?: ..., "error"?: ..., "level"?: ..., "muted"?: ...}  (the
-        answer to a computer: a sentence to say, or one saying why not, or the volume now)
+        answer to a computer: a sentence to say, or one saying why not, or the volume now - or
+        for "mic", whether the microphone is muted now)
 
 and what the brain sends a satellite:
 
@@ -57,9 +58,10 @@ and what the brain sends a satellite:
         satellite which said it has Windows' media controls, sent when it changes;
         cover: true with the new cover as the payload, false for none now, left out
         when the cover is as it was - see docs/decisions/0031)
-    computer  {"id": ..., "action": "open"|"open_url"|"close"|"close_front"|"volume",
+    computer  {"id": ..., "action": "open"|"open_url"|"close"|"close_front"|"volume"|"mic",
         "item"?: ..., "url"?: ..., "name"?: ..., "direction"?: ..., "step"?: ..., "level"?: ...,
-        "mute"?: ...}  (something to do on the computer itself, answered by computer_done)
+        "mute"?: ...}  (something to do on the computer itself, answered by computer_done; "mic"
+        mutes or unmutes Windows' own microphone, sent only to a satellite which said system_volume)
     restart
 
 The handshake comes first, and proves the satellite's password to the brain and the
@@ -97,7 +99,7 @@ MAX_SPEAKER = 64
 MEDIA_ACTIONS = ("play", "pause", "next", "previous")
 
 # The things a satellite can be told to do on its computer, as computer's action.
-COMPUTER_ACTIONS = ("open", "open_url", "close", "close_front", "volume")
+COMPUTER_ACTIONS = ("open", "open_url", "close", "close_front", "volume", "mic")
 
 # The kinds of thing a satellite can open, as the kind of each entry in its apps.
 APP_KINDS = ("app", "epic", "steam")
