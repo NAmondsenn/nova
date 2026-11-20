@@ -73,6 +73,15 @@ CLOSE_WAIT = 2
 # What the orb can be asked to show.
 STATES = ("listening", "thinking", "speaking", "hidden")
 
+# How many showings in a row may fail before the orb gives up until the satellite
+# restarts. While the desktop is away - a remote session left disconnected, the screens
+# changing as a monitor sleeps, a graphics driver resetting - Windows can refuse each
+# showing until it is back, which costs one frame and no log line each time, so the orb
+# keeps trying through a good few of them: a spoken reminder while the PC is locked is
+# an everyday thing. A window which fails this many times running, with no frame going
+# up in between, is broken in a way trying again won't mend.
+GIVE_UP_AFTER = 10
+
 # The clock's easings, as the four numbers of a CSS cubic-bezier(): `ease`, which is what
 # its opacity transition has by default, and the one its blob grows in with, which
 # overshoots a little before it settles.
@@ -414,8 +423,12 @@ class ScreenOrb:
     The satellite tells it what to show and how, from whichever thread it is on, and each
     call only leaves a note for the orb's thread: nothing the satellite does ever waits on
     the window. The thread draws about thirty frames a second while the orb shows, and
-    sleeps on its notes, drawing nothing, while it doesn't. If anything to do with the
-    window fails, that is logged once and the orb goes quiet for the rest of the run.
+    sleeps on its notes, drawing nothing, while it doesn't.
+
+    If the window can't be made, that is logged once and the orb does nothing for the
+    rest of the run. A showing which can't be drawn, as while the desktop is away, is
+    taken down and dropped, and the next one is tried afresh: only the first such failure
+    is logged, and the orb gives up only once GIVE_UP_AFTER showings in a row have failed.
     """
 
     def __init__(self, backend: Optional[Callable[[], object]] = None):
@@ -446,6 +459,10 @@ class ScreenOrb:
         # Whether a frame is up on the screen, and when it was drawn.
         self._up = False
         self._drawn_at = 0.0
+        # How many showings have failed since a frame last went up, and whether a failed
+        # showing has been logged yet.
+        self._failed_in_a_row = 0
+        self._failure_logged = False
         if self._make is None:
             return
         made = threading.Event()
@@ -560,7 +577,13 @@ class ScreenOrb:
             if due is not None and now < due:
                 continue
             backend.pump()
-            due = now + FRAME if self._draw(backend, now) else None
+            try:
+                drawn = self._draw(backend, now)
+            except Exception as e:
+                drawn = False
+                if not self._drop(backend, e):
+                    return
+            due = now + FRAME if drawn else None
 
     def _take(self, note: tuple, backend, now: float) -> None:
         """Acts on one note from show or configure."""
@@ -605,7 +628,40 @@ class ScreenOrb:
         backend.put(frame, *self._spot)
         self._up = True
         self._drawn_at = now
+        self._failed_in_a_row = 0
         return True
+
+    def _drop(self, backend, error: Exception) -> bool:
+        """
+        Drops a showing which failed part way through drawing: takes the window down if
+        it can, and forgets what was shown, so the next thing shown starts afresh.
+
+        Args:
+            backend: The window.
+            error: What the failure raised.
+
+        Returns:
+            Whether to carry on: False once GIVE_UP_AFTER showings in a row have failed.
+        """
+        self._fade = Fade()
+        self._up = False
+        self._spot = None
+        try:
+            backend.hide()
+        except Exception:
+            logger.debug("Couldn't take down the window for Nova's orb", exc_info=True)
+        self._failed_in_a_row += 1
+        logger.debug("How drawing Nova's orb on the screen failed", exc_info=error)
+        if not self._failure_logged:
+            self._failure_logged = True
+            logger.warning(f"Couldn't draw Nova's orb on the screen ({type(error).__name__}), so it was left off "
+                           f"this time; it tries again each time it shows")
+        if self._failed_in_a_row < GIVE_UP_AFTER:
+            return True
+        self._quiet = True
+        logger.info(f"Nova's orb on the screen failed {GIVE_UP_AFTER} times in a row, so it's off until the "
+                    f"satellite restarts")
+        return False
 
     def _hide(self, backend) -> None:
         """Takes the window down, if a frame is up."""
@@ -640,6 +696,7 @@ class _Win32Window:
     SWP_NOSIZE = 0x0001
     SWP_NOMOVE = 0x0002
     SWP_NOACTIVATE = 0x0010
+    SWP_SHOWWINDOW = 0x0040
     ULW_ALPHA = 0x00000002
     AC_SRC_OVER = 0x00
     AC_SRC_ALPHA = 0x01
@@ -863,12 +920,17 @@ class _Win32Window:
         if not self._shown:
             # Shown only once its frame is in, so it never flashes up what it last showed;
             # and put back on top of everything each time, as a game or another topmost
-            # window may have come over it while it was hidden.
+            # window may have come over it while it was hidden. Windows may swap the first
+            # ShowWindow's command for the one the satellite was started with (a scheduled
+            # task starts it through pythonw), so SetWindowPos shows it too, whatever that
+            # did. It counts as shown from ShowWindow on, so a hide after a failure here
+            # still takes it down.
             self._user32.ShowWindow(self._hwnd, self.SW_SHOWNOACTIVATE)
-            self._check(self._user32.SetWindowPos(self._hwnd, self.HWND_TOPMOST, 0, 0, 0, 0,
-                                                  self.SWP_NOACTIVATE | self.SWP_NOMOVE | self.SWP_NOSIZE),
-                        "SetWindowPos")
             self._shown = True
+            self._check(self._user32.SetWindowPos(self._hwnd, self.HWND_TOPMOST, 0, 0, 0, 0,
+                                                  self.SWP_NOACTIVATE | self.SWP_NOMOVE | self.SWP_NOSIZE
+                                                  | self.SWP_SHOWWINDOW),
+                        "SetWindowPos")
 
     def _bitmap_for(self, width: int, height: int) -> None:
         """Makes the bitmap frames are copied into that size, unless it already is."""

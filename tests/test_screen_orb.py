@@ -17,6 +17,7 @@ import pytest
 from voice_assistant.orb_drawing import window_side
 from voice_assistant.screen_orb import (
     FADE,
+    GIVE_UP_AFTER,
     GROW,
     LINGER,
     PLACES,
@@ -622,25 +623,41 @@ def test_show_never_waits(orbs):
 class BrokenBackend(FakeBackend):
     """A window which Windows refuses every frame of."""
 
+    def __init__(self):
+        super().__init__()
+        self.tries = 0
+
     def put(self, frame, x, y):
+        self.tries += 1
         raise OSError("refused")
 
 
+def _warnings(caplog):
+    """The warnings the orb has logged."""
+    return [record for record in caplog.records
+            if record.name == "voice_assistant.screen_orb" and record.levelno == logging.WARNING]
+
+
 def test_a_backend_which_fails_is_logged_once_and_goes_quiet(orbs, caplog):
-    caplog.set_level(logging.WARNING)
+    caplog.set_level(logging.INFO)
     window = BrokenBackend()
     orb = orbs(window)
     assert orb.available
-    for state in ("listening", "thinking", "speaking", "hidden", "listening"):
-        orb.show(state)
-        time.sleep(0.05)
+    # Each showing fails and is dropped, so each show is a showing of its own, until
+    # the orb gives up; the ones after that are never tried.
+    for shown in range(1, GIVE_UP_AFTER + 3):
+        orb.show("listening")
+        _until(lambda shown=shown: window.tries >= shown or "destroy" in window.events, 1)
+    assert _until(lambda: "destroy" in window.events, 1)
     orb.configure(True, "top left", "small")
     orb.show("speaking")
-    assert _until(lambda: "destroy" in window.events, 1)
     time.sleep(0.1)
-    warnings = [record for record in caplog.records if record.name == "voice_assistant.screen_orb"]
+    assert window.tries == GIVE_UP_AFTER
+    warnings = _warnings(caplog)
     assert len(warnings) == 1
     assert "OSError" in warnings[0].getMessage()
+    assert any("restarts" in record.getMessage() for record in caplog.records
+               if record.name == "voice_assistant.screen_orb" and record.levelno == logging.INFO)
 
     # A window which can't be made at all leaves the orb unavailable, which is said once.
     caplog.clear()
@@ -653,7 +670,44 @@ def test_a_backend_which_fails_is_logged_once_and_goes_quiet(orbs, caplog):
     orb.show("listening")
     orb.configure(True, "top left", "small")
     orb.close()
-    assert len([record for record in caplog.records if record.name == "voice_assistant.screen_orb"]) == 1
+    assert len(_warnings(caplog)) == 1
+
+
+class FailsOnceBackend(FakeBackend):
+    """
+    A window whose first frame Windows refuses, as it may while the desktop is away (a
+    remote session left disconnected, a graphics driver resetting), and which works
+    once it is back.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.refused = threading.Event()
+
+    def put(self, frame, x, y):
+        if not self.refused.is_set():
+            self.refused.set()
+            raise OSError("the desktop is away")
+        super().put(frame, x, y)
+
+
+def test_a_showing_which_fails_is_dropped_and_the_next_one_draws(orbs, caplog):
+    caplog.set_level(logging.WARNING)
+    window = FailsOnceBackend()
+    orb = orbs(window)
+    orb.show("listening")
+    assert window.refused.wait(1)
+    # The failed showing is taken down and dropped, not tried frame after frame.
+    assert _until(lambda: "hide" in window.events, 1)
+    time.sleep(0.2)
+    assert window.puts == []
+    orb.show("listening")
+    assert _until(lambda: len(window.puts) >= 3, 1)
+    assert set(window.puts) == {((111, 111, 4), 904, 917)}
+    assert "destroy" not in window.events
+    warnings = _warnings(caplog)
+    assert len(warnings) == 1
+    assert "OSError" in warnings[0].getMessage()
 
 
 def test_close_destroys_the_window_and_ends_the_thread():
