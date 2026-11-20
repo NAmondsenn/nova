@@ -2578,6 +2578,7 @@ class FakePcWindows:
         self.started = []
         self.fronted = []
         self.closed = []
+        self.fronts_closed = 0
         self.installed = None
 
     def load(self):
@@ -2596,6 +2597,7 @@ class FakePcWindows:
         return found
 
     def close_front(self):
+        self.fronts_closed += 1
         return self.front
 
     def ready_to_open(self):
@@ -2772,6 +2774,13 @@ def test_close_front_answers_with_the_program_or_nothing_to_close(brain, make, p
     assert ask_computer(brain, "computer-1", action="close_front")["said"] == "Closing Notepad."
     pc.front = None
     assert ask_computer(brain, "computer-2", action="close_front")["error"] == "There's nothing to close."
+
+
+def test_an_action_it_doesnt_know_closes_nothing(brain, make, pc, monkeypatch):
+    monkeypatch.setattr(satellite.protocol, "COMPUTER_ACTIONS", satellite.protocol.COMPUTER_ACTIONS + ("tidy",))
+    pressable(brain, make)
+    assert ask_computer(brain, "computer-1", action="tidy")["error"] == "I can't do that on this computer."
+    assert pc.closed == [] and pc.fronts_closed == 0
 
 
 def test_volume_answers_with_the_level_and_mute(brain, make, pc):

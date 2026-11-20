@@ -1182,11 +1182,14 @@ class Satellite:
                 return {"error": f"{name.strip()} isn't open."}, None
             logger.info(f"Closing {closed}")
             return {"said": f"Closing {closed}."}, None
-        closed = pc_windows.close_front()
-        if closed is None:
-            return {"error": NOTHING_TO_CLOSE}, None
-        logger.info(f"Closing {closed}, which was in front")
-        return {"said": f"Closing {closed}."}, None
+        if action == "close_front":
+            closed = pc_windows.close_front()
+            if closed is None:
+                return {"error": NOTHING_TO_CLOSE}, None
+            logger.info(f"Closing {closed}, which was in front")
+            return {"said": f"Closing {closed}."}, None
+        # One added to the protocol which this satellite doesn't know yet.
+        return {"error": CANT_DO}, None
 
     def _open(self, target: str, said: str, browser: bool) -> Tuple[Dict, Optional[Callable[[], object]]]:
         """Opens an app's target or a web address, then has it brought to the front once the brain has its answer."""
