@@ -983,7 +983,7 @@ def test_move_during_a_reply_waits_for_it_and_the_source_stays_quiet(brain, conn
     brain.room_sessions = lambda name: [pi, pc] if name == "bedroom" else [pc, pi]
     brain.connected_sessions = lambda: [pi, pc]
     brain.session_for = sessions.get
-    brain.find_satellite = lambda said: ("pc", None)
+    brain.find_satellite = lambda said, here=None: ("pc", None)
     brain.spoken_name = spoken.get
     brain.move_music = MethodType(Brain.move_music, brain)
 
@@ -1015,7 +1015,7 @@ def test_move_during_a_reply_waits_for_it_and_the_source_stays_quiet(brain, conn
 def test_elsewhere_gives_the_named_sessions_executor(brain, connect, make_session):
     pi, pc = make_session(connect("bedroom")[0]), make_session(connect("pc")[0])
     named = {"the Pi": "bedroom", "the PC": "pc", "the Mac": "mac"}
-    brain.find_satellite = lambda said: (named[said], None) if said in named else (None, f"Which one: {said}?")
+    brain.find_satellite = lambda said, here=None: (named[said], None) if said in named else (None, f"Which one: {said}?")
     brain.session_for = {"bedroom": pi, "pc": pc}.get
     brain.spoken_name = {"mac": "the Mac"}.get
     asked = []
@@ -1030,6 +1030,16 @@ def test_elsewhere_gives_the_named_sessions_executor(brain, connect, make_sessio
     # A move is asked of the brain from the satellite spoken to.
     assert pi.actions.mover("the PC") == {"success": True, "message": "Moved."}
     assert asked == [("bedroom", "the PC")]
+
+
+def test_elsewhere_says_which_satellite_is_here(brain, connect, make_session):
+    pc = make_session(connect("pc")[0])
+    heard = []
+    brain.find_satellite = lambda said, here=None: heard.append((said, here)) or ("pc", None)
+    brain.session_for = {"pc": pc}.get
+    # "On this PC" said at the PC is the PC's own name for itself, which only the session knows.
+    assert pc.actions.elsewhere("this device") == (pc.actions, None)
+    assert heard == [("this device", "pc")]
 
 
 def test_a_sessions_actions_know_how_a_satellite_is_called_and_how_to_wait_for_its_music(brain, make_session):
@@ -1052,7 +1062,7 @@ def test_playing_on_another_satellite_pauses_the_rooms_own_music_for_good_when_i
     sessions, spoken = {"bedroom": pi, "pc": pc}, {"bedroom": "the Pi", "pc": "the PC"}
     brain.room_sessions = lambda name: [pi, pc] if in_one_room else [pi]
     brain.session_for = sessions.get
-    brain.find_satellite = lambda said: ("pc", None)
+    brain.find_satellite = lambda said, here=None: ("pc", None)
     brain.spoken_name = spoken.get
     songs = [{"id": str(number), "title": f"Song {number}", "artist": "Band"} for number in range(1, 4)]
 

@@ -28,14 +28,19 @@ MACHINE_WORDS: Dict[str, Tuple[str, ...]] = {
 # What a reply calls a machine which has no name set on the settings page.
 SPOKEN = {"pi": "the Pi", "pc": "the PC", "mac": "the Mac"}
 
-# Said before a name, and dropped: "my PC" and "the PC" are both "pc".
-_ARTICLES = ("the", "my")
+# Said before a name, and dropped: "my PC", "the PC" and "this PC" are all "pc".
+_ARTICLES = ("the", "my", "this", "that")
+
+# What means the satellite he is talking to, in plain() form: "here", and "this device", "this
+# one", "this speaker" and "this satellite" once "this" is dropped. A word for a kind of machine
+# is never one of these, so "this PC" is still the PC wherever he says it.
+_HERE_WORDS = ("here", "device", "one", "speaker", "satellite")
 
 
 def plain(said: str) -> str:
     """
-    Words as they're compared: lower case, with the leading "the" or "my" and a trailing
-    "satellite" dropped, and the dashes and underscores a satellite's name has read as
+    Words as they're compared: lower case, with the leading "the", "my", "this" or "that" and
+    a trailing "satellite" dropped, and the dashes and underscores a satellite's name has read as
     spaces. The last word is always kept, so a satellite called "the" is still found.
 
     Args:
@@ -53,6 +58,18 @@ def plain(said: str) -> str:
     if len(words) > 1 and words[-1] == "satellite":
         words.pop()
     return " ".join(words)
+
+
+def means_here(said: str) -> bool:
+    """
+    Args:
+        said: Words which may mean the satellite he is talking to, e.g. "this device".
+
+    Returns:
+        Whether they do - "here", "this device", "this one", "this speaker" or "this satellite".
+        Nothing else does, so "this PC" is judged by matching like any other name.
+    """
+    return plain(said) in _HERE_WORDS
 
 
 def matching(said: str, satellites: Dict[str, Tuple[Optional[str], List[str]]]) -> List[str]:

@@ -867,7 +867,7 @@ class Brain:
         """
         return {name: (self.rooms.machine(name), self.rooms.called(name)) for name in self.satellites()}
 
-    def find_satellite(self, said: str) -> Tuple[Optional[str], Optional[str]]:
+    def find_satellite(self, said: str, here: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
         """
         Finds the satellite some words name, such as "my Pi", "the PC" or a name he has
         given one on the settings page - among every one which may connect, not only those
@@ -875,15 +875,24 @@ class Brain:
 
         Args:
             said: The words, as they were said.
+            here: The satellite he is talking to, if it's known - what "here" and "this device"
+                mean, unless a satellite is called that. Without it those words name nothing, as
+                they're only Claude's way to say it, and which satellite that is isn't something the
+                words say.
 
         Returns:
             The satellite's name and None; or None and what to say when the words name
             none ("There's no satellite called the phone. There's the Pi and the PC.") or
             more than one ("Which one: the PC or the Mac?"), or the satellites can't be read.
         """
+        # A word for "here" is tried last: a satellite he has called "speaker" is found by that, as it's a
+        # name he chose, and "here" needs no satellites read when they can't be.
+        means_here = here is not None and satellite_names.means_here(said)
         try:
             satellites = self._named_satellites()
         except (OSError, ValueError) as e:
+            if means_here:
+                return here, None
             logger.warning(f"Couldn't read the satellites to find which one {said!r} is: {e}")
             return None, "I can't tell which satellites there are just now."
         found = satellite_names.matching(said, satellites)
@@ -892,6 +901,8 @@ class Brain:
         if found:
             spoken = [self.spoken_name(name) for name in found]
             return None, f"Which one: {satellite_names.listed(spoken, 'or')}?"
+        if means_here:
+            return here, None
         sentence = f"There's no satellite called {said.strip()}."
         if satellites:
             there = satellite_names.listed([self.spoken_name(name) for name in satellites], "and")
@@ -1076,7 +1087,7 @@ class Brain:
             'nothing_to_move' (True) when it's because there's no music anywhere to move, for a
             play on another satellite to start some there instead - without reading the message.
         """
-        name, problem = self.find_satellite(said)
+        name, problem = self.find_satellite(said, here=spoken_at)
         if name is None:
             return {"success": False, "message": problem}
         # A session stays in the brain's list for a moment after its satellite goes.

@@ -2234,7 +2234,8 @@ class ActionExecutor:
         "note', 'take a note', 'write this down' and 'write me notes on ...'. When they dictate it, text is their "
         "own words; when they ask for notes on something, text is plain-text notes of at most about 400 words. Give "
         "the note a title of a few words. 'Add X to my notes' is the notes list, not this: use manage_list for "
-        "that. What happened is said for you, so just reply 'Okay.'",
+        "that. A note is only saved as a file: don't also use remember for it, unless the user asks you to "
+        "remember it too. What happened is said for you, so just reply 'Okay.'",
         needs="notes",
         required=["title", "text"],
         title={"type": "string", "description": "What to call the note, in a few words, e.g. 'Bins'."},
