@@ -63,6 +63,7 @@ UNAVAILABLE = {
     "listening": "Listening stats need SoulSync.",
     "wrapped": "Wrapped isn't set up.",
     "notes": "I can only save a note at a computer.",
+    "computer": "There's no computer here to open things on.",
 }
 
 # What's said when the new-music playlist isn't there - before Nova's first morning making it,
@@ -70,6 +71,21 @@ UNAVAILABLE = {
 NEW_MUSIC_MISSING = "Your new-music playlist isn't made yet; Nova makes it each morning from what's arrived."
 NO_NEW_MUSIC_PLAYLIST = "No new-music playlist is set. It goes in Settings, under Music."
 NEW_MUSIC_NOT_ON_SPOTIFY = "New music plays from Navidrome, and Spotify is your music player right now."
+
+# Which computer the computer tools act on, when the user says.
+ON_A_COMPUTER = {
+    "type": "string",
+    "description": (
+        "Only when the user names the computer - 'on my PC', 'on the Mac' - as they said it, e.g. 'my PC'. Leave "
+        "this out when they don't: the computer they're at, or the only one there is, is used."
+    ),
+}
+
+
+def _where(where: Any) -> Optional[str]:
+    """The words for which computer the model gave, or None for none - as it may give "" or something else."""
+    return where.strip() if isinstance(where, str) and where.strip() else None
+
 
 # What play_music and play_playlist are told of their "on": only for somewhere other than the
 # satellite the user is talking to, where music plays unless they say otherwise.
@@ -344,7 +360,7 @@ class ActionExecutor:
                  elsewhere: Optional[Callable[[str], Tuple[Optional["ActionExecutor"], Optional[str]]]] = None,
                  spoken_name: Callable[[str], str] = lambda name: name,
                  settled: Optional[Callable[[], None]] = None,
-                 notes: Optional[Callable[[str, str], Dict]] = None):
+                 notes: Optional[Callable[[str, str], Dict]] = None, computer=None):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -407,6 +423,9 @@ class ActionExecutor:
             notes: Saves a note on the computer the user is at - given its title and what it says,
                 gives what the brain says of it - or None if the satellite can't save one, as the
                 Pi can't.
+            computer: ComputerControl, which opens, searches and closes things on a computer
+                satellite, or None if there's none. Its tools are offered only while a computer
+                which opens things has been seen.
         """
         self.music = music
         self.clock = clock
@@ -436,6 +455,7 @@ class ActionExecutor:
         self.spoken_name = spoken_name
         self.settled = settled
         self.notes = notes
+        self.computer = computer
         # What was last asked, and what the assistant said - or the last alert, and
         # all of it - for "send that to my phone". Kept up to date by the Conversation.
         self.last_answer: Optional[Tuple[str, str]] = None
@@ -531,7 +551,14 @@ class ActionExecutor:
         needs = method.tool["needs"]
         if needs is None:
             return True
-        return any(getattr(self, name) is not None for name in ((needs,) if isinstance(needs, str) else needs))
+        return any(self._set_up(name) for name in ((needs,) if isinstance(needs, str) else needs))
+
+    def _set_up(self, name: str) -> bool:
+        """Whether the part of the assistant a tool needs is there - for the computer, one which opens things."""
+        part = getattr(self, name)
+        if name == "computer":
+            return part is not None and part.offered()
+        return part is not None
 
     def execute(self, action: Optional[Action]) -> ActionResult:
         """
@@ -2087,6 +2114,66 @@ class ActionExecutor:
             # The kind of error only: its message could quote the note, whose text is never logged.
             logger.warning(f"Couldn't save a note: {type(e).__name__}")
             return {"success": False, "message": "I couldn't save the note."}
+
+    # Opening, searching and closing on a computer
+
+    @tool(
+        "Open an app, game or program on a computer, for 'open Fortnite', 'fire up Rocket League', 'launch "
+        "Discord on my PC'. Give its name as the user said it; the computer's own list is matched for you, and "
+        "if none fits you're told the closest names to choose from or ask about. Not for web pages: use "
+        "open_web_page. What happened is said for you, so just reply 'Okay.'",
+        needs="computer",
+        required=["name"],
+        name={"type": "string", "description": "The app's name, as the user said it, e.g. 'Fortnite'."},
+        where=ON_A_COMPUTER,
+    )
+    def open_on_computer(self, name: str = "", where: Optional[str] = None):
+        if not isinstance(name, str) or not name.strip():
+            return {"success": False, "message": "I didn't catch what to open."}
+        return self.computer.open(name.strip(), _where(where))
+
+    @tool(
+        "Open a web page in the browser on a computer, for 'open the BBC website', 'go to youtube.com'. Give its "
+        "address, e.g. 'bbc.co.uk' or 'https://www.bbc.co.uk/sport' - only https pages open. What happened is "
+        "said for you, so just reply 'Okay.'",
+        needs="computer",
+        required=["url"],
+        url={"type": "string", "description": "The page's web address, e.g. 'bbc.co.uk'."},
+        where=ON_A_COMPUTER,
+    )
+    def open_web_page(self, url: str = "", where: Optional[str] = None):
+        if not isinstance(url, str) or not url.strip():
+            return {"success": False, "message": "I didn't catch which page to open."}
+        return self.computer.open_url(url.strip(), _where(where))
+
+    @tool(
+        "Search the web in the browser on a computer, for 'search for ...', 'google ...', 'look up ... on Google' "
+        "when the user wants the search open on the computer rather than an answer from you. What happened is said "
+        "for you, so just reply 'Okay.'",
+        needs="computer",
+        required=["words"],
+        words={"type": "string", "description": "What to search for."},
+        where=ON_A_COMPUTER,
+    )
+    def search_on_computer(self, words: str = "", where: Optional[str] = None):
+        if not isinstance(words, str) or not words.strip():
+            return {"success": False, "message": "I didn't catch what to search for."}
+        return self.computer.search(words.strip(), _where(where))
+
+    @tool(
+        "Close a program on a computer, for 'close Discord', 'quit Steam on my PC' - or the window in front, for "
+        "'close this', with name 'this'. It's closed as its own close button does. What happened is said for you, "
+        "so just reply 'Okay.'",
+        needs="computer",
+        required=["name"],
+        name={"type": "string", "description": "The program's name, as the user said it, or 'this' for the window "
+                                               "in front."},
+        where=ON_A_COMPUTER,
+    )
+    def close_on_computer(self, name: str = "", where: Optional[str] = None):
+        if not isinstance(name, str) or not name.strip():
+            return {"success": False, "message": "I didn't catch what to close."}
+        return self.computer.close(name.strip(), _where(where))
 
     # Memory
 

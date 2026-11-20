@@ -30,6 +30,7 @@ from voice_assistant.actions import Action
 from voice_assistant.brain import Brain
 from voice_assistant.clock import Clock
 from voice_assistant.config import Config
+from voice_assistant.computers import ComputerControl, Computers
 from voice_assistant.conversation import Reply
 from voice_assistant.media_watch import MediaWatcher
 from voice_assistant.navidrome import NavidromePlayer
@@ -256,7 +257,7 @@ def brain(tmp_path, monkeypatch, make_config):
     # A satellite rings where it was set, and is in a room of its own, as the Brain's are until
     # Home Assistant says otherwise.
     return SimpleNamespace(config=config, clock=Clock(config=config, start=False), memory=None,
-                           rooms=SatelliteRooms(str(tmp_path / "satellite_rooms.json")),
+                           rooms=SatelliteRooms(str(tmp_path / "satellite_rooms.json")), computers=Computers(),
                            ring_on=lambda name: name, room_of=lambda name: [name], room_sessions=lambda name: [],
                            spoken_name=lambda name: name,
                            names_satellite=lambda said: False,
@@ -1147,6 +1148,16 @@ def test_a_note_is_saved_through_the_satellite_and_its_text_is_never_logged(brai
     # The title and the file are fine to log - never what it says.
     assert "secret" not in caplog.text
     assert "Bins (2).txt" in caplog.text
+
+
+def test_every_session_can_open_things_on_a_computer(brain, connect, make_session):
+    session = make_session()
+    computer = session.actions.computer
+    assert isinstance(computer, ComputerControl) and computer.brain is brain and computer.satellite == "bedroom"
+    # Offered once a computer which opens things has been seen, wherever the user is.
+    assert "open_on_computer" not in {tool["name"] for tool in session.actions.tool_schemas()}
+    brain.computers.set_apps("pc", [])
+    assert "open_on_computer" in {tool["name"] for tool in session.actions.tool_schemas()}
 
 
 def test_pi_session_has_no_notes_tool(brain, connect, make_session):

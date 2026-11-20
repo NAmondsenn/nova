@@ -27,6 +27,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from voice_assistant import paths, storage
 from voice_assistant.actions import ActionExecutor
 from voice_assistant.clock_ringing import heard_in
+from voice_assistant.computers import ComputerControl
 from voice_assistant.conversation import NOT_CAUGHT, Conversation
 from voice_assistant.ha_device import DeviceControls, NovaDevice
 from voice_assistant.home_assistant import HomeAssistant
@@ -298,7 +299,8 @@ class Session:
         # Everything the assistant can do for the user - see actions.py. The lights are
         # only there once Home Assistant is set up, and the calendar once Google is, and
         # timers and alarms ring on the satellite they were set from, as a download is
-        # said there - or on its room's always-on one, if it's a push-to-talk satellite.
+        # said there - or on its room's always-on one, if it's a push-to-talk satellite. Any
+        # satellite can open things on a computer, the one it's on or another.
         self.actions = ActionExecutor(music=self.music_player, clock=brain.clock, volume=self.volume,
                                       weather=brain.weather, home=self.home, memory=brain.memory,
                                       ntfy=brain.ntfy, satellite=satellite.name, batteries=brain.batteries,
@@ -313,7 +315,8 @@ class Session:
                                       elsewhere=self._elsewhere,
                                       spoken_name=lambda name: brain.spoken_name(name),
                                       settled=lambda: self.music.wait(),
-                                      notes=self._save_note if satellite.saves_notes else None)
+                                      notes=self._save_note if satellite.saves_notes else None,
+                                      computer=ComputerControl(brain, satellite.name))
 
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.

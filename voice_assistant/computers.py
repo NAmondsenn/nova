@@ -4,16 +4,23 @@ Computers Module.
 What the brain knows of each computer satellite's things to open: the apps it has
 installed, kept even once it has gone so they can still be talked about, and the
 windows open on it, which are only true while it is connected. Also how a name he said
-is matched to one of them, whatever the marks and capitals of the real name.
+is matched to one of them, whatever the marks and capitals of the real name, which web
+addresses may be opened, and ComputerControl, which has a computer open, search and close
+things for a session.
 
 Only the standard library is imported at module level, so the satellite can import
 parts of this too.
 """
 
+import difflib
+import logging
 import re
 import threading
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote_plus, urlsplit
+
+logger = logging.getLogger(__name__)
 
 # Said, but not part of an app's name.
 IGNORED_WORDS = {"the", "app", "game"}
@@ -21,6 +28,22 @@ IGNORED_WORDS = {"the", "app", "game"}
 MOST_CHOICES = 4
 # Marks in real names, such as "EA SPORTS FC™ 25", which he doesn't say.
 _MARKS = "™®©�"
+# The longest web address a computer is asked to open, as the satellite checks again.
+MOST_URL = 2000
+# What a web address said without its https:// looks like: "bbc.co.uk", "youtube.com/watch?v=x".
+_BARE_DOMAIN = re.compile(r"[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?:[/?#]\S*)?", re.IGNORECASE)
+# Where each search site, as computer.search_site has it, takes the words searched for.
+SEARCH_SITES = {
+    "google": "https://www.google.com/search?q=",
+    "duckduckgo": "https://duckduckgo.com/?q=",
+    "bing": "https://www.bing.com/search?q=",
+}
+# The most of the nearest names given back when what was said matches none.
+MOST_CLOSEST = 3
+# Said when a web address is refused.
+NOT_A_WEB_ADDRESS = "That isn't a web address I can open."
+# Said when there's no computer to do something on.
+NO_COMPUTER = "There's no computer here to open things on."
 
 
 def plain(name: str) -> str:
@@ -152,3 +175,280 @@ class Computers:
         """Returns the satellites whose apps have been set since the brain started."""
         with self._lock:
             return list(self._apps)
+
+
+def safe_url(url: str) -> Optional[str]:
+    """
+    Checks a web address is one a computer may be asked to open.
+
+    Args:
+        url: The address, as given - "bbc.co.uk" or "https://www.bbc.co.uk/news".
+
+    Returns:
+        It, with https:// before it if it was a bare domain - or None for any other
+        scheme, a user or password in it, a space or control character, or one longer
+        than MOST_URL.
+    """
+    if not isinstance(url, str) or any(character.isspace() or ord(character) < 32 or ord(character) == 127
+                                       for character in url):
+        return None
+    if "://" not in url:
+        # Without a scheme it must look like a domain, so "javascript:..." or a path never is one.
+        if not _BARE_DOMAIN.fullmatch(url):
+            return None
+        url = "https://" + url
+    if len(url) > MOST_URL:
+        return None
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    if parts.scheme.lower() != "https" or not parts.hostname or "@" in parts.netloc:
+        return None
+    return url
+
+
+def search_url(site: str, words: str) -> str:
+    """
+    Args:
+        site: One of SEARCH_SITES - Google for any other.
+        words: What to search for.
+
+    Returns:
+        The address of that search on the site, e.g. https://www.google.com/search?q=rocket+league.
+    """
+    return SEARCH_SITES.get(site, SEARCH_SITES["google"]) + quote_plus(words)
+
+
+def _host(url: str) -> str:
+    """The host of a web address, which is all of one that's logged."""
+    try:
+        return urlsplit(url).hostname or "?"
+    except ValueError:
+        return "?"
+
+
+def _listed(names: List[str], last: str) -> str:
+    """Joins names to be said: "A, B or C"."""
+    if len(names) < 2:
+        return "".join(names)
+    return f"{', '.join(names[:-1])} {last} {names[-1]}"
+
+
+def _capital(sentence: str) -> str:
+    """A name said mid-sentence as it starts one: "the PC" as "The PC"."""
+    return sentence[:1].upper() + sentence[1:]
+
+
+class ComputerControl:
+    """
+    Has a computer satellite open, search and close things, and set its own volume, for
+    one session - the satellite the user is talking to, which may be the computer or not.
+    The brain decides which computer is meant (Brain.computer_for); only an app's id, a
+    checked web address or a window's name is ever sent.
+    """
+
+    def __init__(self, brain: Any, satellite: str):
+        """
+        Args:
+            brain: The Brain, for which computer, its apps, windows and names, and its session.
+            satellite: The satellite the user is talking to.
+        """
+        self.brain = brain
+        self.satellite = satellite
+
+    def offered(self) -> bool:
+        """Whether any computer seen since the brain started opens things - so the tools are offered."""
+        return bool(self._opening())
+
+    def _opening(self) -> List[str]:
+        """The computers known which he lets open things."""
+        return [name for name in self.brain.computers.known() if self.brain.rooms.opens_things(name)]
+
+    def _target(self, where: Optional[str]) -> Tuple[Optional[str], Any, Optional[Dict]]:
+        """
+        Finds the computer meant, and its connection.
+
+        Args:
+            where: The words for where, as said, or None.
+
+        Returns:
+            (its name, its RemoteSatellite, None) - or (None, None, the reply to give instead).
+        """
+        name, problem = self.brain.computer_for(self.satellite, where)
+        if name is None:
+            if problem is None:
+                opening = self._opening()
+                spoken = [self.brain.spoken_name(each) for each in opening]
+                problem = f"Which one: {_listed(spoken, 'or')}?" if len(opening) > 1 else NO_COMPUTER
+            return None, None, {"success": False, "message": problem}
+        session = self.brain.session_for(name)
+        if session is None:
+            # Gone since it was chosen.
+            return None, None, {"success": False,
+                                "message": f"Nova isn't running on {self.brain.spoken_name(name)}."}
+        return name, session.satellite, None
+
+    def _there(self, sentence: str, name: str) -> str:
+        """A sentence ending with a full stop, with " on {name}" before it when that isn't where the user is."""
+        if name == self.satellite:
+            return sentence
+        return f"{sentence[:-1]} on {self.brain.spoken_name(name)}."
+
+    def _ask(self, target: str, computer: Any, done: Optional[str], action: str, **fields) -> Dict:
+        """
+        Asks the computer, and gives what to say of it.
+
+        Args:
+            target: The computer's satellite name.
+            computer: Its RemoteSatellite.
+            done: What to say when it has done it, or None for the sentence it says itself.
+            action: One of protocol.COMPUTER_ACTIONS.
+            **fields: What the action needs.
+
+        Returns:
+            {"success", "message"}, with "level" and "muted" when it gave them.
+        """
+        answer = computer.ask_computer(action, **fields)
+        if answer is None:
+            return {"success": False, "message": f"I couldn't do that on {self.brain.spoken_name(target)}."}
+        if answer.get("error"):
+            return {"success": False, "message": answer["error"]}
+        said = done or answer.get("said") or "Done."
+        reply = {"success": True, "message": said}
+        for each in ("level", "muted"):
+            if each in answer:
+                reply[each] = answer[each]
+        return reply
+
+    def open(self, name: str, where: Optional[str] = None) -> Dict:
+        """
+        Opens an app, game or the like on a computer, by its id in the computer's own list.
+
+        Args:
+            name: Its name, as said.
+            where: The words for which computer, or None.
+
+        Returns:
+            {"success", "message"}: "Opening Fortnite.", which one he means, or why not -
+            with the nearest names, when none fits, for Claude to choose from or ask about.
+        """
+        target, computer, refused = self._target(where)
+        if refused:
+            return refused
+        items = self.brain.computers.apps(target)
+        found = match_app(name, items, self.brain.rooms.app_names(target))
+        if found.choices:
+            return {"success": False, "message": f"Which one: {_listed(found.choices, 'or')}?"}
+        spoken = self.brain.spoken_name(target)
+        if found.item is None:
+            message = f"I can't find {name.strip()} on {spoken}."
+            names = {plain(item["name"]): item["name"] for item in items}
+            closest = difflib.get_close_matches(plain(name), list(names), n=MOST_CLOSEST, cutoff=0.6)
+            if closest:
+                message += f" Closest: {_listed([names[each] for each in closest], 'and')}."
+            return {"success": False, "message": message}
+        app = found.item["name"]
+        logger.info(f"Opening {app} on the {target} satellite")
+        return self._ask(target, computer, self._there(f"Opening {app}.", target), "open", item=found.item["id"])
+
+    def open_url(self, url: str, where: Optional[str] = None) -> Dict:
+        """
+        Opens a web page in the computer's own browser.
+
+        Args:
+            url: Its address, with or without https://.
+            where: The words for which computer, or None.
+
+        Returns:
+            {"success", "message"}: "Opening bbc.co.uk.", or why not.
+        """
+        checked = safe_url(url)
+        if checked is None:
+            return {"success": False, "message": NOT_A_WEB_ADDRESS}
+        target, computer, refused = self._target(where)
+        if refused:
+            return refused
+        host = _host(checked)
+        # The host alone: the rest of an address can hold what's his.
+        logger.info(f"Opening a page on {host} on the {target} satellite")
+        return self._ask(target, computer, self._there(f"Opening {host}.", target), "open_url", url=checked)
+
+    def search(self, words: str, where: Optional[str] = None) -> Dict:
+        """
+        Searches the web on the computer, on the search site chosen on the settings page.
+
+        Args:
+            words: What to search for.
+            where: The words for which computer, or None.
+
+        Returns:
+            {"success", "message"}: "Searching for rocket league.", or why not.
+        """
+        words = words.strip() if isinstance(words, str) else ""
+        if not words:
+            return {"success": False, "message": "I didn't catch what to search for."}
+        target, computer, refused = self._target(where)
+        if refused:
+            return refused
+        config = getattr(self.brain, "config", None)
+        site = config.section("computer").get("search_site", "google") if config is not None else "google"
+        url = search_url(site, words)
+        # Never the words, which are in the address.
+        logger.info(f"Searching on {_host(url)} on the {target} satellite")
+        return self._ask(target, computer, self._there(f"Searching for {words}.", target), "open_url", url=url)
+
+    def close(self, name: str, where: Optional[str] = None) -> Dict:
+        """
+        Closes a program's windows on the computer - or, for "this", the one in front.
+
+        Args:
+            name: The program, as said, or "this".
+            where: The words for which computer, or None.
+
+        Returns:
+            {"success", "message"}: "Closing Discord.", "Steam isn't open.", or why not.
+        """
+        target, computer, refused = self._target(where)
+        if refused:
+            return refused
+        if plain(name) == "this":
+            # Which program it is only the computer knows, so it says so itself.
+            logger.info(f"Closing the window in front on the {target} satellite")
+            return self._ask(target, computer, None, "close_front")
+        window = match_window(name, self.brain.computers.windows(target))
+        if window is None:
+            return {"success": False, "message": f"{_capital(name.strip())} isn't open."}
+        logger.info(f"Closing {window} on the {target} satellite")
+        return self._ask(target, computer, self._there(f"Closing {window}.", target), "close", name=window)
+
+    def volume(self, where: Optional[str], **change) -> Dict:
+        """
+        Changes the computer's own volume, as Windows' volume keys do.
+
+        Args:
+            where: The words for which computer, or None for the one the user is talking to.
+            **change: direction and step, level, or mute - as protocol's computer has them.
+
+        Returns:
+            {"success", "message"} with "level" and "muted" as the computer has them now - or
+            why not.
+        """
+        if where:
+            target, problem = self.brain.find_satellite(where)
+            if target is None:
+                return {"success": False, "message": problem}
+        else:
+            target = self.satellite
+        session = self.brain.session_for(target)
+        if session is None:
+            return {"success": False, "message": self.brain.not_connected(target)}
+        computer = session.satellite
+        if not getattr(computer, "system_volume", False):
+            return {"success": False,
+                    "message": f"{_capital(self.brain.spoken_name(target))} can't change its own volume."}
+        reply = self._ask(target, computer, None, "volume", **change)
+        if reply["success"]:
+            reply["message"] = ("Muted." if reply.get("muted")
+                                else f"Volume {reply['level']} percent." if "level" in reply else reply["message"])
+        return reply

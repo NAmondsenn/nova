@@ -621,6 +621,106 @@ def test_spoken_name_isnt_the_satellites_machine_word(named):
     assert named.spoken_name("pc") == "Desk"
 
 
+# Which computer something is opened on
+
+class FakePCPower:
+    """Stands in for PCPower: says whether the PC is on, and keeps which PC it was asked about."""
+
+    def __init__(self, on=True, pcs=None):
+        self.on = on
+        self.pcs = pcs if pcs is not None else [{"device": "dev-1", "name": "Desk PC", "wake": None}]
+        self.asked = []
+
+    def act(self, action, name=None):
+        self.asked.append((action, name))
+        return {"success": True, "message": "Your PC's on." if self.on else "Your PC's off."}
+
+    def overview(self):
+        return {"pcs": self.pcs, "buttons": []}
+
+
+def put_in_session(brain, name):
+    """Puts in a connected session for a satellite, by hand."""
+    brain.sessions[name] = FakeSession(brain, SimpleNamespace(name=name, connected=True, close=lambda: None), [])
+
+
+def test_where_spoken_at_pc(named):
+    named.computers.set_apps("pc", [])
+    put_in_session(named, "pc")
+    assert named.computer_for("pc", None) == ("pc", None)
+
+
+def test_where_named_from_pi(named):
+    named.computers.set_apps("pc", [])
+    put_in_session(named, "pc")
+    assert named.computer_for("bedroom", "my PC") == ("pc", None)
+    # One which has never said it opens things can't, connected or not.
+    put_in_session(named, "mac")
+    assert named.computer_for("bedroom", "the Mac") == (None, "The Mac can't open things.")
+    assert named.computer_for("pc", "the Pi") == (None, "The Pi can't open things.")
+    # Words naming none say so, as find_satellite does.
+    assert named.computer_for("bedroom", "the phone")[1].startswith("There's no satellite called the phone.")
+
+
+def test_where_only_one_known(named):
+    named.computers.set_apps("pc", [])
+    put_in_session(named, "pc")
+    assert named.computer_for("bedroom", None) == ("pc", None)
+    # With two that open things and neither spoken at, it isn't for here to choose.
+    named.computers.set_apps("mac", [])
+    assert named.computer_for("bedroom", None) == (None, None)
+    assert named.computer_for("pc", None) == ("pc", None)
+
+
+def test_where_none_known_falls_through(named):
+    put_in_session(named, "pc")
+    assert named.computer_for("bedroom", None) == (None, None)
+    assert named.computer_for("pc", None) == (None, None)
+
+
+def test_where_switch_off(named):
+    named.computers.set_apps("pc", [])
+    put_in_session(named, "pc")
+    named.rooms.set_opens_things("pc", False)
+    assert named.computer_for("pc", None) == (None, None)
+    assert named.computer_for("bedroom", None) == (None, None)
+    assert named.computer_for("bedroom", "the PC") == (None, "The PC can't open things.")
+
+
+def test_where_pc_asleep(named):
+    named.computers.set_apps("pc", [])
+    named.pc = FakePCPower(on=False)
+    # Known from before, but not connected: the PC is off, as Home Assistant says.
+    assert named.computer_for("bedroom", None) == (None, "Your PC's off.")
+    assert named.computer_for("bedroom", "the PC") == (None, "Your PC's off.")
+    # On, but with no Nova on it.
+    named.pc.on = True
+    assert named.computer_for("pc", None) == (None, "Nova isn't running on the PC.")
+    # No Home Assistant to ask.
+    named.pc = None
+    assert named.computer_for("bedroom", None) == (None, "Nova isn't running on the PC.")
+
+
+def test_where_asks_about_the_pc_chosen_for_it(named):
+    named.computers.set_apps("pc", [])
+    named.pc = FakePCPower(on=False, pcs=[{"device": "dev-1", "name": "Desk PC", "wake": None},
+                                          {"device": "dev-2", "name": "Gaming PC", "wake": None}])
+    named.rooms.set_pc_device("pc", "dev-2")
+    named.computer_for("bedroom", None)
+    assert named.pc.asked == [("status", "Gaming PC")]
+    # One chosen which has gone, or none chosen, asks about no PC in particular: with one PC, it's that one.
+    named.rooms.set_pc_device("pc", "dev-9")
+    named.computer_for("bedroom", None)
+    assert named.pc.asked[-1] == ("status", None)
+
+
+def test_where_a_mac_asleep_isnt_the_pc(named):
+    named.computers.set_apps("mac", [])
+    named.pc = FakePCPower(on=False)
+    assert named.computer_for("bedroom", None) == (None, "Nova isn't running on the Mac.")
+    assert named.pc.asked == []
+
+
 @pytest.fixture
 def two_pis(brain, passwords):
     """A brain with two Pis (the bedroom, the default, and the kitchen) and a PC, none of them connected."""

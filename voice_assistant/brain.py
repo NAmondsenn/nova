@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import numpy as np
 
 from voice_assistant import logging_setup, paths, protocol, satellite_names, storage, watchdog
-from voice_assistant.batteries import BatteryChoices, BatteryWatcher
+from voice_assistant.batteries import HOME_FAILURES, BatteryChoices, BatteryWatcher
 from voice_assistant.choices import ChoiceStore
 from voice_assistant.clean_check import CleanCheck
 from voice_assistant.clean_schedule import CleanSchedule
@@ -935,6 +935,75 @@ class Brain:
         shared = any(spoken == satellite_names.spoken(other, self.rooms.machine(other), self.rooms.called(other))
                      for other in others)
         return name if shared else spoken
+
+    def computer_for(self, spoken_at: str, where: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Finds the computer to open, search or close something on: the one named, else the
+        one spoken at if it opens things, else the only one known which does.
+
+        Args:
+            spoken_at: The satellite the user was talking to.
+            where: The words for which computer, e.g. "my PC", or None for none said.
+
+        Returns:
+            The computer's satellite name and None; or None and what to say instead - the
+            words name none, or one which can't open things, or it isn't connected ("Your
+            PC's off."); or None and None when none was named and there's no one computer to
+            choose, for a local command to fall through.
+        """
+        opening = [name for name in self.computers.known() if self.rooms.opens_things(name)]
+        if where:
+            name, problem = self.find_satellite(where)
+            if name is None:
+                return None, problem
+            if name not in opening:
+                spoken = self.spoken_name(name)
+                return None, f"{spoken[:1].upper() + spoken[1:]} can't open things."
+        elif spoken_at in opening:
+            name = spoken_at
+        elif len(opening) == 1:
+            name = opening[0]
+        else:
+            return None, None
+        if self.session_for(name) is None:
+            return None, self.not_connected(name)
+        return name, None
+
+    def not_connected(self, name: str) -> str:
+        """
+        Args:
+            name: A computer satellite which isn't connected.
+
+        Returns:
+            Why, as far as can be told: "Your PC's off." if it's a PC Home Assistant says is,
+            else "Nova isn't running on the PC.".
+        """
+        if self.pc is not None and self.rooms.machine(name) == "pc":
+            try:
+                status = self.pc.act("status", name=self._pc_called(name))
+            except HOME_FAILURES as e:
+                logger.warning(f"Couldn't ask Home Assistant whether the {name} satellite's PC is on: {e}")
+                status = {}
+            # As PCPower says it of a PC which is off.
+            if status.get("success") and status.get("message") == "Your PC's off.":
+                return "Your PC's off."
+        return f"Nova isn't running on {self.spoken_name(name)}."
+
+    def _pc_called(self, name: str) -> Optional[str]:
+        """
+        The name Home Assistant has for the PC a satellite is, as chosen on the settings
+        page - or None if none was, or it has gone, or Home Assistant can't be asked. With
+        one PC, PCPower takes that one whatever it's given.
+        """
+        device = self.rooms.pc_device(name)
+        if device is None:
+            return None
+        try:
+            pcs = self.pc.overview()["pcs"]
+        except HOME_FAILURES as e:
+            logger.warning(f"Couldn't read Home Assistant's PCs for the {name} satellite: {e}")
+            return None
+        return next((pc["name"] for pc in pcs if pc["device"] == device), None)
 
     def ring_on(self, name: str) -> str:
         """

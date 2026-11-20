@@ -3183,3 +3183,74 @@ def test_the_playlist_tools_change_things_so_a_later_undo_reaches_only_the_last(
     executor = make_executor(SongPlayer(), playlist_changes=changes)
     executor.execute(Action("add_to_playlists", {"playlists": ["Gym"]}, from_model=True))
     assert executor.execute(UNDO_THAT).say == "Took it back." and undone == [1]
+
+
+# Opening, closing and searching on a computer
+
+class FakeComputerControl:
+    """Stands in for ComputerControl: keeps what it was asked, and whether a computer opens things."""
+
+    def __init__(self, offered=True):
+        self.is_offered = offered
+        self.asked = []
+
+    def offered(self):
+        return self.is_offered
+
+    def _did(self, *asked):
+        self.asked.append(asked)
+        return {"success": True, "message": "Opening Fortnite."}
+
+    def open(self, name, where=None):
+        return self._did("open", name, where)
+
+    def open_url(self, url, where=None):
+        return self._did("open_url", url, where)
+
+    def search(self, words, where=None):
+        return self._did("search", words, where)
+
+    def close(self, name, where=None):
+        return self._did("close", name, where)
+
+
+COMPUTER_TOOLS = {"open_on_computer", "open_web_page", "search_on_computer", "close_on_computer"}
+
+
+def test_tools_offered_only_when_known():
+    def offered(executor):
+        return {tool["name"] for tool in executor.tool_schemas()}
+
+    assert not COMPUTER_TOOLS & offered(ActionExecutor(clock=object()))
+    computer = FakeComputerControl(offered=False)
+    assert not COMPUTER_TOOLS & offered(ActionExecutor(computer=computer))
+    # Once a computer which opens things has been seen - connected or not - all four are.
+    computer.is_offered = True
+    schemas = {tool["name"]: tool for tool in ActionExecutor(computer=computer).tool_schemas()}
+    assert COMPUTER_TOOLS <= set(schemas)
+    for name in COMPUTER_TOOLS:
+        assert "What happened is said for you, so just reply 'Okay.'" in schemas[name]["description"]
+        assert "where" in schemas[name]["input_schema"]["properties"]
+    # Asked for anyway while none is, it's refused.
+    computer.is_offered = False
+    result = ActionExecutor(computer=computer).execute(Action("open_on_computer", {"name": "Fortnite"}, from_model=True))
+    assert (result.ok, result.say) == (False, "There's no computer here to open things on.")
+    assert computer.asked == []
+
+
+def test_computer_tools_pass_what_was_said():
+    computer = FakeComputerControl()
+    executor = ActionExecutor(computer=computer)
+    result = executor.execute(Action("open_on_computer", {"name": "Fortnite", "where": "my PC"}, from_model=True))
+    assert (result.ok, result.say) == (True, "Opening Fortnite.")
+    executor.execute(Action("open_web_page", {"url": "bbc.co.uk"}, from_model=True))
+    executor.execute(Action("search_on_computer", {"words": "rocket league", "where": ""}, from_model=True))
+    executor.execute(Action("close_on_computer", {"name": "this"}, from_model=True))
+    assert computer.asked == [("open", "Fortnite", "my PC"), ("open_url", "bbc.co.uk", None),
+                              ("search", "rocket league", None), ("close", "this", None)]
+    # Nothing to open, or a name that isn't words, asks no computer.
+    for tool, params in (("open_on_computer", {"name": " "}), ("open_web_page", {"url": 5}),
+                         ("search_on_computer", {}), ("close_on_computer", {"name": None})):
+        result = executor.execute(Action(tool, params, from_model=True))
+        assert result.ok is False and result.say
+    assert len(computer.asked) == 4
