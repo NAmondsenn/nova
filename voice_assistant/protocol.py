@@ -23,6 +23,11 @@ After the handshake, what a satellite sends the brain:
         save_note: the name of the file made, or a sentence saying why not)
     media  {"action": "play"|"pause"|"next"|"previous"}  (a button of Windows' media
         controls, from a satellite which said it has them - see docs/decisions/0031)
+    apps  {}  (payload: a JSON list of {"id": ..., "name": ..., "kind": ...}, what the
+        satellite can open, kind one of APP_KINDS - from a satellite which said it opens things)
+    windows  {}  (payload: a JSON list of the names of the windows open now)
+    computer_done  {"id": ..., "said"?: ..., "error"?: ..., "level"?: ..., "muted"?: ...}  (the
+        answer to a computer: a sentence to say, or one saying why not, or the volume now)
 
 and what the brain sends a satellite:
 
@@ -52,13 +57,16 @@ and what the brain sends a satellite:
         satellite which said it has Windows' media controls, sent when it changes;
         cover: true with the new cover as the payload, false for none now, left out
         when the cover is as it was - see docs/decisions/0031)
+    computer  {"id": ..., "action": "open"|"open_url"|"close"|"close_front"|"volume",
+        "item"?: ..., "url"?: ..., "name"?: ..., "direction"?: ..., "step"?: ..., "level"?: ...,
+        "mute"?: ...}  (something to do on the computer itself, answered by computer_done)
     restart
 
 The handshake comes first, and proves the satellite's password to the brain and the
 brain's to the satellite, without the password itself ever being sent:
 
     hello  {name, hostname, sample_rate, unclean, nonce, speaker?, push_to_talk?, machine?,
-            saves_notes?, media_controls?}    (satellite)
+            saves_notes?, media_controls?, opens?, system_volume?}    (satellite)
     challenge  {nonce, proof}    (brain; or refused, and the connection is closed)
     proof  {proof}    (satellite, once the brain's proof is right)
     ready, or refused    (brain)
@@ -87,6 +95,12 @@ MAX_SPEAKER = 64
 
 # The buttons of Windows' media controls a satellite passes on, as media's action.
 MEDIA_ACTIONS = ("play", "pause", "next", "previous")
+
+# The things a satellite can be told to do on its computer, as computer's action.
+COMPUTER_ACTIONS = ("open", "open_url", "close", "close_front", "volume")
+
+# The kinds of thing a satellite can open, as the kind of each entry in its apps.
+APP_KINDS = ("app", "epic", "steam")
 
 # What a nonce is: 32 hex digits, as secrets.token_hex(16) makes. Written out rather than
 # tried with int(nonce, 16), which lets through digits of other scripts, and spaces.
@@ -184,7 +198,8 @@ def _expect(stream: BinaryIO, kind: str, *fields: str) -> Dict:
 
 def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate: int, unclean: bool,
           speaker: Optional[str] = None, push_to_talk: bool = False, machine: Optional[str] = None,
-          saves_notes: bool = False, media_controls: bool = False):
+          saves_notes: bool = False, media_controls: bool = False, opens: bool = False,
+          system_volume: bool = False):
     """
     The satellite's side of the handshake.
 
@@ -205,6 +220,10 @@ def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate
             hello if False.
         media_controls: Whether this satellite shows its music in Windows' media
             controls, and passes on their buttons - left out of the hello if False.
+        opens: Whether it can open and close things on its computer - left out of the
+            hello if False.
+        system_volume: Whether it can set its computer's own volume - left out of the
+            hello if False.
 
     Raises:
         Refused: The brain refused it, or couldn't prove it knows the password - in
@@ -217,13 +236,17 @@ def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate
     # Likewise, so the hello of a satellite which listens for a wake word is unchanged.
     if push_to_talk:
         extra["push_to_talk"] = True
-    # And these three, so a brain from before them is sent the hello it always was.
+    # And these five, so a brain from before them is sent the hello it always was.
     if machine is not None:
         extra["machine"] = machine
     if saves_notes:
         extra["saves_notes"] = True
     if media_controls:
         extra["media_controls"] = True
+    if opens:
+        extra["opens"] = True
+    if system_volume:
+        extra["system_volume"] = True
     send(stream, "hello", name=name, hostname=hostname, sample_rate=sample_rate,
          unclean=unclean, nonce=nonce, **extra)
     challenge = _expect(stream, "challenge", "nonce", "proof")
@@ -248,7 +271,8 @@ def admit(stream: BinaryIO, password_for: Callable[[str], Optional[str]]) -> Dic
         whether it is push-to-talk and whether it has Windows' media controls, each False
         if it doesn't say, its machine, one of machine.MACHINES, and whether it saves
         notes. The last two are None and False if the hello leaves them out or says what
-        makes no sense, which never keeps a satellite out: they are extras.
+        makes no sense, which never keeps a satellite out: they are extras. So are whether
+        it opens things and whether it has system volume, each False in the same cases.
 
     Raises:
         Refused: The satellite is unknown or got the password wrong. It has been told so.
@@ -294,9 +318,33 @@ def admit(stream: BinaryIO, password_for: Callable[[str], Optional[str]]) -> Dic
         logger.warning(f"{name} said whether it saves notes in a way which makes no sense, so it's taken "
                        f"as not: {ascii(saves_notes)[:80]}")
         saves_notes = False
+    opens = _flag(name, hello, "opens", "opens things")
+    system_volume = _flag(name, hello, "system_volume", "has system volume")
     return {"name": name, "hostname": hostname, "sample_rate": sample_rate, "unclean": unclean,
             "speaker": speaker, "push_to_talk": push_to_talk, "machine": machine, "saves_notes": saves_notes,
-            "media_controls": media_controls}
+            "media_controls": media_controls, "opens": opens, "system_volume": system_volume}
+
+
+def _flag(name: str, hello: Dict, key: str, meaning: str) -> bool:
+    """
+    A true-or-false extra of a hello, False if it's left out or isn't one, so a
+    satellite is never kept out by it.
+
+    Args:
+        name: The satellite's name, for the warning.
+        hello: The hello.
+        key: The field's name.
+        meaning: What it says, for the warning, e.g. "opens things".
+
+    Returns:
+        What the hello says, or False.
+    """
+    said = hello.get(key, False)
+    if not isinstance(said, bool):
+        logger.warning(f"{name} said whether it {meaning} in a way which makes no sense, so it's taken "
+                       f"as not: {ascii(said)[:80]}")
+        return False
+    return said
 
 
 def _speaker(said) -> Optional[str]:
