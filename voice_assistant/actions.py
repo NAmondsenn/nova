@@ -1605,7 +1605,9 @@ class ActionExecutor:
         elif level is not None:
             change = {"level": int(level)}
         elif direction in ("up", "down"):
-            change = {"direction": direction, "step": round(self.volume.step if amount is None else abs(float(amount)))}
+            # A step the computer can take: at least 1, at most all of it.
+            step = round(self.volume.step if amount is None else abs(float(amount)))
+            change = {"direction": direction, "step": min(100, max(1, step))}
         else:
             # Nothing to change, so the current level is reported instead.
             return {"success": True, "message": f"The general volume is at {self.volume.percent('general')} percent."}

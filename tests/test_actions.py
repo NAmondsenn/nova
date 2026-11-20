@@ -280,6 +280,13 @@ def test_volume_up_at_pc_goes_to_windows(pc_and_pi):
                                            ("volume", {"direction": "down", "step": 5})]
 
 
+def test_a_step_at_pc_is_one_windows_can_take(pc_and_pi):
+    for amount in (500, 0.2):
+        pc_and_pi.pc.actions.execute(Action("set_volume", {"direction": "up", "amount": amount}, from_model=True))
+    assert pc_and_pi.windows.asked == [("volume", {"direction": "up", "step": 100}),
+                                       ("volume", {"direction": "up", "step": 1})]
+
+
 def test_volume_on_pc_from_pi(pc_and_pi):
     result = pc_and_pi.pi.actions.execute(Action("set_volume", {"direction": "down", "where": "the pc"}))
     assert pc_and_pi.windows.asked == [("volume", {"direction": "down", "step": 10})]
