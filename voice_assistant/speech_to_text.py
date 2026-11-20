@@ -353,6 +353,19 @@ class NemotronTranscription:
         # Whether it was given any of the recording - which is only once the recording
         # has found the user talking (see recording.record_until_silence).
         self._speech = False
+        # How much of the recording Nemotron has been given, in samples, and how much it
+        # had been when its words last changed - see quiet_words. Counted in audio rather
+        # than clock time, so a Nemotron running behind doesn't look as if the user has
+        # gone quiet. The recording's thread reads them while _hear's changes them, so
+        # they're only touched under the lock.
+        self._words_lock = threading.Lock()
+        self._given = 0
+        self._changed_at = 0
+        self._word_heard = False
+        # Only _hear's thread touches these: the words as they were last looked at, and
+        # whether Nemotron has failed to say them - after which it isn't asked again.
+        self._last_words = ""
+        self._words_failed = False
         self._thread = threading.Thread(target=self._hear, name="nemotron", daemon=True)
         self._thread.start()
 
@@ -365,6 +378,22 @@ class NemotronTranscription:
         """
         self._speech = True
         self._waiting.put(audio)
+
+    def quiet_words(self) -> Optional[float]:
+        """
+        How long the words have been still - safe to ask from the recording's thread
+        while Nemotron is still working through it.
+
+        Returns:
+            None until a real word has been heard in this recording - words imagined in
+            noise, such as a lone "Thank you.", aren't one. After that, the seconds of
+            audio Nemotron has been given since its words last changed. Also None if
+            Nemotron can't say what it has heard so far.
+        """
+        with self._words_lock:
+            if not self._word_heard:
+                return None
+            return (self._given - self._changed_at) / RATE
 
     def finish(self, audio: np.ndarray, timeline=None, quiet_after: float = 0.0,
                wake_word: Optional[str] = None) -> Dict[str, Any]:
@@ -481,5 +510,36 @@ class NemotronTranscription:
                     self._text = nemotron.finish(stream)
                     return
                 nemotron.add(stream, piece)
+                self._note_words(nemotron, stream, len(piece))
         except Exception as e:
             self._failed = e
+
+    def _note_words(self, nemotron, stream, samples: int):
+        """
+        Notes what Nemotron has heard so far, after it's been given more of the recording.
+
+        Args:
+            nemotron: The Nemotron.
+            stream: Its stream for this recording.
+            samples: How many samples it was just given.
+        """
+        words = None
+        if not self._words_failed:
+            try:
+                words = nemotron.words(stream)
+            except Exception as e:
+                # Only the recording ending on its words is lost, not the transcript, so
+                # it's said once rather than after every piece, and it isn't asked again.
+                self._words_failed = True
+                logger.warning(f"Couldn't read what Nemotron has heard so far, so the recording can't "
+                               f"end on its words being still: {e}")
+        real = bool(words) and not _imagined(words)
+        with self._words_lock:
+            self._given += samples
+            if words is None:
+                return
+            if words != self._last_words:
+                self._last_words = words
+                self._changed_at = self._given
+            if real:
+                self._word_heard = True

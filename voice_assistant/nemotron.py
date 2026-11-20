@@ -67,6 +67,16 @@ class Nemotron:
         stream.accept_waveform(RATE, audio)
         self._work(stream)
 
+    def words(self, stream) -> str:
+        """
+        The words heard so far in a recording which isn't over, which can still change as
+        more of it is heard - the last of them especially.
+
+        Args:
+            stream: From start.
+        """
+        return str(self.recognizer.get_result(stream)).strip()
+
     def finish(self, stream) -> str:
         """
         The words, now the recording is over.

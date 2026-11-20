@@ -51,6 +51,9 @@ class FakeNemotron:
         # or to an exception for the next piece to raise.
         self.busy = None
         self.fail = None
+        # The words-so-far after each piece, as a list: the one at the stream's piece
+        # count, or the last once it's past the end - or None to hear no words yet.
+        self.script = None
 
     def start(self):
         self.streams.append([])
@@ -63,6 +66,11 @@ class FakeNemotron:
             failure, self.fail = self.fail, None
             raise failure
         stream.append(audio)
+
+    def words(self, stream):
+        if self.script is None or not stream:
+            return ""
+        return self.script[min(len(stream), len(self.script)) - 1]
 
     def finish(self, stream):
         self.finished.append(stream)
@@ -221,6 +229,135 @@ def test_a_recording_heard_in_time_means_nemotron_hasnt_hung(monkeypatch):
         assert not stt.hung
     finally:
         nemotron.let_go.set()
+
+
+# How long the words have been still, which a push-to-talk recording ends on.
+
+def _tenths(count):
+    """Pieces of a recording, each 0.1s of quiet - 1600 samples at 16kHz."""
+    return [np.zeros(1600, dtype=np.float32) for _ in range(count)]
+
+
+def _heard_pieces(nemotron, count):
+    """
+    A recording of count pieces, each 0.1s, given to a Nemotron and all taken by it.
+
+    Returns:
+        The transcription, cancelled so that its thread has been through every piece.
+    """
+    transcription = speech_to_text.NemotronSpeechToText(nemotron).listen()
+    for piece in _tenths(count):
+        transcription.add(piece)
+    transcription.cancel()
+    return transcription
+
+
+@pytest.mark.parametrize("script", [None, ["", "", ""], ["You"], ["", "Thank you."]])
+def test_quiet_words_is_none_until_a_word(script):
+    # Nothing heard yet, and words Nemotron imagines in noise, aren't a word to wait on
+    # the end of.
+    nemotron = FakeNemotron()
+    nemotron.script = script
+    assert _heard_pieces(nemotron, 5).quiet_words() is None
+
+
+def test_quiet_words_counts_audio_since_the_words_last_changed():
+    nemotron = FakeNemotron()
+    # The words change at the third piece and then stay as they are.
+    nemotron.script = ["", "", "Set"]
+    quiet = _heard_pieces(nemotron, 8).quiet_words()
+    assert quiet == pytest.approx(0.5, abs=0.01)
+
+
+def test_quiet_words_starts_again_when_the_words_change():
+    nemotron = FakeNemotron()
+    nemotron.script = ["", "", "Set", "Set a", "Set a", "Set a"]
+    # Changed last at the fourth piece, of eight.
+    assert _heard_pieces(nemotron, 8).quiet_words() == pytest.approx(0.4, abs=0.01)
+
+
+def test_quiet_words_is_nothing_while_the_words_are_still_changing():
+    nemotron = FakeNemotron()
+    nemotron.script = ["Set", "Set a", "Set a timer"]
+    assert _heard_pieces(nemotron, 3).quiet_words() == pytest.approx(0.0, abs=0.01)
+
+
+def test_a_word_heard_stays_heard_when_the_words_later_come_to_nothing_but_noise():
+    # Nemotron's words-so-far can be revised: a real word was still heard in this
+    # recording.
+    nemotron = FakeNemotron()
+    nemotron.script = ["Set", "You"]
+    assert _heard_pieces(nemotron, 5).quiet_words() == pytest.approx(0.3, abs=0.01)
+
+
+def _wait_for(condition, seconds=2.0):
+    import time
+
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.005)
+    return condition()
+
+
+def test_quiet_words_counts_audio_not_clock_time():
+    import threading
+    import time
+
+    nemotron = FakeNemotron()
+    nemotron.script = ["Set"]
+    transcription = speech_to_text.NemotronSpeechToText(nemotron).listen()
+    try:
+        first, *later = _tenths(3)
+        transcription.add(first)
+        assert _wait_for(lambda: transcription.quiet_words() is not None)
+        assert transcription.quiet_words() == pytest.approx(0.0, abs=0.01)
+
+        # Nemotron falls behind: the next pieces are in its queue, none of them taken.
+        nemotron.busy = threading.Event()
+        for piece in later:
+            transcription.add(piece)
+        time.sleep(0.3)
+        assert transcription.quiet_words() == pytest.approx(0.0, abs=0.01)
+
+        # And as it takes them, each one is 0.1s.
+        nemotron.busy.set()
+        assert _wait_for(lambda: transcription.quiet_words() == pytest.approx(0.2, abs=0.01))
+    finally:
+        nemotron.busy = None
+        transcription.cancel()
+
+
+class _WithoutWords(FakeNemotron):
+    """A Nemotron which can't say what it has heard so far."""
+
+    def __init__(self):
+        super().__init__()
+        self.asked = 0
+
+    def words(self, stream):
+        self.asked += 1
+        raise RuntimeError("no words so far")
+
+
+def test_a_nemotron_without_words_leaves_quiet_words_none(caplog):
+    nemotron = _WithoutWords()
+    transcription = speech_to_text.NemotronSpeechToText(nemotron).listen()
+    pieces = _tenths(5)
+    for piece in pieces:
+        transcription.add(piece)
+
+    with caplog.at_level("WARNING"):
+        heard = transcription.finish(np.concatenate(pieces))
+
+    assert transcription.quiet_words() is None
+    # The recording is heard as it was, the words at the end the same.
+    assert heard["text"] == "Set a timer for ten minutes."
+    assert len(nemotron.streams[0]) == 5
+    assert nemotron.finished == [nemotron.streams[0]]
+    # Said once, not after every piece.
+    assert len([record for record in caplog.records if "no words so far" in record.getMessage()]) == 1
 
 
 # A lone short word - "Pause.", "Wait.", "Play." - which Nemotron so often hears as nothing.
