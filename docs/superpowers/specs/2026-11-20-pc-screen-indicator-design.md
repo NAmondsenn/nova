@@ -136,7 +136,7 @@ These are told to the orb as they happen ("listening", "thinking", "speaking",
   size, alpha only inside the orb, premultiplication, each state differing, time
   moving it.
 
-### Settings (settings page, section Satellites, beside the search site)
+### Settings (settings page, section Satellites, after the search site and the microphone's mute minutes)
 
 | Setting | Choices | Default |
 |---|---|---|
