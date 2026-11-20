@@ -2942,17 +2942,37 @@ def test_the_press_chime_and_music_never_show_speaking(brain, make, pc, orbs):
     orb = made.orb
     made._pressed()
     assert wait_for(lambda: orb.shown == ["listening"])
-    # The press's own chime, from the satellite itself.
+    # The press's own chime, from the satellite itself, which never reaches the orb.
     assert made.speaker.files() == [os.path.join(made.sounds_folder, "listening.wav")]
+    brain.say("stop_listening")
+    assert wait_for(lambda: orb.shown == ["listening", "thinking"])
+
+    # Sent while the orb thinks, and not while it listens, which outranks speaking and
+    # would hide them: a sound which counted as Nova's words would show speaking now, and
+    # end the thinking. An announcement's chime is a sound; music is a stream, but not words.
     brain.say("play_sound", id="chime-1", name="listening.wav", volume=1.0, kind="announcement")
     say_a_reply(brain, id="music-1", kind="music")
     brain.say("stream_end", id="music-1")
     assert wait_for(lambda: {message["id"] for message in brain.messages("played")} == {"chime-1", "music-1"})
-    brain.say("stop_listening")
+    assert orb.shown == ["listening", "thinking"]
+
     brain.say("allow", kind="announcement")
     assert wait_for(lambda: orb.shown == ["listening", "thinking", "hidden"])
     time.sleep(0.2)
     assert orb.shown == ["listening", "thinking", "hidden"]
+
+
+def test_a_chime_and_music_with_no_press_show_nothing(brain, make, pc, orbs):
+    made = pressable(brain, make)
+    orb = made.orb
+    brain.say("play_sound", id="chime-1", name="listening.wav", volume=1.0, kind="announcement")
+    say_a_reply(brain, id="music-1", kind="music")
+    assert wait_for(lambda: len(made.speaker.playing) == 2 and made.speaker.streams()[0].pieces)
+    # Played out, as they would be - each reported to the brain once it has.
+    for playback in made.speaker.playing:
+        playback.finish()
+    assert wait_for(lambda: {message["id"] for message in brain.messages("played")} == {"chime-1", "music-1"})
+    assert orb.shown == []
 
 
 def test_a_spoken_announcement_shows_speaking(brain, make, pc, orbs):
