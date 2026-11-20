@@ -14,6 +14,7 @@ waiting for a satellite which isn't there.
 """
 
 import itertools
+import json
 import logging
 import os
 import queue
@@ -56,6 +57,17 @@ _playback_ids = itertools.count(1)
 # small file, so a satellite which hasn't said by now is not going to.
 NOTE_WAIT = 5.0
 
+# How long to wait for a satellite to say it has done what a computer request asked, in
+# seconds. Opening or closing a window is quick, so one that hasn't said by now is not going to.
+COMPUTER_WAIT = 5.0
+
+# The most apps, and the most windows, taken from a satellite's list, and the longest an app's
+# id and any name may be. More than a person has on a computer, so the cap is only a guard.
+MOST_APPS = 3000
+MOST_WINDOWS = 200
+MOST_APP_ID = 64
+MOST_NAME = 200
+
 # The most of a note's title which is sent. A title is in a line of JSON, which may only be
 # protocol.MAX_LINE long, and takes up to 12 bytes a character there (an emoji, escaped as
 # two surrogates): 320 of them still fit. The satellite cuts the title to MOST_TITLE once
@@ -66,6 +78,9 @@ MOST_TITLE_SENT = 4 * MOST_TITLE
 # brain runs for the reason _playback_ids is, so a late answer from the last connection
 # is never taken for one to a note on this.
 _note_ids = itertools.count(1)
+
+# Numbers for the requests the brain makes of a satellite's computer, counted for the same reason.
+_computer_ids = itertools.count(1)
 
 # Numbers for the answers the brain asks a satellite to send, said with listen and with
 # the stop_listening which ends one - "listen-1" on, never a satellite's "wake-1", and
@@ -500,8 +515,8 @@ class RemoteSpeaker:
         self._check_speaking()
 
 
-class _NoteWait:
-    """One note the brain has asked a satellite to save, and what the satellite said of it."""
+class _Wait:
+    """One request the brain has made of a satellite - to save a note, or to act on its computer - and what it said."""
 
     def __init__(self):
         # Set once the satellite has answered, or has gone.
@@ -542,6 +557,14 @@ class RemoteSatellite:
         # Whether it shows its music in Windows' media controls, and passes on their
         # buttons - False from a satellite which doesn't say. See docs/decisions/0031.
         self.media_controls: bool = bool(hello.get("media_controls", False))
+        # Whether it can open and close things on its computer, and has a system volume -
+        # False from a satellite which doesn't say.
+        self.opens: bool = bool(hello.get("opens", False))
+        self.system_volume: bool = bool(hello.get("system_volume", False))
+        # Set by the brain: called with (this satellite's name, its apps as [{"id", "name",
+        # "kind"}]) and (its name, its open windows' names) each time the satellite sends them.
+        self.on_apps: Optional[Callable[[str, List[Dict]], None]] = None
+        self.on_windows: Optional[Callable[[str, List[str]], None]] = None
         self.speaker = RemoteSpeaker(self.send, self.sample_rate)
         # Each wake word heard, in order: {"talked_over": whether a reply was playing,
         # "pre_roll": how many samples of the feed are from before the wake word - or
@@ -567,9 +590,10 @@ class RemoteSatellite:
         self._feed: Optional[AudioFeed] = None
         self._feed_recording: Optional[str] = None
         self._last_heard = monotonic()
-        # The notes asked to be saved which haven't been answered, by id.
+        # The requests (notes to save, things to do on the computer) which haven't been
+        # answered, by id - "note-N" or "computer-N".
         self._notes_lock = threading.Lock()
-        self._note_waits: Dict[str, _NoteWait] = {}
+        self._note_waits: Dict[str, _Wait] = {}
         self._handlers: Dict[str, Callable[[Dict, bytes], None]] = {
             "ping": lambda message, payload: self.send("pong"),
             "wake": self._woken,
@@ -580,6 +604,9 @@ class RemoteSatellite:
             "away": self._away,
             "note_saved": self._note_saved,
             "media": self._media,
+            "apps": self._apps,
+            "windows": self._windows,
+            "computer_done": self._computer_done,
         }
 
     @property
@@ -791,20 +818,53 @@ class RemoteSatellite:
             {"file": "Bins.txt"}, the name of the file it made, or {"error": sentence},
             the reason it didn't, to say - or None if it didn't answer in time, or went.
         """
-        id = f"note-{next(_note_ids)}"
-        waiting = _NoteWait()
+        # The text goes as the payload, not in the line of JSON, which is only
+        # protocol.MAX_LINE long. A character which can't be encoded, from a broken
+        # reply, is for the satellite to refuse as it refuses any other note.
+        return self._ask(f"note-{next(_note_ids)}", "save_note", text.encode("utf-8", "surrogatepass"), wait,
+                         title=title[:MOST_TITLE_SENT])
+
+    def ask_computer(self, action: str, wait: float = COMPUTER_WAIT, **fields) -> Optional[Dict]:
+        """
+        Has the satellite do something on its computer, and waits for it to say it has.
+        For a satellite whose opens (or, for "volume", system_volume) is True.
+
+        Args:
+            action: One of protocol.COMPUTER_ACTIONS.
+            wait: The longest to wait for its answer, in seconds.
+            **fields: What the action needs, e.g. app="fortnite" - short, so sent in the
+                line of JSON.
+
+        Returns:
+            What it said, as {"said": sentence} or {"error": sentence} and, for volume,
+            "level" and "muted" - or None if it didn't answer in time, or went.
+        """
+        return self._ask(f"computer-{next(_computer_ids)}", "computer", b"", wait, action=action, **fields)
+
+    def _ask(self, id: str, kind: str, payload: bytes, wait: float, **fields) -> Optional[Dict]:
+        """
+        Sends a request and waits for the satellite's answer to it.
+
+        Args:
+            id: What the answer will carry, unique across connections.
+            kind: The message to send.
+            payload: Its payload.
+            wait: The longest to wait, in seconds.
+            **fields: The rest of the message.
+
+        Returns:
+            The answer, or None if there wasn't one in time, the message couldn't be sent
+            or the satellite went.
+        """
+        waiting = _Wait()
         with self._notes_lock:
             # Checked under the lock _lost takes after it has made this False, so a
-            # note is never left waiting on a satellite which has already gone.
+            # request is never left waiting on a satellite which has already gone.
             if not self._connected:
                 return None
             self._note_waits[id] = waiting
         try:
-            # The text goes as the payload, not in the line of JSON, which is only
-            # protocol.MAX_LINE long. A character which can't be encoded, from a broken
-            # reply, is for the satellite to refuse as it refuses any other note.
-            if not self.send("save_note", text.encode("utf-8", "surrogatepass"), id=id,
-                             title=title[:MOST_TITLE_SENT]):
+            if not self.send(kind, payload, id=id, **fields):
                 return None
             waiting.arrived.wait(wait)
             # Whatever came, even as the wait ran out.
@@ -890,11 +950,75 @@ class RemoteSatellite:
                            f"or why not")
             return
         with self._notes_lock:
-            waiting = self._note_waits.get(message.get("id"))
+            waiting = self._waiting_for("note-", message.get("id"))
         # None once the wait has been given up, which a late answer is no reason to mind.
         if waiting is not None:
             waiting.answer = answer
             waiting.arrived.set()
+
+    def _waiting_for(self, prefix: str, id) -> Optional[_Wait]:
+        """The request an answer is for, if it's still waited on - and of the kind the answer is for. Call with _notes_lock held."""
+        if isinstance(id, str) and id.startswith(prefix):
+            return self._note_waits.get(id)
+        return None
+
+    def _computer_done(self, message: Dict, payload: bytes):
+        """The satellite's answer to a computer request: what it said, and for volume the level and mute."""
+        said, error, level, muted = message.get("said"), message.get("error"), message.get("level"), message.get("muted")
+        answer = {}
+        if isinstance(said, str):
+            answer["said"] = said
+        if isinstance(error, str):
+            answer["error"] = error
+        if isinstance(level, int) and not isinstance(level, bool):
+            answer["level"] = level
+        if isinstance(muted, bool):
+            answer["muted"] = muted
+        with self._notes_lock:
+            waiting = self._waiting_for("computer-", message.get("id"))
+        # None once the wait has been given up, which a late answer is no reason to mind.
+        if waiting is not None:
+            waiting.answer = answer
+            waiting.arrived.set()
+
+    def _list_from_payload(self, what: str, payload: bytes) -> Optional[list]:
+        """The JSON list a satellite sent as a payload - None, with a warning, if it didn't say it opens or this isn't one."""
+        if not self.opens:
+            logger.warning(f"The {self.name} satellite sent its {what} without saying it opens things")
+            return None
+        try:
+            sent = json.loads(payload.decode("utf-8"))
+        except ValueError:
+            sent = None
+        if not isinstance(sent, list):
+            logger.warning(f"The {self.name} satellite sent its {what} as something which isn't a list")
+            return None
+        return sent
+
+    def _apps(self, message: Dict, payload: bytes):
+        """The apps the satellite can open, from one which said it opens things."""
+        sent = self._list_from_payload("apps", payload)
+        if sent is None:
+            return
+        apps = [app for app in sent[:MOST_APPS]
+                if isinstance(app, dict) and isinstance(app.get("id"), str) and len(app["id"]) <= MOST_APP_ID
+                and isinstance(app.get("name"), str) and 1 <= len(app["name"]) <= MOST_NAME
+                and app.get("kind") in protocol.APP_KINDS]
+        if len(apps) < len(sent):
+            logger.warning(f"The {self.name} satellite sent {len(sent) - len(apps)} apps which were dropped")
+        if self.on_apps is not None:
+            self.on_apps(self.name, [{key: app[key] for key in ("id", "name", "kind")} for app in apps])
+
+    def _windows(self, message: Dict, payload: bytes):
+        """The names of the windows open on the satellite, from one which said it opens things."""
+        sent = self._list_from_payload("windows", payload)
+        if sent is None:
+            return
+        windows = [each for each in sent[:MOST_WINDOWS] if isinstance(each, str) and len(each) <= MOST_NAME]
+        if len(windows) < len(sent):
+            logger.warning(f"The {self.name} satellite sent {len(sent) - len(windows)} window names which were dropped")
+        if self.on_windows is not None:
+            self.on_windows(self.name, windows)
 
     def _media(self, message: Dict, payload: bytes):
         """A button of Windows' media controls, from a satellite which said it has them."""
@@ -946,7 +1070,7 @@ class RemoteSatellite:
         self._connected = False
         self._end_feed()
         self.speaker._gone()
-        # Without an answer, which is how save_note tells it was the satellite going.
+        # Without an answer, which is how a request tells it was the satellite going.
         with self._notes_lock:
             waiting = list(self._note_waits.values())
         for each in waiting:
