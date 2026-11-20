@@ -410,3 +410,27 @@ Settling, under the service's one lock, then outside it: the first answer wins a
 - [ ] **Step 4: Commit.** "Decision 0036: approval for big actions" (with the 0034, checklist and roadmap changes).
 
 Deploy is not part of this plan. His named jobs after review: push to GitHub's main; on the brain, install `requirements-backend.txt` (for `cryptography`) and restart `nova-backend`; on the PC, `scripts/deploy_pc.sh` with `requirements-pc.txt` (for the Hello package); then the hand checks above, the passkey first.
+
+### Task 13: Find my phone rings through Google Find My, and stops by voice
+
+His ruling (20 Nov): "find my phone" uses Google Find My Device's Play sound, as Home Assistant has it, and he can stop it through Nova by voice. Separate from approvals; same deploy.
+
+Facts (read live on 20 Nov): the HACS integration `googlefindmy` gives each device `button.<device>_play_sound`, `button.<device>_stop_sound`, `button.<device>_locate_now` and `device_tracker.<device>`, e.g. devices "Galaxy S25 Ultra", "Galaxy Tab S11 Ultra" and "Nathan's Wallet" (a tracker tag). The Home Assistant app's devices (today's `AppDevice`, `home.app_devices()`) are separate HA devices of the same phone.
+
+**Files:**
+- Modify: `voice_assistant/devices.py` (a `FindMyDevice` discovered at run time), `voice_assistant/home_assistant.py` (`find_my_devices() -> List[Dict]`: every device with a `googlefindmy` play_sound button, with its name, play/stop button ids and tracker), `voice_assistant/actions.py` (`find_device` rings through Find My first; new tool `stop_finding(device?)`), `voice_assistant/intents.py` (the rules)
+- Test: `tests/test_devices.py`, `tests/test_actions.py`, `tests/test_intents.py`
+
+**Interfaces / behaviour:**
+- Matching what was said to a Find My device: discovered at run time from the integration's entities (HA-first, no names in code). "phone" and "tablet" map to the Find My device that is the same physical device as the HA app device found today (match their names by plain words, e.g. both contain "s25 ultra"); a Find My device with no app device is found by its own name's words ("wallet", "keys"). Several fits say "Which one: A or B?" as today.
+- Ringing: press `<device>_play_sound`; say "Ringing your phone." (as now). If Find My has no device for it, or the press fails or HA can't reach Google, fall back to today's app notification ring (`_ring`), and log which was used. The Mac keeps the notification ring.
+- "Where's my X" keeps today's answer from the tracker it already uses; a Find My-only device ("where's my wallet") answers from its `device_tracker`, private as now (never logged).
+- Stopping: `stop_finding(device?)` presses `<device>_stop_sound` for the device named, else every Find My device Nova rang in the last 10 minutes; says "Stopped." or why not. Local rules, whole request only: `stop ringing( my| the)? <device>?`, `stop (the |my )?<device>( ringing)?`, `found (it|my <device>)`, `(i've|i have) found (it|my <device>)`. Bare "stop" is NOT taken (it stays the stop word for alarms and music).
+- Intents: FOUND_DEVICE gains the words of Find My devices' names at run time (a hook from the session, like names_satellite), so "find my wallet" and "ring my wallet" match; "phone|tablet|mac|laptop" stay.
+- Claude's `find_device` description mentions any device found in Home Assistant's Find My, and `stop_finding` is offered with it.
+
+- [ ] **Step 1: Write the failing tests**: `test_find_my_devices_discovered_from_the_integration`; `test_phone_rings_through_find_my`; `test_falls_back_to_the_app_notification_when_find_my_fails`; `test_mac_still_rings_by_notification`; `test_wallet_found_and_rung_by_its_name`; `test_stop_presses_stop_sound_for_what_was_rung`; `test_found_it_stops_it`; `test_bare_stop_is_not_taken`; `test_where_is_my_wallet_is_private`.
+- [ ] **Step 2:** Run them on the Pi: fail.
+- [ ] **Step 3:** Implement as above.
+- [ ] **Step 4:** Run the three files London and UTC, ruff: pass.
+- [ ] **Step 5:** Commit "Find my phone through Google Find My, and stop it by voice". Add hand checks to Task 12's checklist entries: ring the phone (makes sound in his room, warn first), "stop ringing my phone", "found it", ring the wallet.
