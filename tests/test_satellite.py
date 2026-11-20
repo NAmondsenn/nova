@@ -2875,3 +2875,319 @@ def test_the_system_volume_is_closed_with_the_satellite(brain, make, pc):
     made.stop()
     assert wait_for(lambda: made.exited)
     assert volume.closed
+
+
+# Nova's orb on the PC's screen - see voice_assistant/screen_orb.py
+
+class FakeScreenOrb:
+    """Stands in for ScreenOrb, keeping what it was asked to show and configure - available unless a test says not."""
+
+    available = True
+    made = []
+
+    def __init__(self):
+        self.shown = []
+        self.configured = []
+        self.closed = False
+        FakeScreenOrb.made.append(self)
+
+    def show(self, state):
+        self.shown.append(state)
+
+    def configure(self, on, place, size):
+        self.configured.append((on, place, size))
+
+    def close(self):
+        self.closed = True
+
+
+class UnavailableScreenOrb(FakeScreenOrb):
+    available = False
+
+
+@pytest.fixture
+def orbs(monkeypatch):
+    """Has satellites make a fake ScreenOrb, and gives the list of those made."""
+    FakeScreenOrb.made = []
+    monkeypatch.setattr(satellite, "ScreenOrb", FakeScreenOrb)
+    return FakeScreenOrb.made
+
+
+def say_a_reply(brain, id="reply-1", kind="reply"):
+    """The brain starts streaming some words, of a kind - which end with stream_end."""
+    brain.say("play_stream", id=id, rate=22050, channels=1, volume=1.0, kind=kind, paused=False)
+    brain.say("stream_audio", np.array([1, 2, 3], np.int16).tobytes(), id=id)
+
+
+def test_a_press_shows_listening_thinking_speaking_then_hides(brain, make, pc, orbs):
+    made = pressable(brain, make)
+    orb = made.orb
+    assert orb is orbs[0]
+    made._pressed()
+    assert wait_for(lambda: orb.shown == ["listening"])
+    brain.say("stop_listening")
+    assert wait_for(lambda: orb.shown == ["listening", "thinking"])
+    say_a_reply(brain)
+    assert wait_for(lambda: orb.shown == ["listening", "thinking", "speaking"])
+    brain.say("stream_end", id="reply-1")
+    assert wait_for(lambda: orb.shown == ["listening", "thinking", "speaking", "hidden"])
+    brain.say("allow", kind="reply")
+    # Nothing more to show: the turn's end finds the orb already hidden.
+    time.sleep(0.2)
+    assert orb.shown == ["listening", "thinking", "speaking", "hidden"]
+
+
+def test_the_press_chime_and_music_never_show_speaking(brain, make, pc, orbs):
+    made = pressable(brain, make)
+    orb = made.orb
+    made._pressed()
+    assert wait_for(lambda: orb.shown == ["listening"])
+    # The press's own chime, from the satellite itself.
+    assert made.speaker.files() == [os.path.join(made.sounds_folder, "listening.wav")]
+    brain.say("play_sound", id="chime-1", name="listening.wav", volume=1.0, kind="announcement")
+    say_a_reply(brain, id="music-1", kind="music")
+    brain.say("stream_end", id="music-1")
+    assert wait_for(lambda: {message["id"] for message in brain.messages("played")} == {"chime-1", "music-1"})
+    brain.say("stop_listening")
+    brain.say("allow", kind="announcement")
+    assert wait_for(lambda: orb.shown == ["listening", "thinking", "hidden"])
+    time.sleep(0.2)
+    assert orb.shown == ["listening", "thinking", "hidden"]
+
+
+def test_a_spoken_announcement_shows_speaking(brain, make, pc, orbs):
+    made = pressable(brain, make)
+    orb = made.orb
+    say_a_reply(brain, id="announcement-1", kind="announcement")
+    assert wait_for(lambda: orb.shown == ["speaking"])
+    brain.say("stream_end", id="announcement-1")
+    assert wait_for(lambda: orb.shown == ["speaking", "hidden"])
+
+
+def test_the_orb_stops_speaking_before_the_brain_hears_the_reply_has_played(brain, make, pc, orbs):
+    # The brain answers "played" with whatever comes next, so the orb must already be told.
+    made = pressable(brain, make)
+    orb = made.orb
+    seen = []
+    send = made.link.send
+
+    def send_noting_the_orb(message_type, *args, **fields):
+        if message_type == "played":
+            seen.append(list(orb.shown))
+        return send(message_type, *args, **fields)
+
+    made.link.send = send_noting_the_orb
+    say_a_reply(brain)
+    assert wait_for(lambda: orb.shown == ["speaking"])
+    brain.say("stream_end", id="reply-1")
+    assert wait_for(lambda: seen)
+    assert seen == [["speaking", "hidden"]]
+
+
+def test_a_follow_up_shows_listening(brain, make, pc, orbs):
+    made = pressable(brain, make)
+    orb = made.orb
+    made._pressed()
+    assert wait_for(lambda: orb.shown == ["listening"])
+    brain.say("stop_listening")
+    say_a_reply(brain)
+    brain.say("stream_end", id="reply-1")
+    assert wait_for(lambda: orb.shown == ["listening", "thinking", "speaking", "hidden"])
+    assert wait_for(lambda: made._recording is None)
+
+    # Nova asks a question, and the answer is heard.
+    brain.say("listen", recording="listen-1")
+    assert wait_for(lambda: orb.shown[-1] == "listening")
+    assert orb.shown == ["listening", "thinking", "speaking", "hidden", "listening"]
+    brain.say("stop_listening", recording="listen-1")
+    assert wait_for(lambda: orb.shown[-1] == "thinking")
+
+
+def test_a_second_press_shows_thinking(brain, make, pc, orbs):
+    made = pressable(brain, make)
+    orb = made.orb
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    made._pressed()
+    assert wait_for(lambda: orb.shown == ["listening", "thinking"])
+    assert wait_for(lambda: made._recording is None)
+    # The recording's end, which the main loop sees later, doesn't change it.
+    time.sleep(0.1)
+    assert orb.shown == ["listening", "thinking"]
+
+
+def test_a_recording_which_reaches_its_limit_shows_thinking(brain, make, pc, orbs):
+    made = pressable(brain, make)
+    orb = made.orb
+    made.longest_request = 1
+    made._pressed()
+    assert wait_for(lambda: brain.messages("audio_end"))
+    assert brain.messages("audio_end") == [{"type": "audio_end", "reason": "limit"}]
+    assert wait_for(lambda: made._recording is None)
+    assert orb.shown == ["listening", "thinking"]
+
+
+def test_a_turn_with_nothing_to_say_does_not_leave_the_orb_thinking(brain, make, pc, orbs):
+    # The brain ends such a turn with an allow straight after its stop_listening, on the
+    # same thread - which can come before the main loop has even seen the recording is over.
+    # So the recording's end is told where it's set, not once the main loop notices.
+    made = pressable(brain, make)
+    orb = made.orb
+    holding, blocked, let_go = threading.Event(), threading.Event(), threading.Event()
+    listen = made.microphone.listen
+
+    def listen_holding(start=None):
+        reader = listen(start)
+        read = reader.read
+
+        def read_holding(count):
+            audio = read(count)
+            if holding.is_set():
+                blocked.set()
+                let_go.wait(5)
+            return audio
+
+        reader.read = read_holding
+        return reader
+
+    made.microphone.listen = listen_holding
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    holding.set()
+    try:
+        # The main loop is now stuck, with the recording set but not yet seen to be over.
+        assert blocked.wait(5)
+        brain.say("stop_listening")
+        brain.say("allow", kind="reply")
+        assert wait_for(lambda: orb.shown == ["listening", "thinking", "hidden"])
+    finally:
+        let_go.set()
+    assert wait_for(lambda: made._recording is None and not made.microphone.holds)
+    time.sleep(0.1)
+    assert orb.shown == ["listening", "thinking", "hidden"]
+
+
+def test_the_screen_orb_setting_reaches_the_orb(brain, make, pc, orbs, caplog):
+    made = pressable(brain, make)
+    with caplog.at_level("WARNING", logger="satellite"):
+        brain.say("state", volumes={}, muted=False, screen_orb={"on": False, "place": "top left", "size": "small"})
+        assert wait_for(lambda: made.orb.configured == [(False, "top left", "small")])
+        assert not [record for record in caplog.records if "screen_orb" in record.getMessage()]
+
+        # One which makes no sense is refused, and said once however often the brain repeats it.
+        for muted in (True, False, True):
+            brain.say("state", volumes={}, muted=muted, screen_orb={"on": True, "place": "middle", "size": "small"})
+            assert wait_for(lambda: made.state.muted is muted)
+
+    assert made.orb.configured == [(False, "top left", "small")]
+    said = [record.getMessage() for record in caplog.records if "screen_orb" in record.getMessage()]
+    assert len(said) == 1 and "middle" in said[0]
+
+
+@pytest.mark.parametrize("sent", [{"screen_orb": "on"}, {"screen_orb": None}, {"screen_orb": []}, {"screen_orb": {}},
+                                  {"screen_orb": {"on": "yes", "place": "top left", "size": "small"}},
+                                  {"screen_orb": {"on": 1, "place": "top left", "size": "small"}},
+                                  {"screen_orb": {"on": True, "place": "top left"}},
+                                  {"screen_orb": {"on": True, "place": "top left", "size": "huge"}},
+                                  {"screen_orb": {"on": True, "place": "top left", "size": ["small"]}},
+                                  {"screen_orb": {"on": True, "place": 3, "size": "small"}},
+                                  {}],
+                         ids=["text", "null", "list", "empty", "text_on", "number_on", "no_size", "bad_size",
+                              "list_size", "number_place", "none"])
+def test_a_screen_orb_setting_which_makes_no_sense_is_ignored(brain, make, pc, orbs, sent):
+    made = pressable(brain, make)
+    brain.say("state", volumes={}, muted=True, **sent)
+    assert wait_for(lambda: made.state.muted is True)
+    assert made.orb.configured == []
+    # And a good one afterwards still counts, so the bad one didn't wedge the state.
+    brain.say("state", volumes={}, muted=False, screen_orb={"on": True, "place": "top right", "size": "large"})
+    assert wait_for(lambda: made.orb.configured == [(True, "top right", "large")])
+
+
+def test_losing_the_brain_hides_the_orb(brain, make, pc, orbs):
+    made = pressable(brain, make)
+    orb = made.orb
+    made._pressed()
+    assert wait_for(lambda: orb.shown == ["listening"])
+    brain.drop()
+    assert wait_for(lambda: orb.shown == ["listening", "hidden"])
+    # The recording which was being sent ends too, and has nothing more to say.
+    assert wait_for(lambda: made._recording is None)
+    time.sleep(0.1)
+    assert orb.shown == ["listening", "hidden"]
+
+
+def test_losing_the_brain_while_nova_thinks_or_speaks_hides_the_orb(brain, make, pc, orbs):
+    made = pressable(brain, make)
+    orb = made.orb
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    brain.say("stop_listening")
+    say_a_reply(brain)
+    assert wait_for(lambda: orb.shown == ["listening", "thinking", "speaking"])
+    brain.drop()
+    assert wait_for(lambda: orb.shown[-1] == "hidden")
+    time.sleep(0.1)
+    assert orb.shown == ["listening", "thinking", "speaking", "hidden"]
+
+
+def test_no_orb_on_a_wake_word_satellite_or_off_windows(brain, make, pc, orbs, monkeypatch):
+    # The wake word, on Windows: not the PC, which is pressed.
+    made = make(start=False)
+    assert made.wake is not None and made.orb is None and orbs == []
+    # Pressed, but not on Windows.
+    monkeypatch.setattr(satellite, "_on_windows", lambda: False)
+    made = make(start=False, satellite={"trigger": "push_to_talk"})
+    assert made.wake is None and made.orb is None and orbs == []
+    # And on Windows, pressed, it has one.
+    monkeypatch.setattr(satellite, "_on_windows", lambda: True)
+    made = make(start=False, satellite={"trigger": "push_to_talk"})
+    assert made.orb is orbs[0] and len(orbs) == 1
+
+
+def test_a_wake_word_satellite_ignores_the_screen_orb_setting(brain, make, pc, orbs, caplog):
+    made = make()
+    assert wait_for(lambda: connected(made) and made.wake.listening)
+    with caplog.at_level("WARNING", logger="satellite"):
+        brain.say("state", volumes={}, muted=True, screen_orb={"on": True, "place": "middle", "size": "small"})
+        assert wait_for(lambda: made.wake.muted is True)
+        brain.say("state", volumes={}, muted=False, screen_orb={"on": True, "place": "middle", "size": "small"})
+        assert wait_for(lambda: made.wake.muted is False)
+    assert not [record for record in caplog.records if "screen_orb" in record.getMessage()]
+    # Its recordings go as ever, with nothing to show them on.
+    made.wake.say()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    brain.say("stop_listening")
+
+
+def test_an_unavailable_orb_changes_nothing(brain, make, pc, monkeypatch):
+    FakeScreenOrb.made = []
+    monkeypatch.setattr(satellite, "ScreenOrb", UnavailableScreenOrb)
+    made = pressable(brain, make)
+    (orb,) = FakeScreenOrb.made
+    assert made.orb is None
+
+    brain.say("state", volumes={}, muted=False, screen_orb={"on": True, "place": "top left", "size": "small"})
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    brain.say("stop_listening")
+    say_a_reply(brain)
+    assert wait_for(lambda: made.speaker.streams() and made.speaker.streams()[0].pieces)
+    brain.say("stream_end", id="reply-1")
+    assert wait_for(lambda: brain.messages("played"))
+    assert not brain.messages("played")[0]["stopped"]
+    brain.say("allow", kind="reply")
+    assert wait_for(lambda: made._recording is None)
+    assert orb.shown == [] and orb.configured == []
+
+
+def test_the_orb_is_closed_with_the_satellite(brain, make, pc, orbs):
+    made = pressable(brain, make)
+    orb = made.orb
+    made._pressed()
+    assert wait_for(lambda: orb.shown == ["listening"])
+    made.stop()
+    assert wait_for(lambda: made.exited)
+    assert orb.closed
+    # Given up on part way, the recording leaves nothing showing.
+    assert orb.shown[-1] == "hidden"

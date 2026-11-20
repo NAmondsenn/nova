@@ -36,9 +36,11 @@ from voice_assistant.logging_setup import setup_logging
 from voice_assistant.machine import downloads_folder, machine_kind
 from voice_assistant.microphone import RATE, Microphone
 from voice_assistant.notes import NoteRefused, save_note
+from voice_assistant.orb_drawing import SIZES
 from voice_assistant.pc_volume import SystemVolume
 from voice_assistant.press import PressListener
 from voice_assistant.satellite_link import SILENT_FOR, SatelliteLink
+from voice_assistant.screen_orb import PLACES, OrbStates, ScreenOrb
 from voice_assistant.speaker import BLOCK_SECONDS, Playback, Speaker
 from voice_assistant.timeline import Timeline
 from voice_assistant.wake_clips import WakeClips, clip_start
@@ -154,6 +156,11 @@ class _FromBrain:
         self.kind = kind
         self.channels = channels
         self.pieces = pieces
+
+    @property
+    def spoken(self) -> bool:
+        """Whether it is Nova's own voice - a streamed reply or announcement, not a chime or music."""
+        return self.kind in ("reply", "announcement") and self.pieces is not None
 
     def let_go(self):
         """Ends a stream's pieces, which would otherwise wait for more for good."""
@@ -346,6 +353,18 @@ class Satellite:
             self.opens = pc_windows.load()
             volume = SystemVolume()
             self.system_volume = volume if volume.available else None
+        # Nova's orb on the PC's screen, while it listens, thinks and speaks there - only
+        # on a push-to-talk satellite on Windows, which is the PC, and only where its
+        # window can be made, else None and nothing is shown. What it shows is worked out
+        # by _orb_states from what the satellite tells it as each thing happens, and
+        # nothing the satellite does waits on the orb or fails because of it.
+        self.orb: Optional[ScreenOrb] = None
+        if self.push_to_talk and _on_windows():
+            orb = ScreenOrb()
+            self.orb = orb if orb.available else None
+        self._orb_states = OrbStates(self._show_orb)
+        # The last screen_orb from the brain which made no sense, as it was logged.
+        self._refused_orb: Optional[str] = None
         # The things this computer can open, by id, with what launches each - which never
         # leaves it. Built on a thread of its own, and read by the computer requests'.
         self._apps: Dict[str, Dict] = {}
@@ -572,6 +591,9 @@ class Satellite:
             recording = self._recording
             if recording is not None and not recording.is_set():
                 recording.pressed = True
+                # Before it is set, so the orb is thinking before the main loop sends the
+                # recording's end, and so before the brain can answer it.
+                self._orb_states.listening_ended(True)
                 recording.set()
                 # As _stop_listening does, so losing the brain now says it can't be reached.
                 self._turn_open = True
@@ -747,6 +769,7 @@ class Satellite:
         sizes = itertools.chain([pre_roll] if pre_roll else [], itertools.repeat(round(PIECE_SECONDS * RATE)))
         sent = 0
         try:
+            self._orb_states.listening_started()
             if self.push_to_talk:
                 # Nothing from before the microphone opened: what it still holds from
                 # then is the last recording's.
@@ -772,6 +795,7 @@ class Satellite:
                         # may have ended it since, with nothing to say.
                         if not stopped.is_set():
                             self._turn_open = True
+                            self._orb_states.listening_ended(True)
                     self.link.send("audio_end", reason="limit")
                     return "limit"
         except BaseException:
@@ -780,6 +804,11 @@ class Satellite:
             self.link.send("audio_end", reason="cancelled")
             raise
         finally:
+            # A recording which ended as it should - the brain's stop, a second press or the
+            # limit - was told to the orb where it was ended, so this changes nothing for
+            # it. It ends one which was dropped or given up on, which leaves Nova nothing
+            # to work on. First, so whatever fails below, the orb isn't left listening.
+            self._orb_states.listening_ended(False)
             self.microphone.release()
             with self._lock:
                 if self._recording is stopped:
@@ -843,6 +872,11 @@ class Satellite:
         said = said if isinstance(said, str) else None
         with self._lock:
             if self._recording is not None and (said is None or said in self._recording.ids):
+                # Before it is set, and here rather than once the main loop sees it's
+                # over: the brain's allow, for a turn with nothing to say, follows on this
+                # thread within milliseconds, and the main loop can be a piece of audio
+                # behind. Told after it, the orb would be left thinking.
+                self._orb_states.listening_ended(True)
                 self._recording.set()
                 # Here rather than once the main loop sees it's stopped, which can be
                 # after the brain's allow has arrived, when it has nothing to say.
@@ -857,6 +891,8 @@ class Satellite:
             if self._turn_open:
                 self._save_timeline()
             self._turn_open = False
+        # A turn which said nothing is over, so the orb isn't left waiting for its words.
+        self._orb_states.turn_ended()
         self.speaker.allow(message["kind"])
 
     def _play_sound(self, message: Dict, payload: bytes):
@@ -960,6 +996,10 @@ class Satellite:
             self._refused_longest = ascii(longest)
             logger.warning(f"The brain's longest_request makes no sense, so a recording still lasts up to "
                            f"{self.longest_request:g} seconds: {ascii(longest)[:80]}")
+        # The orb's settings come with the state of a push-to-talk satellite, as the longest
+        # request does - and one the orb can't take is left, the same way.
+        if self.orb is not None:
+            self._take_orb_setting(message.get("screen_orb"))
         # A push-to-talk satellite has no wake word to tune, to check a voice for or to
         # note an unmute for: only the mute, which the state copy has just taken.
         if self.wake is None:
@@ -982,6 +1022,33 @@ class Satellite:
         if self.wake.muted and not self.state.muted:
             self._unmuted_at = self.microphone.position + round(IN_FLIGHT_SECONDS * RATE)
         self.wake.set_muted(self.state.muted)
+
+    def _take_orb_setting(self, setting):
+        """
+        Passes the orb the settings the brain sent for it, if they make sense.
+
+        Args:
+            setting: The state's screen_orb, which should be {"on": a bool, "place": one of
+                PLACES, "size": one of SIZES}. None when the brain doesn't send it, which
+                is nothing to say. Anything else is left alone and logged, once for each
+                such value, as the brain repeats it with every state.
+        """
+        if setting is None:
+            return
+        if (isinstance(setting, dict) and isinstance(setting.get("on"), bool)
+                and isinstance(setting.get("place"), str) and setting["place"] in PLACES
+                and isinstance(setting.get("size"), str) and setting["size"] in SIZES):
+            self.orb.configure(setting["on"], setting["place"], setting["size"])
+        elif ascii(setting) != self._refused_orb:
+            self._refused_orb = ascii(setting)
+            logger.warning(f"The brain's screen_orb makes no sense, so the orb stays as it was: "
+                           f"{ascii(setting)[:80]}")
+
+    def _show_orb(self, state: str):
+        """Has the orb show a state, which OrbStates works out. Never waits - see ScreenOrb."""
+        orb = self.orb
+        if orb is not None:
+            orb.show(state)
 
     def _check_voice_at(self, sureness: Optional[float]):
         """
@@ -1246,6 +1313,10 @@ class Satellite:
         """Keeps one of the brain's playbacks by its id, and reports on it until it ends."""
         with self._lock:
             self._playing[id] = playing
+        # Here, on the link's thread and before the report's thread can end it, so it
+        # starts before it ends, and before whatever the brain sends next.
+        if playing.spoken:
+            self._orb_states.speaking_started()
         threading.Thread(target=self._report, args=(id, playing), daemon=True, name=f"played-{id}").start()
 
     def _report(self, id: str, playing: _FromBrain):
@@ -1266,6 +1337,10 @@ class Satellite:
         # finished, and the wake for a new request.
         with self._waking:
             pass
+        # Before the brain is told, which answers with whatever comes next - a question to
+        # listen to, say - and the orb must not still be speaking then.
+        if playing.spoken:
+            self._orb_states.speaking_ended()
         with self._lock:
             if self._playing.get(id) is playing:
                 del self._playing[id]
@@ -1298,6 +1373,8 @@ class Satellite:
     def _on_connected(self, connected: bool):
         """Called on the link's own thread each time the brain is reached, or lost."""
         if not connected:
+            # Nothing the brain was doing will end now, so the orb can't wait for it to.
+            self._orb_states.lost()
             self._forget_the_brain()
             return
         # A new brain, or the same one started again, has neither list yet.
@@ -1438,6 +1515,8 @@ class Satellite:
             self.media.close()
         if self.system_volume is not None:
             self.system_volume.close()
+        if self.orb is not None:
+            self.orb.close()
         self.ringer.quiet()
         with self._lock:
             self._save_timeline()
