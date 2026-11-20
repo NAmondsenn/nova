@@ -2852,6 +2852,24 @@ def test_volume_answers_with_the_level_and_mute(brain, make, pc):
     assert made.system_volume.changes == [{"direction": "up", "step": 5}, {"mute": True}, {"direction": "down"}]
 
 
+def test_muting_windows_by_voice_plays_mic_off_first_and_unmuting_plays_nothing(brain, make, pc):
+    made = pressable(brain, make)
+    order = made.system_volume.log = []
+    made.speaker.play_file = lambda path, **kwargs: (order.append(os.path.basename(path)),
+                                                     types.SimpleNamespace(wait=lambda timeout=None: order.append(f"wait {timeout}")))[1]
+    real_change = made.system_volume.change
+    made.system_volume.change = lambda **change: (order.append(f"change {change}"), real_change(**change))[1]
+    ask_computer(brain, "computer-1", action="volume", mute=True)
+    # Heard to the end - for at most 1.5 s - before Windows mutes.
+    assert order == ["mic_off.wav", "wait 1.5", "change {'mute': True}"]
+    order.clear()
+    ask_computer(brain, "computer-2", action="volume", mute=False)
+    assert order == ["change {'mute': False}"]
+    order.clear()
+    ask_computer(brain, "computer-3", action="volume", level=20)
+    assert order == ["change {'level': 20}"]
+
+
 def test_a_pc_which_opens_nothing_refuses_to(brain, make, pc, monkeypatch):
     monkeypatch.setattr(satellite, "pc_windows", FakePcWindows(loads=False))
     monkeypatch.setattr(satellite, "SystemVolume", NoSystemVolume)

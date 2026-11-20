@@ -46,3 +46,12 @@ Protocol: `computer` gains the action `"mic"` with `mute` (a bool) and, for a mu
 ## Not changed
 
 The microphone's existing switches; 0026's "a press works whatever the mute"; the stop words.
+
+## Muting the sound sounds like the mic (his ruling, 20 Nov, later still)
+
+Muting or unmuting the sound or audio ("mute the audio", "mute the sound", "turn the sound off/on", "unmute the audio", the "audio" answer to "The mic or the audio?", Claude's set_volume with mute) plays mic_off.wav for a mute and mic_on.wav for an unmute, instead of "Muted."/"Unmuted.". Failures still speak.
+
+- At the Pi (the music's mute) the normal sound confirmation plays, both ways. Named from another satellite, the sound plays where he spoke.
+- At the PC, Windows' master mute would silence Nova's own sound, so for a mute the satellite plays mic_off.wav on its own speaker and waits for it to end (at most 1.5 s) before muting. The brain's confirmation then plays nothing more (no words, no second sound: the self-confirming "silent" result). For an unmute Windows is unmuted first, then the brain plays mic_on.wav. A press still unmutes Windows (unchanged).
+- A failed Windows mute may have played mic_off.wav before failing; the failure is still said.
+- "Unmute everything", "unmute all", "unmute both" at the PC unmute the PC's microphone (ending Nova's hour, as a voice unmute does) and Windows' sound, and play mic_on.wav once, no words. "Everything", "both" or "all" also answers plain "unmute"'s "The mic or the audio?". There is no "mute everything". If one half fails, the words say which ("The audio is on, but I couldn't unmute the mic.").

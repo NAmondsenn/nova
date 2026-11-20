@@ -430,6 +430,7 @@ class LocalIntents:
             # over something ringing, or Nova talking, a bare "mute" never gets here: it stops
             # them, as "stop" does - see Conversation.handle. At a PC the mic said is its own, in
             # Windows, and a plain "mute" asks which (his rulings, 20 Nov) - see _microphone.
+            (r"unmute (?:everything|all|both)", self._unmute_everything),
             (rf"(?P<un>un)?mute(?P<mic> {MIC})?{ON_WHERE}", self._microphone),
             (rf"(?P<un>un)?mute {MOVE_WHERE}", self._microphone),
             (rf"(?P<state>stop|start) listening{ON_WHERE}", self._microphone),
@@ -702,6 +703,13 @@ class LocalIntents:
         if where and not self._names_a_satellite(where):
             return None
         return self._volume({"mute": _turned_off(found), **({"where": where} if where else {})})
+
+    def _unmute_everything(self, found) -> Optional[Dict]:
+        # Only at a PC which can reach Windows' sound: its microphone and its sound both (his ruling,
+        # 20 Nov). Elsewhere it falls through to the rules after.
+        if self.computer is None or not self.computer.mic_here():
+            return None
+        return self._result("Okay.", [Action("unmute_everything")])
 
     def _microphone(self, found) -> Optional[Dict]:
         # Only a satellite's: "mute the TV" falls through to the rules after.

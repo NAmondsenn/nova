@@ -399,7 +399,11 @@ def test_mute_which_asks_the_mic_or_the_audio(pc_and_pi):
     assert result.ask_first.chosen("microphone") == Action("mute_computer_mic", {"muted": False})
     assert result.ask_first.chosen("unmute the audio") == Action("set_volume", {"mute": False})
     assert result.ask_first.chosen("sound") == Action("set_volume", {"mute": False})
-    assert result.ask_first.chosen("both") is None and result.ask_first.chosen("the mic and the lights") is None
+    assert result.ask_first.chosen("the mic and the lights") is None
+    # Both is an answer to an unmute only (his ruling, 20 Nov): there's no "mute everything".
+    for said in ("both", "everything", "unmute all", "all of it"):
+        assert result.ask_first.chosen(said) == Action("unmute_everything"), said
+    assert pc_and_pi.pc.actions.execute(Action("mute_which", {"muted": True})).ask_first.chosen("both") is None
     # The other verb is no answer: "mute the audio" after "Unmute." is a fresh request.
     assert result.ask_first.chosen("mute the audio") is None and result.ask_first.chosen("mute the mic") is None
     muting = pc_and_pi.pc.actions.execute(Action("mute_which", {"muted": True})).ask_first
@@ -410,11 +414,13 @@ def test_mute_which_asks_the_mic_or_the_audio(pc_and_pi):
 def test_mute_at_pc(pc_and_pi):
     muted = pc_and_pi.pc.actions.execute(Action("set_volume", {"mute": True}))
     assert pc_and_pi.windows.asked == [("volume", {"mute": True})]
-    # No beep, which Windows has just muted.
-    assert (muted.ok, muted.say, muted.confirm) == (True, "Muted.", "speak")
+    # The satellite plays mic_off.wav itself, before Windows mutes: the brain adds nothing, no words.
+    assert (muted.ok, muted.confirm, muted.sound) == (True, "music", None)
+    assert confirm([muted]) == ([], [])
     unmuted = pc_and_pi.pc.actions.execute(Action("set_volume", {"mute": False}))
     assert pc_and_pi.windows.asked[-1] == ("volume", {"mute": False})
-    assert (unmuted.ok, unmuted.say, unmuted.sound) == (True, "Unmuted.", "volume_beep.wav")
+    assert (unmuted.ok, unmuted.confirm, unmuted.sound) == (True, "sound", "mic_on.wav")
+    assert confirm([unmuted]) == ([("mic_on.wav", "general")], [])
     # Nova's own volumes and the PC's music are untouched.
     assert pc_and_pi.pc.volume.percent("general") == 70 and pc_and_pi.pc_music.level == 50
 
@@ -423,17 +429,18 @@ def test_mute_at_pi_mutes_music_only_and_unmute_restores(pc_and_pi):
     pi = pc_and_pi.pi
     pc_and_pi.pi_music.playing = True
     muted = pi.actions.execute(Action("set_volume", {"mute": True}))
-    assert muted.ok and pc_and_pi.pi_music.level == 0
+    assert (muted.ok, muted.confirm, muted.sound) == (True, "sound", "mic_off.wav")
+    assert pc_and_pi.pi_music.level == 0
     # Nova's voice, alarms and timers still sound, and the PC's music plays on.
     assert (pi.volume.percent("general"), pi.volume.percent("alarm")) == (70, 100)
     assert pc_and_pi.pc_music.level == 50 and pc_and_pi.windows.asked == []
     unmuted = pi.actions.execute(Action("set_volume", {"mute": False}))
-    assert unmuted.ok and pc_and_pi.pi_music.level == 60
-    # Muted from the PC, beeped on the Pi; and an unmute with nothing muted changes nothing.
+    assert (unmuted.ok, unmuted.sound) == (True, "mic_on.wav") and pc_and_pi.pi_music.level == 60
+    # Muted from the PC, confirmed by the sound at the PC, as the microphone's is; and an unmute with nothing muted changes nothing.
     pc_and_pi.pc.actions.execute(Action("set_volume", {"mute": True, "where": "the pi"}))
-    assert pc_and_pi.pi_music.level == 0 and pi.boops == [0.7]
-    pc_and_pi.pc.actions.execute(Action("set_volume", {"mute": False, "where": "the pi"}))
-    assert pc_and_pi.pi_music.level == 60
+    assert pc_and_pi.pi_music.level == 0 and pi.boops == []
+    named = pc_and_pi.pc.actions.execute(Action("set_volume", {"mute": False, "where": "the pi"}))
+    assert pc_and_pi.pi_music.level == 60 and named.sound == "mic_on.wav"
     again = pi.actions.execute(Action("set_volume", {"mute": False}))
     assert again.ok and pc_and_pi.pi_music.level == 60
 
@@ -3717,3 +3724,11 @@ def test_computer_tools_pass_what_was_said():
         result = executor.execute(Action(tool, params, from_model=True))
         assert result.ok is False and result.say
     assert len(computer.asked) == 4
+
+
+def test_a_failed_mute_of_the_sound_still_speaks(pc_and_pi):
+    # Nothing to mute at the Pi without its music player.
+    pc_and_pi.pi.actions.music = None
+    failed = pc_and_pi.pi.actions.execute(Action("set_volume", {"mute": True}))
+    assert not failed.ok and failed.confirm == "speak" and failed.say
+    assert confirm([failed]) == ([], [failed.say])
