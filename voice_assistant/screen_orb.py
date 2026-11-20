@@ -91,10 +91,11 @@ class OrbStates:
     outranks speaking (a press over a reply is heard at once), and thinking fills the gap
     between a recording and the words, so the orb never blinks out between them.
 
-    `on_change` is called with the new state, only when it changes, never while a lock
-    is held, and one call at a time, in order. It must return at once and should not
-    raise: if it does, the state is still right, but the exception reaches whoever told
-    OrbStates what happened.
+    `on_change` is called with the new state, only when it changes, outside the lock on
+    the state, and one call at a time, in order - so a slow one holds up every thread
+    which tells OrbStates anything, and it must return at once. It must not change the
+    state itself, and should not raise: if it does, the state is still right, but the
+    exception reaches whoever told OrbStates what happened.
     """
 
     def __init__(self, on_change: Callable[[str], None]):
@@ -818,8 +819,9 @@ class _Win32Window:
             # gives it the screens' real pixels and leaves its window unstretched: the
             # orb is drawn for the scaling itself, sharp on a 4K screen at 150%. A window
             # keeps its thread's awareness from when it is made, so this comes first. On
-            # a Windows too old for it, Windows stretches the window itself, and the orb
-            # is drawn for 100%.
+            # a Windows too old to have the call, looking it up raises AttributeError, and
+            # the orb is simply unavailable; on one which has it but turns this awareness
+            # down, the orb is drawn for 100% and Windows stretches the window itself.
             self._aware = bool(user32.SetThreadDpiAwarenessContext(self.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
             self._instance = kernel32.GetModuleHandleW(None)
             self._class_name = f"NovaScreenOrb{next(self._numbers)}"
@@ -903,11 +905,12 @@ class _Win32Window:
         if not self._shown:
             # Shown only once its frame is in, so it never flashes up what it last showed;
             # and put back on top of everything each time, as a game or another topmost
-            # window may have come over it while it was hidden. Windows may swap the first
-            # ShowWindow's command for the one the satellite was started with (a scheduled
-            # task starts it through pythonw), so SetWindowPos shows it too, whatever that
-            # did. It counts as shown from ShowWindow on, so a hide after a failure here
-            # still takes it down.
+            # window may have come over it while it was hidden. Windows may swap a
+            # program's first ShowWindow's command for one it was started with. The
+            # launcher starts the satellite with none, but SetWindowPos shows it too,
+            # whatever that did, in case it is ever started some other way with one. It
+            # counts as shown from ShowWindow on, so a hide after a failure here still
+            # takes it down.
             self._user32.ShowWindow(self._hwnd, self.SW_SHOWNOACTIVATE)
             self._shown = True
             self._check(self._user32.SetWindowPos(self._hwnd, self.HWND_TOPMOST, 0, 0, 0, 0,
