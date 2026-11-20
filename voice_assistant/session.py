@@ -318,7 +318,8 @@ class Session:
                                       notes=self._save_note, notes_offered=lambda: bool(brain.notes_saved_on()),
                                       computer=ComputerControl(brain, satellite.name), device=self._device,
                                       at_pc=lambda: brain.rooms.machine(satellite.name) == "pc",
-                                      pc_name=lambda: brain.pc_called(satellite.name))
+                                      pc_name=lambda: brain.pc_called(satellite.name),
+                                      microphone=self._mute_microphone)
 
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.
@@ -970,6 +971,41 @@ class Session:
         if session is None:
             return None, self.brain.not_connected(name)
         return session, None
+
+    def _mute_microphone(self, muted: bool, where: Optional[str] = None) -> Dict:
+        """
+        Turns a satellite's listening off or on by voice - the mute the settings page and Home
+        Assistant's switch have, see set_muted.
+
+        Args:
+            muted: True to stop it hearing the wake word, False to hear it again.
+            where: The words for the satellite, e.g. "the Pi", or None for none said: this one if it
+                listens for a wake word, else its room's always-on one, as a timer set here rings on
+                (see Brain.ring_on) - the PC only listens while its key is held.
+
+        Returns:
+            Dict with 'success' and what to say: "Microphone off.", with " on the Pi" when it's
+            another satellite's; or why not, when the words name none, or one which isn't connected
+            or which only listens on a press of its key.
+        """
+        here = self.satellite.name
+        if where:
+            name, problem = self.brain.find_satellite(where, here=here)
+            if name is None:
+                return {"success": False, "message": problem}
+        else:
+            name = self.brain.ring_on(here)
+        spoken = self.brain.spoken_name(name)
+        if self.brain.rooms.push_to_talk(name):
+            # A press works whatever the mute (0026), so muting it would change nothing.
+            return {"success": False, "message": f"{spoken[:1].upper() + spoken[1:]} only listens while you hold "
+                                                 f"the key, so there's nothing to {'mute' if muted else 'unmute'}."}
+        session = self.brain.session_for(name)
+        if session is None:
+            return {"success": False, "message": self.brain.not_connected(name)}
+        session.set_muted(muted)
+        return {"success": True,
+                "message": f"Microphone {'off' if muted else 'on'}{'' if name == here else f' on {spoken}'}."}
 
     def _save_note(self, title: str, text: str, where: Optional[str] = None) -> Dict:
         """

@@ -222,7 +222,7 @@ def test_a_question_for_assist_says_its_a_question(text):
 
 
 @pytest.mark.parametrize("text", [
-    "Turn off the microphone.", "Turn off my alarm.", "Turn off the timer.", "Turn on shuffle.", "Turn on repeat.",
+    "Turn off my alarm.", "Turn off the timer.", "Turn on shuffle.", "Turn on repeat.",
     "Turn it off.", "Pause it.", "Is it on?", "Turn off the music.", "Turn off notifications.",
     "Turn off the TV and the lamp.", "Turn up the heating.",
     # "My" isn't a name, so this isn't "the volume" of something called "my".
@@ -856,12 +856,40 @@ def test_volume_on_a_device_named(text, change):
 
 
 @pytest.mark.parametrize("text, change", [
-    ("Mute.", {"mute": True}), ("Unmute.", {"mute": False}), ("Mute the sound.", {"mute": True}),
+    ("Mute the sound.", {"mute": True}), ("Unmute the sound.", {"mute": False}), ("Mute the audio.", {"mute": True}),
     ("Unmute the music.", {"mute": False}), ("Mute the volume.", {"mute": True}),
-    ("Mute the PC.", {"mute": True, "where": "the pc"}), ("Unmute my Pi.", {"mute": False, "where": "my pi"}),
+    ("Turn the sound off.", {"mute": True}), ("Turn the audio on.", {"mute": False}),
+    ("Turn off the sound.", {"mute": True}),
+    ("Mute the sound on the PC.", {"mute": True, "where": "the pc"}),
+    ("Unmute the audio on my Pi.", {"mute": False, "where": "my pi"}),
+    ("Turn the sound off on the PC.", {"mute": True, "where": "the pc"}),
 ])
-def test_mute_and_unmute(text, change):
+def test_sound_mute_needs_the_word(text, change):
+    # Sound is muted only when he says sound or audio (or the music, or the volume): 0034's mute.
     assert _moves(text) == [Action("set_volume", change)]
+
+
+@pytest.mark.parametrize("text, change", [
+    ("Mute.", {"muted": True}), ("Unmute.", {"muted": False}), ("Stop listening.", {"muted": True}),
+    ("Start listening.", {"muted": False}), ("Mute the mic.", {"muted": True}),
+    ("Mute the microphone.", {"muted": True}), ("Unmute the microphone.", {"muted": False}),
+    ("Turn off the mic.", {"muted": True}), ("Turn the microphone on.", {"muted": False}),
+    # Never Assist's, which once had "turn off the microphone" left to Claude.
+    ("Turn off the microphone.", {"muted": True}),
+    ("Mute the PC.", {"muted": True, "where": "the pc"}), ("Unmute my Pi.", {"muted": False, "where": "my pi"}),
+    ("Stop listening on my Pi.", {"muted": True, "where": "my pi"}),
+    ("Mute the mic on my Pi.", {"muted": True, "where": "my pi"}),
+])
+def test_mute_means_the_microphone(text, change):
+    # Plain "mute", the mic and "stop listening" turn Nova's listening off, here or on the device named.
+    assert _moves(text) == [Action("mute_microphone", change)]
+
+
+def test_mute_without_names_satellite_is_still_the_microphone():
+    assert _actions("Mute.") == [Action("mute_microphone", {"muted": True})]
+    assert _actions("Mute the sound.") == [Action("set_volume", {"mute": True})]
+    # A device can't be told without the brain.
+    assert _actions("Stop listening on my Pi.") is None
 
 
 def test_tv_volume_still_assist():
@@ -870,9 +898,11 @@ def test_tv_volume_still_assist():
                                                                           "wider": True})]
     assert _moves("Set the PC volume to 20.") == [Action("set_volume", {"level": 20, "where": "pc"})]
     # Words naming no satellite are never a device's volume: left to the rules after, or Claude.
-    for text in ("Turn the heating down.", "Mute the TV.", "Volume up on the TV.", "Set the lamp to 30."):
+    for text in ("Turn the heating down.", "Mute the TV.", "Volume up on the TV.", "Set the lamp to 30.",
+                 "Mute the sound on the TV.", "Stop listening on the TV."):
         actions = _moves(text)
-        assert actions is None or all(action.tool != "set_volume" for action in actions), text
+        assert actions is None or all(action.tool not in ("set_volume", "mute_microphone")
+                                      for action in actions), text
     # Nor without a brain to name satellites.
     assert _actions("Volume up on the PC.") is None and _actions("Mute the PC.") is None
 
