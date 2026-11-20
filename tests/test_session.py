@@ -259,7 +259,7 @@ def brain(tmp_path, monkeypatch, make_config):
     return SimpleNamespace(config=config, clock=Clock(config=config, start=False), memory=None,
                            rooms=SatelliteRooms(str(tmp_path / "satellite_rooms.json")), computers=Computers(),
                            ring_on=lambda name: name, room_of=lambda name: [name], room_sessions=lambda name: [],
-                           spoken_name=lambda name: name,
+                           spoken_name=lambda name: name, notes_saved_on=lambda: [],
                            names_satellite=lambda said: False,
                            routines=Routines(path=str(tmp_path / "routines.json")), ntfy=None, weather=None,
                            batteries=None, lists=None, pc=None, registry=None, calendar=None, media=None,
@@ -1099,6 +1099,36 @@ def test_playing_on_another_satellite_pauses_the_rooms_own_music_for_good_when_i
 
 # Notes saved at a computer
 
+def _brain_choosing_notes(brain, sessions, saving=("pc",)):
+    """
+    Has the brain here choose the computer a note is saved on, and name it, as the real Brain does,
+    over a Pi ("bedroom", the default) and a PC ("pc") - the PC saying it saves notes unless saving says otherwise.
+
+    Args:
+        sessions: The sessions connected, by satellite name - what Brain.session_for finds.
+        saving: The satellites which say they save notes.
+    """
+    brain.rooms.seen("bedroom", False, "pi", "bedroom" in saving)
+    brain.rooms.seen("pc", True, "pc", "pc" in saving)
+    brain.satellites = lambda: ["bedroom", "pc"]
+    brain.session_for = sessions.get
+    for method in ("_named_satellites", "find_satellite", "spoken_name", "not_connected", "notes_for",
+                   "notes_saved_on"):
+        setattr(brain, method, MethodType(getattr(Brain, method), brain))
+
+
+def _noting(satellite, answers=None):
+    """Has a satellite answer each note it's asked to save from answers, else as Bins.txt, and returns what it was asked."""
+    asked = []
+
+    def save_note(title, text, wait=5.0):
+        asked.append((title, text))
+        return answers.pop(0) if answers else {"file": "Bins.txt"}
+
+    satellite.save_note = save_note
+    return asked
+
+
 def _at_the_pc(brain, connect, make_session, answers=None, saves_notes=True):
     """
     A session for the PC, which says it saves notes unless told it doesn't, with the notes
@@ -1109,19 +1139,30 @@ def _at_the_pc(brain, connect, make_session, answers=None, saves_notes=True):
     """
     satellite, _ = connect("pc")
     satellite.saves_notes = saves_notes
-    asked = []
-
-    def save_note(title, text, wait=5.0):
-        asked.append((title, text))
-        return answers.pop(0) if answers else {"file": "Bins.txt"}
-
-    satellite.save_note = save_note
-    brain.spoken_name = {"pc": "the PC", "bedroom": "the Pi"}.get
-    return make_session(satellite), asked
+    asked = _noting(satellite, answers)
+    session = make_session(satellite)
+    _brain_choosing_notes(brain, {"pc": session}, saving=("pc",) if saves_notes else ())
+    return session, asked
 
 
-def _note(session, title="Bins", text="Green on Tuesday."):
-    return session.actions.execute(Action("save_note", {"title": title, "text": text}, from_model=True))
+def _at_the_pi(brain, connect, make_session, answers=None, pc_connected=True, saving=("pc",)):
+    """
+    A session for the Pi, which saves no notes, and one for the PC, which is called Nathaniel's PC on the settings page.
+
+    Returns:
+        The Pi's session, the PC's session, the notes the PC was asked to save and those the Pi was.
+    """
+    pi_satellite, pc_satellite = connect("bedroom")[0], connect("pc")[0]
+    pc_satellite.saves_notes = "pc" in saving
+    pc_asked, pi_asked = _noting(pc_satellite, answers), _noting(pi_satellite)
+    pi, pc = make_session(pi_satellite), make_session(pc_satellite)
+    _brain_choosing_notes(brain, {"bedroom": pi, **({"pc": pc} if pc_connected else {})}, saving=saving)
+    brain.rooms.set_called("pc", ["Nathaniel's PC"])
+    return pi, pc, pc_asked, pi_asked
+
+
+def _note(session, title="Bins", text="Green on Tuesday.", **params):
+    return session.actions.execute(Action("save_note", {"title": title, "text": text, **params}, from_model=True))
 
 
 def test_save_note_reply_names_the_file_without_extension(brain, connect, make_session):
@@ -1163,7 +1204,7 @@ def test_a_note_too_long_is_refused_before_anything_is_sent(brain, connect, make
 
 
 def test_a_note_which_cant_be_looked_up_by_name_is_still_saved(brain, connect, make_session):
-    # The name is only wanted to say it couldn't, so a note saved isn't reported lost over it.
+    # The name is only wanted to say it couldn't, so a note saved here isn't reported lost over it.
     session, asked = _at_the_pc(brain, connect, make_session)
 
     def broken(name):
@@ -1178,8 +1219,8 @@ def test_a_note_which_cant_be_looked_up_by_name_is_still_saved(brain, connect, m
 def test_a_note_is_saved_through_the_satellite_and_its_text_is_never_logged(brain, connect, make_session, caplog):
     satellite, pi = connect("pc")
     satellite.saves_notes = True
-    brain.spoken_name = {"pc": "the PC"}.get
     session = make_session(satellite)
+    _brain_choosing_notes(brain, {"pc": session})
     done = []
     caplog.set_level(logging.DEBUG)
     thread = threading.Thread(target=lambda: done.append(_note(session, "Bins", "Green on Tuesday, secret.")))
@@ -1197,6 +1238,92 @@ def test_a_note_is_saved_through_the_satellite_and_its_text_is_never_logged(brai
     assert "Bins (2).txt" in caplog.text
 
 
+def test_a_note_at_the_pi_is_offered_while_a_computer_saves_notes(brain, connect, make_session):
+    pi, pc, _, _ = _at_the_pi(brain, connect, make_session)
+    assert pi.satellite.saves_notes is False
+    assert "save_note" in {tool["name"] for tool in pi.actions.tool_schemas()}
+    # Nor does it depend on the PC being connected: it's the one which saves them, asleep or not.
+    asleep, _, _, _ = _at_the_pi(brain, connect, make_session, pc_connected=False)
+    assert "save_note" in {tool["name"] for tool in asleep.actions.tool_schemas()}
+
+
+def test_a_note_is_not_offered_when_no_satellite_saves_notes(brain, connect, make_session):
+    pi, pc, _, _ = _at_the_pi(brain, connect, make_session, saving=())
+    for session in (pi, pc):
+        assert "save_note" not in {tool["name"] for tool in session.actions.tool_schemas()}
+    # Asked for by name anyway, it's said rather than sent anywhere.
+    result = _note(pi)
+    assert (result.ok, result.say) == (False, "None of your computers can save notes.")
+
+
+def test_a_note_named_for_the_pc_at_the_pi_is_saved_on_the_pc(brain, connect, make_session):
+    pi, pc, pc_asked, pi_asked = _at_the_pi(brain, connect, make_session, [{"file": "Swimming.txt"}])
+    result = _note(pi, "Swimming", "I'm going swimming.", where="my PC")
+    assert (result.ok, result.say, result.confirm) == (
+        True, "Saved to the Downloads on Nathaniel's PC as Swimming.", "speak")
+    assert pc_asked == [("Swimming", "I'm going swimming.")] and pi_asked == []
+
+
+def test_a_note_without_a_computer_named_at_the_pi_goes_to_the_one_which_saves_notes(brain, connect, make_session):
+    pi, pc, pc_asked, pi_asked = _at_the_pi(brain, connect, make_session, [{"file": "Swimming.txt"}])
+    # Said for the user to hear where it went, as it isn't where they are.
+    result = _note(pi, "Swimming", "I'm going swimming.")
+    assert (result.ok, result.say) == (True, "Saved to the Downloads on Nathaniel's PC as Swimming.")
+    assert pc_asked == [("Swimming", "I'm going swimming.")] and pi_asked == []
+
+
+def test_a_note_at_the_pc_is_said_to_be_saved_there_named_or_not(brain, connect, make_session):
+    # With or without the PC named, at the PC itself it's saved there, as the user at it hears.
+    pc, asked = _at_the_pc(brain, connect, make_session)
+    assert _note(pc).say == "Saved to your Downloads as Bins."
+    assert _note(pc, where="this PC").say == "Saved to your Downloads as Bins."
+    assert _note(pc, where="").say == "Saved to your Downloads as Bins."
+    # A model which gives something which isn't words is taken as none.
+    assert _note(pc, where=5).say == "Saved to your Downloads as Bins."
+    assert len(asked) == 4
+
+
+def test_a_note_named_for_a_satellite_which_cant_save_notes_says_so(brain, connect, make_session):
+    pi, pc, pc_asked, pi_asked = _at_the_pi(brain, connect, make_session)
+    result = _note(pc, where="the Pi")
+    assert (result.ok, result.say) == (False, "The Pi can't save notes.")
+    assert pc_asked == [] and pi_asked == []
+
+
+def test_a_note_for_a_pc_which_is_asleep_says_so(brain, connect, make_session):
+    pi, pc, pc_asked, _ = _at_the_pi(brain, connect, make_session, pc_connected=False)
+    for params in ({"where": "my PC"}, {}):
+        result = _note(pi, "Swimming", "I'm going swimming.", **params)
+        assert (result.ok, result.say) == (False, "Nova isn't running on Nathaniel's PC.")
+    assert pc_asked == []
+
+
+def test_a_note_which_goes_wrong_on_another_satellite_names_it(brain, connect, make_session):
+    pi, pc, pc_asked, _ = _at_the_pi(brain, connect, make_session, [None, {"error": "The folder's full."}])
+    result = _note(pi, where="my PC")
+    assert (result.ok, result.say) == (False, "Nathaniel's PC didn't answer, so the note wasn't saved.")
+    result = _note(pi, where="my PC")
+    assert (result.ok, result.say) == (False, "I couldn't save it on Nathaniel's PC: The folder's full.")
+    assert len(pc_asked) == 2
+
+
+def test_a_note_too_long_for_another_satellite_is_refused_before_anything_is_sent(brain, connect, make_session):
+    pi, pc, pc_asked, _ = _at_the_pi(brain, connect, make_session)
+    result = _note(pi, text="x" * (notes.MOST_TEXT + 1), where="my PC")
+    assert (result.ok, result.say) == (
+        False, "I couldn't save it on Nathaniel's PC: That note's too long to save.")
+    assert pc_asked == []
+
+
+def test_a_note_saved_on_another_satellite_never_logs_its_text(brain, connect, make_session, caplog):
+    pi, pc, _, _ = _at_the_pi(brain, connect, make_session)
+    caplog.set_level(logging.DEBUG)
+    assert _note(pi, "Bins", "Green on Tuesday, secret.", where="my PC").ok
+    assert "secret" not in caplog.text
+    # What's logged says where it went.
+    assert "Bins.txt" in caplog.text and "pc satellite" in caplog.text
+
+
 def test_every_session_can_open_things_on_a_computer(brain, connect, make_session):
     session = make_session()
     computer = session.actions.computer
@@ -1207,17 +1334,18 @@ def test_every_session_can_open_things_on_a_computer(brain, connect, make_sessio
     assert "open_on_computer" in {tool["name"] for tool in session.actions.tool_schemas()}
 
 
-def test_pi_session_has_no_notes_tool(brain, connect, make_session):
-    # A satellite which doesn't say it saves notes - the Pi, or one from before there were any.
-    session, _ = _at_the_pc(brain, connect, make_session, saves_notes=False)
-    assert session.actions.notes is None
-    assert "save_note" not in {tool["name"] for tool in session.actions.tool_schemas()}
-    # Asked for by name anyway, it's refused rather than sent anywhere.
-    result = _note(session)
-    assert result.ok is False and result.say
-    # And one which does is offered it.
-    pc, _ = _at_the_pc(brain, connect, make_session)
-    assert pc.actions.notes is not None
+def test_the_pi_is_offered_notes_but_saves_none_itself(brain, connect, make_session):
+    # A satellite which doesn't say it saves notes - the Pi, or one from before there were any - is never
+    # asked to save one: its notes go to a computer which does.
+    pi, pc, pc_asked, pi_asked = _at_the_pi(brain, connect, make_session)
+    assert pi.actions.notes is not None
+    assert _note(pi).ok and _note(pi, where="my PC").ok
+    assert pi_asked == [] and len(pc_asked) == 2
+    # And with no computer which does, it's said, not sent.
+    alone, _ = _at_the_pc(brain, connect, make_session, saves_notes=False)
+    assert "save_note" not in {tool["name"] for tool in alone.actions.tool_schemas()}
+    result = _note(alone)
+    assert (result.ok, result.say) == (False, "None of your computers can save notes.")
 
 
 def test_add_to_my_notes_is_still_the_list_at_the_pc(brain, connect, make_session):

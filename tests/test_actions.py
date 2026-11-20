@@ -12,7 +12,7 @@ import pytest
 import requests
 
 from voice_assistant import volume as volume_module
-from voice_assistant.actions import NOT_A_COMMAND, Action, ActionExecutor, ActionResult, confirm
+from voice_assistant.actions import NOT_A_COMMAND, ON_A_COMPUTER, Action, ActionExecutor, ActionResult, confirm
 from voice_assistant.batteries import Battery
 from voice_assistant.computers import ComputerControl
 from voice_assistant.downloads import ON_ITS_WAY, Downloads, Wanted
@@ -3046,35 +3046,59 @@ def test_without_home_assistant_journeys_say_so():
         assert (result.ok, result.say) == (False, "Journeys need Home Assistant.")
 
 
-# Notes saved on the computer the user is at
+# Notes saved on a computer
+
+def _notes(title, text, where=None):
+    return {}
+
 
 def test_save_note_offered_only_with_notes():
-    # The Pi, and any satellite which can't save a note, has no way to, so isn't offered one.
+    # With no way to save one, none is offered.
     assert "save_note" not in {tool["name"] for tool in ActionExecutor(clock=object()).tool_schemas()}
-    schemas = {tool["name"]: tool for tool in ActionExecutor(notes=lambda title, text: {}).tool_schemas()}
+    schemas = {tool["name"]: tool for tool in ActionExecutor(notes=_notes).tool_schemas()}
     assert schemas["save_note"]["input_schema"]["required"] == ["title", "text"]
-    assert set(schemas["save_note"]["input_schema"]["properties"]) == {"title", "text"}
+    assert set(schemas["save_note"]["input_schema"]["properties"]) == {"title", "text", "where"}
+    # Which computer is given as it is for the tools which open things.
+    assert schemas["save_note"]["input_schema"]["properties"]["where"] == ON_A_COMPUTER
 
 
-def test_save_note_passes_title_and_text():
+def test_save_note_is_offered_only_while_a_satellite_saves_notes():
+    # The satellite the user is talking to need not be one: the Pi's notes go to the PC's Downloads.
+    saving = []
+    executor = ActionExecutor(notes=_notes, notes_offered=lambda: bool(saving))
+    assert "save_note" not in {tool["name"] for tool in executor.tool_schemas()}
+    saving.append("pc")
+    assert "save_note" in {tool["name"] for tool in executor.tool_schemas()}
+    # Asked for by name while none does, it's said, not tried.
+    saving.clear()
+    result = executor.execute(Action("save_note", {"title": "Bins", "text": "Green on Tuesday."}))
+    assert (result.ok, result.say) == (False, "None of your computers can save notes.")
+
+
+def test_save_note_passes_title_text_and_where():
     saved = []
 
-    def notes(title, text):
-        saved.append((title, text))
+    def notes(title, text, where):
+        saved.append((title, text, where))
         return {"success": True, "message": "Saved to your Downloads as Bins."}
 
-    result = ActionExecutor(notes=notes).execute(
+    executor = ActionExecutor(notes=notes)
+    result = executor.execute(
         Action("save_note", {"title": "Bins", "text": "Green on Tuesday.", "extra": "ignored"}, from_model=True))
     assert (result.ok, result.say, result.confirm) == (True, "Saved to your Downloads as Bins.", "speak")
-    assert saved == [("Bins", "Green on Tuesday.")]
+    # The computer the user names is passed as they said it, and none named as none.
+    executor.execute(Action("save_note", {"title": "Bins", "text": "Green.", "where": " my PC "}, from_model=True))
+    for where in ("", "  ", None, 5):
+        executor.execute(Action("save_note", {"title": "Bins", "text": "Green.", "where": where}))
+    assert saved == [("Bins", "Green on Tuesday.", None), ("Bins", "Green.", "my PC")] + [("Bins", "Green.", None)] * 4
     # What the session says of a note it couldn't save is said as it is.
-    refused = ActionExecutor(notes=lambda title, text: {"success": False, "message": "The PC didn't answer."})
+    refused = ActionExecutor(notes=lambda title, text, where: {"success": False, "message": "The PC didn't answer."})
     result = refused.execute(Action("save_note", {"title": "Bins", "text": "Green on Tuesday."}))
     assert (result.ok, result.say) == (False, "The PC didn't answer.")
 
 
 def test_save_note_description_keeps_the_list_apart():
-    schemas = {tool["name"]: tool for tool in ActionExecutor(notes=lambda title, text: {}).tool_schemas()}
+    schemas = {tool["name"]: tool for tool in ActionExecutor(notes=_notes).tool_schemas()}
     description = schemas["save_note"]["description"]
     # "Add milk to my notes" is the notes list, which has a tool of its own.
     assert "'Add X to my notes' is the notes list" in description and "manage_list" in description
@@ -3083,10 +3107,19 @@ def test_save_note_description_keeps_the_list_apart():
         assert words in description
 
 
+def test_save_note_description_says_the_computer_is_only_for_when_the_user_names_it():
+    # "Make a note on my PC" said at the Pi is the PC's; "make a note" alone isn't given a computer to guess at.
+    schemas = {tool["name"]: tool for tool in ActionExecutor(notes=_notes).tool_schemas()}
+    description = schemas["save_note"]["description"]
+    assert "Give where only when the user names the computer ('make a note on my PC')" in description
+    # No longer only the computer the user is talking to, which the Pi isn't.
+    assert "the computer the user is talking to" not in description
+
+
 def test_save_note_description_says_a_note_isnt_also_a_memory():
     # "Make a note that my bins go out on Tuesday" once had Claude save the note and remember it, so
     # Nova kept it in its memory as well and he had to say "don't remember that".
-    schemas = {tool["name"]: tool for tool in ActionExecutor(notes=lambda title, text: {}).tool_schemas()}
+    schemas = {tool["name"]: tool for tool in ActionExecutor(notes=_notes).tool_schemas()}
     description = schemas["save_note"]["description"]
     assert ("A note is only saved as a file: don't also use remember for it, unless the user asks you to "
             "remember it too.") in description
@@ -3095,14 +3128,14 @@ def test_save_note_description_says_a_note_isnt_also_a_memory():
 
 
 def test_save_note_asked_for_without_a_way_to_save_one_says_so():
-    # It can be asked for by name, offered or not, as at the Pi.
+    # It can be asked for by name, offered or not.
     result = ActionExecutor().execute(Action("save_note", {"title": "Bins", "text": "Green on Tuesday."}))
-    assert result.ok is False and result.say
+    assert (result.ok, result.say) == (False, "None of your computers can save notes.")
 
 
 def test_save_note_with_nothing_to_write_or_a_notes_which_fails_says_so():
     saved = []
-    executor = ActionExecutor(notes=lambda title, text: saved.append(title))
+    executor = ActionExecutor(notes=lambda title, text, where: saved.append(title))
     # Nothing is saved for words which weren't given, whatever type the model gave.
     for text in ("", "  ", None, 5):
         result = executor.execute(Action("save_note", {"title": "Bins", "text": text}))
@@ -3110,12 +3143,12 @@ def test_save_note_with_nothing_to_write_or_a_notes_which_fails_says_so():
     assert saved == []
 
     # A title which isn't words is left for the satellite to name, as it does an empty one.
-    ActionExecutor(notes=lambda title, text: saved.append(title) or {"success": True}).execute(
+    ActionExecutor(notes=lambda title, text, where: saved.append(title) or {"success": True}).execute(
         Action("save_note", {"title": None, "text": "Green on Tuesday."}))
     assert saved == [""]
 
     # The session's end is another machine, never the end of this request.
-    def broken(title, text):
+    def broken(title, text, where):
         raise OSError("the satellite's lost it")
 
     result = ActionExecutor(notes=broken).execute(Action("save_note", {"title": "Bins", "text": "Green"}))
