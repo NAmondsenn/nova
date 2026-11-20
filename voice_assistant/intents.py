@@ -428,12 +428,13 @@ class LocalIntents:
             (rf"turn (?P<state>off|on) the (?:sound|audio){ON_WHERE}", self._mute),
             # Plain "mute" is the microphone, Nova's listening: here, or on the device named. Said
             # over something ringing, or Nova talking, a bare "mute" never gets here: it stops
-            # them, as "stop" does - see Conversation.handle.
-            (rf"(?P<un>un)?mute(?: {MIC})?{ON_WHERE}", self._microphone),
+            # them, as "stop" does - see Conversation.handle. At a PC the mic said is its own, in
+            # Windows, and a plain "mute" asks which (his rulings, 20 Nov) - see _microphone.
+            (rf"(?P<un>un)?mute(?P<mic> {MIC})?{ON_WHERE}", self._microphone),
             (rf"(?P<un>un)?mute {MOVE_WHERE}", self._microphone),
             (rf"(?P<state>stop|start) listening{ON_WHERE}", self._microphone),
-            (rf"turn {MIC} (?P<state>off|on){ON_WHERE}", self._microphone),
-            (rf"turn (?P<state>off|on) {MIC}{ON_WHERE}", self._microphone),
+            (rf"turn (?P<mic>{MIC}) (?P<state>off|on){ON_WHERE}", self._microphone),
+            (rf"turn (?P<state>off|on) (?P<mic>{MIC}){ON_WHERE}", self._microphone),
             (r"what(?:'s| is) the time|what time is it(?: now)?|tell me the time", self._time),
             (r"what(?:'s| is) (?:the date|today's date)(?: today)?|what day is it(?: today)?", self._date),
             (r"(?:cancel|stop|delete) (?:the|my) timer", self._cancel_only_timer),
@@ -704,10 +705,19 @@ class LocalIntents:
 
     def _microphone(self, found) -> Optional[Dict]:
         # Only a satellite's: "mute the TV" falls through to the rules after.
-        where = found.groupdict().get("where")
+        groups = found.groupdict()
+        where = groups.get("where")
         if where and not self._names_a_satellite(where):
             return None
-        return self._result("Okay.", [Action("mute_microphone", {"muted": _turned_off(found),
+        muted = _turned_off(found)
+        # At a PC which can reach Windows' sound, with no device named: "mute the mic" is its own
+        # microphone, and a plain "mute" could be that or the sound, so it asks. "Stop listening"
+        # is still the room's always-on satellite's.
+        if not where and self.computer is not None and self.computer.mic_here() \
+                and groups.get("state") not in ("stop", "start"):
+            return self._result("Okay.", [Action("mute_computer_mic" if groups.get("mic") else "mute_which",
+                                                 {"muted": muted})])
+        return self._result("Okay.", [Action("mute_microphone", {"muted": muted,
                                                                  **({"where": where} if where else {})})])
 
     def _time(self, found) -> Dict:

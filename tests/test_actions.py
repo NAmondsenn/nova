@@ -380,6 +380,28 @@ def test_mute_microphone_is_the_sessions_and_offered_to_claude():
     assert not bare.execute(Action("mute_microphone", {"muted": True})).ok
 
 
+def test_the_pcs_own_microphone_is_offered_only_at_a_pc_which_can_reach_it(pc_and_pi):
+    offered = {tool["name"]: tool for tool in pc_and_pi.pc.actions.tool_schemas()}
+    assert "mute_computer_mic" in offered and "mute_microphone" in offered["mute_computer_mic"]["description"]
+    # The question is the local rules' alone.
+    assert "mute_which" not in offered
+    assert not pc_and_pi.pc.actions.execute(Action("mute_which", {"muted": True}, from_model=True)).ok
+    # Not at the Pi, which has no Windows to mute.
+    assert "mute_computer_mic" not in {tool["name"] for tool in pc_and_pi.pi.actions.tool_schemas()}
+    refused = pc_and_pi.pi.actions.execute(Action("mute_computer_mic", {"muted": True}))
+    assert not refused.ok and pc_and_pi.windows.asked == []
+
+
+def test_mute_which_asks_the_mic_or_the_audio(pc_and_pi):
+    result = pc_and_pi.pc.actions.execute(Action("mute_which", {"muted": False}))
+    assert (result.ok, result.say) == (True, "The mic or the audio?")
+    assert result.ask_first.chosen("the mic") == Action("mute_computer_mic", {"muted": False})
+    assert result.ask_first.chosen("microphone") == Action("mute_computer_mic", {"muted": False})
+    assert result.ask_first.chosen("unmute the audio") == Action("set_volume", {"mute": False})
+    assert result.ask_first.chosen("sound") == Action("set_volume", {"mute": False})
+    assert result.ask_first.chosen("both") is None and result.ask_first.chosen("the mic and the lights") is None
+
+
 def test_mute_at_pc(pc_and_pi):
     muted = pc_and_pi.pc.actions.execute(Action("set_volume", {"mute": True}))
     assert pc_and_pi.windows.asked == [("volume", {"mute": True})]

@@ -1002,8 +1002,10 @@ PC_WINDOWS = ["Discord", "Firefox"]
 class ComputerBrain:
     """The parts of the brain ComputerHooks asks, with the PC the only computer, connected or not there."""
 
-    def __init__(self, somewhere=True, apps=PC_APPS, aliases=None):
+    def __init__(self, somewhere=True, apps=PC_APPS, aliases=None, system_volume=True):
         self.somewhere = somewhere
+        # The PC's connection, which says whether it can reach Windows' sound and microphone.
+        self.pc = SimpleNamespace(satellite=SimpleNamespace(system_volume=system_volume))
         self.computers = Computers()
         self.computers.set_apps("pc", [{"id": name, "name": name, "kind": "exe"} for name in apps])
         self.computers.set_windows("pc", PC_WINDOWS)
@@ -1013,6 +1015,9 @@ class ComputerBrain:
 
     def computer_meant(self, spoken_at, where):
         return ("pc", None) if where or self.somewhere else (None, None)
+
+    def session_for(self, name):
+        return self.pc if name == "pc" else SimpleNamespace(satellite=SimpleNamespace(system_volume=False))
 
 
 def _computer(text, at_pc=True, somewhere=True, **brain):
@@ -1197,3 +1202,51 @@ def test_shut_down_bare_asks():
     # Through pc_power, whose question before shutting down is tested in test_pc - never press_pc_button.
     assert _computer("Shut down.") == [Action("pc_power", {"action": "off"})]
     assert _computer("Restart.") == [Action("pc_power", {"action": "restart"})]
+
+
+# At the PC, "mute the mic" is Windows' own microphone, and a plain "mute" asks which (his rulings, 20 Nov).
+
+@pytest.mark.parametrize("text, muted", [
+    ("Mute mic.", True), ("Mute the mic.", True), ("Mute the microphone.", True), ("Mute my mic.", True),
+    ("Unmute mic.", False), ("Unmute the microphone.", False), ("Turn the mic off.", True),
+    ("Turn off the microphone.", True), ("Turn the mic on.", False), ("Turn on the mic.", False),
+])
+def test_the_mic_at_the_pc_is_its_own(text, muted):
+    assert _computer(text) == [Action("mute_computer_mic", {"muted": muted})]
+
+
+@pytest.mark.parametrize("text, muted", [("Mute.", True), ("Unmute.", False), ("Mute please.", True)])
+def test_plain_mute_at_the_pc_asks_which(text, muted):
+    assert _computer(text) == [Action("mute_which", {"muted": muted})]
+
+
+@pytest.mark.parametrize("text, action", [
+    # Windows' sound needs the word, as before.
+    ("Mute the audio.", Action("set_volume", {"mute": True})),
+    ("Mute the sound.", Action("set_volume", {"mute": True})),
+    ("Unmute the sound.", Action("set_volume", {"mute": False})),
+    # "Stop listening" is still the room's always-on Pi.
+    ("Stop listening.", Action("mute_microphone", {"muted": True})),
+    ("Start listening.", Action("mute_microphone", {"muted": False})),
+    # A device named goes to that device.
+    ("Mute the PC.", Action("mute_microphone", {"muted": True, "where": "the pc"})),
+    ("Unmute my Pi.", Action("mute_microphone", {"muted": False, "where": "my pi"})),
+    ("Mute the mic on my Pi.", Action("mute_microphone", {"muted": True, "where": "my pi"})),
+])
+def test_the_rest_of_mute_at_the_pc_is_unchanged(text, action):
+    assert _computer(text) == [action]
+
+
+@pytest.mark.parametrize("text, action", [
+    ("Mute.", Action("mute_microphone", {"muted": True})),
+    ("Mute the mic.", Action("mute_microphone", {"muted": True})),
+    ("Unmute.", Action("mute_microphone", {"muted": False})),
+])
+def test_mute_at_the_pi_is_still_the_pis(text, action):
+    assert _computer(text, at_pc=False) == [action]
+
+
+def test_a_pc_which_cant_reach_windows_sound_mutes_as_before():
+    # An older PC satellite, which never said it has system_volume, isn't asked of its microphone.
+    assert _computer("Mute.", system_volume=False) == [Action("mute_microphone", {"muted": True})]
+    assert _computer("Mute the mic.", system_volume=False) == [Action("mute_microphone", {"muted": True})]

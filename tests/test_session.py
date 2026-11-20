@@ -263,6 +263,7 @@ def brain(tmp_path, monkeypatch, make_config):
                            ring_on=lambda name: name, room_of=lambda name: [name], room_sessions=lambda name: [],
                            spoken_name=lambda name: name, notes_saved_on=lambda: [],
                            names_satellite=lambda said: False,
+                           session_for=lambda name: None,
                            routines=Routines(path=str(tmp_path / "routines.json")), ntfy=None, weather=None,
                            batteries=None, lists=None, pc=None, registry=None, calendar=None, media=None,
                            downloads=None, football=None, listening=None, wrapped_store=None, usage=None, new_music_playlist=None,
@@ -1689,7 +1690,8 @@ def test_stop_listening_while_the_pi_rings_stops_it_first(pi_and_pc, pi_ringing)
 
 def test_mute_at_the_pc_while_the_pi_rings_stops_it_first(pi_and_pc, pi_ringing, brain):
     pi, pc = pi_and_pc.pi, pi_and_pc.pc
-    result = pc.actions.execute(pc.intents.match("Mute.")["actions"][0])
+    # "Stop listening": a plain "mute" at a PC which can reach Windows' sound asks which (20 Nov).
+    result = pc.actions.execute(pc.intents.match("Stop listening.")["actions"][0])
     assert (result.ok, result.say, result.confirm) == (True, "Stopped, and the Pi's microphone is off.", "sound")
     assert result.sound == "mic_off.wav"
     assert pi_ringing == set() and pi.muted and not pc.muted
@@ -1699,6 +1701,111 @@ def test_mute_at_the_pc_while_the_pi_rings_stops_it_first(pi_and_pc, pi_ringing,
     brain.rooms.set_called("bedroom", ["Bedroom Pi"])
     assert pc.actions.execute(Action("mute_microphone", {"muted": True})).say == \
         "Stopped, and Bedroom Pi's microphone is off."
+
+
+# The PC's own microphone in Windows (his rulings, 20 Nov)
+
+@pytest.fixture
+def windows_pc(pi_and_pc, monkeypatch):
+    """The PC of pi_and_pc saying it can reach Windows' sound and microphone, which answer as Windows would."""
+    pc = pi_and_pc.pc
+    windows = SimpleNamespace(asked=[], mic_muted=False, muted=False)
+
+    def ask_computer(action, **fields):
+        windows.asked.append((action, fields))
+        if action == "mic":
+            windows.mic_muted = fields["mute"]
+            return {"said": "Microphone off." if fields["mute"] else "Microphone on.", "muted": fields["mute"]}
+        windows.muted = fields.get("mute", windows.muted)
+        return {"level": 40, "muted": windows.muted}
+
+    monkeypatch.setattr(pc.satellite, "system_volume", True)
+    monkeypatch.setattr(pc.satellite, "ask_computer", ask_computer)
+    # "The Pi" names a satellite, as the brain would say.
+    for session in (pi_and_pc.pi, pc):
+        monkeypatch.setattr(session.intents, "names_satellite", lambda said: said == "the pi")
+    # Claude, if asked, says only this.
+    monkeypatch.setattr(pc.llm, "process_query", lambda text, **kwargs: {"response": "Claude's answer.",
+                                                                          "actions": [], "success": True})
+    pi_and_pc.windows = windows
+    return pi_and_pc
+
+
+def test_mute_the_mic_at_the_pc_mutes_windows_microphone_with_a_sound(windows_pc):
+    pi, pc, windows = windows_pc.pi, windows_pc.pc, windows_pc.windows
+    reply = pc.conversation.handle("Mute the mic.")
+    assert (reply.say, reply.sounds) == ("", [("mic_off.wav", "general")])
+    assert windows.asked == [("mic", {"mute": True, "minutes": 60})] and windows.mic_muted
+    # Nova's own listening, on the Pi and the PC, is left alone.
+    assert not pi.muted and not pc.muted
+    reply = pc.conversation.handle("Unmute the microphone.")
+    assert (reply.say, reply.sounds) == ("", [("mic_on.wav", "general")])
+    assert windows.asked[-1] == ("mic", {"mute": False}) and not windows.mic_muted
+
+
+@pytest.mark.parametrize("answer", ["The mic.", "mic", "Microphone.", "the microphone please", "Nova, mute the mic."])
+def test_plain_mute_at_the_pc_asks_and_the_mic_answer_mutes_windows_microphone(windows_pc, answer):
+    pc, windows = windows_pc.pc, windows_pc.windows
+    asked = pc.conversation.handle("Mute.")
+    assert asked.say == "The mic or the audio?" and asked.listen_again
+    assert windows.asked == []
+    # The answer, heard without the wake word.
+    reply = pc.conversation.handle(answer, follow_up=True)
+    assert (reply.say, reply.sounds) == ("", [("mic_off.wav", "general")])
+    assert windows.asked == [("mic", {"mute": True, "minutes": 60})]
+    assert not windows_pc.pi.muted
+
+
+@pytest.mark.parametrize("answer", ["The audio.", "sound", "Audio please.", "the sound"])
+def test_plain_mute_at_the_pc_asks_and_the_audio_answer_mutes_windows_sound(windows_pc, answer):
+    pc, windows = windows_pc.pc, windows_pc.windows
+    pc.conversation.handle("Mute.")
+    reply = pc.conversation.handle(answer, follow_up=True)
+    assert reply.say == "Muted." and windows.asked == [("volume", {"mute": True})]
+
+
+def test_plain_unmute_at_the_pc_asks_too(windows_pc):
+    pc, windows = windows_pc.pc, windows_pc.windows
+    assert pc.conversation.handle("Unmute.").say == "The mic or the audio?"
+    reply = pc.conversation.handle("the mic", follow_up=True)
+    assert reply.sounds == [("mic_on.wav", "general")] and windows.asked == [("mic", {"mute": False})]
+    assert pc.conversation.handle("Unmute.").say == "The mic or the audio?"
+    pc.conversation.handle("audio", follow_up=True)
+    assert windows.asked[-1] == ("volume", {"mute": False})
+
+
+def test_anything_else_said_back_to_which_is_a_fresh_request(windows_pc):
+    pc, windows = windows_pc.pc, windows_pc.windows
+    pc.conversation.handle("Mute.")
+    assert pc.conversation.handle("What's the capital of France?", follow_up=True).say == "Claude's answer."
+    assert windows.asked == []
+    # And it's gone: "the mic" now is no answer to anything.
+    pc.conversation.handle("the mic", follow_up=True)
+    assert windows.asked == []
+
+
+def test_stop_listening_and_a_device_named_at_the_pc_are_unchanged(windows_pc):
+    pi, pc, windows = windows_pc.pi, windows_pc.pc, windows_pc.windows
+    reply = pc.conversation.handle("Stop listening.")
+    assert reply.sounds == [("mic_off.wav", "general")] and pi.muted
+    pc.conversation.handle("Unmute the Pi.")
+    assert not pi.muted
+    pc.conversation.handle("Mute the Pi.")
+    assert pi.muted
+    assert windows.asked == []
+
+
+def test_plain_mute_at_the_pi_still_mutes_the_pi(windows_pc):
+    pi, windows = windows_pc.pi, windows_pc.windows
+    reply = pi.conversation.handle("Mute.")
+    assert reply.sounds == [("mic_off.wav", "general")] and pi.muted and windows.asked == []
+
+
+def test_an_older_pc_satellite_which_doesnt_know_mic_says_so(windows_pc, monkeypatch):
+    pc = windows_pc.pc
+    monkeypatch.setattr(pc.satellite, "ask_computer", lambda action, **fields: {
+        "error": "I can't do that on this computer."})
+    assert pc.conversation.handle("Mute the mic.").say == "I can't do that on this computer."
 
 
 def test_unmute_leaves_a_ring_alone(pi_and_pc, pi_ringing):
