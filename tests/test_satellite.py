@@ -2618,6 +2618,21 @@ class FakeSystemVolume:
     def __init__(self):
         self.changes = []
         self.closed = False
+        self.muted = False
+        self.unmutes = 0
+        self.fail = False
+        self.log = None
+
+    def unmute_if_muted(self):
+        if self.fail:
+            raise TimeoutError("slow")
+        if not self.muted:
+            return False
+        self.muted = False
+        self.unmutes += 1
+        if self.log is not None:
+            self.log.append("unmute")
+        return True
 
     def change(self, **change):
         self.changes.append(change)
@@ -2800,6 +2815,58 @@ def test_a_pc_which_opens_nothing_refuses_to(brain, make, pc, monkeypatch):
     assert ask_computer(brain, "computer-1", action="close_front")["error"] == "I can't do that on this computer."
     assert ask_computer(brain, "computer-2", action="volume", level=10)["error"] == \
         "This computer's volume can't be changed."
+
+
+def press_on_pc(brain, make, muted=False, fail=False):
+    made = pressable(brain, make)
+    made.system_volume.muted, made.system_volume.fail = muted, fail
+    made.system_volume.log = order = []
+    made.speaker.play_file = lambda *args, **kwargs: order.append("chime")
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    brain.say("stop_listening")
+    return made, order
+
+
+def test_a_press_unmutes_a_muted_windows_before_the_chime(brain, make, pc, caplog):
+    caplog.set_level("INFO")
+    made, order = press_on_pc(brain, make, muted=True)
+    assert order == ["unmute", "chime"]
+    assert made.system_volume.changes == []
+    assert "Windows was muted, so it's unmuted for the press" in caplog.text
+
+
+def test_a_press_leaves_windows_alone_when_it_is_not_muted(brain, make, pc):
+    made, order = press_on_pc(brain, make)
+    assert order == ["chime"] and made.system_volume.unmutes == 0 and made.system_volume.changes == []
+
+
+def test_a_press_which_ends_a_recording_does_not_touch_the_volume(brain, make, pc):
+    made = pressable(brain, make)
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    made.system_volume.muted = True
+    made._pressed()
+    assert wait_for(lambda: brain.messages("audio_end"))
+    assert made.system_volume.unmutes == 0 and made.system_volume.muted is True
+
+
+def test_a_press_works_without_a_system_volume(brain, make, monkeypatch, downloads):
+    monkeypatch.setattr(satellite, "_on_windows", lambda: True)
+    monkeypatch.setattr(satellite, "pc_windows", FakePcWindows())
+    monkeypatch.setattr(satellite, "SystemVolume", NoSystemVolume)
+    made = pressable(brain, make)
+    assert made.system_volume is None
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    brain.say("stop_listening")
+    assert made.speaker.files() == [os.path.join(made.sounds_folder, "listening.wav")]
+
+
+def test_a_press_still_chimes_when_windows_does_not_answer(brain, make, pc, caplog):
+    made, order = press_on_pc(brain, make, muted=True, fail=True)
+    assert order == ["chime"]
+    assert "Couldn't check whether Windows is muted (TimeoutError)" in caplog.text
 
 
 def test_the_system_volume_is_closed_with_the_satellite(brain, make, pc):

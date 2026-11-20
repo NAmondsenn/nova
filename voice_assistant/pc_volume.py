@@ -153,6 +153,30 @@ class SystemVolume:
         backend = self._backend
         return self._do(lambda: _apply(backend.endpoint(), direction, step, level, mute), JOB_WAIT)
 
+    def unmute_if_muted(self) -> bool:
+        """
+        Unmutes Windows if it's muted, keeping the level as it is.
+
+        Returns:
+            True if it was muted and now isn't, False if it wasn't muted.
+
+        Raises:
+            RuntimeError: There's no volume to change here.
+            TimeoutError or OSError: Windows didn't answer, or refused.
+        """
+        if self._backend is None:
+            raise RuntimeError("Windows' volume can't be reached")
+        backend = self._backend
+
+        def work() -> bool:
+            endpoint = backend.endpoint()
+            if not endpoint.muted():
+                return False
+            endpoint.set_mute(False)
+            return True
+
+        return bool(self._do(work, JOB_WAIT))
+
     def close(self):
         """Lets the owning thread go, as the satellite stops."""
         if self._owner is not None:
