@@ -837,6 +837,39 @@ def test_the_screen_orb_goes_with_the_state_only_when_given(pair):
                              ({"type": "state", "volumes": volumes, "muted": False, "screen_orb": orb}, b"")]
 
 
+def test_app_goes_in_the_state_message_only_when_given(pair):
+    # Just another field, so a satellite which has no app - or an older one - is sent its state as it was.
+    satellite, fake, serving = pair
+    volumes = {"general": 0.5, "alarm": 1.0, "music": 0.3}
+    app = {"shortcut": "ctrl+alt+n", "page": "", "mic_mute_minutes": 60}
+
+    satellite.set_state(volumes, False)
+    satellite.set_state(volumes, False, app=app)
+
+    assert wait_for(lambda: len(fake.received) == 2)
+    assert fake.received == [({"type": "state", "volumes": volumes, "muted": False}, b""),
+                             ({"type": "state", "volumes": volumes, "muted": False, "app": app}, b"")]
+
+
+def test_shortcut_taken_is_passed_to_the_session(pair, caplog):
+    # The satellite keeps it, one for each connection, and the session says what its satellite does.
+    satellite, fake, serving = pair
+    assert satellite.shortcut_taken is False
+    with caplog.at_level(logging.WARNING):
+        fake.say("shortcut_taken", taken=True)
+        assert wait_for(lambda: satellite.shortcut_taken)
+        # Not a yes or no, so it's not believed, and the last one stands.
+        fake.say("shortcut_taken", taken="yes")
+        fake.say("shortcut_taken")
+        fake.say("ping")
+        assert wait_for(lambda: fake.messages("pong"))
+        assert satellite.shortcut_taken is True
+        assert len([record for record in caplog.records if "shortcut" in record.getMessage()]) == 2
+        fake.say("shortcut_taken", taken=False)
+        assert wait_for(lambda: not satellite.shortcut_taken)
+    assert satellite.connected
+
+
 def test_messages_sent_from_several_threads_arrive_whole_and_in_order():
     # Music, speech and the session's own messages are all sent from threads of their own.
     satellite, fake, serving = connect(Chunky)

@@ -3656,6 +3656,21 @@ def test_a_screen_orb_setting_saved_is_sent_to_each_satellite(brain, connect):
     assert wait_for(lambda: len(bedroom.messages("state")) == len(kitchen.messages("state")) == 2)
 
 
+def test_saving_the_page_address_or_the_mute_minutes_sends_the_state_again(brain, connect):
+    serving(brain)
+    bedroom, kitchen = connect(brain), connect(brain, "kitchen", KITCHEN)
+    connected(brain)
+    connected(brain, "kitchen")
+    assert wait_for(lambda: bedroom.messages("state") and kitchen.messages("state"))
+    assert {("wrapped", "link"), ("computer", "mic_mute_minutes")} <= set(brain_module.SENT_IN_STATE)
+
+    # The app has both in its state, so each reaches it with no restart.
+    assert brain.apply_settings({("wrapped", "link"): "https://nova.example"}) == []
+    assert wait_for(lambda: len(bedroom.messages("state")) == len(kitchen.messages("state")) == 2)
+    assert brain.apply_settings({("computer", "mic_mute_minutes"): 30}) == []
+    assert wait_for(lambda: len(bedroom.messages("state")) == len(kitchen.messages("state")) == 3)
+
+
 def test_other_settings_saved_send_the_satellites_nothing(brain, connect):
     serving(brain)
     bedroom = connect(brain)

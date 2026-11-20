@@ -1488,6 +1488,12 @@ input[type="range"]:focus-visible::-moz-range-thumb {
   min-height: 44px;
 }
 
+/* Why a shortcut is not working: a line of its own, under its box. */
+.satellites .actions .detail {
+  flex: 1 1 100%;
+  text-align: left;
+}
+
 .satellites .button {
   min-width: 44px;
   min-height: 44px;

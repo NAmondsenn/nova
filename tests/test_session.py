@@ -1583,6 +1583,61 @@ def test_a_screen_orb_written_by_hand_is_sent_as_the_satellite_takes_it(brain, c
     assert pc_link.messages("state")[-1]["screen_orb"] == sent
 
 
+def test_a_push_to_talk_satellite_is_sent_its_app(brain, connect, make_session):
+    pc, pc_link = connect("pc", "pc.local")
+    pc.push_to_talk = True
+    session = make_session(pc)
+    brain.config.apply({("wrapped", "link"): "https://nova.example", ("computer", "mic_mute_minutes"): 45})
+    session.send_state()
+    assert wait_for(lambda: pc_link.messages("state"))
+    # The shortcut is the default until he saves another.
+    assert pc_link.messages("state")[-1]["app"] == {"shortcut": "ctrl+alt+n", "page": "https://nova.example",
+                                                    "mic_mute_minutes": 45}
+
+    # Each read as it is sent, so a save reaches the PC with no restart.
+    brain.rooms.set_shortcut("pc", "ctrl+shift+f5")
+    session.send_state()
+    assert wait_for(lambda: len(pc_link.messages("state")) == 2)
+    assert pc_link.messages("state")[-1]["app"]["shortcut"] == "ctrl+shift+f5"
+    # None at all is said as nothing, so the app can tell it from one it wasn't told.
+    brain.rooms.set_shortcut("pc", "")
+    brain.config.apply({("wrapped", "link"): ""})
+    session.send_state()
+    assert wait_for(lambda: len(pc_link.messages("state")) == 3)
+    assert pc_link.messages("state")[-1]["app"] == {"shortcut": "", "page": "", "mic_mute_minutes": 45}
+
+
+def test_a_wake_word_satellite_is_sent_no_app(brain, connect, make_session):
+    bedroom, bedroom_pi = connect()
+    make_session(bedroom).send_state()
+    assert wait_for(lambda: bedroom_pi.messages("state"))
+    assert "app" not in bedroom_pi.messages("state")[-1]
+
+
+@pytest.mark.parametrize("written", [None, 0, -5, 2.5, True, "45", []])
+def test_minutes_left_empty_in_the_settings_are_the_default(brain, connect, make_session, written):
+    pc, pc_link = connect("pc", "pc.local")
+    pc.push_to_talk = True
+    session = make_session(pc)
+    # What config.yaml would refuse, written by hand, or left empty.
+    brain.config.apply({("computer", "mic_mute_minutes"): written})
+    session.send_state()
+    assert wait_for(lambda: pc_link.messages("state"))
+    assert pc_link.messages("state")[-1]["app"]["mic_mute_minutes"] == 60
+
+
+def test_a_new_session_does_not_inherit_a_taken_shortcut(connect, make_session):
+    first, _ = connect("pc", "pc.local")
+    session = make_session(first)
+    assert session.shortcut_taken is False
+    # What the satellite said - see RemoteSatellite - is what the session says, from the moment it does.
+    first.shortcut_taken = True
+    assert session.shortcut_taken is True
+    # A reconnect is a new satellite, with a new session over it, which hasn't been told it again yet.
+    again, _ = connect("pc", "pc.local")
+    assert make_session(again).shortcut_taken is False
+
+
 def test_mute_is_kept_per_satellite_and_sent_to_it(brain, connect, make_session):
     bedroom, bedroom_pi = connect("bedroom", "bedroom-pi")
     kitchen, kitchen_pi = connect("kitchen", "kitchen-pi")
@@ -3597,7 +3652,8 @@ def test_two_states_sent_at_once_arrive_in_the_order_they_were_read(brain, conne
     brain.media = _playing()
     sent, sending, carry_on = [], threading.Event(), threading.Event()
 
-    def set_state(volumes, muted, longest_request=None, wake_confidence=None, voice_check=None, screen_orb=None):
+    def set_state(volumes, muted, longest_request=None, wake_confidence=None, voice_check=None, screen_orb=None,
+                  app=None):
         # The first send stalls on the way, as one to a satellite slow to read can.
         if not sending.is_set():
             sending.set()

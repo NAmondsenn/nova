@@ -958,6 +958,27 @@ function showSatellites(state) {
     });
     called.append(element("span", "Also called"), calledBox);
     actions.append(called);
+    // The keys a push-to-talk computer listens on, typed as "Ctrl+Alt+N" and sent as it's left, as the
+    // names are: the brain says why if it isn't one, and the rows are drawn again whatever it says. An
+    // empty box is none. A wake-word satellite has no keys to press, so none is drawn for it.
+    if (satellite.push_to_talk) {
+      const shortcut = element("label", undefined, "choice called");
+      const shortcutBox = element("input");
+      Object.assign(shortcutBox, { type: "text", value: satellite.shortcut || "", autocomplete: "off",
+                                   spellcheck: false, placeholder: "none" });
+      shortcutBox.addEventListener("change", () =>
+        change("/api/satellites/shortcut", { name: satellite.name, text: shortcutBox.value }, () => {
+          delete drawn.satellites;
+          return load();
+        }));
+      shortcutBox.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") shortcutBox.blur();
+      });
+      shortcut.append(element("span", "Shortcut to listen"), shortcutBox);
+      actions.append(shortcut);
+      // Said by the computer, which is the one to find out, so only while it's connected.
+      if (satellite.shortcut_taken) actions.append(element("span", "In use by another program on that computer.", "detail"));
+    }
     // Only for one which has said it opens things. The same as the names above: sent as the text is
     // left, which the brain checks against the apps it found, and the rows drawn again whatever
     // it says. The names are shown as they're kept, in lower case without marks.

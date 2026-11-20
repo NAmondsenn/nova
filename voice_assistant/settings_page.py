@@ -50,7 +50,7 @@ from urllib.parse import parse_qs, urlsplit
 import requests
 import yaml
 
-from voice_assistant import paths, satellite_names, storage, timeline
+from voice_assistant import paths, satellite_names, shortcut, storage, timeline
 from voice_assistant.batteries import HOME_FAILURES
 from voice_assistant.clock import format_duration
 from voice_assistant.computers import match_app, plain as plain_app
@@ -635,7 +635,8 @@ class SettingsPage:
         connected - with what it's doing, its mute, whether it records on a press of a
         key, whether it travels with the user, what machine it is (None if it hasn't said),
         whether it saves notes, the other names he has given it and, if Spotify is the
-        player, the speaker it plays on. Never its password.
+        player, the speaker it plays on. Never its password. Its shortcut, as written, and whether another
+        program has it, which only a connected computer can say.
 
         A satellite which has said it opens things since the brain started, or is a PC,
         also has whether he lets it, how many apps it found and his short names for them. With more than one PC in Home
@@ -671,7 +672,10 @@ class SettingsPage:
                           "opens_on": rooms.opens_things(name),
                           "apps_found": len(computers.apps(name)), "app_names": rooms.app_names(name),
                           # As saved: the PCs it is one of come from home_choices_state, as Home Assistant is slow to ask.
-                          "pc_device": rooms.pc_device(name)})
+                          "pc_device": rooms.pc_device(name),
+                          # As written, "" for none; whether the computer said another program has it.
+                          "shortcut": rooms.shortcut(name),
+                          "shortcut_taken": session is not None and session.shortcut_taken})
         return found
 
     def state(self, satellite: Optional[str] = None) -> Dict:
@@ -2227,6 +2231,47 @@ class SettingsPage:
                     f"{'open' if on else 'opening'} things")
         return {"success": True, "message": f"{name} opens things now." if on else f"{name} won't open things now."}
 
+    def set_shortcut(self, name, text, who: str) -> Dict:
+        """
+        Sets the keys a computer listens on to start Nova listening, and sends it them at once.
+        See SatelliteRooms.set_shortcut. It's kept as shortcut.written gives it, whatever case and
+        order it was typed in. Nothing is saved if it isn't a shortcut.
+
+        Args:
+            name: The satellite, as the page sent it.
+            text: The shortcut as typed, e.g. "Ctrl + Alt + N" - empty for none.
+            who: The Tailscale login asking, for the log.
+
+        Returns:
+            Dict with 'success' and a 'message' - which says why, if it isn't a shortcut.
+        """
+        if not (isinstance(name, str) and isinstance(text, str)):
+            return {"success": False, "message": "That didn't make sense."}
+        names = self._satellite_names()
+        if names is None:
+            return {"success": False, "message": SATELLITES_UNREADABLE}
+        if name not in names:
+            return {"success": False, "message": f"There's no satellite called {name}."}
+        try:
+            chosen = shortcut.read(text)
+        except shortcut.ShortcutError as e:
+            return {"success": False, "message": str(e)}
+        written = shortcut.written(chosen)
+        try:
+            self.brain.rooms.set_shortcut(name, written)
+        except OSError as e:
+            logger.error(f"Settings page: couldn't save the shortcut of the {name} satellite: {e}")
+            return {"success": False, "message": "That couldn't be saved."}
+        # Only the one it's for, and only if it's connected: one which isn't is sent it as it connects.
+        session = self.brain.session_for(name)
+        if session is not None:
+            session.send_state()
+        if chosen is None:
+            logger.info(f"Settings page: {who} took away the shortcut of the {name} satellite")
+            return {"success": True, "message": f"{name} has no shortcut now."}
+        logger.info(f"Settings page: {who} set the shortcut of the {name} satellite to {written}")
+        return {"success": True, "message": f"{name} listens on {shortcut.shown(chosen)} now."}
+
     def set_app_names(self, name, text, who: str) -> Dict:
         """
         Gives a satellite's apps the short names he says for them, in place of any they
@@ -2621,6 +2666,7 @@ ACTIONS: Dict[str, Callable[[SettingsPage, Dict, str], Dict]] = {
     "/api/satellites/travels": lambda page, body, who: page.set_travels(body["name"], body["on"], who),
     "/api/satellites/called": lambda page, body, who: page.set_called(body["name"], body["called"], who),
     "/api/satellites/opens": lambda page, body, who: page.set_opens(body["name"], body["on"], who),
+    "/api/satellites/shortcut": lambda page, body, who: page.set_shortcut(body["name"], body["text"], who),
     "/api/satellites/app-names": lambda page, body, who: page.set_app_names(body["name"], body["text"], who),
     "/api/satellites/pc": lambda page, body, who: page.set_pc(body["name"], body["device"], who),
     # A new clock's fields are sent as one, as the page adds the satellite it's looking

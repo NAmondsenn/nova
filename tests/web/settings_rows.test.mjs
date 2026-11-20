@@ -1177,6 +1177,56 @@ test("the opening switch and the app names are sent as they are changed", async 
     { path: "/api/satellites/app-names", name: "pc", text: "GTA = Grand Theft Auto V Enhanced " }]));
 });
 
+// The shortcut a push-to-talk satellite listens on: its box, by its words, and the line which says another program has it.
+const SHORTCUTS = [
+  { name: "pc", connected: true, default: false, travels: false, machine: "pc", called: [], saves_notes: true,
+    push_to_talk: true, shortcut: "ctrl+alt+n", shortcut_taken: false },
+  { name: "mac", connected: true, default: false, travels: false, machine: "mac", called: [], saves_notes: true,
+    push_to_talk: true, shortcut: "", shortcut_taken: true },
+  { name: "home-assistant", connected: true, default: true, travels: false, machine: "pi", called: [], saves_notes: false,
+    push_to_talk: false, shortcut: "ctrl+alt+n", shortcut_taken: false },
+];
+const shortcutBox = (row) => row.querySelectorAll("input").find((one) => one.placeholder === "none");
+const IN_USE = "In use by another program on that computer.";
+
+test("a push-to-talk satellite has a box for its shortcut, and a wake-word one has none", async () => {
+  const shown = page({ state: { ...STATE, satellites: SHORTCUTS, satellite: null } });
+  await shown.context.load();
+  const box = shortcutBox(satelliteRow(shown, "pc"));
+  assert.equal(box.value, "ctrl+alt+n");
+  // Said in words by the label which holds it, as the other names' box is.
+  assert.equal(`${box.parent.tag} ${box.parent.textContent.startsWith("Shortcut to listen")}`, "label true");
+  // None is an empty box, which the placeholder says.
+  assert.equal(shortcutBox(satelliteRow(shown, "mac")).value, "");
+  assert.equal(shortcutBox(satelliteRow(shown, "home-assistant")), undefined);
+  // The names' box is still the first, and the shortcut's is another.
+  assert.notEqual(calledBox(satelliteRow(shown, "pc")), box);
+});
+
+test("the line about a shortcut in use is drawn only when it is", async () => {
+  const shown = page({ state: { ...STATE, satellites: SHORTCUTS, satellite: null } });
+  await shown.context.load();
+  const inUse = (name) => detailsOf(satelliteRow(shown, name)).includes(IN_USE);
+  assert.equal(`${inUse("pc")} ${inUse("mac")} ${inUse("home-assistant")}`, "false true false");
+});
+
+test("a shortcut is sent as it is changed, and the rows drawn again", async () => {
+  const shown = page({ state: { ...STATE, satellites: SHORTCUTS, satellite: null } });
+  await shown.context.load();
+  const posts = posting(shown);
+  const box = shortcutBox(satelliteRow(shown, "pc"));
+  box.value = "Ctrl + Shift + F5 ";
+  assert.equal(posts.length, 0);
+  for (const listener of box.listeners.change || []) await listener({});
+  assert.equal(JSON.stringify(posts), JSON.stringify([
+    { path: "/api/satellites/shortcut", name: "pc", text: "Ctrl + Shift + F5 " }]));
+  // Enter ends the typing, as it does in the names' box.
+  let left = 0;
+  box.blur = () => { left += 1; };
+  for (const listener of box.listeners.keydown || []) await listener({ key: "Enter" });
+  assert.equal(left, 1);
+});
+
 // What /api/home-choices says, with the PCs a satellite can be chosen from.
 const choices = (satellite_pcs) => ({ available: true, lists: [], sending: [], weather: null, pcs: null, satellite_pcs });
 

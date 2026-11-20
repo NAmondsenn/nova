@@ -17,6 +17,7 @@ import logging
 import threading
 from typing import Any, Dict, Iterable, List, Optional
 
+from voice_assistant import shortcut
 from voice_assistant.machine import MACHINES
 from voice_assistant.storage import load_json, save_json
 
@@ -26,7 +27,19 @@ logger = logging.getLogger(__name__)
 def _blank() -> Dict:
     """Returns the entry of a satellite nothing is known of, with every field the file keeps."""
     return {"push_to_talk": False, "area": None, "machine": None, "saves_notes": False, "called": [],
-            "opens_things": True, "app_names": {}, "pc_device": None}
+            "opens_things": True, "app_names": {}, "pc_device": None, "shortcut": shortcut.DEFAULT}
+
+
+def _shortcut(stored: Any) -> str:
+    """
+    Returns the shortcut read from the file, as shortcut.written gives it - the default if what's there
+    isn't one, as for a file from before shortcuts or one edited by hand. An empty one stays empty: that
+    is his choice of none.
+    """
+    try:
+        return shortcut.written(shortcut.read(stored))
+    except shortcut.ShortcutError:
+        return shortcut.DEFAULT
 
 
 def _names(stored: Any) -> List[str]:
@@ -79,7 +92,9 @@ class SatelliteRooms:
                               # On unless he turned it off, so a file from before has it on.
                               "opens_things": each.get("opens_things") is not False,
                               "app_names": _aliases(each.get("app_names")),
-                              "pc_device": each.get("pc_device") if isinstance(each.get("pc_device"), str) else None}
+                              "pc_device": each.get("pc_device") if isinstance(each.get("pc_device"), str) else None,
+                              # Not there before shortcuts, which is the default rather than none.
+                              "shortcut": _shortcut(each["shortcut"]) if "shortcut" in each else shortcut.DEFAULT}
                        for name, each in stored.items()}
 
     def _save(self):
@@ -199,6 +214,19 @@ class SatelliteRooms:
         """
         self._set_field(name, "pc_device", device)
 
+    def set_shortcut(self, name: str, text: str):
+        """
+        Notes the keys a computer listens on for a press, as the settings page saves them.
+
+        Args:
+            name: The satellite's name.
+            text: The shortcut as shortcut.written gives it, or "" for none.
+
+        Raises:
+            OSError: If it couldn't be saved.
+        """
+        self._set_field(name, "shortcut", text)
+
     def push_to_talk(self, name: str) -> bool:
         """Returns whether a satellite records on a press of a key - False for one not known."""
         with self._lock:
@@ -233,6 +261,11 @@ class SatelliteRooms:
         """Returns the device id of the HASS.Agent PC he chose for a satellite, or None if he hasn't."""
         with self._lock:
             return self._known.get(name, {}).get("pc_device")
+
+    def shortcut(self, name: str) -> str:
+        """Returns the keys a computer listens on, as shortcut.written gives them - "" for none, the default if never chosen."""
+        with self._lock:
+            return self._known.get(name, {}).get("shortcut", shortcut.DEFAULT)
 
     def area(self, name: str) -> Optional[str]:
         """Returns the room a satellite is in, or None if it isn't known."""

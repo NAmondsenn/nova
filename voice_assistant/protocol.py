@@ -29,6 +29,8 @@ After the handshake, what a satellite sends the brain:
     computer_done  {"id": ..., "said"?: ..., "error"?: ..., "level"?: ..., "muted"?: ...}  (the
         answer to a computer: a sentence to say, or one saying why not, or the volume now - or
         for "mic", whether the microphone is muted now)
+    shortcut_taken  {"taken": true|false}  (whether another program has the shortcut the satellite's
+        app listens on, said each time that changes and as it connects)
 
 and what the brain sends a satellite:
 
@@ -47,7 +49,10 @@ and what the brain sends a satellite:
     state  {"volumes": {"general": ..., "alarm": ..., "music": ...}, "muted": ..., "longest_request"?: seconds,
             "wake_confidence"?: 0-1, "voice_check"?: 0-0.99,
             "screen_orb"?: {"on": ..., "place": ..., "size": ...}  (a push-to-talk satellite only: whether
-            and where on its screen to show Nova's orb, and how big)}
+            and where on its screen to show Nova's orb, and how big),
+            "app"?: {"shortcut": ..., "page": ..., "mic_mute_minutes": ...}  (a push-to-talk satellite
+            only: the keys its app listens on as "ctrl+alt+n", "" for none; the settings page's address,
+            "" for none; and how long its microphone stays muted)}
     alarms  {"entries": [{"id": ..., "due": ..., "kind": ..., "sound": ...}]}
     phrase  {"rate": ...}  (payload)
     away_settled  (once the brain has saved what away said)
