@@ -218,3 +218,296 @@ def test_a_recording_from_a_feed_marks_the_timeline_by_when_the_audio_arrived(mo
     assert set(marks) == {"recording_started", "speech_started", "speech_ended", "recording_stopped"}
     assert marks["speech_started"] == pytest.approx(9.9)
     assert marks["speech_ended"] == pytest.approx(11.0)
+
+
+class ChimeDetector(FakeDetector):
+    """Calls the first frames quiet however loud they are, as Silero does for a chime."""
+
+    def __init__(self, quiet_frames):
+        self.quiet_frames = quiet_frames
+        self.seen = 0
+
+    def reset(self):
+        self.seen = 0
+
+    def speech_probability(self, frame):
+        self.seen += 1
+        if self.seen <= self.quiet_frames:
+            return 0.0
+        return super().speech_probability(frame)
+
+
+class FakeWords:
+    """Stands in for NemotronTranscription: it only knows how much audio it has been given."""
+
+    def __init__(self, real_from, still_from=None):
+        # Seconds of audio at which the first real word has been heard, and - if the
+        # words stop changing - the seconds of audio at which they last changed.
+        self.real_from = real_from
+        self.still_from = still_from
+        self.given = 0
+
+    def heard(self, audio):
+        self.given += len(audio)
+
+    def quiet_words(self):
+        heard = self.given / RATE
+        if heard < self.real_from:
+            return None
+        if self.still_from is None:
+            return 0.1
+        return max(0.0, heard - self.still_from)
+
+
+# 12 dB below his own loudness: the tests' 8000 against 1500 is only 14.5 dB down.
+TWELVE_DB = 10 ** (-12 / 20)
+ENDED_BY = {"silence", "voice drop", "no new words", "limit", "feed ended", "no speech"}
+
+
+def test_a_quieter_background_ends_it_with_the_voice_drop():
+    def loud_then_background():
+        feed = AudioFeed()
+        feed.feed(seconds(1.0, 8000))
+        feed.feed(seconds(3.0, 1500))
+        return feed
+
+    words, report = FakeWords(0.3), {}
+    audio = record(loud_then_background(), listen_from=0, timeout=3.0, voice_drop=TWELVE_DB,
+                   words_quiet=words.quiet_words, heard=words.heard, report=report)
+
+    # The loud part ends at 1.0s; it takes a 0.15s window of the background to show, then 0.6s of it.
+    assert 1.6 <= len(audio) / RATE <= 1.8
+    assert report["ended_by"] == "voice drop"
+
+    # Off, the background is speech to the detector and it runs to the timeout.
+    words, report = FakeWords(0.3), {}
+    audio = record(loud_then_background(), listen_from=0, timeout=3.0, voice_drop=None,
+                   words_quiet=words.quiet_words, heard=words.heard, report=report)
+
+    assert len(audio) / RATE == pytest.approx(3.0)
+    assert report["ended_by"] == "limit"
+
+
+def test_the_voice_drop_has_no_word_to_wait_for_without_words_quiet():
+    # The session only gives voice_drop without words_quiet when the speech-to-text can't say its words.
+    feed = AudioFeed()
+    feed.feed(seconds(1.0, 8000))
+    feed.feed(seconds(3.0, 1500))
+    report = {}
+
+    audio = record(feed, listen_from=0, timeout=3.0, voice_drop=TWELVE_DB, report=report)
+
+    assert 1.6 <= len(audio) / RATE <= 1.8
+    assert report["ended_by"] == "voice drop"
+    assert report["words_quiet"] is None
+
+
+def test_a_short_quiet_dip_mid_sentence_doesnt_end_it():
+    feed = AudioFeed()
+    for length, value in [(0.5, 8000), (0.3, 1500), (0.5, 8000), (1.0, 0)]:
+        feed.feed(seconds(length, value))
+    words, report = FakeWords(0.3), {}
+
+    audio = record(feed, listen_from=0, voice_drop=TWELVE_DB,
+                   words_quiet=words.quiet_words, heard=words.heard, report=report)
+
+    # 0.5 + 0.3 + 0.5s of speech, then Silero's own 0.6s of quiet.
+    assert len(audio) / RATE == pytest.approx(1.9, abs=0.1)
+    assert report["ended_by"] == "silence"
+
+
+def test_neither_rule_ends_it_before_a_real_word():
+    feed = AudioFeed()
+    for length, value in [(2.0, 1500), (0.5, 8000), (3.0, 1500)]:
+        feed.feed(seconds(length, value))
+    words, report = FakeWords(2.2), {}
+
+    audio = record(feed, listen_from=0, voice_drop=TWELVE_DB,
+                   words_quiet=words.quiet_words, heard=words.heard, report=report)
+
+    assert len(audio) / RATE > 2.5
+    assert report["ended_by"] == "voice drop"
+
+
+def test_the_voice_drop_waits_for_a_real_word_before_it_counts_the_quiet():
+    # He's loud for 1s, then the background (which the detector calls speech) is far quieter:
+    # without the wait it would end at about 1.7s. His first word is only heard at 2.0s.
+    feed = AudioFeed()
+    feed.feed(seconds(1.0, 8000))
+    feed.feed(seconds(3.0, 1500))
+    words, report = FakeWords(2.0), {}
+
+    audio = record(feed, listen_from=0, timeout=3.5, voice_drop=TWELVE_DB,
+                   words_quiet=words.quiet_words, heard=words.heard, report=report)
+
+    # Quiet is counted from the first word, not backdated: 2.0s and then 0.6s.
+    assert len(audio) / RATE == pytest.approx(2.6, abs=0.1)
+    assert report["ended_by"] == "voice drop"
+
+
+def test_loud_sound_silero_doesnt_call_speech_never_sets_the_loudness():
+    # The press chime heard by the microphone: 30000, and not speech to Silero.
+    feed = AudioFeed()
+    for length, value in [(0.3, 30000), (1.0, 8000), (3.0, 1500)]:
+        feed.feed(seconds(length, value))
+    words, report = FakeWords(0.5), {}
+
+    audio = record_until_silence(feed, ChimeDetector(quiet_frames=10), listen_from=0,
+                                 silence_duration=0.6, speech_timeout=0.9, timeout=5.0,
+                                 voice_drop=TWELVE_DB, words_quiet=words.quiet_words,
+                                 heard=words.heard, report=report)
+
+    assert report["loudness"] == pytest.approx(8000 / 32768, abs=0.005)
+    assert report["ended_by"] == "voice drop"
+    assert len(audio) / RATE < 2.2
+
+
+def test_the_chime_cant_set_the_loudness_when_speech_is_found_at_once():
+    # With a short min_speech the first window is made as soon as speech is found, and
+    # would still hold the end of the chime if it counted frames from before the speech.
+    feed = AudioFeed()
+    for length, value in [(0.3, 30000), (1.0, 8000), (3.0, 1500)]:
+        feed.feed(seconds(length, value))
+    words, report = FakeWords(0.5), {}
+
+    record_until_silence(feed, ChimeDetector(quiet_frames=10), listen_from=0, min_speech=0.03,
+                         silence_duration=0.6, speech_timeout=0.9, timeout=5.0,
+                         voice_drop=TWELVE_DB, words_quiet=words.quiet_words,
+                         heard=words.heard, report=report)
+
+    assert report["loudness"] == pytest.approx(8000 / 32768, abs=0.005)
+    assert report["ended_by"] == "voice drop"
+
+
+def test_a_loud_burst_in_the_middle_that_silero_doesnt_call_speech_doesnt_set_the_loudness():
+    class BangDetector(FakeDetector):
+        def speech_probability(self, frame):
+            return 0.0 if np.abs(frame).mean() > 20000 else super().speech_probability(frame)
+
+    feed = AudioFeed()
+    for length, value in [(1.0, 8000), (0.3, 30000), (1.0, 0)]:
+        feed.feed(seconds(length, value))
+    words, report = FakeWords(0.3), {}
+
+    record_until_silence(feed, BangDetector(), listen_from=0, silence_duration=0.6,
+                         speech_timeout=0.9, timeout=5.0, voice_drop=TWELVE_DB,
+                         words_quiet=words.quiet_words, heard=words.heard, report=report)
+
+    assert report["loudness"] == pytest.approx(8000 / 32768, abs=0.005)
+
+
+def test_words_which_stop_being_known_stop_the_rules_applying():
+    # NemotronTranscription.quiet_words gives None for good if Nemotron can't say its words.
+    feed = AudioFeed()
+    feed.feed(seconds(1.0, 8000))
+    feed.feed(seconds(3.0, 1500))
+    words, report = FakeWords(0.3), {}
+    steps = iter(range(10 ** 6))
+
+    def words_then_none():
+        return words.quiet_words() if next(steps) < 20 else None
+
+    audio = record(feed, listen_from=0, timeout=3.0, voice_drop=TWELVE_DB,
+                   words_quiet=words_then_none, heard=words.heard, report=report)
+
+    assert len(audio) / RATE == pytest.approx(3.0, abs=0.05)
+    assert report["ended_by"] == "limit"
+
+
+def test_words_still_for_long_enough_end_it():
+    def steady():
+        feed = AudioFeed()
+        feed.feed(seconds(6.0, 8000))
+        return feed
+
+    # Speech throughout, so Silero never ends it; the words are real from 0.5s and then
+    # still, so they have been quiet for 1.5s when the audio reaches 2.0s.
+    words, report = FakeWords(0.5, still_from=0.5), {}
+    audio = record(steady(), listen_from=0, words_quiet=words.quiet_words, heard=words.heard, report=report)
+
+    assert len(audio) / RATE == pytest.approx(2.0, abs=0.1)
+    assert report["ended_by"] == "no new words"
+    assert report["words_quiet"] == pytest.approx(1.5, abs=0.1)
+
+    # A shorter wait for it, when the caller asks.
+    words, report = FakeWords(0.5, still_from=0.5), {}
+    audio = record(steady(), listen_from=0, no_words_after=1.0, words_quiet=words.quiet_words,
+                   heard=words.heard, report=report)
+
+    assert len(audio) / RATE == pytest.approx(1.5, abs=0.1)
+
+    # Words which keep changing keep it going to the limit.
+    words, report = FakeWords(0.5), {}
+    audio = record(steady(), listen_from=0, words_quiet=words.quiet_words, heard=words.heard, report=report)
+
+    assert len(audio) / RATE == pytest.approx(5.0, abs=0.05)
+    assert report["ended_by"] == "limit"
+
+    # And so do none yet - nothing is ended by words nobody has heard.
+    report = {}
+    audio = record(steady(), listen_from=0, words_quiet=lambda: None, report=report)
+
+    assert len(audio) / RATE == pytest.approx(5.0, abs=0.05)
+    assert report["ended_by"] == "limit"
+    assert report["words_quiet"] is None
+
+
+def test_the_report_is_numbers_only():
+    feed = AudioFeed()
+    feed.feed(seconds(1.0, 8000))
+    feed.feed(seconds(3.0, 1500))
+    words, report = FakeWords(0.3, still_from=0.3), {}
+
+    record(feed, listen_from=0, timeout=3.0, voice_drop=TWELVE_DB,
+           words_quiet=words.quiet_words, heard=words.heard, report=report)
+
+    assert set(report) == {"ended_by", "loudness", "levels", "speech", "words_quiet"}
+    assert report["ended_by"] in ENDED_BY
+    for key in ("loudness", "words_quiet"):
+        assert report[key] is None or isinstance(report[key], float)
+    for key in ("levels", "speech"):
+        assert report[key] and all(isinstance(value, float) for value in report[key])
+    # One of each for every 0.15s window of the speech, rounded.
+    assert len(report["levels"]) == len(report["speech"])
+    assert all(value == round(value, 4) for value in report["levels"])
+    assert all(value == round(value, 2) for value in report["speech"])
+    assert report["levels"][0] == pytest.approx(8000 / 32768, abs=0.001)
+    assert report["levels"][-1] == pytest.approx(1500 / 32768, abs=0.001)
+    assert set(report["speech"]) == {1.0}
+
+
+def test_without_the_new_arguments_nothing_changes():
+    def make_feeds():
+        stalled = AudioFeed(stall_seconds=0.2)
+        stalled.feed(seconds(0.5, 2000))
+        part_way = AudioFeed()
+        part_way.feed(seconds(0.5, 2000))
+        part_way.feed(np.full(100, 2000, dtype=np.int16))
+        part_way.end()
+        quiet = AudioFeed()
+        quiet.feed(seconds(0.5, 2000))
+        quiet.feed(seconds(1.0, 0))
+        silent = AudioFeed()
+        silent.feed(seconds(2.0, 0))
+        ended_early = AudioFeed()
+        ended_early.feed(seconds(0.2, 0))
+        ended_early.end()
+        endless = AudioFeed()
+        endless.feed(seconds(4.0, 2000))
+        return {"silence": quiet, "feed ended": part_way, "no speech": silent, "limit": endless,
+                "stalled": stalled, "ended early": ended_early}
+
+    expected = {"silence": ("silence", 1.1), "feed ended": ("feed ended", 0.5),
+                "no speech": ("no speech", 0.0), "limit": ("limit", 2.0),
+                "stalled": ("feed ended", 0.5), "ended early": ("no speech", 0.0)}
+    plain, reported = make_feeds(), make_feeds()
+
+    for name, (ended_by, length) in expected.items():
+        report = {}
+        audio = record(reported[name], listen_from=0, timeout=2.0, report=report)
+
+        assert report["ended_by"] == ended_by, name
+        assert len(audio) / RATE == pytest.approx(length, abs=0.05), name
+        # Asking for a report changes nothing about the recording.
+        assert np.array_equal(audio, record(plain[name], listen_from=0, timeout=2.0)), name
+        assert report["words_quiet"] is None, name

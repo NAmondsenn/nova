@@ -8,9 +8,10 @@ handling of pauses and false wake words, serves them.
 """
 
 import logging
+import math
 import threading
 import time
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -38,12 +39,21 @@ PAUSE_SECONDS = 0.2
 # has been dropped, so the first sound of their first word isn't clipped.
 LEAD_IN_SECONDS = 0.15
 
+# The voice-drop rule judges how loud it is over this many frames (0.15s) rather than
+# one: short enough to follow his voice dying away, long enough that a single click
+# doesn't set how loud he is, and the dips between syllables don't count as quiet.
+VOICE_WINDOW = 5
+
 
 def record_until_silence(source, detector, listen_from: Optional[int] = None,
                          keep_before: float = 0.0, timeout: float = 10.0,
                          silence_duration: float = 0.6, speech_timeout: float = 3.0,
                          min_speech: float = 0.12, timeline=None,
-                         heard: Optional[Callable[[np.ndarray], None]] = None) -> np.ndarray:
+                         heard: Optional[Callable[[np.ndarray], None]] = None,
+                         voice_drop: Optional[float] = None,
+                         words_quiet: Optional[Callable[[], Optional[float]]] = None,
+                         no_words_after: float = 1.5,
+                         report: Optional[Dict] = None) -> np.ndarray:
     """
     Records until the user has spoken and then gone quiet, or a timeout is reached.
 
@@ -73,6 +83,38 @@ def record_until_silence(source, detector, listen_from: Optional[int] = None,
             float32 samples which add up to exactly what's returned. Nothing is
             given until the user starts talking, so a false wake word costs
             nothing.
+        voice_drop: Off if None. Otherwise a ratio, such as 0.126 for 18 dB down:
+            once speech-to-text has heard a real word (see words_quiet), a frame also
+            counts towards the silence when the last 0.15s of sound is below the
+            loudest the user has been, times this. It's for a user close to a
+            microphone, who is much louder there than a game or a video playing
+            nearby, which Silero can still take for speech. How loud they have been
+            comes only from 0.15s windows whose newest frame Silero calls speech, so
+            a loud sound it doesn't - such as the listening chime - can't set it.
+            Without words_quiet there is no word to wait for, so it counts as soon
+            as the user is talking.
+        words_quiet: Off if None. Says how long the user's words have been still:
+            None until speech-to-text has heard a real word in the recording, then
+            the seconds of audio since the words last changed - see
+            NemotronTranscription.quiet_words. The recording ends when that reaches
+            no_words_after, a backstop for loud sound which isn't speech. Until it
+            gives a number neither this nor voice_drop applies, so a recording
+            kept going by background sound before the user speaks isn't ended before
+            they've said anything.
+        no_words_after: Seconds of audio without a new word which end the recording.
+        report: Optional dict, filled in when the recording ends with how it did.
+            ended_by: What ended it - "silence", "voice drop" (a quiet run which
+                voice_drop helped count), "no new words", "limit" (the timeout),
+                "feed ended" (the source stopped after the user had started), or
+                "no speech" (it was given up on before the user started, however
+                that came about).
+            loudness: How loud the user was, from 0 to 1, or None if not known.
+            levels: How loud each 0.15s window was from when speech started, from 0
+                to 1, to four places.
+            speech: Silero's mean probability of speech in each of those windows, to
+                two places.
+            words_quiet: The last number words_quiet gave, or None if it never did.
+            Only numbers and the name of what ended it - never audio or words.
 
     Returns:
         The recording as float32 samples at 16kHz, or an empty array if the user
@@ -105,6 +147,36 @@ def record_until_silence(source, detector, listen_from: Optional[int] = None,
     quiet_frames = 0
     paused = False
 
+    # How loud the last VOICE_WINDOW frames were, kept as running sums over two small
+    # rings of the frames' own numbers - a sum of squares and Silero's probability
+    # each - so sliding the window on costs one frame's arithmetic and no copy of the
+    # frames before it. Only worked out when something will use it.
+    measuring = voice_drop is not None or report is not None
+    square_ring = [0.0] * VOICE_WINDOW
+    speech_ring = [0.0] * VOICE_WINDOW
+    window_squares = 0.0
+    window_speech = 0.0
+    # Frames since the user started talking, counted from the first of the run of speech
+    # which started it. A window only counts once it is made wholly of those, so
+    # whatever sounded before - the listening chime, which the microphone hears too and
+    # which Silero doesn't call speech - can't make the user seem louder than they are.
+    since_start = 0
+    loudness = None
+    levels: List[float] = []
+    speeches: List[float] = []
+    last_still = None
+    # Whether the quiet run so far has needed the voice drop to count a frame.
+    voice_only = False
+    ended_by = "limit"
+
+    def note(by: str):
+        """Says how the recording ended, in the report if there is one."""
+        if report is not None:
+            report.update(ended_by=by,
+                          loudness=None if loudness is None else round(loudness, 4),
+                          levels=levels, speech=speeches,
+                          words_quiet=None if last_still is None else round(last_still, 2))
+
     for i in range(max_frames):
         frame = reader.read(FRAME)
         kept.append(frame)
@@ -116,15 +188,28 @@ def record_until_silence(source, detector, listen_from: Optional[int] = None,
             # was said is the recording - unless the user hadn't started yet.
             if not speech_started:
                 logger.info("The audio ended before any speech, cancelling")
+                note("no speech")
                 return np.array([], dtype=np.float32)
+            ended_by = "feed ended"
             break
         probability = detector.speech_probability(frame)
+
+        if measuring:
+            samples = frame.astype(np.float32)
+            squares = float(np.dot(samples, samples))
+            chance = float(probability)
+            slot = i % VOICE_WINDOW
+            window_squares += squares - square_ring[slot]
+            window_speech += chance - speech_ring[slot]
+            square_ring[slot] = squares
+            speech_ring[slot] = chance
 
         if not speech_started:
             # Gives up early if the user never started talking, so a false wake
             # word doesn't leave the assistant recording silence.
             if i >= speech_timeout_frames:
                 logger.info(f"No speech within {speech_timeout:.1f}s, cancelling")
+                note("no speech")
                 return np.array([], dtype=np.float32)
 
             speech_frames = speech_frames + 1 if probability >= detector.threshold else 0
@@ -133,6 +218,7 @@ def record_until_silence(source, detector, listen_from: Optional[int] = None,
             if speech_frames >= frames_to_start:
                 speech_started = True
                 speech_ended_at = reader.position
+                since_start = speech_frames
                 # The moment kept from before listening started is there for "Hey
                 # Nova what time is it" said in one breath. When the user paused
                 # after the wake word instead - for the listening sound, usually -
@@ -151,20 +237,58 @@ def record_until_silence(source, detector, listen_from: Optional[int] = None,
                 if timeline:
                     timeline.mark("speech_started",
                                   at=source.time_at(reader.position - speech_frames * FRAME))
-        elif probability < detector.threshold - SILENCE_MARGIN:
-            silent_frames += 1
-            if silent_frames >= frames_to_stop:
-                logger.info(f"Silence detected after {(reader.position - listen_from) / RATE:.1f}s")
-                break
         else:
-            silent_frames = 0
-            speech_ended_at = reader.position
+            level = None
+            if measuring:
+                since_start += 1
+                if since_start >= VOICE_WINDOW:
+                    level = math.sqrt(max(window_squares, 0.0) / (VOICE_WINDOW * FRAME)) / 32768.0
+                    if since_start % VOICE_WINDOW == 0:
+                        levels.append(round(level, 4))
+                        speeches.append(round(max(window_speech, 0.0) / VOICE_WINDOW, 2))
+                    # Only a window whose newest frame Silero calls speech says how loud
+                    # the user is.
+                    if probability >= detector.threshold and (loudness is None or level > loudness):
+                        loudness = level
+
+            # How long the words have been still - a number only once a real word has
+            # been heard. Until then neither new rule applies, as the background sound
+            # they're for can be called speech from the moment of the press, and the
+            # first word only follows a moment later.
+            still = words_quiet() if words_quiet is not None else None
+            if still is not None:
+                last_still = still
+            # With no words_quiet to ask there's no word to wait for.
+            dropped = (voice_drop is not None and (words_quiet is None or still is not None)
+                       and level is not None and loudness is not None
+                       and level < loudness * voice_drop)
+
+            if probability < detector.threshold - SILENCE_MARGIN or dropped:
+                silent_frames += 1
+                # A frame Silero calls speech which counts only because of the voice drop.
+                voice_only = voice_only or probability >= detector.threshold - SILENCE_MARGIN
+                if silent_frames >= frames_to_stop:
+                    ended_by = "voice drop" if voice_only else "silence"
+                    logger.info(f"{'Voice dropped away' if voice_only else 'Silence detected'} after "
+                                f"{(reader.position - listen_from) / RATE:.1f}s")
+                    break
+            else:
+                silent_frames = 0
+                voice_only = False
+                speech_ended_at = reader.position
+
+            if still is not None and still >= no_words_after:
+                ended_by = "no new words"
+                logger.info(f"No new words for {still:.1f}s, stopping after "
+                            f"{(reader.position - listen_from) / RATE:.1f}s")
+                break
 
     if timeline:
         if speech_started:
             timeline.mark("speech_ended", at=source.time_at(speech_ended_at))
         timeline.mark("recording_stopped")
 
+    note(ended_by)
     audio = np.concatenate(kept).astype(np.float32) / 32768.0
     logger.info(f"Recorded {len(audio)} samples")
     return audio
