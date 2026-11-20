@@ -947,41 +947,67 @@ class Brain:
                      for other in others)
         return name if shared else spoken
 
-    def computer_for(self, spoken_at: str, where: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    def computer_meant(self, spoken_at: str, where: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
         """
-        Finds the computer to open, search or close something on: the one named, else the
-        one spoken at if it opens things, else the only one known which does.
+        Finds which computer a request means, without needing it connected and without
+        asking Home Assistant anything - cheap enough for the local rules to ask while
+        deciding whether a request is a computer's at all (see ComputerHooks). The one
+        named, else the one spoken at if it opens things, else the only one known which does.
 
         Args:
             spoken_at: The satellite the user was talking to.
             where: The words for which computer, e.g. "my PC", or None for none said.
 
         Returns:
-            The computer's satellite name and None; or None and what to say instead - the
-            words name none, or one which can't open things, or it isn't connected ("Your
-            PC's off." - for a computer named, even one not heard from since the brain started); or None and None when none was named and there's no one computer to
-            choose, for a local command to fall through.
+            The computer's satellite name and None - a PC or Mac named but not heard from since
+            the brain started counts, as computer_for says what's wrong with it; or None and what
+            to say instead, when the words name none or one which can't open things; or None and
+            None when none was named and there's no one computer to choose.
         """
         opening = [name for name in self.computers.known() if self.rooms.opens_things(name)]
         if where:
-            name, problem = self.find_satellite(where)
+            name, problem = self.find_satellite(where, here=spoken_at)
             if name is None:
                 return None, problem
-            if (name not in self.computers.known() and self.rooms.machine(name) in ("pc", "mac")
-                    and self.session_for(name) is None):
-                # A computer not heard from since the brain started - asleep, or Nova isn't running there.
-                return None, self.not_connected(name)
-            if name not in opening:
-                spoken = self.spoken_name(name)
-                return None, f"{spoken[:1].upper() + spoken[1:]} can't open things."
-        elif spoken_at in opening:
-            name = spoken_at
-        elif len(opening) == 1:
-            name = opening[0]
-        else:
-            return None, None
-        if self.session_for(name) is None:
+            if name in opening or (name not in self.computers.known() and self.rooms.machine(name) in ("pc", "mac")):
+                return name, None
+            spoken = self.spoken_name(name)
+            return None, f"{spoken[:1].upper() + spoken[1:]} can't open things."
+        if spoken_at in opening:
+            return spoken_at, None
+        if len(opening) == 1:
+            return opening[0], None
+        return None, None
+
+    def computer_for(self, spoken_at: str, where: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Finds the computer to open, search or close something on, as computer_meant does,
+        and checks it can be asked now.
+
+        Args:
+            spoken_at: The satellite the user was talking to.
+            where: The words for which computer, e.g. "my PC", or None for none said.
+
+        Returns:
+            The computer's satellite name and None; or None and what to say instead - as
+            computer_meant says, or it isn't connected ("Your PC's off.", even for one not
+            heard from since the brain started), or it's connected but hasn't yet said what
+            it has ("I'm still finding the apps on the PC."); or None and None when none was
+            named and there's no one computer to choose, for a local command to fall through.
+        """
+        name, problem = self.computer_meant(spoken_at, where)
+        if name is None:
+            return None, problem
+        session = self.session_for(name)
+        if session is None:
+            # Asleep, or Nova isn't running there.
             return None, self.not_connected(name)
+        if name not in self.computers.known():
+            spoken = self.spoken_name(name)
+            if not self.rooms.opens_things(name) or not getattr(session.satellite, "opens", False):
+                return None, f"{spoken[:1].upper() + spoken[1:]} can't open things."
+            # Just connected, and still building its list.
+            return None, f"I'm still finding the apps on {spoken}."
         return name, None
 
     def not_connected(self, name: str) -> str:

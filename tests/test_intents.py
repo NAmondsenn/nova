@@ -981,7 +981,7 @@ class ComputerBrain:
                                      machine=lambda name: "pc" if name == "pc" else "pi")
         self.names_satellite = SATELLITE_WORDS.__contains__
 
-    def computer_for(self, spoken_at, where):
+    def computer_meant(self, spoken_at, where):
         return ("pc", None) if where or self.somewhere else (None, None)
 
 

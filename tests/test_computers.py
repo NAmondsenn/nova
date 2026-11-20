@@ -113,10 +113,12 @@ class FakeComputer:
 class FakeBrain:
     """The parts of the brain ComputerControl asks: which computer, and its apps, windows and names."""
 
-    def __init__(self, target="pc", problem=None, search_site="google"):
+    def __init__(self, target="pc", problem=None, search_site="google", meant=None):
         self.computers = Computers()
         self.computer = FakeComputer()
         self.target, self.problem = target, problem
+        # The computer meant, connected or not - the one targeted, unless one asleep is given.
+        self.meant = meant or target
         self.aliases = {}
         self.wheres = []
         self.rooms = SimpleNamespace(app_names=lambda name: dict(self.aliases), opens_things=lambda name: True)
@@ -125,6 +127,9 @@ class FakeBrain:
     def computer_for(self, spoken_at, where):
         self.wheres.append((spoken_at, where))
         return (self.target, None) if self.target else (None, self.problem)
+
+    def computer_meant(self, spoken_at, where):
+        return self.meant, None
 
     def spoken_name(self, name):
         return {"pc": "Nathaniel's PC", "mac": "the Mac"}.get(name, name)
@@ -307,5 +312,9 @@ def test_hooks_without_a_computer_fall_through():
     found = hooks(brain, spoken_at="pi", machine="pi")
     assert not found.names_app("fortnite", None) and not found.names_window("fortnite", None)
     assert not found.opens_somewhere() and not found.at_pc()
-    # A computer which is off is still somewhere, to say so.
-    assert hooks(FakeBrain(target=None, problem="Your PC's off."), spoken_at="pi", machine="pi").opens_somewhere()
+    # A computer which is off is still somewhere, to say so - and its apps are still its.
+    asleep = FakeBrain(target=None, problem="Your PC's off.", meant="pc")
+    asleep.computers.set_apps("pc", apps("Fortnite"))
+    found = hooks(asleep, spoken_at="pi", machine="pi")
+    assert found.opens_somewhere() and found.names_app("fortnite", None)
+    assert at(asleep, "pi").open("fortnite") == {"success": False, "message": "Your PC's off."}

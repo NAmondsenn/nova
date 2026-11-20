@@ -40,6 +40,7 @@ from voice_assistant.config import Config
 from voice_assistant.displays import Displays
 from voice_assistant.downloads import Downloads
 from voice_assistant.clean_schedule import CleanSchedule
+from voice_assistant.computers import ComputerControl, ComputerHooks
 from voice_assistant.following import FollowWatcher
 from voice_assistant.football import Football
 from voice_assistant.football_watch import FootballChoices, FootballWatcher
@@ -680,9 +681,10 @@ class FakePCPower:
         return {"pcs": self.pcs, "buttons": []}
 
 
-def put_in_session(brain, name):
-    """Puts in a connected session for a satellite, by hand."""
-    brain.sessions[name] = FakeSession(brain, SimpleNamespace(name=name, connected=True, close=lambda: None), [])
+def put_in_session(brain, name, opens=False):
+    """Puts in a connected session for a satellite, by hand - one which says it opens things, if opens."""
+    brain.sessions[name] = FakeSession(
+        brain, SimpleNamespace(name=name, connected=True, close=lambda: None, opens=opens), [])
 
 
 def test_where_spoken_at_pc(named):
@@ -768,6 +770,40 @@ def test_where_asks_about_the_pc_chosen_for_it(named):
     named.rooms.set_pc_device("pc", "dev-9")
     named.computer_for("bedroom", None)
     assert named.pc.asked[-1] == ("status", None)
+
+
+def test_a_named_computer_just_connected_is_still_finding_its_apps(named):
+    # Connected and saying it opens things, but its list hasn't come yet.
+    put_in_session(named, "pc", opens=True)
+    assert named.computer_for("bedroom", "the PC") == (None, "I'm still finding the apps on the PC.")
+    # Turned off on the settings page, it can't, list or not.
+    named.rooms.set_opens_things("pc", False)
+    assert named.computer_for("bedroom", "the PC") == (None, "The PC can't open things.")
+
+
+def test_an_asleep_computer_is_matched_from_the_pi_and_said_to_be_off(named):
+    # The PC sent its list, then went to sleep: "open Fortnite" at the Pi is still its.
+    named.computers.set_apps("pc", [{"id": "f", "name": "Fortnite", "kind": "epic"}])
+    named.pc = FakePCPower(on=False)
+    hooks = ComputerHooks.for_satellite(named, "bedroom")
+    assert hooks.names_app("fortnite", None)
+    assert hooks.opens_somewhere() and hooks.app_called("fortnite")
+    assert not hooks.names_window("fortnite", None)
+    # Deciding whether the rules match never asks Home Assistant; only the reply does.
+    assert named.pc.asked == []
+    assert ComputerControl(named, "bedroom").open("fortnite") == {"success": False, "message": "Your PC's off."}
+    assert named.pc.asked == [("status", None)]
+
+
+def test_computer_meant_never_asks_home_assistant(named):
+    named.computers.set_apps("pc", [])
+    named.pc = FakePCPower(on=False)
+    assert named.computer_meant("bedroom", None) == ("pc", None)
+    assert named.computer_meant("bedroom", "the PC") == ("pc", None)
+    # A computer named but never heard from is still the one meant; the Pi isn't one.
+    assert named.computer_meant("bedroom", "the Mac") == ("mac", None)
+    assert named.computer_meant("pc", "the Pi") == (None, "The Pi can't open things.")
+    assert named.pc.asked == []
 
 
 def test_where_a_mac_asleep_isnt_the_pc(named):

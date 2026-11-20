@@ -279,8 +279,10 @@ class ComputerHooks:
     def for_satellite(cls, brain: Any, satellite: str) -> "ComputerHooks":
         """
         Args:
-            brain: The Brain, for which computer is meant (Brain.computer_for), its apps,
-                windows and his names for them, and the satellites' names and machines.
+            brain: The Brain, for which computer is meant (Brain.computer_meant, which needs no
+                connection and never asks Home Assistant, as every request is matched against
+                these), its apps, windows and his names for them, and the satellites' names and
+                machines.
             satellite: The satellite the user is talking to.
 
         Returns:
@@ -289,10 +291,12 @@ class ComputerHooks:
             PC." or "Your PC's off.". With none, only an app or window's whole name, or his own
             name for an app - or, said at the computer itself, the one name with every word
             said. Several it might be, or some words of a name said elsewhere ("open the
-            windows" at the Pi), fall through to Assist or Claude, whose tool asks which.
+            windows" at the Pi), fall through to Assist or Claude, whose tool asks which. A
+            computer which is asleep is still matched against its last list, so "open Fortnite"
+            at the Pi is said to be off rather than asked of Claude.
         """
         def target(where: Optional[str]) -> Optional[str]:
-            name, _ = brain.computer_for(satellite, where)
+            name, _ = brain.computer_meant(satellite, where)
             return name
 
         def names_app(said: str, where: Optional[str]) -> bool:
@@ -319,7 +323,7 @@ class ComputerHooks:
 
         def opens_somewhere() -> bool:
             # Even one which isn't connected, so "Your PC's off." is said rather than Claude asked.
-            return brain.computer_for(satellite, None) != (None, None)
+            return target(None) is not None
 
         def app_called(said: str) -> bool:
             name = target(None)
