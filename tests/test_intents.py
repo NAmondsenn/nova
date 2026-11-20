@@ -12,7 +12,7 @@ import pytest
 
 from voice_assistant import intents as intents_module
 from voice_assistant.actions import Action
-from voice_assistant.computers import ComputerHooks, match_app, match_window
+from voice_assistant.computers import ComputerHooks, Computers
 from voice_assistant.intents import LocalIntents, calendar_days
 
 
@@ -922,30 +922,37 @@ def test_what_a_local_rule_asks_for_is_logged_without_a_notes_text(caplog):
 # Opening, closing and searching on a computer, and the PC's own power words - see computers.py
 
 # The PC's apps and open windows, as the brain last heard them.
-PC_APPS = [{"id": name, "name": name, "kind": "exe"} for name in
-           ("Fortnite", "Discord", "Steam", "YouTube", "Rocket League", "Overwatch", "Overwatch 2")]
+PC_APPS = ["Fortnite", "Discord", "Steam", "YouTube", "Rocket League", "Overwatch", "Overwatch 2", "Google Chrome",
+           "Google Drive", "Windows Security", "Windows PowerShell", "Music Maker"]
 PC_WINDOWS = ["Discord", "Firefox"]
 
 
-def _hooks(at_pc=True, somewhere=True):
-    """Hooks as ComputerHooks.for_satellite gives them, for the PC's apps and windows: at the PC or the Pi."""
-    def target(where):
-        # A satellite named is the computer's whatever is said; with none, the one spoken at or the only one.
-        return where is not None or somewhere
+class ComputerBrain:
+    """The parts of the brain ComputerHooks asks, with the PC the only computer, connected or not there."""
 
-    return ComputerHooks(
-        at_pc=lambda: at_pc,
-        names_app=lambda said, where: where is not None or (
-            somewhere and (lambda found: found.item is not None or bool(found.choices))(match_app(said, PC_APPS, {}))),
-        names_window=lambda said, where: where is not None or (somewhere and match_window(said, PC_WINDOWS) is not None),
-        opens_somewhere=lambda: target(None))
+    def __init__(self, somewhere=True, apps=PC_APPS, aliases=None):
+        self.somewhere = somewhere
+        self.computers = Computers()
+        self.computers.set_apps("pc", [{"id": name, "name": name, "kind": "exe"} for name in apps])
+        self.computers.set_windows("pc", PC_WINDOWS)
+        self.rooms = SimpleNamespace(app_names=lambda name: dict(aliases or {}),
+                                     machine=lambda name: "pc" if name == "pc" else "pi")
+        self.names_satellite = SATELLITE_WORDS.__contains__
+
+    def computer_for(self, spoken_at, where):
+        return ("pc", None) if where or self.somewhere else (None, None)
 
 
-def _computer(text, at_pc=True, somewhere=True):
-    """The actions a request gives with a computer to open things on, or None if it falls through."""
-    result = LocalIntents(home=HOME, names_satellite=SATELLITE_WORDS.__contains__,
-                          computer=_hooks(at_pc, somewhere)).match(text)
+def _computer(text, at_pc=True, somewhere=True, **brain):
+    """The actions a request gives at the PC or the Pi, with the PC to open things on or not, or None."""
+    hooks = ComputerHooks.for_satellite(ComputerBrain(somewhere, **brain), "pc" if at_pc else "pi")
+    result = LocalIntents(home=HOME, names_satellite=SATELLITE_WORDS.__contains__, computer=hooks).match(text)
     return None if result is None else result["actions"]
+
+
+def _not_computers(actions):
+    """Whether actions, or None, have nothing opened, closed or searched on a computer."""
+    return actions is None or all(not action.tool.endswith(("_on_computer", "_web_page")) for action in actions)
 
 
 @pytest.mark.parametrize("text, name", [
@@ -987,6 +994,26 @@ def test_open_domain():
 def test_open_youtube_app_beats_site():
     assert _computer("Open YouTube.") == [Action("open_on_computer", {"name": "youtube"})]
     assert _computer("Go to youtube.com.") == [Action("open_on_computer", {"name": "youtube"})]
+    # Only an app of that whole name, or his own name for one: Google Chrome isn't google.com.
+    for text, url in (("Go to google.com.", "google.com"), ("Go to www.google.com.", "www.google.com"),
+                      ("Open google.co.uk.", "google.co.uk")):
+        assert _computer(text) == [Action("open_web_page", {"url": url})]
+    assert _computer("Go to chrome.com.", aliases={"chrome": "Google Chrome"}) == [
+        Action("open_on_computer", {"name": "chrome"})]
+
+
+def test_only_a_whole_name_is_opened_or_closed_away_from_the_computer():
+    # At the PC, the one app with every word said; at the Pi, only a whole name or his own.
+    assert _computer("Open rocket.") == [Action("open_on_computer", {"name": "rocket"})]
+    assert _not_computers(_computer("Open rocket.", at_pc=False))
+    assert _computer("Open Rocket League.", at_pc=False) == [Action("open_on_computer", {"name": "rocket league"})]
+    assert _computer("Open GTA.", at_pc=False, apps=["Grand Theft Auto V"], aliases={"gta": "Grand Theft Auto V"}) == [
+        Action("open_on_computer", {"name": "gta"})]
+    # Several it might be is left to Assist's shapes or Claude, whose tool asks which - even at the PC.
+    assert _not_computers(_computer("Open Google."))
+    assert _not_computers(_computer("Launch Google."))
+    # A window's whole name, anywhere; the one window with every word, at the PC only.
+    assert _computer("Close Discord.", at_pc=False) == [Action("close_on_computer", {"name": "discord"})]
 
 
 @pytest.mark.parametrize("text", ["Close this.", "Close that.", "Quit this window.", "Exit the window.",
@@ -1033,7 +1060,10 @@ def test_fall_through_untouched():
         for text in ("Open the garage.", "Close the garage door.", "Close the blinds."):
             assert [action.tool for action in _computer(text, at_pc)] == ["control_home"]
         assert _computer("Add milk to my shopping list.", at_pc)[0].tool == "add_to_list"
+        # Words in many of the PC's names, but no one's whole name.
+        assert [action.tool for action in _computer("Open the windows.", at_pc)] == ["control_home"]
         assert _computer("Play.", at_pc) == [Action("play_music")]
+    assert _not_computers(_computer("Start the music.", at_pc=False))
 
 
 @pytest.mark.parametrize("text, action", [

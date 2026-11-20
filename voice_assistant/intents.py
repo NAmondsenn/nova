@@ -856,10 +856,10 @@ class LocalIntents:
         if not sites or (where and not (self.names_satellite is not None and self.names_satellite(where))):
             return None
         site = sites[0]
-        # His app of the same name wins: "go to youtube.com" opens his YouTube app. Not with a computer
-        # named, which names_app takes whatever the name, so the page is opened there.
+        # His app of the same name wins: "go to youtube.com" opens his YouTube app, but "go to google.com"
+        # isn't Google Chrome. Not with a computer named, where the page is opened.
         name = next((part for part in site.split(".") if part != "www"), site)
-        if not where and self.computer.names_app(name, None):
+        if not where and self.computer.app_called(name):
             return self._computer_action("open_on_computer", {"name": name}, None)
         if not where and not self.computer.opens_somewhere():
             return None

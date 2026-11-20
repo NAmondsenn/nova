@@ -282,8 +282,15 @@ def test_hooks_name_an_app_or_window_on_the_computer_meant():
     brain.computers.set_windows("pc", ["Discord"])
     found = hooks(brain)
     assert found.names_app("fortnite", None) and found.names_app("overwatch", None)
-    # Several it might be is still the computer's, for it to ask which.
-    assert found.names_app("rocket", None)
+    # Several it might be is left to Claude, whose tool asks which; one with every word said is
+    # the computer's when said at it, but not from the Pi.
+    assert not found.names_app("rocket", None)
+    assert found.names_app("league", None)
+    assert not hooks(brain, spoken_at="pi", machine="pi").names_app("league", None)
+    assert hooks(brain, spoken_at="pi", machine="pi").names_app("rocket league", None)
+    # The app called exactly that, or his own name for one, for a web address's name.
+    brain.aliases = {"rl": "Rocket League"}
+    assert found.app_called("rl") and found.app_called("fortnite") and not found.app_called("rocket")
     assert not found.names_app("the garage", None)
     assert found.names_window("discord", None) and not found.names_window("steam", None)
     # With the PC named, whatever is said is the PC's; with words which name no satellite, it isn't.

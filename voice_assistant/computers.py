@@ -122,6 +122,22 @@ def match_app(said: str, items: List[Dict], aliases: Dict[str, str]) -> Match:
     return found
 
 
+def named_exactly(said: str, names: List[str], aliases: Optional[Dict[str, str]] = None) -> bool:
+    """
+    Whether what he said is one of the names in full, or one of his own short names for one -
+    not just some of its words, as "google" is of "Google Chrome".
+
+    Args:
+        said: The name as he said it.
+        names: The apps' or windows' names.
+        aliases: His own short names for apps, as said name to app name, or None.
+    """
+    if any(plain(alias) == plain(said) for alias in (aliases or {})):
+        return True
+    wanted = {plain(said), " ".join(_words_in(said))}
+    return any(plain(name) in wanted for name in names)
+
+
 def match_window(said: str, names: List[str]) -> Optional[str]:
     """
     Matches what he said to one of a computer's open windows.
@@ -255,6 +271,9 @@ class ComputerHooks:
     names_window: Callable[[str, Optional[str]], bool]
     # Whether, with no computer named, there is one to open things on.
     opens_somewhere: Callable[[], bool]
+    # Whether some words, with no computer named, are an app's whole name or his own name for one -
+    # so "go to google.com" isn't taken for Google Chrome.
+    app_called: Callable[[str], bool]
 
     @classmethod
     def for_satellite(cls, brain: Any, satellite: str) -> "ComputerHooks":
@@ -267,8 +286,10 @@ class ComputerHooks:
         Returns:
             The hooks for that satellite's session. With a satellite named, the request is
             that computer's whatever is said, so ComputerControl says "I can't find X on your
-            PC." or "Your PC's off."; with none, only an app or window the computer meant
-            has, or several it might be, for "Which one" to be asked.
+            PC." or "Your PC's off.". With none, only an app or window's whole name, or his own
+            name for an app - or, said at the computer itself, the one name with every word
+            said. Several it might be, or some words of a name said elsewhere ("open the
+            windows" at the Pi), fall through to Assist or Claude, whose tool asks which.
         """
         def target(where: Optional[str]) -> Optional[str]:
             name, _ = brain.computer_for(satellite, where)
@@ -280,21 +301,33 @@ class ComputerHooks:
             name = target(None)
             if name is None:
                 return False
-            found = match_app(said, brain.computers.apps(name), brain.rooms.app_names(name))
-            return found.item is not None or bool(found.choices)
+            items, aliases = brain.computers.apps(name), brain.rooms.app_names(name)
+            if named_exactly(said, [item["name"] for item in items], aliases):
+                return True
+            return name == satellite and match_app(said, items, aliases).item is not None
 
         def names_window(said: str, where: Optional[str]) -> bool:
             if where:
                 return brain.names_satellite(where)
             name = target(None)
-            return name is not None and match_window(said, brain.computers.windows(name)) is not None
+            if name is None:
+                return False
+            windows = brain.computers.windows(name)
+            if named_exactly(said, windows):
+                return True
+            return name == satellite and match_window(said, windows) is not None
 
         def opens_somewhere() -> bool:
             # Even one which isn't connected, so "Your PC's off." is said rather than Claude asked.
             return brain.computer_for(satellite, None) != (None, None)
 
+        def app_called(said: str) -> bool:
+            name = target(None)
+            return name is not None and named_exactly(
+                said, [item["name"] for item in brain.computers.apps(name)], brain.rooms.app_names(name))
+
         return cls(at_pc=lambda: brain.rooms.machine(satellite) == "pc", names_app=names_app,
-                   names_window=names_window, opens_somewhere=opens_somewhere)
+                   names_window=names_window, opens_somewhere=opens_somewhere, app_called=app_called)
 
 
 class ComputerControl:
