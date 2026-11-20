@@ -2041,7 +2041,9 @@ class ActionExecutor:
     @tool(
         "Add an event to the user's Google calendar, for 'put the dentist on Thursday at 3'. start and end are "
         "local 'YYYY-MM-DD HH:MM', or 'YYYY-MM-DD' for all day; leave end out for an hour. Give calendar only "
-        "when the user names one, e.g. 'work'. What was added is said for you, so just reply 'Okay.'",
+        "when the user names one, e.g. 'work'. Give repeat only when the user says it repeats - 'every weekday', "
+        "'every Tuesday', 'each month', 'every year' - and never otherwise: start is then the first one. "
+        "What was added is said for you, so just reply 'Okay.'",
         needs="calendar",
         required=["summary", "start"],
         summary={"type": "string", "description": "What the event is, as it'd be written on the calendar, e.g. "
@@ -2050,10 +2052,32 @@ class ActionExecutor:
         end={"type": "string", "description": "When it ends, only when the user said - an end day is included."},
         all_day={"type": "boolean", "description": "Whether it's all day. Leave out for a day without a time."},
         calendar={"type": "string", "description": "The calendar the user named, as they said it."},
+        repeat={"type": "string", "enum": ["daily", "weekdays", "weekly", "monthly", "yearly"],
+                "description": "How often it repeats, only when the user said it does: 'weekdays' is Monday to "
+                               "Friday. Leave out for an event which happens once."},
+        repeat_on={"type": "array", "items": {"type": "string", "enum": [
+            "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]},
+                   "description": "Only for 'weekly': the weekdays it's on, e.g. ['Monday', 'Wednesday']. Leave "
+                                  "out for the weekday start falls on."},
+        repeat_every={"type": "integer", "minimum": 1,
+                      "description": "Every how many days, weeks, months or years, e.g. 2 for 'every other week'. "
+                                     "Leave out for every one."},
+        repeat_until={"type": "string", "description": "The last day it repeats on, 'YYYY-MM-DD', only when the user "
+                                                       "said when it stops."},
+        repeat_times={"type": "integer", "minimum": 1,
+                      "description": "How many times it happens in all, only when the user said so, e.g. 10 - "
+                                     "never with repeat_until."},
     )
     def add_to_calendar(self, summary: Optional[str] = None, start: Optional[str] = None, end: Optional[str] = None,
-                        all_day: Optional[bool] = None, calendar: Optional[str] = None):
-        return self.calendar.add(summary or "", start or "", end=end, all_day=all_day, calendar=calendar)
+                        all_day: Optional[bool] = None, calendar: Optional[str] = None,
+                        repeat: Optional[str] = None, repeat_on: Optional[List[str]] = None,
+                        repeat_every: Optional[int] = None, repeat_until: Optional[str] = None,
+                        repeat_times: Optional[int] = None):
+        # Only what was given, so a repeat is only ever passed on for one the user asked for.
+        repeats = {name: value for name, value in (("repeat", repeat), ("repeat_on", repeat_on),
+                                                   ("repeat_every", repeat_every), ("repeat_until", repeat_until),
+                                                   ("repeat_times", repeat_times)) if value is not None}
+        return self.calendar.add(summary or "", start or "", end=end, all_day=all_day, calendar=calendar, **repeats)
 
     @tool(
         "Remove an event from the user's Google calendar, for 'cancel the dentist', 'take the gym off my "

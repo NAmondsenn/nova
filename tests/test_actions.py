@@ -990,8 +990,8 @@ def test_add_to_calendar_is_only_offered_once_google_is_set_up():
         def activity_calendars(self):
             return {}
 
-        def add(self, summary, start, end=None, all_day=None, calendar=None):
-            self.asked = (summary, start, end, all_day, calendar)
+        def add(self, summary, start, end=None, all_day=None, calendar=None, **repeats):
+            self.asked = (summary, start, end, all_day, calendar, repeats)
             return {"success": True, "message": "Added Shift to Work, Saturday the 31st at 9 AM."}
 
     calendar = FakeCalendar()
@@ -1000,14 +1000,47 @@ def test_add_to_calendar_is_only_offered_once_google_is_set_up():
     assert offered["add_to_calendar"]["description"] == (
         "Add an event to the user's Google calendar, for 'put the dentist on Thursday at 3'. start and end are "
         "local 'YYYY-MM-DD HH:MM', or 'YYYY-MM-DD' for all day; leave end out for an hour. Give calendar only "
-        "when the user names one, e.g. 'work'. What was added is said for you, so just reply 'Okay.'")
+        "when the user names one, e.g. 'work'. Give repeat only when the user says it repeats - 'every weekday', "
+        "'every Tuesday', 'each month', 'every year' - and never otherwise: start is then the first one. "
+        "What was added is said for you, so just reply 'Okay.'")
     assert offered["add_to_calendar"]["input_schema"]["required"] == ["summary", "start"]
-    assert set(offered["add_to_calendar"]["input_schema"]["properties"]) == {"summary", "start", "end", "all_day",
-                                                                           "calendar"}
+    assert set(offered["add_to_calendar"]["input_schema"]["properties"]) == {
+        "summary", "start", "end", "all_day", "calendar", "repeat", "repeat_on", "repeat_every", "repeat_until",
+        "repeat_times"}
     result = executor.execute(Action("add_to_calendar", {"summary": "Shift", "start": "2026-10-31 09:00",
                                                          "calendar": "work"}, from_model=True))
-    assert calendar.asked == ("Shift", "2026-10-31 09:00", None, None, "work")
+    assert calendar.asked == ("Shift", "2026-10-31 09:00", None, None, "work", {})
     assert (result.ok, result.say) == (True, "Added Shift to Work, Saturday the 31st at 9 AM.")
+
+
+def test_add_to_calendar_passes_a_repeat_on_and_only_when_it_is_given():
+    class FakeCalendar:
+        def activity_calendars(self):
+            return {}
+
+        def add(self, summary, start, end=None, all_day=None, calendar=None, **repeats):
+            self.asked = (summary, start, repeats)
+            return {"success": True, "message": "Added."}
+
+    calendar = FakeCalendar()
+    executor = ActionExecutor(calendar=calendar)
+    properties = {schema["name"]: schema for schema in executor.tool_schemas()}["add_to_calendar"][
+        "input_schema"]["properties"]
+    # The kinds Nova builds a rule for, the weekdays, and whole numbers - Claude never writes a rule.
+    assert properties["repeat"]["enum"] == ["daily", "weekdays", "weekly", "monthly", "yearly"]
+    assert properties["repeat_on"]["type"] == "array" and properties["repeat_on"]["items"]["enum"] == [
+        "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    assert properties["repeat_every"]["type"] == properties["repeat_times"]["type"] == "integer"
+    assert properties["repeat_until"]["type"] == "string" and "YYYY-MM-DD" in properties["repeat_until"]["description"]
+
+    executor.execute(Action("add_to_calendar", {
+        "summary": "Gym", "start": "2026-11-23 08:00", "repeat": "weekly", "repeat_on": ["Monday", "Wednesday"],
+        "repeat_every": 2, "repeat_until": "2026-12-18", "repeat_times": 10}, from_model=True))
+    assert calendar.asked == ("Gym", "2026-11-23 08:00", {
+        "repeat": "weekly", "repeat_on": ["Monday", "Wednesday"], "repeat_every": 2, "repeat_until": "2026-12-18",
+        "repeat_times": 10})
+    executor.execute(Action("add_to_calendar", {"summary": "Gym", "start": "2026-11-23 08:00"}, from_model=True))
+    assert calendar.asked == ("Gym", "2026-11-23 08:00", {})
 
 
 # Removing, moving and renaming calendar events

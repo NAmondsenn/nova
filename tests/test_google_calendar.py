@@ -1886,6 +1886,197 @@ def test_an_event_added_can_be_taken_back_off(for_adding):
         ("POST", _events_url("calendar-work")), ("DELETE", _event_url("calendar-work", "made-up-event"))]
 
 
+# Adding an event which repeats
+
+# Monday the 26th of October 2026 at 8 AM, on GMT - the clocks went back on the Sunday - asked about on Saturday.
+MONDAY_8 = "2026-10-26 08:00"
+LONDON_START = {"dateTime": "2026-10-26T08:00:00+00:00", "timeZone": "Europe/London"}
+LONDON_END = {"dateTime": "2026-10-26T09:00:00+00:00", "timeZone": "Europe/London"}
+
+
+@pytest.mark.parametrize("asked, rule, said", [
+    ({"repeat": "daily"}, "RRULE:FREQ=DAILY", "every day"),
+    ({"repeat": "daily", "repeat_every": 3}, "RRULE:FREQ=DAILY;INTERVAL=3", "every 3 days"),
+    ({"repeat": "weekdays"}, "RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR", "every weekday"),
+    # The start's own weekday, unless some are named - in the week's order, whatever order they were given.
+    ({"repeat": "weekly"}, "RRULE:FREQ=WEEKLY;BYDAY=MO", "every Monday"),
+    ({"repeat": "weekly", "repeat_on": ["wednesday", "Monday"]}, "RRULE:FREQ=WEEKLY;BYDAY=MO,WE",
+     "every Monday and Wednesday"),
+    ({"repeat": "weekly", "repeat_on": ["Monday", "Wednesday", "Friday"]}, "RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR",
+     "every Monday, Wednesday and Friday"),
+    ({"repeat": "weekly", "repeat_every": 2, "repeat_on": ["Monday"]}, "RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=MO",
+     "every 2 weeks on Monday"),
+    ({"repeat": "weekdays", "repeat_every": 2}, "RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,TU,WE,TH,FR",
+     "every 2 weeks on weekdays"),
+    # Which days only a weekly repeat has, and an interval of one is none.
+    ({"repeat": "daily", "repeat_on": ["Friday"], "repeat_every": 1}, "RRULE:FREQ=DAILY", "every day"),
+    ({"repeat": "monthly"}, "RRULE:FREQ=MONTHLY", "every month on the 26th"),
+    ({"repeat": "monthly", "repeat_every": 2}, "RRULE:FREQ=MONTHLY;INTERVAL=2", "every 2 months on the 26th"),
+    ({"repeat": "yearly"}, "RRULE:FREQ=YEARLY", "every year on the 26th of October"),
+])
+def test_each_kind_of_repeat_is_built_into_its_rule_and_said(for_adding, asked, rule, said):
+    calendar = for_adding()
+    assert _said(calendar.add("Gym", MONDAY_8, today=SATURDAY, **asked)) == {
+        "success": True, "message": f"Added Gym, {said} at 8 AM from Monday."}
+    # Google needs the zone it repeats in on a start and end at a time.
+    assert _added(calendar) == [("calendar-personal", {"summary": "Gym", "start": LONDON_START, "end": LONDON_END,
+                                                       "recurrence": [rule]})]
+
+
+def test_a_repeat_ends_by_a_day_or_a_number_of_times(for_adding):
+    # Until a day, inclusive: the end of it on the clock it repeats on, in UTC - on BST, an hour earlier.
+    calendar = for_adding()
+    assert _said(calendar.add("Gym", "2026-09-07 08:00", repeat="weekly", repeat_until="2026-10-12",
+                              today=date(2026, 9, 1))) == {
+        "success": True, "message": "Added Gym, every Monday at 8 AM from Monday, until Monday the 12th of October."}
+    assert _added(calendar)[0][1]["recurrence"] == ["RRULE:FREQ=WEEKLY;BYDAY=MO;UNTIL=20261012T225959Z"]
+    calendar = for_adding()
+    calendar.add("Gym", MONDAY_8, repeat="weekdays", repeat_until="2026-12-18", today=SATURDAY)
+    assert _added(calendar)[0][1]["recurrence"] == ["RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;UNTIL=20261218T235959Z"]
+
+    calendar = for_adding()
+    assert _said(calendar.add("Gym", MONDAY_8, repeat="weekdays", repeat_times=10, today=SATURDAY)) == {
+        "success": True, "message": "Added Gym, every weekday at 8 AM from Monday, 10 times."}
+    assert _added(calendar)[0][1]["recurrence"] == ["RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;COUNT=10"]
+
+    # Given both, the day wins.
+    calendar = for_adding()
+    assert calendar.add("Gym", MONDAY_8, repeat="daily", repeat_until="2026-11-06", repeat_times=3, today=SATURDAY)[
+        "message"] == "Added Gym, every day at 8 AM from Monday, until Friday the 6th of November."
+    assert _added(calendar)[0][1]["recurrence"] == ["RRULE:FREQ=DAILY;UNTIL=20261106T235959Z"]
+
+    # The last day itself is on it, and a day all day ends as a date, with no zone to give.
+    calendar = for_adding()
+    assert _said(calendar.add("Bins", "2026-10-27", repeat="weekly", repeat_until="2026-11-17", today=SATURDAY)) == {
+        "success": True, "message": "Added Bins, every Tuesday, all day from Tuesday, until Tuesday the 17th of November."}
+    assert _added(calendar) == [("calendar-personal", {"summary": "Bins", "start": {"date": "2026-10-27"},
+                                                       "end": {"date": "2026-10-28"},
+                                                       "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261117"]})]
+
+
+def test_a_repeat_starts_on_the_first_day_its_rule_makes(for_adding):
+    # Google's rule and its first time should agree, or what it does with a start the rule doesn't make is
+    # undefined: Monday for "every Wednesday and Friday" is Wednesday, and Saturday for "every weekday" is Monday.
+    calendar = for_adding()
+    assert calendar.add("Gym", MONDAY_8, repeat="weekly", repeat_on=["Wednesday", "Friday"], today=SATURDAY)[
+        "message"] == "Added Gym, every Wednesday and Friday at 8 AM from Wednesday."
+    assert _added(calendar)[0][1]["start"] == {"dateTime": "2026-10-28T08:00:00+00:00", "timeZone": "Europe/London"}
+    assert _added(calendar)[0][1]["end"] == {"dateTime": "2026-10-28T09:00:00+00:00", "timeZone": "Europe/London"}
+
+    # From Saturday morning on BST - and the 8 AM stays 8 AM on GMT, an hour on in UTC.
+    calendar = for_adding()
+    assert calendar.add("Gym", "2026-10-24 08:00", repeat="weekdays", today=SATURDAY)[
+        "message"] == "Added Gym, every weekday at 8 AM from Monday."
+    assert _added(calendar)[0][1]["start"] == {"dateTime": "2026-10-26T08:00:00+00:00", "timeZone": "Europe/London"}
+
+    # One all day moves the same way, keeping its length.
+    calendar = for_adding()
+    calendar.add("Conference", "2026-10-24", end="2026-10-25", repeat="weekdays", today=SATURDAY)
+    assert _added(calendar)[0][1]["start"] == {"date": "2026-10-26"}
+    assert _added(calendar)[0][1]["end"] == {"date": "2026-10-28"}
+
+    # Not so far that it passes the last day.
+    calendar = for_adding()
+    assert calendar.add("Gym", "2026-10-24 08:00", repeat="weekdays", repeat_until="2026-10-25", today=SATURDAY) == {
+        "success": False, "message": "That ends before it starts."}
+    assert calendar._session.posted == []
+
+
+def test_a_repeat_is_given_the_zone_of_the_calendar_it_is_added_to(for_adding, monkeypatch):
+    def listed(calendar):
+        return calendar._session.answers[LIST][0]["items"]
+
+    # The calendar's own, whatever the brain's.
+    calendar = for_adding()
+    listed(calendar)[0]["timeZone"] = "America/New_York"
+    calendar.add("Gym", MONDAY_8, repeat="daily", today=SATURDAY)
+    event = _added(calendar)[0][1]
+    assert event["start"]["timeZone"] == event["end"]["timeZone"] == "America/New_York"
+
+    # Else the brain's, when Google gave none.
+    calendar = for_adding()
+    del listed(calendar)[0]["timeZone"]
+    assert calendar.add("Gym", MONDAY_8, repeat="daily", today=SATURDAY)["success"]
+    assert _added(calendar)[0][1]["start"]["timeZone"] == "Europe/London"
+
+    # Else none is sent which Google would refuse: it says so, and adds nothing.
+    monkeypatch.setattr(google_calendar, "_brain_zone", lambda: None)
+    calendar = for_adding()
+    del listed(calendar)[0]["timeZone"]
+    assert calendar.add("Gym", MONDAY_8, repeat="daily", today=SATURDAY) == {
+        "success": False, "message": "I couldn't tell which time zone to repeat it in."}
+    assert calendar._session.posted == []
+    # An event all day has no zone to give.
+    assert calendar.add("Bins", "2026-10-27", repeat="weekly", today=SATURDAY)["success"]
+    assert "timeZone" not in str(_added(calendar))
+
+
+def test_the_brains_zone_is_found_from_its_environment_or_its_files(monkeypatch, tmp_path):
+    monkeypatch.setenv("TZ", "Europe/London")
+    assert google_calendar._brain_zone() == "Europe/London"
+    # Written as a POSIX TZ can be, with a leading colon.
+    monkeypatch.setenv("TZ", ":America/New_York")
+    assert google_calendar._brain_zone() == "America/New_York"
+    # Otherwise the file the system keeps its zone's name in.
+    monkeypatch.delenv("TZ")
+    name = tmp_path / "timezone"
+    name.write_text("Europe/Paris\n")
+    monkeypatch.setattr(google_calendar, "TIMEZONE_FILE", str(name))
+    assert google_calendar._brain_zone() == "Europe/Paris"
+    # Never one which isn't a zone, or that couldn't be read.
+    name.write_text("not a zone\n")
+    monkeypatch.setattr(google_calendar, "LOCALTIME_FILE", str(tmp_path / "missing"))
+    assert google_calendar._brain_zone() is None
+    monkeypatch.setattr(google_calendar, "TIMEZONE_FILE", str(tmp_path / "missing"))
+    assert google_calendar._brain_zone() is None
+
+
+@pytest.mark.parametrize("asked", [
+    {"repeat": "fortnightly"}, {"repeat": 5}, {"repeat": "weekly", "repeat_on": ["Funday"]},
+    {"repeat": "weekly", "repeat_on": "Monday"}, {"repeat": "weekly", "repeat_on": [3]},
+    {"repeat": "daily", "repeat_every": 0}, {"repeat": "daily", "repeat_every": -2},
+    {"repeat": "daily", "repeat_every": "two"}, {"repeat": "daily", "repeat_every": True},
+    {"repeat": "daily", "repeat_times": 0}, {"repeat": "daily", "repeat_times": "ten"},
+    {"repeat": "daily", "repeat_until": "next March"}, {"repeat": "daily", "repeat_until": "2026-13-01"},
+    {"repeat": "daily", "repeat_until": "20261218"}, {"repeat": "daily", "repeat_until": "2026-12-18 09:00"},
+])
+def test_a_repeat_which_cant_be_read_isnt_added(for_adding, asked):
+    calendar = for_adding()
+    assert calendar.add("Gym", MONDAY_8, today=SATURDAY, **asked) == {
+        "success": False, "message": "I didn't catch how often it repeats."}, asked
+    assert calendar._session.posted == []
+
+
+def test_nothing_repeats_unless_a_repeat_is_given(for_adding):
+    # The rest of a repeat has no meaning alone, and what's said of it would be said of a one-off - nor has
+    # a repeat left empty, as a model does for what it leaves out.
+    for asked in ({"repeat_on": ["Monday"], "repeat_every": 2, "repeat_times": 3, "repeat_until": "2026-12-18"},
+                  {"repeat": "", "repeat_on": [], "repeat_until": ""}, {"repeat": "  "}):
+        calendar = for_adding()
+        assert _said(calendar.add("Gym", MONDAY_8, today=SATURDAY, **asked)) == {
+            "success": True, "message": "Added Gym, Monday the 26th at 8 AM."}, asked
+        assert _added(calendar) == [("calendar-personal", {"summary": "Gym",
+                                                           "start": {"dateTime": "2026-10-26T08:00:00+00:00"},
+                                                           "end": {"dateTime": "2026-10-26T09:00:00+00:00"}})]
+
+
+def test_a_repeating_event_added_to_a_calendar_is_said_with_its_name(for_adding):
+    calendar = for_adding()
+    assert calendar.add("Shift", MONDAY_8, calendar="work", repeat="weekdays", today=SATURDAY)[
+        "message"] == "Added Shift to Work, every weekday at 8 AM from Monday."
+    assert _added(calendar)[0][0] == "calendar-work"
+
+
+def test_a_repeating_event_added_is_taken_back_off_whole(for_adding):
+    calendar = for_adding()
+    calendar._session.answers[f"DELETE {_event_url('calendar-personal', 'made-up-event')}"] = [DELETED]
+    reply = calendar.add("Gym", MONDAY_8, repeat="weekdays", today=SATURDAY)
+    assert reply["undo"]() == {"success": True, "message": "Took Gym back off your calendar."}
+    # By the id Google gave the series - which deletes every time of it, not one day.
+    assert calendar._session.sent[-1] == _write("DELETE", _event_url("calendar-personal", "made-up-event"))
+    assert [sent["method"] for sent in calendar._session.sent] == ["POST", "DELETE"]
+
+
 def test_every_write_to_google_is_sent_once_and_tells_nobody():
     # Adding, removing and putting back all go through _send_once, the one request that writes
     # to Google - sent once, with sendUpdates=none, which the tells_nobody fixture checks of

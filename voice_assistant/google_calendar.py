@@ -209,6 +209,20 @@ TIME_ONLY = "I can only change the time for all of them. Move the days in Google
 # How long an event added with no end lasts.
 DEFAULT_LENGTH = timedelta(hours=1)
 
+# How an event added repeats, as the model gives it, and the rule it is for: Nova builds every rule itself,
+# so Claude never writes one. "weekdays" is a weekly one on Monday to Friday.
+REPEATS = {"daily": "DAILY", "weekdays": "WEEKLY", "weekly": "WEEKLY", "monthly": "MONTHLY", "yearly": "YEARLY"}
+WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+WEEKDAY_NUMBERS = {name.lower(): number for number, name in enumerate(WEEKDAYS)}
+RULE_DAYS = ("MO", "TU", "WE", "TH", "FR", "SA", "SU")
+NOT_REPEAT = "I didn't catch how often it repeats."
+NO_ZONE = "I couldn't tell which time zone to repeat it in."
+
+# Where the system keeps the name of its time zone, and the link to its zone's file, for the zone a
+# repeating event is in when Google's list gave its calendar none.
+TIMEZONE_FILE = "/etc/timezone"
+LOCALTIME_FILE = "/etc/localtime"
+
 # The only ways a time to add is read - "20261029" or "2026-10-29T15" would be read by
 # fromisoformat as times nobody meant.
 WHEN_GIVEN = re.compile(r"\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2})?")
@@ -981,10 +995,13 @@ class GoogleCalendar:
         return {"success": True, "message": describe_activity(word, events, first, days, today or date.today())}
 
     def add(self, summary: str, start: str, end: Optional[str] = None, all_day: Optional[bool] = None,
-            calendar: Optional[str] = None, today: Optional[date] = None) -> Dict:
+            calendar: Optional[str] = None, repeat: Optional[str] = None, repeat_on: Optional[List[str]] = None,
+            repeat_every: Optional[int] = None, repeat_until: Optional[str] = None,
+            repeat_times: Optional[int] = None, today: Optional[date] = None) -> Dict:
         """
         Adds an event to one of the user's own calendars, for "put the dentist on Thursday
-        at 3". It's sent once, never again by itself: Google may have added it already.
+        at 3", or "put gym on every weekday at 8". It's sent once, never again by itself:
+        Google may have added it already.
 
         Args:
             summary: What the event is, e.g. "Dentist".
@@ -994,11 +1011,18 @@ class GoogleCalendar:
             all_day: Whether it's all day, even with a time given.
             calendar: The calendar the user named, by its name or an activity's word -
                 "work" is Work. None for the one new events go to.
+            repeat: How often it repeats - a key of REPEATS - or None for once only. A weekly or
+                weekdays one starts on the first of its days from the start given. The rest of
+                the repeat means nothing without it.
+            repeat_on: The weekdays of a weekly repeat - "Monday" - or None for the start's own.
+            repeat_every: Every how many days, weeks, months or years - None for 1.
+            repeat_until: The last day it repeats on, "YYYY-MM-DD", included - or None.
+            repeat_times: How many times it's on in all, or None - which repeat_until wins over.
             today: Today's date - only given by the tests.
 
         Returns:
             Dict with 'success' and what was added, or why not, as the 'message' - and once
-            it's added, an 'undo', which takes it back off.
+            it's added, an 'undo', which takes it back off - the whole series, for one that repeats.
         """
         summary = summary.strip() if isinstance(summary, str) else ""
         if not summary:
@@ -1011,12 +1035,28 @@ class GoogleCalendar:
         # likely the week or the year misheard.
         if _first_day(times[0]) < today:
             return {"success": False, "message": DAY_GONE}
+        repeating = None
+        if _given(repeat):
+            repeating = _repeating(times, repeat, repeat_on, repeat_every, repeat_until, repeat_times)
+            if isinstance(repeating, str):
+                return {"success": False, "message": repeating}
+            times, repeating = repeating
         try:
             found = self._calendar_to_add_to(calendar)
             if isinstance(found, str):
                 return {"success": False, "message": found}
             chosen, default = found
-            event_id = self._insert(chosen["id"], {"summary": summary, "start": times[0], "end": times[1]})
+            event = {"summary": summary, "start": times[0], "end": times[1]}
+            if repeating:
+                # Google needs the zone a repeating event at a time repeats in: its calendar's own, else the
+                # brain's, and never one it would refuse.
+                timed = "dateTime" in times[0]
+                zone = (chosen.get("timeZone") or _brain_zone()) if timed else None
+                if timed and not zone:
+                    return {"success": False, "message": NO_ZONE}
+                event["start"], event["end"] = _in_zone(times, zone)
+                event["recurrence"] = [_repeat_rule(repeating, times[0], zone)]
+            event_id = self._insert(chosen["id"], event)
         except _NotSure as e:
             logger.warning(f"Couldn't tell whether Google added an event: {e}")
             return {"success": False, "message": f"{e.said}, so I can't tell whether {summary} was added."}
@@ -1025,7 +1065,8 @@ class GoogleCalendar:
         logger.info("Added an event to Google's calendar")
         to = f" to {spoken_name(chosen)}" if chosen["id"] != default["id"] and chosen["name"] else ""
         added = _event_url(chosen["id"], event_id)
-        return {"success": True, "message": f"Added {summary}{to}, {_added_when(times[0], today)}.",
+        when = _added_repeating(times[0], repeating, today) if repeating else _added_when(times[0], today)
+        return {"success": True, "message": f"Added {summary}{to}, {when}.",
                 "undo": _undo(summary, lambda: self._send_once("DELETE", added),
                               f"Took {summary} back off your calendar.", f"I can't tell whether {summary} was taken off.")}
 
@@ -2510,6 +2551,172 @@ def _event_times(start: str, end: Optional[str], all_day: Optional[bool]) -> Uni
     if last <= first:
         return "That ends before it starts."
     return {"dateTime": first.isoformat()}, {"dateTime": last.isoformat()}
+
+
+class _Repeat(NamedTuple):
+    """How an event added repeats, as it was said and checked: see GoogleCalendar.add."""
+
+    kind: str
+    # The weekdays it's on, 0 for Monday - for a weekly repeat, or weekdays.
+    days: Tuple[int, ...]
+    every: int
+    until: Optional[date]
+    times: Optional[int]
+
+
+def _given(value) -> bool:
+    """Whether the model gave a value for what's optional - not left out, and not given empty."""
+    if isinstance(value, str):
+        value = value.strip()
+    return value is not None and value != "" and value != []
+
+
+def _whole(value, least: int) -> bool:
+    """Whether a value is a whole number of at least least - a bool is not."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= least
+
+
+def _repeating(times: Tuple[Dict, Dict], repeat: str, repeat_on, repeat_every, repeat_until,
+               repeat_times) -> Union[str, Tuple[Tuple[Dict, Dict], _Repeat]]:
+    """
+    How an event to add repeats, as the model gave it, checked - and its start moved on to the first
+    day its rule makes, as Google's rule and its first time should agree: "every Wednesday and Friday"
+    from a Monday is from Wednesday.
+
+    Args:
+        times: Its start and end, as _event_times gives them.
+        repeat, repeat_on, repeat_every, repeat_until, repeat_times: As GoogleCalendar.add takes them.
+
+    Returns:
+        The start and end, moved on if need be, and how it repeats - or what to say when that can't be used.
+    """
+    kind = repeat.strip().lower() if isinstance(repeat, str) else None
+    every = repeat_every if _given(repeat_every) else 1
+    count = repeat_times if _given(repeat_times) else None
+    until = _when_said(repeat_until) if _given(repeat_until) else None
+    # Only a day - "2026-12-18" - and not a time of it.
+    if isinstance(until, datetime) or (until is None and _given(repeat_until)):
+        return NOT_REPEAT
+    if kind not in REPEATS or not _whole(every, 1) or (count is not None and not _whole(count, 1)):
+        return NOT_REPEAT
+    first = _first_day(times[0])
+    days = _repeat_days(kind, repeat_on, first)
+    if days is None:
+        return NOT_REPEAT
+    if days and first.weekday() not in days:
+        first += timedelta(days=min((day - first.weekday()) % 7 for day in days))
+        times = _on_day(times, first)
+    if until is not None and until < first:
+        return "That ends before it starts."
+    # A day to end on wins over a number of times.
+    return times, _Repeat(kind, days, every, until, None if until else count)
+
+
+def _repeat_days(kind: str, repeat_on, first: date) -> Optional[Tuple[int, ...]]:
+    """
+    The weekdays an event repeats on, 0 for Monday: Monday to Friday for weekdays, those named - in the week's
+    order - for a weekly one, or its start's own if none are, and none for the rest.
+
+    Args:
+        kind: A key of REPEATS.
+        repeat_on: The weekdays the model named, "Monday" - or None.
+        first: The day it starts on.
+
+    Returns:
+        The weekdays, or None if one named isn't a weekday.
+    """
+    if kind == "weekdays":
+        return (0, 1, 2, 3, 4)
+    if kind != "weekly":
+        return ()
+    if not _given(repeat_on):
+        return (first.weekday(),)
+    named = [WEEKDAY_NUMBERS.get(name.strip().lower()) if isinstance(name, str) else None for name in repeat_on] \
+        if isinstance(repeat_on, list) else [None]
+    return None if None in named else tuple(sorted(set(named)))
+
+
+def _repeat_rule(repeat: _Repeat, start: Dict, zone: Optional[str]) -> str:
+    """
+    The rule an event repeats by, as Google takes it - "RRULE:FREQ=WEEKLY;BYDAY=MO,WE;COUNT=10".
+
+    Args:
+        repeat: How it repeats.
+        start: Its start, as Google takes it.
+        zone: The zone it repeats in, as Google names one - for the end of the last day, which is in UTC
+            for an event at a time. None for the brain's own.
+    """
+    parts = [f"FREQ={REPEATS[repeat.kind]}"]
+    if repeat.every > 1:
+        parts.append(f"INTERVAL={repeat.every}")
+    if repeat.days:
+        parts.append("BYDAY=" + ",".join(RULE_DAYS[day] for day in repeat.days))
+    if repeat.until and "date" in start:
+        parts.append(f"UNTIL={repeat.until.strftime('%Y%m%d')}")
+    elif repeat.until:
+        # The last day included: to the end of it on the clock it repeats on.
+        end = datetime.combine(repeat.until, day_time(23, 59, 59), tzinfo=_zone_named(zone))
+        parts.append("UNTIL=" + end.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+    elif repeat.times:
+        parts.append(f"COUNT={repeat.times}")
+    return "RRULE:" + ";".join(parts)
+
+
+def _brain_zone() -> Optional[str]:
+    """
+    The name of the zone the brain is in, as Google names one - "Europe/London" - from its TZ, else
+    its TIMEZONE_FILE, else the zone file its LOCALTIME_FILE links to.
+
+    Returns:
+        The name, or None if none of them is one it can load.
+    """
+    names = [os.environ.get("TZ", "").lstrip(":")]
+    try:
+        with open(TIMEZONE_FILE) as file:
+            names.append(file.read().strip())
+    except OSError:
+        pass
+    linked = os.path.realpath(LOCALTIME_FILE)
+    if "zoneinfo/" in linked:
+        names.append(linked.split("zoneinfo/", 1)[1])
+    return next((name for name in names if _zone_named(name)), None)
+
+
+def _repeat_said(repeat: _Repeat, day: date) -> str:
+    """
+    How an event added repeats, as it's said back: "every weekday", "every Monday and Wednesday",
+    "every 2 weeks on Friday", "every month on the 3rd", "every year on the 3rd of December".
+
+    Args:
+        repeat: How it repeats.
+        day: The day it starts on, which a monthly or yearly one repeats on.
+    """
+    unit = {"daily": "day", "monthly": "month", "yearly": "year"}.get(repeat.kind, "week")
+    every = f"every {unit}" if repeat.every == 1 else f"every {repeat.every} {unit}s"
+    if repeat.kind == "monthly":
+        return f"{every} on the {_ordinal(day.day)}"
+    if repeat.kind == "yearly":
+        return f"{every} on the {_ordinal(day.day)} of {day.strftime('%B')}"
+    if repeat.kind == "daily":
+        return every
+    names = "weekdays" if repeat.kind == "weekdays" else joined([WEEKDAYS[day] for day in repeat.days])
+    if repeat.every == 1:
+        return "every weekday" if repeat.kind == "weekdays" else f"every {names}"
+    return f"{every} on {names}"
+
+
+def _added_repeating(start: Dict, repeat: _Repeat, today: date) -> str:
+    """
+    When an event added which repeats starts, as it's said back: "every weekday at 8 AM from Monday",
+    "every year on the 3rd of December, all day from Thursday the 3rd of December, 10 times".
+    """
+    day = _first_day(start)
+    at = ", all day" if "date" in start else f" at {_clock_said(datetime.fromisoformat(start['dateTime']))}"
+    if repeat.until:
+        ending = f", until {spoken_day(repeat.until, today)}"
+    else:
+        ending = f", {repeat.times} {'time' if repeat.times == 1 else 'times'}" if repeat.times else ""
+    return f"{_repeat_said(repeat, day)}{at} from {spoken_day(day, today)}{ending}"
 
 
 def _first_day(start: Dict) -> date:
