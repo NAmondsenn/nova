@@ -271,6 +271,8 @@ class ComputerHooks:
     names_window: Callable[[str, Optional[str]], bool]
     # Whether, with no computer named, there is one to open things on.
     opens_somewhere: Callable[[], bool]
+    # Whether the satellite spoken at is itself a computer which opens things.
+    opens_here: Callable[[], bool]
     # Whether some words, with no computer named, are an app's whole name or his own name for one -
     # so "go to google.com" isn't taken for Google Chrome.
     app_called: Callable[[str], bool]
@@ -325,13 +327,17 @@ class ComputerHooks:
             # Even one which isn't connected, so "Your PC's off." is said rather than Claude asked.
             return target(None) is not None
 
+        def opens_here() -> bool:
+            return target(None) == satellite
+
         def app_called(said: str) -> bool:
             name = target(None)
             return name is not None and named_exactly(
                 said, [item["name"] for item in brain.computers.apps(name)], brain.rooms.app_names(name))
 
         return cls(at_pc=lambda: brain.rooms.machine(satellite) == "pc", names_app=names_app,
-                   names_window=names_window, opens_somewhere=opens_somewhere, app_called=app_called)
+                   names_window=names_window, opens_somewhere=opens_somewhere, opens_here=opens_here,
+                   app_called=app_called)
 
 
 class ComputerControl:

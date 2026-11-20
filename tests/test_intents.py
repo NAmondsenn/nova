@@ -1096,6 +1096,24 @@ def test_search_forms(text, words, where):
         assert _computer(text, at_pc=False, somewhere=False) is None
 
 
+def test_a_plain_search_at_the_pi_is_claudes():
+    # Claude's own web search, as before, unless the PC or Google is named.
+    assert _not_computers(_computer("Search for rocket league tips.", at_pc=False))
+    assert _computer("Search for pizza on the PC.", at_pc=False) == [
+        Action("search_on_computer", {"words": "pizza", "where": "the pc"})]
+    for text, words in (("Search Google for cheap flights.", "cheap flights"), ("Google for train times.", "train times"),
+                        ("Google how tall is Everest.", "how tall is everest"),
+                        ("Look up train times on Google.", "train times")):
+        assert _computer(text, at_pc=False) == [Action("search_on_computer", {"words": words})]
+
+
+@pytest.mark.parametrize("text", ["Search for it.", "Google that.", "Search Google for this.", "Look up it on Google.",
+                                  "Search for it on the PC."])
+def test_a_search_for_a_word_standing_for_something_else_is_claudes(text):
+    assert _not_computers(_computer(text))
+    assert _not_computers(_computer(text, at_pc=False))
+
+
 def test_fall_through_untouched():
     for at_pc in (True, False):
         assert _computer("Start a timer for 5 minutes.", at_pc) == [Action("set_timer", {"duration_seconds": 300})]

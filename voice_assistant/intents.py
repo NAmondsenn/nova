@@ -96,6 +96,8 @@ MOVE_WHERE = r"(?P<where>[a-z0-9']+(?: [a-z0-9']+){0,3})"
 DOMAIN = re.compile(r"[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}")
 # Where a computer is, said after "on": "open Fortnite on the PC".
 ON_WHERE = rf"(?: on {MOVE_WHERE})?"
+# Words which stand for something said before, so are never searched for as they are.
+PRONOUNS = {"it", "that", "this"}
 
 # A thing of Home Assistant's for Assist - "the TV", "AdGuard protection", "movie
 # night" - of one to four words, none of them "and", "then" or "plus", so "turn off
@@ -512,9 +514,12 @@ class LocalIntents:
             (rf"(?:open|launch|start|load up) (?P<app>.+?){ON_WHERE}", self._open_app),
             (rf"(?:close|quit|exit) (?:this|that|this window|the window|it){ON_WHERE}", self._close_this),
             (rf"(?:close|quit|exit) (?P<app>.+?){ON_WHERE}", self._close_app),
-            (rf"(?:search|google)(?: google)? for (?P<words>.+?){ON_WHERE}", self._search),
-            (rf"google (?P<words>.+?){ON_WHERE}", self._search),
-            (rf"look up (?P<words>.+?) on google{ON_WHERE}", self._search),
+            # A plain "search for" is the computer's only at one, or with one named: at the Pi it's
+            # Claude's own web search, as it was. With Google said, it's the computer's anywhere.
+            (rf"search for (?P<words>.+?){ON_WHERE}", self._search(site_said=False)),
+            (rf"(?:search google|google) for (?P<words>.+?){ON_WHERE}", self._search(site_said=True)),
+            (rf"google (?P<words>.+?){ON_WHERE}", self._search(site_said=True)),
+            (rf"look up (?P<words>.+?) on google{ON_WHERE}", self._search(site_said=True)),
             # The to-do lists - see lists.py. Assist is asked first for the adding and
             # ticking off, but only with its own list intents (see ActionExecutor), so
             # "take milk off my shopping list", which Assist reads as removing it, is only
@@ -936,13 +941,22 @@ class LocalIntents:
         return self._computer_action("close_on_computer", {"name": app}, where) \
             if self.computer.names_window(app, where) else None
 
-    def _search(self, found) -> Optional[Dict]:
-        if self.computer is None:
-            return None
-        words, where = self._computer_words(found, "words")
-        if not where and not self.computer.opens_somewhere():
-            return None
-        return self._computer_action("search_on_computer", {"words": words}, where)
+    def _search(self, site_said: bool):
+        """The handler for a search, which says whether the search site was said ("search Google for")."""
+        def handle(found) -> Optional[Dict]:
+            if self.computer is None:
+                return None
+            words, where = self._computer_words(found, "words")
+            # "Search for it" is about something said before, which only Claude knows.
+            if words.strip() in PRONOUNS:
+                return None
+            if not where:
+                if not self.computer.opens_somewhere():
+                    return None
+                if not site_said and not self.computer.opens_here():
+                    return None
+            return self._computer_action("search_on_computer", {"words": words}, where)
+        return handle
 
     def _send_to_phone(self, found) -> Optional[Dict]:
         return self._result("Okay.", [Action("send_to_phone")]) if self.ntfy else None
