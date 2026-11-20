@@ -67,10 +67,11 @@
 
   <div id="marks" class="marks">
     <span id="offline" class="mark offline" hidden>Offline</span>
-    <span id="muted" class="mark muted" hidden>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM6 11a6 6 0 0 0 12 0M12 17v4M4 4l16 16"/></svg>
-      Muted
-    </span>
+    <button id="mic" class="mark mic" type="button" aria-pressed="false" aria-label="Microphone on" hidden>
+      <svg class="mic-on" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM6 11a6 6 0 0 0 12 0M12 17v4"/></svg>
+      <svg class="mic-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM6 11a6 6 0 0 0 12 0M12 17v4M4 4l16 16"/></svg>
+      <span class="mic-words">Muted</span>
+    </button>
   </div>
 
   <div id="nova" class="nova" hidden>

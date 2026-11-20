@@ -48,6 +48,9 @@ const QUICKEST = 1000;
 // How long the volume shows after a button's pressed, in milliseconds.
 const VOLUME_SHOWN = 1500;
 
+// How long the microphone button stays shrunk once tapped, in milliseconds.
+const MIC_PRESSED = 150;
+
 // Presses the same way closer together than this, in milliseconds, are one press. The
 // kiosk app may hand a button to the page twice - through fully.bind() and as a key -
 // and both routes are kept, in case the page's policy turns the first down.
@@ -123,6 +126,11 @@ let touch = null;
 // both are sent along - so an "end" never overtakes its "start" on the way.
 let holdSent = false;
 let holding = Promise.resolve();
+
+// Whether the microphone was last tapped muted or not, shown until Nova answers - null
+// with nothing on its way - and which tap that was, so only the last one's answer counts.
+let micAsked = null;
+let micTaps = 0;
 
 const $ = (id) => document.getElementById(id);
 
@@ -602,9 +610,20 @@ function drawOverlays() {
   novaShown = nova;
 }
 
+// The offline mark, and the microphone button - shown, as the muted mark was, only while
+// Nova's there to tap and the blob isn't over it; muted, as last tapped until Nova answers.
 function drawMarks() {
   $("offline").hidden = online !== false;
-  $("muted").hidden = !(online && state && state.muted) || novaShown !== "idle";
+  const mic = $("mic");
+  const muted = micMuted();
+  mic.hidden = !(online && state) || novaShown !== "idle";
+  mic.classList.toggle("muted", muted);
+  mic.setAttribute("aria-pressed", String(muted));
+  mic.setAttribute("aria-label", muted ? "Microphone muted" : "Microphone on");
+}
+
+function micMuted() {
+  return micAsked !== null ? micAsked : Boolean(state && state.muted);
 }
 
 function setBrightness(level) {
@@ -688,7 +707,8 @@ document.addEventListener("touchstart", (event) => {
     return;
   }
   const finger = event.changedTouches[0];
-  touch = { id: finger.identifier, points: [pointOf(finger)], held: false, abandoned: false, timer: null };
+  touch = { id: finger.identifier, points: [pointOf(finger)], held: false, abandoned: false, timer: null,
+    onMic: $("mic").contains(event.target) };
   touch.timer = setTimeout(checkHold, NovaGestures.HOLD_MS);
 }, { passive: false });
 
@@ -703,11 +723,14 @@ document.addEventListener("touchend", (event) => {
   const finger = trackedIn(event.changedTouches);
   if (!finger) return;
   touch.points.push(pointOf(finger));
-  const { points, held, abandoned } = touch;
+  const { points, held, abandoned, onMic } = touch;
   dropTouch();
   if (held || abandoned) return;
   const gesture = NovaGestures.classify(points);
-  if (gesture === "tap" || gesture === "swipe-left") showPage(page + 1);
+  // A tap on the microphone is the microphone's, not a page turn; a hold or a swipe
+  // starting there is what it would be anywhere else.
+  if (gesture === "tap" && onMic) tapMic();
+  else if (gesture === "tap" || gesture === "swipe-left") showPage(page + 1);
   else if (gesture === "swipe-right") showPage(page - 1);
 }, { passive: false });
 
@@ -722,6 +745,29 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("pagehide", () => dropTouch(true));
 document.addEventListener("contextmenu", (event) => event.preventDefault());
+
+// The microphone button
+
+// Mutes the clock's satellite's microphone, or unmutes it - shown at once, before Nova
+// answers, and put back as Nova has it if Nova can't be reached or turns it down. Each
+// tap says which it wants rather than "the other one", so two taps racing can't cross.
+function tapMic() {
+  if (online !== true || !state) return;
+  const muted = !micMuted();
+  const tap = ++micTaps;
+  micAsked = muted;
+  drawMarks();
+  const mic = $("mic");
+  mic.classList.add("pressed");
+  setTimeout(() => mic.classList.remove("pressed"), MIC_PRESSED);
+  ask(API + "mute", { body: { muted } }).then((answer) => {
+    if (tap === micTaps && answer.status === 200 && state) state.muted = answer.data.muted;
+  }).catch(() => {}).finally(() => {
+    if (tap !== micTaps) return;
+    micAsked = null;
+    drawMarks();
+  });
+}
 
 // The volume buttons
 

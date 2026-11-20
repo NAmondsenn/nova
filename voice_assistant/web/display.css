@@ -350,7 +350,7 @@ h1 {
   background: #9aa4b2;
 }
 
-/* Offline and muted, small, in the bottom corner across from nothing else - below Home's
+/* Offline and the microphone, small, in the bottom corner across from nothing else - below Home's
  * tiles, lined up with their right edge. */
 
 .marks {
@@ -377,6 +377,35 @@ h1 {
   stroke: currentColor;
   stroke-width: 2;
   stroke-linecap: round;
+}
+
+/* The microphone, a button: tapped, it mutes or unmutes the clock's satellite. On, just
+ * the microphone; muted, it's crossed out in the offline dot's red, with the word. The
+ * padding, taken back by the margin, makes it a finger's width to tap without moving it. */
+
+.mic {
+  margin: -12px;
+  padding: 12px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  transition: transform 0.12s;
+}
+
+.mic:not(.muted) .mic-off,
+.mic:not(.muted) .mic-words,
+.mic.muted .mic-on {
+  display: none;
+}
+
+.mic.muted svg {
+  stroke: #f85149;
+}
+
+/* Tapped - shrunk for a moment, so the finger feels it land before Nova answers. */
+.mic.pressed {
+  transform: scale(0.85);
 }
 
 .offline::before {
