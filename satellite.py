@@ -1708,7 +1708,8 @@ class Satellite:
 
     def _note_start(self) -> bool:
         """
-        Leaves RUNNING_MARK, which _clean_up takes away.
+        Leaves RUNNING_MARK, which _clean_up takes away, saying where the press listener
+        is if there is one - it's started before this is called.
 
         Returns:
             Whether the last run left one too, so never stopped properly - which the
@@ -1720,7 +1721,11 @@ class Satellite:
             # Half written as the power went, most likely - which is a restart too.
             unclean = True
         try:
-            storage.save_json(RUNNING_MARK, {"started_at": time.time()})
+            mark = {"started_at": time.time()}
+            if self.press_listener is not None:
+                # Where a second launch of the app finds this one, to ask it to open its page.
+                mark["press_port"] = self.press_listener.port
+            storage.save_json(RUNNING_MARK, mark)
         except OSError as e:
             logger.warning(f"Couldn't note that the satellite is running: {e}")
         return unclean

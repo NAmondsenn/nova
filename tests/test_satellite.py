@@ -2086,6 +2086,21 @@ def test_the_listener_is_made_only_for_a_push_to_talk_satellite_and_closed_with_
     assert wake_word.press_listener is None
 
 
+def test_the_running_mark_says_the_press_port(brain, make, tmp_path):
+    # So a second launcher can find the running one and ask it to open its page.
+    made = pressable(brain, make)
+    mark = json.loads((tmp_path / "running").read_text())
+    assert mark["press_port"] == made.press_listener.port == 10401
+    assert isinstance(mark["started_at"], float)
+
+
+def test_a_wake_word_satellites_mark_has_no_port(brain, make, tmp_path):
+    made = make()
+    assert wait_for(lambda: connected(made))
+    mark = json.loads((tmp_path / "running").read_text())
+    assert "press_port" not in mark and "started_at" in mark
+
+
 def test_a_satellite_which_cant_have_its_press_port_stops_before_reaching_the_brain(brain, make, monkeypatch):
     # Bound before the link, so one which can't listen for presses is started again by
     # the launcher without the brain hearing of it each time.
