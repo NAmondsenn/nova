@@ -308,6 +308,23 @@ def test_volume_on_pi_from_pc_beeps_on_pi(pc_and_pi):
     assert pc_and_pi.pi.boops == [0.3, 0.3]
 
 
+def test_volume_named_elsewhere_is_its_music_only_while_it_plays_there(pc_and_pi):
+    # Playing at the Pi, which wasn't paused for him as he spoke at the PC: its music.
+    pi_music = pc_and_pi.pi_music
+    pi_music.is_playing, pi_music.was_playing = (lambda: True), (lambda: False)
+    pc_and_pi.pc.actions.execute(Action("set_volume", {"direction": "down", "where": "the pi"}))
+    assert pi_music.level == 50 and pc_and_pi.pi.volume.percent("general") == 70
+    # Stopped there, though it was playing when last spoken to there: its voice.
+    pi_music.is_playing, pi_music.was_playing = (lambda: False), (lambda: True)
+    pc_and_pi.pc.actions.execute(Action("set_volume", {"direction": "down", "where": "the pi"}))
+    assert pi_music.level == 50 and pc_and_pi.pi.volume.percent("general") == 60
+    # A player which can't say whether it plays, but says what's playing.
+    del pi_music.is_playing
+    pi_music.playing = True
+    pc_and_pi.pc.actions.execute(Action("set_volume", {"direction": "up", "where": "the pi"}))
+    assert pi_music.level == 60
+
+
 def test_alarm_volume_at_pc_stays_nova(pc_and_pi):
     result = pc_and_pi.pc.actions.execute(Action("set_volume", {"category": "alarm", "direction": "down"}))
     assert pc_and_pi.pc.volume.percent("alarm") == 90 and pc_and_pi.windows.asked == []

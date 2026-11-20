@@ -1555,12 +1555,35 @@ class ActionExecutor:
         Returns:
             What its own set_volume gave, without the beep, which has played there.
         """
+        if category is None and mute is None:
+            # Its music if it's playing there now: whether it was when he spoke is only known of
+            # the satellite he spoke to, which paused it for him.
+            category = "music" if self._playing_now(target.actions.music) else "general"
         result = target.actions.set_volume(category, level, direction, amount, mute=mute)
         sound = result.pop("sound", None)
         sound_category = result.pop("sound_category", "general")
         if sound:
             target.boop(target.volume.get(sound_category))
         return result
+
+    @staticmethod
+    def _playing_now(player) -> bool:
+        """
+        Whether a music player is playing now - by its own is_playing, else what it says is
+        playing - False for none, or one which can't say.
+        """
+        if player is None:
+            return False
+        asked = getattr(player, "is_playing", None)
+        if asked is not None:
+            return bool(asked())
+        now = getattr(player, "now_playing", None)
+        try:
+            playing = now() if now is not None else None
+        except Exception as e:
+            logger.warning(f"Couldn't tell whether the music is playing, so it's taken not to be: {e}")
+            return False
+        return bool(playing and playing.get("playing"))
 
     def _system_volume(self, level: Optional[int], direction: Optional[str], amount: Optional[int],
                        mute: Optional[bool]) -> Dict:
