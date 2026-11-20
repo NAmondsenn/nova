@@ -145,9 +145,9 @@ These are told to the orb as they happen ("listening", "thinking", "speaking",
 | `computer.screen_orb_size` | small, medium, large (about 48, 64, 96 px at 100% scaling) | medium |
 
 The size is the bright body - the lobes and core - which is what reads as "the orb"; the
-aura's glow fades out around it to about 1.6 times that width, as on the clock, so the
-window is that much bigger and its glow, not its body, sits just above the taskbar. My
-call, matching "about twice the size of a taskbar icon".
+aura's glow fades out around it to about 1.7 times that width, as on the clock (520 px
+to its 300), so the window is that much bigger and its glow, not its body, sits just
+above the taskbar. My call, matching "about twice the size of a taskbar icon".
 
 The brain sends them to push-to-talk satellites with the state it already sends (as
 `longest_request` is), and a change on the page reaches the PC at once. An old brain
