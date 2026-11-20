@@ -14,3 +14,5 @@
 6. **Packages.** The six `winrt` packages are pinned in `requirements-pc.txt` at the versions on the PC on 19 November.
 
 **What it costs.** One more read of the player every 5 seconds for the PC, which for Spotify is another request to Spotify's servers. Opening the "Nova" shortcut from the Start menu does nothing while the satellite runs: only one launcher runs at a time, by a named mutex, and a second exits at once. No seek bar, position or volume: Windows' slider stays the system volume. Nothing changes on the Pi.
+
+**Since.** [0036](0036-nova-on-the-computer-as-an-app.md) makes the Start-menu shortcut "Nova" pass `--open`: while the satellite runs it now opens the settings page instead of doing nothing, and it has the orb as its icon.

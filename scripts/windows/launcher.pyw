@@ -6,10 +6,10 @@ when the user chose Quit in its tray menu (exit code 10), which ends the launche
 Restart in the menu (exit code 11) starts it again after the shortest wait, whatever came
 before. The satellite is run through the venv's Nova.exe when that exists, so Windows names
 the program Nova, and through pythonw.exe otherwise. Task Scheduler starts this at the
-user's logon, with the venv's pythonw.exe so there's no window, because its own restart on
-failure doesn't reliably restart a process which exits. Where the satellite is installed is
-install.ps1's business: everything is under %LOCALAPPDATA%\\nova (app, config and data), the
-user's own.
+user's logon, with the venv's Nova.exe when install.ps1 built it (else pythonw.exe) so there's
+no window, because its own restart on failure doesn't reliably restart a process which
+exits. Where the satellite is installed is install.ps1's business: everything is under
+%LOCALAPPDATA%\\nova (app, config and data), the user's own.
 
 It is started in three ways:
   --logon  by the logon task. If the user turned "Start with Windows" off in the tray's
