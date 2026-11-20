@@ -500,6 +500,31 @@ def test_open_with_a_listener_which_never_answers_gives_up(tmp_path, caplog, mon
     assert len(caplog.records) == 1
 
 
+def test_open_with_a_stranger_on_the_port_does_nothing(ask, caplog):
+    # A stale running mark whose port another program has since taken, which answers with
+    # something which isn't HTTP.
+    ask_to_open, data = ask
+
+    def answer():
+        connection, _ = sock.accept()
+        with connection:
+            connection.recv(4096)
+            connection.sendall(b"garbage\r\n\r\n")
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(1)
+    thread = threading.Thread(target=answer, daemon=True)
+    thread.start()
+    try:
+        (data / "running").write_text(json.dumps({"press_port": sock.getsockname()[1]}))
+        assert ask_to_open(str(data)) is False
+        thread.join(5)
+    finally:
+        sock.close()
+    assert len(caplog.records) == 1
+
+
 def test_unknown_arguments_are_ignored_with_one_log_line(launched):
     run, data = launched
     assert len(run(["--logon", "--sing", "extra"])) == 2

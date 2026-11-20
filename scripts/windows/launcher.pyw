@@ -32,6 +32,7 @@ and opening it would otherwise start a second satellite beside the first.
 """
 
 import ctypes
+import http.client
 import json
 import logging
 import os
@@ -225,8 +226,9 @@ def ask_to_open(data: str) -> bool:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(request, timeout=OPEN_TIMEOUT):
             pass
-    except (OSError, ValueError, KeyError, TypeError) as error:
+    except (OSError, http.client.HTTPException, ValueError, KeyError, TypeError) as error:
         # OSError holds the missing mark, a refused connection, a timeout and an HTTP error;
+        # HTTPException a stranger on the port which doesn't speak HTTP;
         # ValueError the mark which isn't JSON; KeyError and TypeError one of another shape.
         logger.warning(f"Couldn't ask the running Nova to open its page: {error!r}")
         return False
