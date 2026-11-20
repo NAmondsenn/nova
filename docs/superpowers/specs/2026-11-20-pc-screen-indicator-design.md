@@ -116,10 +116,8 @@ These are told to the orb as they happen ("listening", "thinking", "speaking",
   the same size on a 4K screen at 150% as on 1080p at 100%.
 - While visible: about 30 frames a second from a timer on that thread. While hidden: the
   timer is stopped.
-- Kept out of screenshots, recordings and screen shares (`SetWindowDisplayAffinity` with
-  `WDA_EXCLUDEFROMCAPTURE`), so it doesn't turn up in game clips or a Discord stream.
-  My call: it's only there to tell him what Nova's doing, and it's one line to drop if
-  he'd rather see it in captures.
+- Shown in screenshots, recordings and screen shares like any other window - his call
+  (20 Nov): no `SetWindowDisplayAffinity`.
 - Shown over games too, anti-cheat ones included (Fortnite), with no list of programs
   it hides for. My call: it's an ordinary window of its own that never touches the
   game, as Windows' own volume pop-up and Discord's newer overlay are. The on/off
