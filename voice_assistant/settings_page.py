@@ -633,7 +633,7 @@ class SettingsPage:
 
         A satellite which has said it opens things also has whether he lets it, how many
         apps it found and his short names for them. With more than one PC in Home
-        Assistant, it has them to choose its own from, and the one chosen.
+        Assistant, it has the one chosen, if it was. Nothing here asks Home Assistant.
 
         Args:
             names: The satellites, as the brain has them - the first is the default.
@@ -647,7 +647,6 @@ class SettingsPage:
         spotify = self.brain.config is None or _chosen(self.brain.config) == "spotify"
         computers = self.brain.computers
         opening = set(computers.known())
-        pcs = self._pcs_to_choose_from() if opening & set(names) else []
         for name in names:
             session = self.brain.session_for(name)
             # One which doesn't say plays on the brain's own - see SpotifyController.
@@ -663,30 +662,9 @@ class SettingsPage:
                           "saves_notes": rooms.saves_notes(name),
                           "opens": name in opening, "opens_on": rooms.opens_things(name),
                           "apps_found": len(computers.apps(name)), "app_names": rooms.app_names(name),
-                          # With one PC it is that one, whatever was saved.
-                          "pcs": pcs if len(pcs) > 1 else [],
-                          "pc_device": self._pc_of(name, pcs)})
+                          # As saved: the PCs it is one of come from home_choices_state, as Home Assistant is slow to ask.
+                          "pc_device": rooms.pc_device(name)})
         return found
-
-    def _pcs_to_choose_from(self) -> List[Dict]:
-        """
-        Returns the PCs Home Assistant has, each as {"device", "name"} - none without Home Assistant, or if it can't be asked.
-        """
-        pc = self.brain.pc
-        if pc is None:
-            return []
-        try:
-            return [{"device": each["device"], "name": each["name"]} for each in pc.overview()["pcs"]]
-        except HOME_FAILURES as e:
-            logger.warning(f"Settings page: couldn't read the PCs for the satellites: {e}")
-            return []
-
-    def _pc_of(self, name: str, pcs: List[Dict]) -> Optional[str]:
-        """Returns the device id of the PC a satellite is: the only one there is, or else the one chosen if it's still listed."""
-        if len(pcs) == 1:
-            return pcs[0]["device"]
-        chosen = self.brain.rooms.pc_device(name)
-        return chosen if chosen in [each["device"] for each in pcs] else None
 
     def state(self, satellite: Optional[str] = None) -> Dict:
         """
@@ -987,7 +965,8 @@ class SettingsPage:
             "sending": [{"name", "how"}], "weather": [{"id", "name", "chosen"}] or None,
             "pcs": {"pcs": [{"device", "name", "wake"}], "buttons": [{"id", "name"}]} or
             None} - the weather only with more than one entity, the PCs only with a PC and
-            more than one PC or more than one button. Else {"available": False, "message": ...}.
+            more than one PC or more than one button - and "satellite_pcs", the PCs a satellite can be
+            chosen from, as {"device", "name"}, only with more than one PC. Else {"available": False, "message": ...}.
         """
         brain = self.brain
         if brain.home is None:
@@ -1016,7 +995,9 @@ class SettingsPage:
             sending.append({"name": device.name, "how": how})
         choose_pc = bool(pcs["pcs"]) and (len(pcs["pcs"]) > 1 or len(pcs["buttons"]) > 1)
         return {"available": True, "lists": lists, "sending": sending,
-                "weather": weather if len(weather) > 1 else None, "pcs": pcs if choose_pc else None}
+                "weather": weather if len(weather) > 1 else None, "pcs": pcs if choose_pc else None,
+                "satellite_pcs": [{"device": each["device"], "name": each["name"]} for each in pcs["pcs"]]
+                if len(pcs["pcs"]) > 1 else []}
 
     def _restart_needed(self, saved: Optional[Config]) -> bool:
         """
@@ -2263,6 +2244,8 @@ class SettingsPage:
         if len(pairs) > MOST_APP_NAMES:
             return {"success": False, "message": f"That's more than {MOST_APP_NAMES} names."}
         apps = self.brain.computers.apps(name)
+        # As it's said mid-sentence, "the PC" or the name he gave it.
+        spoken = self.brain.spoken_name(name)
         given: Dict[str, str] = {}
         for pair in pairs:
             alias, _, app = (part.strip() for part in pair.partition("="))
@@ -2275,7 +2258,7 @@ class SettingsPage:
             # Matched with no names of his own, so a name can't be pointed at another name.
             found = match_app(app, apps, {})
             if found.item is None:
-                return {"success": False, "message": f"I can't find {app} on {name}."}
+                return {"success": False, "message": f"I can't find {app} on {spoken}."}
             given[plain_app(alias)] = found.item["name"]
         try:
             self.brain.rooms.set_app_names(name, given)
@@ -2310,7 +2293,12 @@ class SettingsPage:
             return {"success": False, "message": f"There's no satellite called {name}."}
         if self.brain.pc is None:
             return {"success": False, "message": NO_HOME}
-        chosen = next((each for each in self._pcs_to_choose_from() if each["device"] == device), None)
+        try:
+            listed = self.brain.pc.overview()["pcs"]
+        except HOME_FAILURES as e:
+            logger.warning(f"Settings page: couldn't read the PCs to choose one for the {name} satellite: {e}")
+            return {"success": False, "message": CANT_REACH_HOME}
+        chosen = next((each for each in listed if each["device"] == device), None)
         if chosen is None:
             return {"success": False, "message": "Home Assistant doesn't have that PC."}
         try:

@@ -295,7 +295,8 @@ function page(answers = {}) {
     ? { ok: false, status: 500, json: async () => ({}), text: async () => "broken" }
     : { ok: true, status: 200, json: async () => body, text: async () => "" });
   const paths = { "/api/state": "state", "/api/music": "music", "/api/home": "home", "/api/batteries": "batteries",
-                  "/api/football": "football", "/api/calendars": "calendars" };
+                  "/api/football": "football", "/api/calendars": "calendars",
+                  "/api/home-choices": "choices" };
   const context = vm.createContext({
     document,
     window,
@@ -1135,9 +1136,9 @@ test("the list's rows are the sections in their groups, and a tap on one opens i
 const OPENING = [
   { name: "pc", connected: true, default: false, travels: false, machine: "pc", called: [], saves_notes: true,
     opens: true, opens_on: true, apps_found: 42, app_names: { gta: "Grand Theft Auto V Enhanced", fc: "EA SPORTS FC 25" },
-    pc_device: null, pcs: [] },
+    pc_device: null },
   { name: "mac", connected: true, default: false, travels: false, machine: "mac", called: [], saves_notes: true,
-    opens: false, opens_on: true, apps_found: 0, app_names: {}, pc_device: null, pcs: [] },
+    opens: false, opens_on: true, apps_found: 0, app_names: {}, pc_device: null },
 ];
 // The box of the app names, which is the one with the placeholder, and the opening switch, by its words.
 const appNamesBox = (row) => row.querySelectorAll("input").find((one) => one.placeholder === "GTA = Grand Theft Auto V Enhanced");
@@ -1176,15 +1177,21 @@ test("the opening switch and the app names are sent as they are changed", async 
     { path: "/api/satellites/app-names", name: "pc", text: "GTA = Grand Theft Auto V Enhanced " }]));
 });
 
-test("a PC choice is shown only when the brain lists more than one PC", async () => {
-  const two = [{ ...OPENING[0], pcs: [{ device: "desk", name: "Desk" }, { device: "laptop", name: "Laptop" }], pc_device: "laptop" },
-               OPENING[1]];
-  const shown = page({ state: { ...STATE, satellites: two, satellite: null } });
-  await shown.context.load();
+// What /api/home-choices says, with the PCs a satellite can be chosen from.
+const choices = (satellite_pcs) => ({ available: true, lists: [], sending: [], weather: null, pcs: null, satellite_pcs });
+
+test("a PC choice is shown only when Home Assistant lists more than one PC", async () => {
+  const two = [{ ...OPENING[0], pc_device: "laptop" }, OPENING[1]];
+  const shown = page({ state: { ...STATE, satellites: two, satellite: null },
+                       choices: choices([{ device: "desk", name: "Desk" }, { device: "laptop", name: "Laptop" }]) });
   const choose = (row) => {
     const label = row.querySelectorAll("label").find((one) => one.textContent.startsWith("HASS.Agent PC"));
     return label ? label.querySelector("select") : undefined;
   };
+  await shown.context.load();
+  // Not until Home Assistant's choices have come: the state alone has no PCs.
+  assert.equal(choose(satelliteRow(shown, "pc")), undefined);
+  await shown.context.loadHomeChoices();
   const select = choose(satelliteRow(shown, "pc"));
   assert.equal(select.value, "laptop");
   assert.equal(select.querySelectorAll("option").map((one) => one.textContent).join("|"), "Not chosen|Desk|Laptop");
@@ -1193,8 +1200,11 @@ test("a PC choice is shown only when the brain lists more than one PC", async ()
   select.value = "desk";
   for (const listener of select.listeners.change || []) await listener({});
   assert.equal(JSON.stringify(posts), JSON.stringify([{ path: "/api/satellites/pc", name: "pc", device: "desk" }]));
-  // With one PC there is nothing to choose from.
-  const one = page({ state: { ...STATE, satellites: OPENING, satellite: null } });
-  await one.context.load();
-  assert.equal(choose(satelliteRow(one, "pc")), undefined);
+  // With one PC, or none, there is nothing to choose from.
+  for (const none of [[], [{ device: "desk", name: "Desk" }]]) {
+    const one = page({ state: { ...STATE, satellites: OPENING, satellite: null }, choices: choices(none) });
+    await one.context.load();
+    await one.context.loadHomeChoices();
+    assert.equal(choose(satelliteRow(one, "pc")), undefined);
+  }
 });

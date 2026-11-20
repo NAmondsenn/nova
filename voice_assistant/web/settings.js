@@ -990,7 +990,8 @@ function showSatellites(state) {
       appNames.append(element("span", "Apps also called"), appNamesBox);
       actions.append(appNames);
       // Which HASS.Agent PC it is, only when Home Assistant has more than one: with one, it is that one.
-      if ((satellite.pcs || []).length > 1) {
+      const pcs = satellitePcs();
+      if (pcs.length > 1) {
         const pc = element("label", undefined, "choice");
         const wrap = element("span", undefined, "select");
         const select = element("select");
@@ -998,12 +999,12 @@ function showSatellites(state) {
         none.value = "";
         none.disabled = true;
         select.append(none);
-        for (const each of satellite.pcs) {
+        for (const each of pcs) {
           const option = element("option", each.name);
           option.value = each.device;
           select.append(option);
         }
-        select.value = satellite.pc_device || "";
+        select.value = pcs.some((each) => each.device === satellite.pc_device) ? satellite.pc_device : "";
         select.addEventListener("change", () =>
           change("/api/satellites/pc", { name: satellite.name, device: select.value }, () => {
             delete drawn.satellites;
@@ -1054,7 +1055,7 @@ function showSatellites(state) {
   const none = state.satellites_unreadable
     ? "The satellites' file can't be read, so they can't be shown or changed - see the brain's log."
     : "No satellites have been added.";
-  drawIfChanged("satellites", [satellites, none], () => {
+  drawIfChanged("satellites", [satellites, none, satellitePcs()], () => {
     // Not while a switch or button is held down: the row drawn again under the pointer
     // loses the click, if it's slow enough to land just after a satellite's state changed.
     // Nor while names are being typed, which a satellite starting to speak would wipe.
@@ -1763,6 +1764,12 @@ function calendarRow(calendar, index) {
 }
 
 // Asks the page's other choices of Home Assistant: the main list, the weather and the PCs.
+// The PCs a satellite can be chosen from, which Home Assistant says with the other choices
+// - only when it has more than one - so none until they've come.
+function satellitePcs() {
+  return (homeChoices && homeChoices.satellite_pcs) || [];
+}
+
 async function loadHomeChoices() {
   try {
     const response = answered(await fetchWithin("/api/home-choices"));
@@ -1772,6 +1779,8 @@ async function loadHomeChoices() {
     return;
   }
   showHomeChoices();
+  // The satellites' rows have the PC choice, once it's known.
+  if (stateSaid) showSatellites(stateSaid);
 }
 
 // The lists and how each device is sent to, as rows; the weather and the PCs as choices,

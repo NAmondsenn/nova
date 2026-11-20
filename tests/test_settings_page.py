@@ -60,7 +60,7 @@ LOGIN = "you@example.com"
 # What the page says of a satellite nothing is known of: not what machine it is, what else it's called, whether it
 # saves notes or opens things, or which PC it is.
 UNKNOWN = {"machine": None, "called": [], "saves_notes": False, "opens": False, "opens_on": True, "apps_found": 0,
-           "app_names": {}, "pcs": [], "pc_device": None}
+           "app_names": {}, "pc_device": None}
 
 
 class FakeVolume:
@@ -304,6 +304,9 @@ class FakeBrain:
 
     def session_for(self, satellite):
         return self.sessions.get(satellite or self.default_satellite())
+
+    def spoken_name(self, name):
+        return Brain.spoken_name(self, name)
 
     def run_routine(self, routine):
         self.ran.append(routine)
@@ -2594,7 +2597,8 @@ class FakePCs:
 def _opening(tmp_path, *pcs):
     """A page over a real rooms with a PC which has said it opens things, and a Mac which hasn't."""
     rooms = _rooms(tmp_path, ("pc", "pc", True), ("mac", "mac", True))
-    page = _page(sessions={"pc": FakeSession(), "mac": FakeSession()}, rooms=rooms, pc=FakePCs(*pcs))
+    page = _page(sessions={"pc": FakeSession(), "mac": FakeSession()}, rooms=rooms, pc=FakePCs(*pcs),
+                 home=SimpleNamespace(app_devices=lambda: []))
     page.brain.computers.set_apps("pc", APPS)
     return page
 
@@ -2633,7 +2637,9 @@ def test_app_names_saved_and_checked(files, tmp_path, caplog):
     # An app it doesn't have, one which fits several, or a pair with no right side is refused: nothing is saved.
     kept = dict(rooms.app_names("pc"))
     assert page.set_app_names("pc", "GTA = Grand Theft Auto V Enhanced, X = Doom", LOGIN) == {
-        "success": False, "message": "I can't find Doom on pc."}
+        "success": False, "message": "I can't find Doom on the PC."}
+    page.brain.rooms.set_called("pc", ["Nathaniel's PC"])
+    assert page.set_app_names("pc", "X = Doom", LOGIN)["message"] == "I can't find Doom on Nathaniel's PC."
     assert page.set_app_names("pc", "OW = overwatch", LOGIN)["success"] is True
     assert page.set_app_names("pc", "kept = Overwatch 2, X = Overwatc", LOGIN)["success"] is False
     assert page.set_app_names("pc", "GTA", LOGIN)["success"] is False
@@ -2660,22 +2666,28 @@ def test_app_names_are_limited_in_number_and_length(files, tmp_path):
 
 def test_the_pc_choice_is_shown_only_with_more_than_one_pc(files, tmp_path, caplog):
     one = _opening(tmp_path, "desk")
-    # With one PC, that is the PC whatever is saved and there is nothing to choose from.
-    one.brain.rooms.set_pc_device("pc", "gone")
-    shown = one.state()["satellites"][0]
-    assert (shown["pc_device"], shown["pcs"]) == ("desk", [])
+    # With one PC there is nothing to choose from, and the state asks Home Assistant for nothing.
+    assert one.home_choices_state()["satellite_pcs"] == []
     two = _opening(tmp_path, "desk", "laptop")
-    shown = two.state()["satellites"][0]
-    assert (shown["pc_device"], [each["device"] for each in shown["pcs"]]) == (None, ["desk", "laptop"])
+    assert two.home_choices_state()["satellite_pcs"] == [
+        {"device": "desk", "name": "Desk"}, {"device": "laptop", "name": "Laptop"}]
+    assert two.state()["satellites"][0]["pc_device"] is None
     with caplog.at_level(logging.INFO):
         assert two.set_pc("pc", "laptop", LOGIN) == {"success": True, "message": "pc is the Laptop PC now."}
     assert two.state()["satellites"][0]["pc_device"] == "laptop"
     assert two.set_pc("pc", "nowhere", LOGIN)["success"] is False
     assert two.brain.rooms.pc_device("pc") == "laptop"
     assert two.set_pc("pc", None, LOGIN)["success"] is False
-    # Without Home Assistant there is no choice, and the page still draws.
-    two.brain.pc = None
-    assert two.state()["satellites"][0]["pcs"] == []
+
+
+def test_the_satellites_state_never_asks_home_assistant_for_the_pcs(files, tmp_path):
+    page = _opening(tmp_path, "desk", "laptop")
+
+    def refuse():
+        raise AssertionError("state asked Home Assistant")
+
+    page.brain.pc.overview = refuse
+    assert page.state()["satellites"][0]["opens"] is True
 
 
 def test_the_search_site_is_on_the_page_as_a_choice_used_straight_away(files):
