@@ -867,12 +867,10 @@ def test_a_note_with_no_computer_saving_notes_says_so(brain, passwords):
     assert brain.notes_for("bedroom", None) == (None, "None of your computers can save notes.")
 
 
-def test_a_note_for_a_computer_which_isnt_connected_says_why(noting):
-    # Asleep or its Nova not running, as for the other things said to a computer.
-    assert noting.notes_for("bedroom", "the PC") == (None, "Nova isn't running on the PC.")
-    assert noting.notes_for("bedroom", None) == (None, "Nova isn't running on the PC.")
-    noting.pc = FakePCPower(on=False)
-    assert noting.notes_for("bedroom", None) == (None, "Your PC's off.")
+def test_a_note_for_a_computer_which_isnt_connected_still_names_it(noting):
+    # Asleep or its Nova not running: the session finds that, as the note goes on the notepad list then.
+    assert noting.notes_for("bedroom", "the PC") == ("pc", None)
+    assert noting.notes_for("bedroom", None) == ("pc", None)
 
 
 def test_the_satellites_saving_notes_are_those_let_in_which_say_so(noting, passwords):
