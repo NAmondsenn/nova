@@ -27,6 +27,7 @@ from voice_assistant import fallback, paths, protocol, satellite_link, storage, 
 from voice_assistant.fallback import AlarmCopy, Phrase, StateCopy
 from voice_assistant.notes import NoteRefused
 from voice_assistant.press import PressListener
+from voice_assistant.screen_orb import LINGER
 from voice_assistant.wake_clips import WakeClips
 from voice_assistant.windows_media import UNCHANGED
 
@@ -3285,18 +3286,23 @@ def test_the_system_volume_is_closed_with_the_satellite(brain, make, pc):
 # Nova's orb on the PC's screen - see voice_assistant/screen_orb.py
 
 class FakeScreenOrb:
-    """Stands in for ScreenOrb, keeping what it was asked to show and configure - available unless a test says not."""
+    """
+    Stands in for ScreenOrb, keeping what it was asked to show, and when, and to configure -
+    available unless a test says not.
+    """
 
     available = True
     made = []
 
     def __init__(self):
         self.shown = []
+        self.shown_at = []
         self.configured = []
         self.closed = False
         FakeScreenOrb.made.append(self)
 
     def show(self, state):
+        self.shown_at.append(time.monotonic())
         self.shown.append(state)
 
     def configure(self, on, place, size):
@@ -3424,6 +3430,25 @@ def test_the_orb_stops_speaking_before_the_brain_hears_the_reply_has_played(brai
     brain.say("stream_end", id="reply-1")
     assert wait_for(lambda: seen)
     assert seen == [["speaking", "hidden"]]
+
+
+def test_a_press_over_a_reply_goes_from_speaking_to_listening_without_a_blink(brain, make, pc, orbs):
+    made = pressable(brain, make)
+    orb = made.orb
+    say_a_reply(brain)
+    assert wait_for(lambda: orb.shown == ["speaking"])
+    made._pressed()
+    assert wait_for(lambda: orb.shown[-1] == "listening")
+    # The reply, stopped by the press, has ended by now, and changes nothing more.
+    assert wait_for(lambda: [message["stopped"] for message in brain.messages("played")] == [True])
+    time.sleep(0.1)
+    # The reply's end is told from its own thread once the press has let go of _waking, and
+    # the listening from the main loop just after, so either may come first. Listening
+    # outranks speaking, so the orb goes straight to it; or it is hidden for the moment
+    # between, which the ScreenOrb's linger covers, so nothing blinks.
+    assert orb.shown in (["speaking", "listening"], ["speaking", "hidden", "listening"])
+    if orb.shown[1] == "hidden":
+        assert orb.shown_at[2] - orb.shown_at[1] < LINGER
 
 
 def test_a_follow_up_shows_listening(brain, make, pc, orbs):
