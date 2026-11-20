@@ -1058,7 +1058,7 @@ def test_only_a_whole_name_is_opened_or_closed_away_from_the_computer():
     assert _computer("Close Discord.", at_pc=False) == [Action("close_on_computer", {"name": "discord"})]
 
 
-@pytest.mark.parametrize("text", ["Close this.", "Close that.", "Quit this window.", "Exit the window.",
+@pytest.mark.parametrize("text", ["Close this.", "Close that.", "Close this window.", "Close the window.",
                                   "Close it."])
 def test_close_this_at_pc_only(text):
     assert _computer(text) == [Action("close_on_computer", {"name": "this"})]
@@ -1067,6 +1067,14 @@ def test_close_this_at_pc_only(text):
     assert actions is None or all(action.tool != "close_on_computer" for action in actions)
     assert _computer("Close this on the PC.", at_pc=False) == [
         Action("close_on_computer", {"name": "this", "where": "the pc"})]
+
+
+@pytest.mark.parametrize("text", ["Quit it.", "Exit that.", "Quit this window.", "Exit the window.",
+                                  "Quit it on the PC."])
+def test_quit_or_exit_it_never_closes_the_window_in_front(text):
+    # About something said before, as "quit" and "exit" are only for a program named.
+    assert _not_computers(_computer(text))
+    assert _not_computers(_computer(text, at_pc=False))
 
 
 def test_close_open_window():
@@ -1140,7 +1148,7 @@ def test_fall_through_untouched():
     ("Go to sleep.", "sleep"), ("Sleep.", "sleep"), ("Lock.", "lock"), ("Lock it.", "lock"),
     ("Lock the PC.", "lock"), ("Turn the screen off.", "screen_off"), ("Screen off.", "screen_off"),
     ("Turn off the screen.", "screen_off"), ("Shut down.", "off"), ("Shut it down.", "off"),
-    ("Power off.", "off"), ("Restart.", "restart"), ("Reboot.", "restart"), ("Restart it.", "restart"),
+    ("Power off.", "off"), ("Restart.", "restart"), ("Reboot.", "restart"),
 ])
 def test_power_words_only_whole(text, action):
     assert _computer(text) == [Action("pc_power", {"action": action})]
@@ -1149,7 +1157,7 @@ def test_power_words_only_whole(text, action):
     if text != "Lock the PC.":
         assert actions is None or all(action.tool != "pc_power" for action in actions)
     for longer in ("I'm going to sleep after this.", "Restart the song.", "Lock the front door.",
-                   "Go to sleep in ten minutes."):
+                   "Go to sleep in ten minutes.", "Restart it."):
         for at_pc in (True, False):
             actions = _computer(longer, at_pc)
             assert actions is None or all(action.tool != "pc_power" for action in actions)

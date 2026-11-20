@@ -96,8 +96,10 @@ MOVE_WHERE = r"(?P<where>[a-z0-9']+(?: [a-z0-9']+){0,3})"
 DOMAIN = re.compile(r"[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}")
 # Where a computer is, said after "on": "open Fortnite on the PC".
 ON_WHERE = rf"(?: on {MOVE_WHERE})?"
-# Words which stand for something said before, so are never searched for as they are.
+# Words which stand for something said before, so are never searched for, or closed, as they are.
 PRONOUNS = {"it", "that", "this"}
+# The window in front, as "close this" says it.
+FRONT_WINDOW = r"this|that|this window|the window|it"
 
 # A thing of Home Assistant's for Assist - "the TV", "AdGuard protection", "movie
 # night" - of one to four words, none of them "and", "then" or "plus", so "turn off
@@ -505,7 +507,7 @@ class LocalIntents:
             (r"lock(?: it| the pc| the computer| my pc| my computer)?", self._at_pc("lock")),
             (r"(?:turn )?(?:off )?the screen off|screen off|turn off the screen", self._at_pc("screen_off")),
             (r"shut down|shut it down|power off", self._at_pc("off")),
-            (r"restart(?: it)?|reboot", self._at_pc("restart")),
+            (r"restart|reboot", self._at_pc("restart")),
             # Opening, closing and searching on a computer - see computers.py. Each is only a
             # computer's when the hooks say so, so "open the garage" and "close the blinds" go on to
             # Assist, below, and "start a timer" was a timer above. A web address first, so an app
@@ -515,7 +517,8 @@ class LocalIntents:
             # never opens the one app with "music" in its name.
             (rf"(?:open|launch|load up) (?P<app>.+?){ON_WHERE}", self._open_app(partly=True)),
             (rf"start (?P<app>.+?){ON_WHERE}", self._open_app(partly=False)),
-            (rf"(?:close|quit|exit) (?:this|that|this window|the window|it){ON_WHERE}", self._close_this),
+            # Only "close" for the window in front: "quit it" or "exit that" is about something said before.
+            (rf"close (?:{FRONT_WINDOW}){ON_WHERE}", self._close_this),
             (rf"(?:close|quit|exit) (?P<app>.+?){ON_WHERE}", self._close_app),
             # A plain "search for" is the computer's only at one, or with one named: at the Pi it's
             # Claude's own web search, as it was. With Google said, it's the computer's anywhere.
@@ -944,6 +947,9 @@ class LocalIntents:
         if self.computer is None:
             return None
         app, where = self._computer_words(found, "app")
+        # "Quit it" or "exit the window" isn't a program called that.
+        if re.fullmatch(FRONT_WINDOW, app.strip()):
+            return None
         return self._computer_action("close_on_computer", {"name": app}, where) \
             if self.computer.names_window(app, where) else None
 
