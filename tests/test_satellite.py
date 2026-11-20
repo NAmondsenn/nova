@@ -3109,6 +3109,61 @@ def test_however_the_recording_ends_the_turns_end_mutes_the_microphone_again(bra
     assert made.system_volume.mic_unmutes == 1 and made.system_volume.mic_changes == [True]
 
 
+def test_a_second_press_in_the_turn_still_leaves_the_mute_owed(brain, make, pc):
+    # Pressed again before the turn's end - over a reply, or while the brain thinks - finds the
+    # microphone on; the turn's end must still mute it.
+    made, order = press_on_pc(brain, make, mic_muted=True)
+    assert wait_for(lambda: made._recording is None)
+    sent = len(brain.recordings())
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= sent + 2)
+    brain.say("stop_listening")
+    end_turn(brain)
+    assert wait_for(lambda: made.system_volume.mic_muted is True)
+
+
+def test_a_press_the_brain_never_hears_mutes_the_microphone_again(brain, make, pc, monkeypatch):
+    # Lost just as the press began: no turn, and maybe no disconnect, follows to mute it.
+    made = pressable(brain, make)
+    made.system_volume.mic_muted = True
+    sending = made.link.send
+    monkeypatch.setattr(made.link, "send", lambda kind, *args, **fields: False if kind == "audio"
+                        else sending(kind, *args, **fields))
+    made._pressed()
+    assert wait_for(lambda: made.system_volume.mic_unmutes == 1)
+    assert wait_for(lambda: made.system_volume.mic_muted is True)
+    assert made.system_volume.mic_changes == [True]
+
+
+def test_a_hand_mute_during_a_press_is_undone_when_the_hour_runs_out(brain, make, pc, monkeypatch):
+    monkeypatch.setattr(satellite, "MINUTE", 0.6)
+    made = pressable(brain, make)
+    ask_computer(brain, "computer-1", action="mic", mute=True, minutes=1)
+    made.longest_request = 30
+    made._pressed()
+    assert wait_for(lambda: made._mic_held_open)
+    # His mic's touch button, during the turn.
+    made.system_volume.mic_muted = True
+    assert wait_for(lambda: mic_on_sounds(made))
+    # The sound says it's on, so it is.
+    assert made.system_volume.mic_muted is False
+    brain.say("stop_listening")
+
+
+def test_the_wait_for_the_hour_looks_at_the_clock_again(brain, make, pc, monkeypatch):
+    # Windows counts a wait's time only while the PC is awake, so after a sleep the clock has
+    # moved on further than the wait knows: it's looked at again every MIC_LOOK_EVERY.
+    monkeypatch.setattr(satellite, "MIC_LOOK_EVERY", 0.05)
+    made = pressable(brain, make)
+    ask_computer(brain, "computer-1", action="mic", mute=True, minutes=60)
+    time.sleep(0.1)
+    # The PC slept past it: the clock says it's due, with nothing to wake the wait.
+    with made._mic_lock:
+        made._mic_until = time.time() - 1
+    assert wait_for(lambda: mic_on_sounds(made))
+    assert made.system_volume.mic_muted is False
+
+
 def test_a_press_keeps_the_hour_of_a_mute_by_nova(brain, make, pc, monkeypatch):
     monkeypatch.setattr(satellite, "MINUTE", 60)
     made = pressable(brain, make)
