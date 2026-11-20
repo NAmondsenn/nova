@@ -104,7 +104,8 @@ def start_apps() -> List[Dict]:
 
     Returns:
         Each as {"name", "target"}, the target being shell:AppsFolder\\ and its AppID,
-        which Explorer launches however it was installed.
+        which Explorer launches however it was installed - or, for a shortcut whose AppID
+        is itself a link such as steam://rungameid/..., that link, which is launched as it is.
 
     Raises:
         OSError, subprocess.SubprocessError or ValueError: PowerShell couldn't be run, or
@@ -121,8 +122,19 @@ def start_apps() -> List[Dict]:
     # One app comes as itself, not a list of one.
     if isinstance(listed, dict):
         listed = [listed]
-    return [{"name": app["Name"], "target": "shell:AppsFolder\\" + app["AppID"]} for app in listed
+    return [{"name": app["Name"], "target": start_target(app["AppID"])} for app in listed
             if isinstance(app, dict) and isinstance(app.get("Name"), str) and isinstance(app.get("AppID"), str)]
+
+
+def start_target(app_id: str) -> str:
+    """
+    How a Start menu entry is launched, from its AppID: a Steam or Epic shortcut's AppID is
+    its own link ("steam://rungameid/252950"), which Explorer's apps folder doesn't open, so
+    it's launched as that link; any other through the apps folder.
+    """
+    if re.match(r"[a-z][a-z0-9+.-]*://", app_id, re.IGNORECASE):
+        return app_id
+    return "shell:AppsFolder\\" + app_id
 
 
 def epic_target(item: Dict) -> str:

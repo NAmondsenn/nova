@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import os
+import subprocess
 
 from voice_assistant import pc_apps
 
@@ -127,3 +128,14 @@ def test_start_menu_order_beats_epic_then_steam(tmp_path):
     (tmp_path / "steamapps" / "appmanifest_9.acf").write_text(acf(9, "Fortnite"))
     items = pc_apps.build(start(), str(tmp_path), lambda: [str(tmp_path)])
     assert [(item["name"], item["kind"]) for item in items] == [("Fortnite", "epic")]
+
+
+def test_a_start_menu_shortcut_to_a_link_is_launched_as_the_link(monkeypatch):
+    listed = [{"Name": "Rocket League", "AppID": "steam://rungameid/252950"},
+              {"Name": "Fortnite", "AppID": "com.epicgames.launcher://apps/fn%3Ax%3AFortnite?action=launch"},
+              {"Name": "Notepad", "AppID": "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\notepad.exe"}]
+    monkeypatch.setattr(pc_apps.subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(
+        args, 0, stdout=json.dumps(listed).encode("utf-8")))
+    assert [app["target"] for app in pc_apps.start_apps()] == [
+        "steam://rungameid/252950", "com.epicgames.launcher://apps/fn%3Ax%3AFortnite?action=launch",
+        "shell:AppsFolder\\{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\notepad.exe"]
