@@ -316,7 +316,7 @@ class Session:
                                       spoken_name=lambda name: brain.spoken_name(name),
                                       settled=lambda: self.music.wait(),
                                       notes=self._save_note if satellite.saves_notes else None,
-                                      computer=ComputerControl(brain, satellite.name))
+                                      computer=ComputerControl(brain, satellite.name), device=self._device)
 
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.
@@ -945,6 +945,28 @@ class Session:
             away = self.brain.spoken_name(name)
             return None, f"{away[:1].upper() + away[1:]} isn't connected."
         return session.actions, None
+
+    def _device(self, said: Optional[str]) -> Tuple[Optional["Session"], Optional[str]]:
+        """
+        Finds the session of the satellite some words name, for its volume.
+
+        Args:
+            said: The words for it, e.g. "the PC", or None for this one.
+
+        Returns:
+            Its session and None - this one, with none named, or if it's the one named; or
+            None and what to say, if the words name none or more than one, or the one named
+            isn't connected ("Your PC's off.").
+        """
+        if not said:
+            return self, None
+        name, problem = self.brain.find_satellite(said)
+        if name is None:
+            return None, problem
+        session = self.brain.session_for(name)
+        if session is None:
+            return None, self.brain.not_connected(name)
+        return session, None
 
     def _save_note(self, title: str, text: str) -> Dict:
         """

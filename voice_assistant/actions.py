@@ -374,7 +374,8 @@ class ActionExecutor:
                  elsewhere: Optional[Callable[[str], Tuple[Optional["ActionExecutor"], Optional[str]]]] = None,
                  spoken_name: Callable[[str], str] = lambda name: name,
                  settled: Optional[Callable[[], None]] = None,
-                 notes: Optional[Callable[[str, str], Dict]] = None, computer=None):
+                 notes: Optional[Callable[[str, str], Dict]] = None, computer=None,
+                 device: Optional[Callable[[Optional[str]], Tuple[Optional[Any], Optional[str]]]] = None):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -420,7 +421,7 @@ class ActionExecutor:
                 room is dismissed.
             room_players: Gives the music players of the satellites in the user's room
                 which are connected, this one's first - or None for this one's alone.
-                Pausing, resuming and the music's volume act on the room's music.
+                Pausing and resuming act on the room's music; its volume is this one's own.
             last_change: The LastChange "undo that" takes from, which the brain gives every satellite's
                 executor so there's one for the whole house, or None for one of its own.
             mover: Moves the music to the satellite the words name, e.g. "the PC" - given them,
@@ -440,6 +441,9 @@ class ActionExecutor:
             computer: ComputerControl, which opens, searches and closes things on a computer
                 satellite, or None if there's none. Its tools are offered only while a computer
                 which opens things has been seen.
+            device: Given the words for a satellite, or None for this one, gives its Session and
+                None - or None and what to say, when they name none, or one which isn't connected -
+                for its volume. None to act on this one's own volumes alone.
         """
         self.music = music
         self.clock = clock
@@ -470,6 +474,9 @@ class ActionExecutor:
         self.settled = settled
         self.notes = notes
         self.computer = computer
+        self.device = device
+        # The music's level before "mute", for "unmute" to put it back to - see _mute_music.
+        self._level_before_mute: Optional[int] = None
         # What was last asked, and what the assistant said - or the last alert, and
         # all of it - for "send that to my phone". Kept up to date by the Conversation.
         self.last_answer: Optional[Tuple[str, str]] = None
@@ -661,10 +668,11 @@ class ActionExecutor:
 
     def _playing_in_room(self) -> List:
         """
-        The music players to pause, or turn up or down: every one in the user's room
-        playing now, this one's first - or, with none playing, this one alone, as
-        before there were rooms. The room's music is held while the user is heard, so
-        what's playing is what was playing as they spoke - see Session._converse.
+        The music players to pause: every one in the user's room playing now, this
+        one's first - or, with none playing, this one alone, as before there were rooms.
+        The room's music is held while the user is heard, so what's playing is what was
+        playing as they spoke - see Session._converse. Not their volume, which is only
+        this one's (0034).
         """
         others = self._others_in_room()
         if not others:
@@ -1410,11 +1418,13 @@ class ActionExecutor:
     # Volume
 
     @tool(
-        "Change how loud something is. For a bare 'turn it up', 'volume up', 'too loud' "
-        "or 'set the volume to 40' that doesn't say what, leave category out - the "
-        "assistant works out from what's playing whether that means the music or its own "
-        "voice. Give either level (to set a specific value) or direction (to move it up "
-        "or down), not both.",
+        "Change how loud something is, or mute or unmute it. For a bare 'turn it up', "
+        "'volume up', 'too loud' or 'set the volume to 40' that doesn't say what, leave "
+        "category out - the assistant works out from what's playing whether that means "
+        "the music or its own voice. It acts on the device the user is talking to unless "
+        "they name another. At a computer with its own volume, such as the PC, the music "
+        "and the voice are its system volume. Give one of level (to set a specific value), "
+        "direction (to move it up or down) or mute.",
         needs="volume",
         category={
             "type": "string",
@@ -1452,9 +1462,41 @@ class ActionExecutor:
                 "down by 30'. Leave out otherwise so the standard step is used."
             ),
         },
+        where={
+            "type": "string",
+            "description": (
+                "The device whose volume it is, as the user said it - 'the PC', 'my Pi' - "
+                "for 'volume up on the PC' or 'turn the Pi down'. Leave out when they "
+                "don't name one: it's then the device they're talking to. Never for a "
+                "Home Assistant device such as the TV, which is control_home's."
+            ),
+        },
+        mute={
+            "type": "boolean",
+            "description": (
+                "True to mute, false to unmute ('mute the PC', 'unmute'). At a computer "
+                "it's the system volume's mute; anywhere else it's that device's music "
+                "only, never alarms, timers or the assistant's voice, and never the "
+                "microphone."
+            ),
+        },
     )
     def set_volume(self, category: Optional[str] = None, level: Optional[int] = None,
-                   direction: Optional[str] = None, amount: Optional[int] = None):
+                   direction: Optional[str] = None, amount: Optional[int] = None,
+                   where: Optional[str] = None, mute: Optional[bool] = None):
+        if self.device is not None:
+            target, problem = self.device(where or None)
+            if target is None:
+                return {"success": False, "message": problem}
+            if target.actions is not self:
+                return self._volume_there(target, category, level, direction, amount, mute)
+            # The alarms are always Nova's own, which Windows' volume doesn't stand in for.
+            if category != "alarm" and getattr(target.satellite, "system_volume", False):
+                return self._system_volume(level, direction, amount, mute)
+
+        if mute is not None:
+            return self._mute_music(bool(mute))
+
         category = category or self._unnamed_volume_category()
 
         if category == "music":
@@ -1487,16 +1529,92 @@ class ActionExecutor:
             result["sound_category"] = category
         return result
 
+    def _volume_there(self, target, category: Optional[str], level: Optional[int], direction: Optional[str],
+                      amount: Optional[int], mute: Optional[bool]) -> Dict:
+        """
+        Changes the volume of another satellite, named by the user, as if it were asked
+        there - and beeps there, at the new level, while what's said is said here.
+
+        Args:
+            target: The satellite's Session.
+            category, level, direction, amount, mute: As set_volume has them.
+
+        Returns:
+            What its own set_volume gave, without the beep, which has played there.
+        """
+        result = target.actions.set_volume(category, level, direction, amount, mute=mute)
+        sound = result.pop("sound", None)
+        sound_category = result.pop("sound_category", "general")
+        if sound:
+            target.boop(target.volume.get(sound_category))
+        return result
+
+    def _system_volume(self, level: Optional[int], direction: Optional[str], amount: Optional[int],
+                       mute: Optional[bool]) -> Dict:
+        """
+        Changes the computer's own volume, at a computer which has one - Windows' at the PC
+        - for the music and the assistant's voice alike, which it scales.
+
+        Args:
+            level, direction, amount, mute: As set_volume has them.
+
+        Returns:
+            What ComputerControl.volume gave - "Volume 40 percent.", "Muted." - with the
+            volume beep, unless it has just been muted.
+        """
+        if self.computer is None:
+            return {"success": False, "message": UNAVAILABLE["volume"]}
+        if mute is not None:
+            change = {"mute": bool(mute)}
+        elif level is not None:
+            change = {"level": int(level)}
+        elif direction in ("up", "down"):
+            change = {"direction": direction, "step": round(self.volume.step if amount is None else abs(float(amount)))}
+        else:
+            # Nothing to change, so the current level is reported instead.
+            return {"success": True, "message": f"The general volume is at {self.volume.percent('general')} percent."}
+        result = self.computer.volume(None, **change)
+        return result if result.get("muted") else self._with_beep("general", result)
+
+    def _mute_music(self, mute: bool) -> Dict:
+        """
+        Mutes this satellite's music, or puts it back where it was - its music alone, so
+        the assistant's voice, alarms and timers still sound, and the microphone's own
+        mute is left to its switch.
+
+        Args:
+            mute: True to mute, False to unmute.
+
+        Returns:
+            Dict with 'success' and a relevant message, with the volume beep if it changed.
+        """
+        if not self.music:
+            return {"success": False, "message": UNAVAILABLE["music"]}
+        offline = self._music_offline()
+        if offline:
+            return offline
+        if mute:
+            current = self.music.get_volume()
+            # Muted twice, it's still the level before the first which comes back.
+            if current:
+                self._level_before_mute = current
+            return self._with_beep("general", self.music.set_volume(0))
+        if self._level_before_mute is None:
+            return {"success": True, "message": "The music isn't muted."}
+        level, self._level_before_mute = self._level_before_mute, None
+        return self._with_beep("general", self.music.set_volume(level))
+
     def _unnamed_volume_category(self) -> str:
         """
         Which volume a request like "turn it down" means when it doesn't say.
 
-        The music, if any in the user's room was playing when they spoke - that's what
-        they'll have been listening to - and the assistant's own voice otherwise. Before
-        this the model always chose the assistant's voice, so "turn it down" with music
-        on changed nothing the user could actually hear.
+        The music, if this satellite's was playing when they spoke - that's what they'll
+        have been listening to - and the assistant's own voice otherwise. Before this the
+        model always chose the assistant's voice, so "turn it down" with music on changed
+        nothing the user could actually hear. Music on another satellite in the room
+        isn't this one's to change (0034).
         """
-        if self.music and any(player.was_playing() for player in [self.music] + self._others_in_room()):
+        if self.music and self.music.was_playing():
             return "music"
         return "general"
 
@@ -1506,9 +1624,9 @@ class ActionExecutor:
 
         Kept apart from the assistant's volumes because the music player holds this
         level itself - Spotify's applies to every device playing - rather than it
-        being something only this assistant's audio uses. Every player in the user's
-        room which is playing is changed - see _playing_in_room - and what's said is
-        the first's.
+        being something only this assistant's audio uses. Only this satellite's player
+        is changed, not the rest of the room's (0034, which replaced 0026's room-wide
+        volume).
 
         Args:
             level: An exact percentage, or None.
@@ -1523,13 +1641,7 @@ class ActionExecutor:
         offline = self._music_offline()
         if offline:
             return offline
-        results = [self._change_volume_of(player, level, direction, amount) for player in self._playing_in_room()]
-        return results[0]
-
-    def _change_volume_of(self, player, level: Optional[int], direction: Optional[str],
-                          amount: Optional[int]) -> Dict:
-        """Changes one music player's volume, as _change_music_volume asks."""
-        current = player.get_volume()
+        current = self.music.get_volume()
 
         if level is not None:
             target = level
@@ -1545,7 +1657,7 @@ class ActionExecutor:
         # assistant's own level rather than the music's, since it comes out of the
         # assistant and not through the music player - the music itself demonstrates
         # the new level well enough.
-        return self._with_beep("general", player.set_volume(target))
+        return self._with_beep("general", self.music.set_volume(target))
 
     # Weather
 

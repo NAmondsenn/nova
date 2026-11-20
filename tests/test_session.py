@@ -1247,6 +1247,30 @@ def test_mute_is_kept_per_satellite_and_sent_to_it(brain, connect, make_session)
     assert not make_session(connect("kitchen", "kitchen-pi")[0]).muted
 
 
+def test_volume_named_at_another_satellite_is_changed_and_beeped_there(brain, connect, make_session):
+    pi, pc = make_session(connect("bedroom")[0]), make_session(connect("pc")[0])
+    named = {"the PC": "pc", "the Mac": "mac"}
+    brain.find_satellite = lambda said: (named[said], None) if said in named else (None, "Which one: the phone?")
+    brain.session_for = {"bedroom": pi, "pc": pc}.get
+    brain.not_connected = lambda name: "Your Mac's off."
+    # Itself with none named; else the one named, or what to say.
+    assert pi.actions.device(None) == (pi, None)
+    assert pi.actions.device("the PC") == (pc, None)
+    assert pi.actions.device("the Mac") == (None, "Your Mac's off.")
+    assert pi.actions.device("the phone") == (None, "Which one: the phone?")
+
+    beeps = []
+    pc.speaker = SimpleNamespace(play_file=lambda path, volume: beeps.append((Path(path).name, volume)),
+                                 close=lambda: None)
+    result = pi.actions.execute(Action("set_volume", {"level": 40, "where": "the PC"}))
+    assert result.ok and result.say and result.confirm == "speak"
+    assert pc.volume.percent("general") == 40 and pi.volume.percent("general") == 70
+    assert beeps == [("volume_beep.wav", 0.4)]
+    # A spoken mute is the music's, never the microphone's.
+    pi.actions.execute(Action("set_volume", {"mute": True}))
+    assert not pi.muted
+
+
 def test_volumes_are_kept_per_satellite_and_sent_to_it(brain, connect, make_session):
     bedroom, bedroom_pi = connect("bedroom", "bedroom-pi")
     kitchen, kitchen_pi = connect("kitchen", "kitchen-pi")

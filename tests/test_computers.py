@@ -262,6 +262,8 @@ def test_volume_on_the_computer():
     assert brain.computer.asked == [("volume", {"direction": "up", "step": 10})]
     brain.computer.answer = {"level": 40, "muted": True}
     assert at(brain, "bedroom").volume("the PC", mute=True)["message"] == "Muted."
+    brain.computer.answer = {"level": 40, "muted": False}
+    assert at(brain).volume(None, mute=False)["message"] == "Unmuted."
     # One which can't, or isn't there.
     brain.computer.system_volume = False
     assert at(brain).volume(None, level=30) == {"success": False,

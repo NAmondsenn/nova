@@ -454,6 +454,24 @@ def test_stop_heard_as_so_while_ringing_is_still_a_stop():
     assert clock.dismissed == 1 and llm.asked == []
 
 
+def test_mute_while_ringing_stops():
+    # "Mute" is a volume mute now (0034), but said over something ringing it still stops it, as
+    # "stop" does, before the local rules are asked - and over Nova talking, it only stops her.
+    clock, llm, actions = FakeClock(ringing=True), FakeLLM(), FakeActions()
+    intents = LocalIntents(names_satellite=lambda said: False)
+    assert intents.match("Mute.")["actions"] == [Action("set_volume", {"mute": True})]
+    reply = _conversation(clock=clock, intents=intents, llm=llm, actions=actions).handle("Mute.")
+    assert clock.dismissed == 1 and actions.run == [] and llm.asked == []
+    assert reply.sounds == [("success_chime.wav", "general")]
+
+    conversation = _conversation(intents=intents, llm=llm, actions=actions)
+    conversation.start(talked_over=True)
+    assert conversation.handle("Mute.").say == "" and actions.run == []
+    # With nothing ringing or being said, it's the mute.
+    _conversation(intents=intents, llm=llm, actions=actions).handle("Mute.")
+    assert actions.run == ["set_volume"] and actions.params == [{"mute": True}]
+
+
 def test_only_whats_ringing_where_the_user_is_talking_is_stopped():
     # The kitchen's "stop" dismissed the bedroom's alarm, which couldn't be heard there.
     clock = FakeClock(ringing=True)

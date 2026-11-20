@@ -835,6 +835,48 @@ def test_switch_on_the_pc_is_still_power(text, action):
     assert _moves(text) == [Action("pc_power", {"action": action})]
 
 
+# Volume and mute on the device named, else the one spoken to (0034)
+
+@pytest.mark.parametrize("text, change", [
+    ("Volume up on the PC.", {"direction": "up", "where": "the pc"}),
+    ("Turn it down on my Pi.", {"direction": "down", "where": "my pi"}),
+    ("Turn the music up on the PC.", {"direction": "up", "where": "the pc"}),
+    ("Turn the PC down.", {"direction": "down", "where": "the pc"}),
+    ("PC volume up.", {"direction": "up", "where": "pc"}),
+    ("Louder on the PC.", {"direction": "up", "where": "the pc"}),
+    ("Quieter on my Pi.", {"direction": "down", "where": "my pi"}),
+    ("Set the volume to 30 on the PC.", {"level": 30, "where": "the pc"}),
+    ("Set the PC volume to 30.", {"level": 30, "where": "pc"}),
+    ("PC volume 40.", {"level": 40, "where": "pc"}),
+    ("Set my Pi to 30.", {"level": 30, "where": "my pi"}),
+    ("Set the PC to 30 percent.", {"level": 30, "where": "the pc"}),
+])
+def test_volume_on_a_device_named(text, change):
+    assert _moves(text) == [Action("set_volume", change)]
+
+
+@pytest.mark.parametrize("text, change", [
+    ("Mute.", {"mute": True}), ("Unmute.", {"mute": False}), ("Mute the sound.", {"mute": True}),
+    ("Unmute the music.", {"mute": False}), ("Mute the volume.", {"mute": True}),
+    ("Mute the PC.", {"mute": True, "where": "the pc"}), ("Unmute my Pi.", {"mute": False, "where": "my pi"}),
+])
+def test_mute_and_unmute(text, change):
+    assert _moves(text) == [Action("set_volume", change)]
+
+
+def test_tv_volume_still_assist():
+    # A satellite's name is checked first, then Home Assistant's thing.
+    assert _moves("Set the TV volume to 20.") == [Action("control_home", {"command": "set the tv volume to 20",
+                                                                          "wider": True})]
+    assert _moves("Set the PC volume to 20.") == [Action("set_volume", {"level": 20, "where": "pc"})]
+    # Words naming no satellite are never a device's volume: left to the rules after, or Claude.
+    for text in ("Turn the heating down.", "Mute the TV.", "Volume up on the TV.", "Set the lamp to 30."):
+        actions = _moves(text)
+        assert actions is None or all(action.tool != "set_volume" for action in actions), text
+    # Nor without a brain to name satellites.
+    assert _actions("Volume up on the PC.") is None and _actions("Mute the PC.") is None
+
+
 def test_without_names_satellite_nothing_moves():
     # A brain without satellites to name, as the tests of every other rule have, leaves these as they were.
     for text in ("Play it on my Pi.", "Move this to the PC.", "Switch to the PC."):

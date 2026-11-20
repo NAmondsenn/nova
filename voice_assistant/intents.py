@@ -388,6 +388,24 @@ class LocalIntents:
             (r"louder", lambda match: self._volume({"direction": "up"})),
             (r"quieter|softer|quiter", lambda match: self._volume({"direction": "down"})),
             (r"(?:set (?:the )?)?volume (?:to )?(?P<level>\d{1,3})(?: percent)?", self._volume_level),
+            # The same on a satellite he names - "volume up on the PC", "turn the Pi down", "set
+            # the PC to 30", "PC volume 40" - taken only when the brain says the words name one,
+            # so "set the TV volume to 20" is still Assist's and "turn the heating down" Claude's.
+            (rf"turn (?:it|the volume|the music) (?P<direction>up|down) (?:on|for) {MOVE_WHERE}", self._volume_on),
+            (rf"(?:turn )?(?:the )?volume (?P<direction>up|down) (?:on|for) {MOVE_WHERE}", self._volume_on),
+            (rf"turn {MOVE_WHERE} (?P<direction>up|down)", self._volume_on),
+            (rf"(?:the )?{MOVE_WHERE} volume (?P<direction>up|down)", self._volume_on),
+            (rf"(?P<word>louder|quieter|softer) (?:on|for) {MOVE_WHERE}", self._volume_on),
+            (rf"(?:set (?:the )?)?volume (?:to )?(?P<level>\d{{1,3}})(?: percent)? (?:on|for) {MOVE_WHERE}",
+             self._volume_on),
+            (rf"(?:set )?(?:the )?{MOVE_WHERE} volume (?:to )?(?P<level>\d{{1,3}})(?: percent)?",
+             self._volume_on),
+            (rf"set {MOVE_WHERE} to (?P<level>\d{{1,3}})(?: percent)?", self._volume_on),
+            # Mute and unmute, on the satellite spoken to or one named. Said over something
+            # ringing, or Nova talking, a bare "mute" never gets here: it stops them, as "stop"
+            # does - see Conversation.handle.
+            (r"(?P<un>un)?mute(?: (?:the )?(?:sound|volume|music))?", self._mute),
+            (rf"(?P<un>un)?mute {MOVE_WHERE}", self._mute),
             (r"what(?:'s| is) the time|what time is it(?: now)?|tell me the time", self._time),
             (r"what(?:'s| is) (?:the date|today's date)(?: today)?|what day is it(?: today)?", self._date),
             (r"(?:cancel|stop|delete) (?:the|my) timer", self._cancel_only_timer),
@@ -621,6 +639,33 @@ class LocalIntents:
     def _volume_level(self, found) -> Optional[Dict]:
         level = int(found["level"])
         return self._volume({"level": level}) if level <= 100 else None
+
+    def _names_a_satellite(self, where: str) -> bool:
+        return self.names_satellite is not None and self.names_satellite(where)
+
+    def _volume_on(self, found) -> Optional[Dict]:
+        # Only a satellite's: anything else falls through to the rules after. "The PC's
+        # volume" is the PC's.
+        where = re.sub(r"'s$", "", found["where"])
+        if not self._names_a_satellite(where):
+            return None
+        groups = found.groupdict()
+        if groups.get("level") is not None:
+            level = int(groups["level"])
+            if level > 100:
+                return None
+            change = {"level": level}
+        elif groups.get("word"):
+            change = {"direction": "up" if groups["word"] == "louder" else "down"}
+        else:
+            change = {"direction": groups["direction"]}
+        return self._volume({**change, "where": where})
+
+    def _mute(self, found) -> Optional[Dict]:
+        where = found.groupdict().get("where")
+        if where and not self._names_a_satellite(where):
+            return None
+        return self._volume({"mute": not found["un"], **({"where": where} if where else {})})
 
     def _time(self, found) -> Dict:
         now = datetime.now()

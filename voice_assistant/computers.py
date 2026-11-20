@@ -521,8 +521,8 @@ class ComputerControl:
             **change: direction and step, level, or mute - as protocol's computer has them.
 
         Returns:
-            {"success", "message"} with "level" and "muted" as the computer has them now - or
-            why not.
+            {"success", "message"} with "level" and "muted" as the computer has them now -
+            "Volume 40 percent.", "Muted." or "Unmuted." - or why not.
         """
         if where:
             target, problem = self.brain.find_satellite(where)
@@ -540,5 +540,6 @@ class ComputerControl:
         reply = self._ask(target, computer, None, "volume", **change)
         if reply["success"]:
             reply["message"] = ("Muted." if reply.get("muted")
+                                else "Unmuted." if change.get("mute") is False
                                 else f"Volume {reply['level']} percent." if "level" in reply else reply["message"])
         return reply
