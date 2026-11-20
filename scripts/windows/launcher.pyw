@@ -1,11 +1,25 @@
 """
 Launcher.
 
-Runs Nova's satellite on the Windows PC, and starts it again whenever it exits. Task
-Scheduler starts this at the user's logon, with the venv's pythonw.exe so there's no
-window, because its own restart on failure doesn't reliably restart a process which
-exits. Where the satellite is installed is install.ps1's business: everything is under
-%LOCALAPPDATA%\\nova (app, config and data), the user's own.
+Runs Nova's satellite on the Windows PC, and starts it again whenever it exits, except
+when the user chose Quit in its tray menu (exit code 10), which ends the launcher too.
+Restart in the menu (exit code 11) starts it again after the shortest wait, whatever came
+before. The satellite is run through the venv's Nova.exe when that exists, so Windows names
+the program Nova, and through pythonw.exe otherwise. Task Scheduler starts this at the
+user's logon, with the venv's pythonw.exe so there's no window, because its own restart on
+failure doesn't reliably restart a process which exits. Where the satellite is installed is
+install.ps1's business: everything is under %LOCALAPPDATA%\\nova (app, config and data), the
+user's own.
+
+It is started in three ways:
+  --logon  by the logon task. If the user turned "Start with Windows" off in the tray's
+           menu, the satellite leaves the file no_logon_start in the data folder, and this
+           ends at once, before it touches anything.
+  --open   by the Start-menu shortcut "Nova". If a launcher is already running, this asks
+           the running satellite to open its settings page and ends.
+  nothing  by a deploy, which wants the satellite running whatever the user chose.
+Anything else is ignored with a line in the log: a launcher which refuses to start is worse
+than one which ignores a typo.
 
 Windows never sends SIGTERM, so a logoff, a shutdown or a deploy ends the satellite
 without its clean-up, leaving its running mark. A fresh launcher follows each of those,
@@ -18,12 +32,16 @@ and opening it would otherwise start a second satellite beside the first.
 """
 
 import ctypes
+import json
 import logging
 import os
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from logging.handlers import RotatingFileHandler
+from typing import List, Optional
 
 logger = logging.getLogger("launcher")
 
@@ -37,6 +55,17 @@ LONGEST_WAIT = 300
 # The satellite's stderr log is moved aside when it reaches this size, so it and its one
 # earlier copy hold about twice as much at most, however long the satellite runs.
 STDERR_LOG_MOST = 1_000_000
+
+# What the satellite exits with when Quit or Restart is chosen in its tray menu: the
+# satellite's own QUIT_CODE and RESTART_CODE, copied here because the launcher imports nothing
+# of Nova's (a test holds the two to each other).
+QUIT_CODE = 10
+RESTART_CODE = 11
+# The file the satellite leaves in its data folder while "Start with Windows" is off, which
+# the logon start looks for (the satellite's NO_LOGON_MARK is this name in the data folder).
+NO_LOGON_MARK = "no_logon_start"
+# How long to wait for the running satellite to answer a request to open its page.
+OPEN_TIMEOUT = 2
 
 # The mutex the running launcher holds, named for the user's session alone, which a second
 # launcher finds already there.
@@ -70,6 +99,10 @@ class Backoff:
         wait = self.wait
         self.wait = min(self.wait * 2, LONGEST_WAIT)
         return wait
+
+    def reset(self) -> None:
+        """Goes back to the shortest wait, as after a run which lasted."""
+        self.wait = FIRST_WAIT
 
 
 def open_stderr_log(path: str, most: int = STDERR_LOG_MOST) -> logging.Logger:
@@ -153,7 +186,61 @@ def only_launcher() -> bool:
     return True
 
 
-def main():
+def program(app: str) -> str:
+    """
+    Args:
+        app: The folder the satellite is installed in.
+
+    Returns:
+        The venv's Nova.exe if it's there, else its pythonw.exe.
+    """
+    scripts = os.path.join(app, "venv", "Scripts")
+    nova = os.path.join(scripts, "Nova.exe")
+    if os.path.exists(nova):
+        return nova
+    return os.path.join(scripts, "pythonw.exe")
+
+
+def ask_to_open(data: str) -> bool:
+    """
+    Asks the running satellite to open its settings page, at the port it wrote in its
+    running mark. Never raises: whatever goes wrong is a line in the log.
+
+    Args:
+        data: The data folder, where the running mark is.
+
+    Returns:
+        True if the satellite was asked and said yes, False if it couldn't be.
+    """
+    try:
+        with open(os.path.join(data, "running"), encoding="utf-8") as file:
+            port = json.load(file)["press_port"]
+        # A bool is an int to Python, and True isn't a port.
+        if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+            raise ValueError(f"{port!r} isn't a port")
+        request = urllib.request.Request(f"http://127.0.0.1:{port}/open", data=b"", method="POST",
+                                         headers={"X-Nova-Press": "1", "Host": f"127.0.0.1:{port}"})
+        # An opener of its own with no proxies, so the system's settings can't send this
+        # local request anywhere else.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=OPEN_TIMEOUT):
+            pass
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        # OSError holds the missing mark, a refused connection, a timeout and an HTTP error;
+        # ValueError the mark which isn't JSON; KeyError and TypeError one of another shape.
+        logger.warning(f"Couldn't ask the running Nova to open its page: {error!r}")
+        return False
+    logger.info("Asked the running Nova to open its page")
+    return True
+
+
+def main(argv: Optional[List[str]] = None):
+    """
+    Args:
+        argv: The arguments after the program's name, as sys.argv[1:] has them if None.
+    """
+    if argv is None:
+        argv = sys.argv[1:]
     local = os.environ.get("LOCALAPPDATA")
     if not local:
         sys.exit("LOCALAPPDATA isn't set, so there's nowhere to look for Nova")
@@ -169,14 +256,24 @@ def main():
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
 
-    # Before anything else, the running satellite's mark above all, is touched.
+    unknown = [argument for argument in argv if argument not in ("--logon", "--open")]
+    if unknown:
+        logger.info(f"Ignoring the arguments {unknown!r}")
+
+    # Before anything else, the running satellite's mark above all, is touched - so this is
+    # first, and takes neither the mutex nor the mark.
+    if "--logon" in argv and os.path.exists(os.path.join(data, NO_LOGON_MARK)):
+        logger.info('"Start with Windows" is off, so the launcher exits without starting the satellite')
+        return
     if not only_launcher():
         logger.info("Another launcher is already running, so this one exits")
+        if "--open" in argv:
+            ask_to_open(data)
         return
 
     # paths.py reads these two to find the install's settings, keys and saved data.
     environment = dict(os.environ, NOVA_CONFIG=os.path.join(base, "config"), NOVA_DATA=data)
-    command = [os.path.join(app, "venv", "Scripts", "pythonw.exe"), os.path.join(app, "satellite.py")]
+    command = [program(app), os.path.join(app, "satellite.py")]
     stderr_log = open_stderr_log(os.path.join(logs, "satellite-stderr.log"))
     backoff = Backoff()
     logger.info("Launcher started")
@@ -204,7 +301,15 @@ def main():
             logger.error(f"Couldn't start the satellite: {error}")
             code = None
         ran_for = time.monotonic() - started
+        if code == QUIT_CODE:
+            logger.info("The satellite was quit, so the launcher ends")
+            return
         wait = backoff.next_wait(ran_for)
+        if code == RESTART_CODE:
+            # Chosen on purpose, so not a failure whatever came before: the shortest wait,
+            # and the next failure starts its climb from the bottom.
+            backoff.reset()
+            wait = FIRST_WAIT
         logger.warning(f"The satellite exited (code {code}) after {ran_for:.0f} s; starting it again in {wait:.0f} s")
         time.sleep(wait)
 
