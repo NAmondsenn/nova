@@ -2613,6 +2613,16 @@ def test_satellites_say_whether_they_open_things_and_what_they_found(files, tmp_
     assert (shown["mac"]["opens"], shown["mac"]["apps_found"]) == (False, 0)
 
 
+def test_a_pc_keeps_its_switch_after_the_brain_restarts(files, tmp_path):
+    # Not heard from since the brain started, asleep: still a PC, so its switch and names stay.
+    rooms = _rooms(tmp_path, ("pc", "pc", True), ("mac", "mac", True))
+    page = _page(sessions={}, known=["pc", "mac"], rooms=rooms, pc=FakePCs(),
+                 home=SimpleNamespace(app_devices=lambda: []))
+    shown = {each["name"]: each for each in page.state()["satellites"]}
+    assert (shown["pc"]["opens"], shown["pc"]["apps_found"]) == (True, 0)
+    assert shown["mac"]["opens"] is False
+
+
 def test_set_opens_saves_the_switch(files, tmp_path, caplog):
     page = _opening(tmp_path)
     with caplog.at_level(logging.INFO):

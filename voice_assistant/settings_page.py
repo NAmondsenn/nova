@@ -631,8 +631,8 @@ class SettingsPage:
         whether it saves notes, the other names he has given it and, if Spotify is the
         player, the speaker it plays on. Never its password.
 
-        A satellite which has said it opens things also has whether he lets it, how many
-        apps it found and his short names for them. With more than one PC in Home
+        A satellite which has said it opens things since the brain started, or is a PC,
+        also has whether he lets it, how many apps it found and his short names for them. With more than one PC in Home
         Assistant, it has the one chosen, if it was. Nothing here asks Home Assistant.
 
         Args:
@@ -660,7 +660,9 @@ class SettingsPage:
                           "travels": journeys is not None and journeys.travels(name),
                           "machine": rooms.machine(name), "called": rooms.called(name),
                           "saves_notes": rooms.saves_notes(name),
-                          "opens": name in opening, "opens_on": rooms.opens_things(name),
+                          # A PC keeps its switch and names after the brain restarts, before it's heard from.
+                          "opens": name in opening or rooms.machine(name) == "pc",
+                          "opens_on": rooms.opens_things(name),
                           "apps_found": len(computers.apps(name)), "app_names": rooms.app_names(name),
                           # As saved: the PCs it is one of come from home_choices_state, as Home Assistant is slow to ask.
                           "pc_device": rooms.pc_device(name)})
