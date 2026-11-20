@@ -320,6 +320,10 @@ IN_AND_OUT = {
     ("football", "stale_after"): ([120, 300], [119, 301, 200.5, True]),
     ("football", "kickoff_minutes"): ([2, 15, 120], [1, 121, 15.5, True]),
     ("computer", "mic_mute_minutes"): ([1, 60, 1440], [0, 1441, 30.5, True]),
+    # 0 minutes is asking every time; a wait under a minute can't be answered.
+    ("approvals", "trust_minutes"): ([0, 5, 60], [-1, 61, 2.5, True]),
+    ("approvals", "wait_minutes"): ([1, 2, 10], [0, 11, 1.5, True]),
+    ("approvals", "album_count"): ([2, 3, 20], [1, 21, 2.5, True]),
     # 0 is no buffer, no heads-up, no percentage and no asking Google at all.
     ("journeys", "buffer_minutes"): ([0, 10, 60], [-1, 61, 10.5, True]),
     ("journeys", "reminder_minutes"): ([0, 5, 30], [-1, 31, 5.5, True]),

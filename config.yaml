@@ -167,6 +167,20 @@ computer:
   # Used straight away.
   screen_orb_size: medium
 
+# Big actions (removing a calendar event, a big music download, and changing these
+# settings upwards) need his OK first, from a passkey on his phone or Windows Hello at
+# the PC. Lowering any of these needs no OK. All of it is used straight away.
+approvals:
+  # Minutes one approval lasts: anything big asked in this time goes ahead without asking
+  # again. A whole number from 0 to 60; 0 asks every time.
+  trust_minutes: 5
+  # Minutes to wait for an answer before saying "No answer, so I haven't." A whole number
+  # from 1 to 10.
+  wait_minutes: 2
+  # Albums that make a download need approval: the one which makes this many asked for
+  # within the minutes one approval lasts. A whole number from 2 to 20.
+  album_count: 3
+
 # Web search is only used when the query explicitly asks for it
 # (e.g. "search for..."), so normal replies stay fast and free.
 # Each search is billed by Anthropic on top of token costs.

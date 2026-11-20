@@ -100,6 +100,13 @@ LIMITS: Dict[Tuple[str, str], Limit] = {
     # The PC's own microphone, muted by Nova, comes back on by itself after this - at least a
     # minute, and at most a day, past which it's a microphone forgotten about.
     ("computer", "mic_mute_minutes"): Limit("number", 1, 1440, True),
+    # Approvals. One approval may cover what he asks for up to an hour after it, and 0 asks every time; a
+    # longer window is a door left open. A wait under a minute is too short to find the phone, and one over
+    # ten minutes leaves the action hanging long after he has moved on. A download of 1 album needing
+    # approval would make every album ask; over 20 is one which never would.
+    ("approvals", "trust_minutes"): Limit("number", 0, 60, True),
+    ("approvals", "wait_minutes"): Limit("number", 1, 10, True),
+    ("approvals", "album_count"): Limit("number", 2, 20, True),
     # Journeys. A buffer of over an hour, or a reminder over half an hour ahead, is a slip. A look every minute
     # would spend the month's requests in days, and one over half an hour would miss the traffic changing. A
     # watch under 10 minutes would hardly look before the time to leave, and over 2 hours would ask Google about
