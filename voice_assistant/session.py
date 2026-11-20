@@ -985,8 +985,9 @@ class Session:
 
         Returns:
             Dict with 'success' and what to say: "Microphone off." for this one, "The Pi's
-            microphone is off." for another; or why not, when the words name none, or one which isn't connected
-            or which only listens on a press of its key.
+            microphone is off." for another, after "Stopped, and" if what rang there was
+            stopped first; or why not, when the words name none, or one which isn't
+            connected or which only listens on a press of its key.
         """
         here = self.satellite.name
         if where:
@@ -995,19 +996,28 @@ class Session:
                 return {"success": False, "message": problem}
         else:
             name = self.brain.ring_on(here)
+        # As said mid-sentence ("the Pi"), and to start one ("The Pi").
         spoken = self.brain.spoken_name(name)
+        starting = spoken[:1].upper() + spoken[1:]
         if self.brain.rooms.push_to_talk(name):
             # A press works whatever the mute (0026), so muting it would change nothing.
-            return {"success": False, "message": f"{spoken[:1].upper() + spoken[1:]} only listens while you hold "
-                                                 f"the key, so there's nothing to {'mute' if muted else 'unmute'}."}
+            return {"success": False, "message": f"{starting} only listens while you hold the key, so there's "
+                                                 f"nothing to {'mute' if muted else 'unmute'}."}
         session = self.brain.session_for(name)
         if session is None:
             return {"success": False, "message": self.brain.not_connected(name)}
+        # Muted while something rings there, it couldn't hear "stop", and a timer would climb
+        # to full volume - so what rings is stopped first.
+        stopped = muted and self.brain.clock.is_ringing(satellite=name)
+        if stopped:
+            self.brain.clock.dismiss(satellite=name)
         session.set_muted(muted)
         state = "off" if muted else "on"
         if name == here:
-            return {"success": True, "message": f"Microphone {state}."}
-        return {"success": True, "message": f"{spoken[:1].upper() + spoken[1:]}'s microphone is {state}."}
+            said = f"microphone {state}." if stopped else f"Microphone {state}."
+        else:
+            said = f"{spoken if stopped else starting}'s microphone is {state}."
+        return {"success": True, "message": f"Stopped, and {said}" if stopped else said}
 
     def _save_note(self, title: str, text: str, where: Optional[str] = None) -> Dict:
         """

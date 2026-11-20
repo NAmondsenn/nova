@@ -1564,7 +1564,8 @@ class ActionExecutor:
         "Turn the assistant's listening off or on: its microphone, so it stops or starts hearing "
         "its wake word. For 'mute', 'unmute', 'mute the mic', 'stop listening' and 'start "
         "listening', here or on a device named ('unmute the Pi'). Never for sound: muting the "
-        "sound or audio is set_volume's.",
+        "sound or audio is set_volume's. 'Stop listening to' a song or the music is never "
+        "this: it's the music's.",
         needs="microphone",
         required=["muted"],
         muted={"type": "boolean", "description": "True to stop listening, false to listen again."},

@@ -1517,6 +1517,47 @@ def test_mute_the_pc_says_it_only_listens_on_the_key(pi_and_pc, brain):
     assert not pi.muted and not pc.muted
 
 
+@pytest.fixture
+def pi_ringing(brain, monkeypatch):
+    """An alarm ringing on the Pi ("bedroom"), which the clock dismisses where it's asked to."""
+    ringing = {"bedroom"}
+
+    def dismiss(satellite=None):
+        ringing.discard(satellite)
+        return {"success": True, "message": "Okay."}
+
+    monkeypatch.setattr(brain.clock, "is_ringing", lambda satellite=None: satellite in ringing)
+    monkeypatch.setattr(brain.clock, "dismiss", dismiss)
+    return ringing
+
+
+def test_stop_listening_while_the_pi_rings_stops_it_first(pi_and_pc, pi_ringing):
+    # Muted with the alarm still going, the Pi couldn't hear "Nova, stop", and it would climb to full volume.
+    pi = pi_and_pc.pi
+    result = pi.actions.execute(pi.intents.match("Stop listening.")["actions"][0])
+    assert (result.ok, result.say) == (True, "Stopped, and microphone off.")
+    assert pi_ringing == set() and pi.muted
+
+
+def test_mute_at_the_pc_while_the_pi_rings_stops_it_first(pi_and_pc, pi_ringing, brain):
+    pi, pc = pi_and_pc.pi, pi_and_pc.pc
+    result = pc.actions.execute(pc.intents.match("Mute.")["actions"][0])
+    assert (result.ok, result.say) == (True, "Stopped, and the Pi's microphone is off.")
+    assert pi_ringing == set() and pi.muted and not pc.muted
+    # A name he gave it keeps its own case mid-sentence.
+    pi.set_muted(False)
+    pi_ringing.add("bedroom")
+    brain.rooms.set_called("bedroom", ["Bedroom Pi"])
+    assert pc.actions.execute(Action("mute_microphone", {"muted": True})).say == \
+        "Stopped, and Bedroom Pi's microphone is off."
+
+
+def test_unmute_leaves_a_ring_alone(pi_and_pc, pi_ringing):
+    pi_and_pc.pi.set_muted(True)
+    result = pi_and_pc.pc.actions.execute(Action("mute_microphone", {"muted": False, "where": "the Pi"}))
+    assert result.say == "The Pi's microphone is on." and pi_ringing == {"bedroom"}
+
+
 def test_mute_a_satellite_not_connected_says_so(pi_and_pc, brain):
     pi, pc = pi_and_pc.pi, pi_and_pc.pc
     brain.session_for = {"pc": pc}.get
