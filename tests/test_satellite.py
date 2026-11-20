@@ -3389,6 +3389,23 @@ def test_a_spoken_announcement_shows_speaking(brain, make, pc, orbs):
     assert wait_for(lambda: orb.shown == ["speaking", "hidden"])
 
 
+def test_a_spoken_stream_refused_at_once_neither_speaks_nor_ends_thinking(brain, make, pc, orbs):
+    # A press silences announcements until the brain's allow, so one sent while Nova works
+    # on the press is over before it starts - as is any stream while the speaker can't
+    # open. No words have come, so the orb thinks on.
+    made = pressable(brain, make)
+    orb = made.orb
+    made._pressed()
+    assert wait_for(lambda: orb.shown == ["listening"])
+    brain.say("stop_listening")
+    assert wait_for(lambda: orb.shown == ["listening", "thinking"])
+    say_a_reply(brain, id="announcement-1", kind="announcement")
+    assert wait_for(lambda: [message["id"] for message in brain.messages("played")] == ["announcement-1"])
+    assert orb.shown == ["listening", "thinking"]
+    brain.say("allow", kind="announcement")
+    assert wait_for(lambda: orb.shown == ["listening", "thinking", "hidden"])
+
+
 def test_the_orb_stops_speaking_before_the_brain_hears_the_reply_has_played(brain, make, pc, orbs):
     # The brain answers "played" with whatever comes next, so the orb must already be told.
     made = pressable(brain, make)

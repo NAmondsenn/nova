@@ -174,6 +174,9 @@ class _FromBrain:
         self.kind = kind
         self.channels = channels
         self.pieces = pieces
+        # Whether the orb was told Nova started speaking with it, so its end is told only
+        # then - see Satellite._follow.
+        self.counted = False
 
     @property
     def spoken(self) -> bool:
@@ -1512,8 +1515,13 @@ class Satellite:
         with self._lock:
             self._playing[id] = playing
         # Here, on the link's thread and before the report's thread can end it, so it
-        # starts before it ends, and before whatever the brain sends next.
-        if playing.spoken:
+        # starts before it ends, and before whatever the brain sends next. Not for a stream
+        # the speaker refused at once - an announcement while a press has them silenced,
+        # or any while the speaker can't open - which says nothing, so mustn't end the
+        # orb's thinking. One already done here was refused: a stream's end comes later,
+        # on this same thread. Worked out once, so its end is told only if its start was.
+        playing.counted = playing.spoken and not playing.playback.done
+        if playing.counted:
             self._orb_states.speaking_started()
         threading.Thread(target=self._report, args=(id, playing), daemon=True, name=f"played-{id}").start()
 
@@ -1537,7 +1545,7 @@ class Satellite:
             pass
         # Before the brain is told, which answers with whatever comes next - a question to
         # listen to, say - and the orb must not still be speaking then.
-        if playing.spoken:
+        if playing.counted:
             self._orb_states.speaking_ended()
         with self._lock:
             if self._playing.get(id) is playing:
