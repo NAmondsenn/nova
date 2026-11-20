@@ -136,12 +136,12 @@ These are told to the orb as they happen ("listening", "thinking", "speaking",
   size, alpha only inside the orb, premultiplication, each state differing, time
   moving it.
 
-### Settings (settings page, section Computer)
+### Settings (settings page, section Satellites, beside the search site)
 
 | Setting | Choices | Default |
 |---|---|---|
 | `computer.screen_orb` | on / off | on |
-| `computer.screen_orb_place` | bottom centre, bottom right, bottom left, top centre, top right, top left | bottom centre |
+| `computer.screen_orb_place` | bottom centre, bottom left, bottom right, top centre, top left, top right | bottom centre |
 | `computer.screen_orb_size` | small, medium, large (about 48, 64, 96 px at 100% scaling) | medium |
 
 The size is the bright body - the lobes and core - which is what reads as "the orb"; the
