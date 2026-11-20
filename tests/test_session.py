@@ -1795,6 +1795,23 @@ def test_stop_listening_and_a_device_named_at_the_pc_are_unchanged(windows_pc):
     assert windows.asked == []
 
 
+def test_plain_mute_at_the_pc_stops_the_pi_ringing_in_its_room_rather_than_asking(windows_pc, brain, monkeypatch):
+    pi, pc, windows = windows_pc.pi, windows_pc.pc, windows_pc.windows
+    ringing = {"bedroom"}
+    monkeypatch.setattr(brain, "room_of", lambda name: [name] + [other for other in ("pc", "bedroom") if other != name])
+    monkeypatch.setattr(brain.clock, "is_ringing", lambda satellite=None: bool(ringing & set(
+        satellite if isinstance(satellite, list) else [satellite])))
+
+    def dismiss(satellite=None):
+        ringing.clear()
+        return {"success": True, "message": "Okay."}
+
+    monkeypatch.setattr(brain.clock, "dismiss", dismiss)
+    reply = pc.conversation.handle("Mute.")
+    assert reply.say != "The mic or the audio?" and not reply.listen_again
+    assert ringing == set() and windows.asked == [] and not pi.muted
+
+
 def test_plain_mute_at_the_pi_still_mutes_the_pi(windows_pc):
     pi, windows = windows_pc.pi, windows_pc.windows
     reply = pi.conversation.handle("Mute.")
