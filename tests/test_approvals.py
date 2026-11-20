@@ -389,8 +389,15 @@ def test_stopping_refuses_everything_waiting(tmp_path, made):
     time.sleep(0.05)
     assert do.runs == 0 and world.said == []
     assert world.approve(request)["success"] is False
-    assert world.approve(world.service.request("Remove 'Gym'"))["message"] == "Approved."
-    assert world.service.trusted() is True
+    # Anything asked once it has stopped is stopped too, and never runs.
+    assert world.service.request("Remove 'Gym'").outcome == "stopped"
+    assert world.service.gate("Remove 'Gym'", do, "kitchen")["success"] is False
+    assert do.runs == 0
+    # The trust window is in memory only.
+    again = world.new_service()
+    world.service = again
+    assert world.approve(again.request("Remove 'Run'"))["message"] == "Approved."
+    assert again.trusted() is True
     assert world.new_service().trusted() is False
 
 
@@ -444,3 +451,80 @@ def test_nothing_secret_is_logged(tmp_path, made, caplog):
         assert secret not in text
     plain = [record for record in caplog.records if "Dentist" in record.getMessage()]
     assert plain and all(getattr(record, "transcript", False) for record in plain)
+
+
+def test_a_pc_answering_after_the_wait_runs_nothing_and_opens_no_window(tmp_path, made, monkeypatch):
+    pc = FakeApprover("pc", answer=True, delay_event=threading.Event())
+    world = World(tmp_path, made, approvers=[pc])
+    do = Doing()
+    world.service.gate("Remove 'Dentist'", do, "kitchen")
+    request = world.service.lookup(world.last_id())
+    _until(lambda: pc.asks)
+    # The waiter is asleep, so the PC's answer comes before it looks at the clock again.
+    monkeypatch.setattr(approvals_module, "CHECK_EVERY", 60)
+    time.sleep(0.05)
+    world.clock.move(121)
+    pc.event.set()
+    _until(lambda: request.outcome)
+    assert request.outcome == "timeout"
+    assert world.service.trusted() is False
+    assert do.runs == 0
+    pc.answer = None
+    assert world.service.request("Remove 'Gym'").outcome is None
+
+
+def test_an_approval_doesnt_approve_others_past_their_wait(tmp_path, made):
+    world = World(tmp_path, made)
+    old = world.service.request("Remove 'Dentist'")
+    world.clock.move(60)
+    new = world.service.request("Remove 'Gym'")
+    world.clock.move(61)
+    assert world.approve(new)["message"] == "Approved."
+    assert old.outcome == "timeout"
+
+
+def test_the_trust_window_never_covers_a_request_without_a_passkey(tmp_path, made):
+    world = World(tmp_path, made)
+    spare = world.add_passkey("Spare")
+    spare_id = b64url(spare.credential_id)
+    # The spare approves something, then its own removal still asks the other passkey.
+    assert world.approve(world.service.request("Remove 'Dentist'"), auth=spare)["message"] == "Approved."
+    assert world.service.trusted() is True
+    removal = world.service.request("Remove the passkey Spare", without=spare_id)
+    assert removal.outcome is None
+    assert world.approve(removal, auth=spare)["message"] == "That passkey can't answer this."
+    assert world.approve(removal)["message"] == "Approved."
+
+
+def test_an_approval_leaves_a_request_without_its_passkey_waiting(tmp_path, made):
+    world = World(tmp_path, made, settings={"trust_minutes": 5, "wait_minutes": 2, "album_count": 3})
+    spare = world.add_passkey("Spare")
+    other = world.service.request("Remove 'Dentist'")
+    removal = world.service.request("Remove the passkey Spare", without=b64url(spare.credential_id))
+    assert world.approve(other, auth=spare)["message"] == "Approved."
+    assert removal.outcome is None
+
+
+def test_a_slow_withdraw_holds_up_no_other_passkey_answer(tmp_path, made):
+    pc = FakeApprover("pc", answer=None, delay_event=threading.Event())
+    release = threading.Event()
+    withdraw = pc.withdraw_approval
+
+    def slow_withdraw(id):
+        release.wait(5)
+        return withdraw(id)
+
+    pc.withdraw_approval = slow_withdraw
+    world = World(tmp_path, made, approvers=[pc], settings={"trust_minutes": 0, "wait_minutes": 2, "album_count": 3})
+    first = world.service.request("Remove 'Dentist'")
+    second = world.service.request("Remove 'Gym'")
+    _until(lambda: pc.asks)
+    answered = []
+    threading.Thread(target=lambda: answered.append(world.approve(first)), daemon=True).start()
+    _until(lambda: first.outcome)
+    # The first answer is stuck withdrawing the PC's prompt; the second goes through.
+    assert world.approve(second)["message"] == "Approved."
+    assert answered == []
+    release.set()
+    _until(lambda: answered)
+    assert answered == [{"success": True, "message": "Approved."}]

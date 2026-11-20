@@ -111,6 +111,9 @@ class Request:
     by: Optional[str] = None
     settled: threading.Event = field(default_factory=threading.Event, repr=False)
     settled_at: Optional[float] = None  # monotonic
+    # A passkey id which mustn't answer it. The trust window never covers such a request:
+    # removing a passkey needs a fresh answer from another way, not one the passkey gave.
+    without: Optional[str] = None
 
 
 class Approvals:
@@ -157,6 +160,8 @@ class Approvals:
         self._open: Dict[str, Request] = {}
         self._settled: Dict[str, Request] = {}
         self._approved_at: Optional[float] = None
+        # Once stopped, every new request is settled "stopped" at once.
+        self._stopped = False
         # Per approver name: one prompt showing at a time on each PC.
         self._approver_locks: Dict[str, threading.Lock] = {}
         # Per request id: the approvers whose prompt for it is showing now.
@@ -177,7 +182,8 @@ class Approvals:
         """When the trust window closes (monotonic), or None. The caller holds the lock.
 
         It is worked out from the minutes as they are set now, so lowering them closes
-        the window sooner straight away.
+        the window sooner straight away, and raising them lengthens a window already
+        open (raising them needs an approval, which opens a fresh one anyway).
         """
         if self._approved_at is None:
             return None
@@ -227,8 +233,9 @@ class Approvals:
             without: A passkey id which mustn't answer it, e.g. the one being removed.
 
         Returns:
-            The request: already approved by the trust window if it's open, settled
-            "no_way" if there's no way to approve, else open.
+            The request: already approved by the trust window if it's open (unless
+            made `without` a passkey), settled "no_way" if there's no way to approve,
+            "stopped" once the service has stopped, else open.
         """
         description = _cut(description)
         keys = self._phone_keys(without)
@@ -242,16 +249,19 @@ class Approvals:
             asked=tuple(asked),
             credentials=tuple(each.id for each in keys),
             approvers=tuple(each.name for each in approvers),
+            without=without,
         )
         with self._lock:
-            if self._trust_ends() is not None:
+            if self._stopped:
+                self._finish(request, "stopped", None)
+            elif without is None and self._trust_ends() is not None:
                 self._finish(request, "approved", TRUST)
             elif not asked:
                 self._finish(request, "no_way", None)
             else:
                 self._open[request.id] = request
         if request.outcome is not None:
-            self._announce([request], [])
+            self._announce([request])
             return request
         logger.info(f"Approval {_short(request.id)} asked of {len(asked)} way(s)")
         logger.info(f"Approval {_short(request.id)} is for: {description}", extra=TRANSCRIPT)
@@ -330,6 +340,8 @@ class Approvals:
             return do()
         if request.outcome == "no_way":
             return {"success": False, "message": NO_WAY}
+        if request.outcome == "stopped":
+            return {"success": False, "message": FAILED_SAID}
         threading.Thread(target=self._carry_out, args=(request, do, satellite, done), name="approval-wait",
                          daemon=True).start()
         return {"success": True, "message": pending_said(request.asked)}
@@ -408,6 +420,17 @@ class Approvals:
             return {"success": False, "message": CANT_ANSWER}
         if credential_id not in request.credentials:
             return {"success": False, "message": CANT_ANSWER}
+        withdraw: List[Tuple[object, str]] = []
+        try:
+            return self._check_and_settle(request, credential_id, client_data_json, authenticator_data,
+                                          signature, withdraw)
+        finally:
+            # Outside the answer lock, so a slow PC never holds up another passkey's answer.
+            self._withdraw(withdraw)
+
+    def _check_and_settle(self, request: Request, credential_id: str, client_data_json: bytes,
+                          authenticator_data: bytes, signature: bytes, withdraw: List) -> Dict:
+        """The passkey answer's checks and settling, one answer at a time; withdrawals are left in `withdraw`."""
         with self._answer_lock:
             passkey = self._passkeys.get(credential_id)
             if passkey is None:
@@ -428,7 +451,7 @@ class Approvals:
             except OSError as e:
                 # The challenge is single-use, so the approval still can't be replayed.
                 logger.error(f"Could not keep a passkey's counter ({type(e).__name__})")
-            if not self._settle(request, "approved", passkey.name):
+            if not self._settle(request, "approved", passkey.name, withdraw):
                 return self._late(request) or {"success": False, "message": ALREADY}
         return {"success": True, "message": APPROVED}
 
@@ -453,35 +476,55 @@ class Approvals:
     def stop(self):
         """Settles everything waiting "stopped", so nothing runs after the brain stops."""
         with self._lock:
+            self._stopped = True
             waiting = list(self._open.values())
             for request in waiting:
                 self._finish(request, "stopped", None)
             withdraw = self._withdrawals(waiting)
-        self._announce(waiting, withdraw)
+        self._announce(waiting)
+        self._withdraw(withdraw)
 
     # Settling.
 
-    def _settle(self, request: Request, outcome: str, by: Optional[str]) -> bool:
-        """Settles a request, unless it already is. Returns whether this settled it.
+    def _settle(self, request: Request, outcome: str, by: Optional[str],
+                withdraw_later: Optional[List] = None) -> bool:
+        """Settles a request, unless it already is. Returns whether this settled it as asked.
 
-        An approval opens the trust window and approves every other request still
-        waiting. Each PC showing a prompt for a request settled here has it withdrawn.
+        An answer which comes once the request has run out settles it "timeout" instead
+        (and gives False), so a late answer from anywhere neither runs the action nor
+        opens the trust window. An approval opens the trust window and approves every
+        other request still waiting and not run out, except one made `without` a
+        passkey. Each PC showing a prompt for a request settled here has it withdrawn -
+        now, or by the caller if it passes `withdraw_later`.
         """
         with self._lock:
             if request.outcome is not None:
                 return False
+            now = self._now()
+            settled = True
+            if outcome in ("approved", "refused") and now >= request.expires:
+                outcome, by, settled = "timeout", None, False
             self._finish(request, outcome, by)
             finished = [request]
             if outcome == "approved":
-                self._approved_at = self._now()
+                self._approved_at = now
                 # With no trust window, an approval covers only its own request.
                 if self._minutes("trust_minutes", TRUST_MINUTES) > 0:
                     for other in list(self._open.values()):
-                        self._finish(other, "approved", TRUST)
+                        if now >= other.expires:
+                            self._finish(other, "timeout", None)
+                        elif other.without is None:
+                            self._finish(other, "approved", TRUST)
+                        else:
+                            continue
                         finished.append(other)
             withdraw = self._withdrawals(finished)
-        self._announce(finished, withdraw)
-        return True
+        self._announce(finished)
+        if withdraw_later is None:
+            self._withdraw(withdraw)
+        else:
+            withdraw_later.extend(withdraw)
+        return settled
 
     def _finish(self, request: Request, outcome: str, by: Optional[str]):
         """Marks a request settled and keeps it in the recent list. The caller holds the lock."""
@@ -503,13 +546,16 @@ class Approvals:
         for id in [id for id, each in self._settled.items() if each.settled_at < cutoff]:
             del self._settled[id]
 
-    def _announce(self, finished: List[Request], withdraw: List[Tuple[object, str]]):
-        """What's done once requests are settled, outside the lock: wake their waiters, log, save, withdraw."""
+    def _announce(self, finished: List[Request]):
+        """What's done once requests are settled, outside the lock: wake their waiters, log and save."""
         for request in finished:
             request.settled.set()
             by = f" by {request.by}" if request.by else ""
             logger.info(f"Approval {_short(request.id)}: {request.outcome}{by}")
         self._save()
+
+    def _withdraw(self, withdraw: List[Tuple[object, str]]):
+        """Takes down the prompts still showing for settled requests, outside every lock."""
         for approver, id in withdraw:
             try:
                 approver.withdraw_approval(id)
