@@ -36,7 +36,7 @@ Numbered 0032: 0029 (quiet while another speaks), 0030 (changing playlists and t
 
 - Waking a sleeping PC to move music to it, and moving Spotify's music.
 - Playing on two satellites at once: they would drift apart.
-- Notes anywhere but a Downloads folder, or from the Pi; naming a satellite by its room.
+- Notes anywhere but a computer's Downloads folder, so none are saved on the Pi itself (one asked for at the Pi goes to a computer's, as the calls above say); naming a satellite by its room.
 - The Mac: the satellite code saves in `~/Downloads` on macOS already, but it has never run on a Mac. It is checked for real when the Mac satellite is built.
 - The Windows lookup of the Downloads folder (`SHGetKnownFolderPath` through ctypes) has never run on real Windows: a test replaces it. It falls back to `%USERPROFILE%\Downloads`, and any failure there means no notes rather than a crash, but only the PC can say it works (a live check).
 - A long "write me notes on ..." shares Claude's 1,024-token reply limit with its thinking, so a note of about 400 words may not fit. When it does not, the log says Claude stopped short (or gave no reply), nothing is saved, and Nova says "Sorry, that didn't work. Try asking again." Tests cannot say how often that happens (a live check).
