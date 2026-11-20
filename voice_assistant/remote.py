@@ -13,6 +13,7 @@ it ends - every playback is done and every feed ended - so nothing on the brain 
 waiting for a satellite which isn't there.
 """
 
+import collections
 import itertools
 import json
 import logging
@@ -60,6 +61,9 @@ NOTE_WAIT = 5.0
 # How long to wait for a satellite to say it has done what a computer request asked, in
 # seconds. Opening or closing a window is quick, so one that hasn't said by now is not going to.
 COMPUTER_WAIT = 5.0
+
+# How many withdrawn approvals' ids a satellite remembers.
+WITHDRAWN_REMEMBERED = 50
 
 # The most apps, and the most windows, taken from a satellite's list, and the longest an app's
 # id and any name may be. More than a person has on a computer, so the cap is only a guard.
@@ -561,6 +565,8 @@ class RemoteSatellite:
         # False from a satellite which doesn't say.
         self.opens: bool = bool(hello.get("opens", False))
         self.system_volume: bool = bool(hello.get("system_volume", False))
+        # Whether it can ask the user's OK to a big action - False from a satellite which doesn't say.
+        self.approves: bool = bool(hello.get("approves", False))
         # Set by the brain: called with (this satellite's name, its apps as [{"id", "name",
         # "kind"}]) and (its name, its open windows' names) each time the satellite sends them.
         self.on_apps: Optional[Callable[[str, List[Dict]], None]] = None
@@ -594,6 +600,9 @@ class RemoteSatellite:
         # answered, by id - "note-N" or "computer-N".
         self._notes_lock = threading.Lock()
         self._note_waits: Dict[str, _Wait] = {}
+        # The approvals withdrawn lately (their ids, oldest first), so one asked for after
+        # it was settled is never put to the user. Guarded by _notes_lock.
+        self._withdrawn: "collections.deque[str]" = collections.deque(maxlen=WITHDRAWN_REMEMBERED)
         self._handlers: Dict[str, Callable[[Dict, bytes], None]] = {
             "ping": lambda message, payload: self.send("pong"),
             "wake": self._woken,
@@ -607,6 +616,7 @@ class RemoteSatellite:
             "apps": self._apps,
             "windows": self._windows,
             "computer_done": self._computer_done,
+            "approval_answer": self._approval_answer,
         }
 
     @property
@@ -848,6 +858,42 @@ class RemoteSatellite:
         """
         return self._ask(f"computer-{next(_computer_ids)}", "computer", b"", wait, action=action, **fields)
 
+    def ask_approval(self, id: str, description: str, wait: float) -> Optional[bool]:
+        """
+        Asks the user's OK on the satellite, and waits for the answer.
+        For a satellite whose approves is True.
+
+        Args:
+            id: The request's id, as approvals gives it. The satellite knows it as "approval-" and this.
+            description: What would be done, in a sentence, to show.
+            wait: The longest to wait for the answer, in seconds.
+
+        Returns:
+            Whether the user approved - or None if there was no answer in time, the request
+            had already been withdrawn, or the satellite went.
+        """
+        with self._notes_lock:
+            if f"approval-{id}" in self._withdrawn:
+                return None
+        answer = self._ask(f"approval-{id}", "approval", b"", wait, description=description)
+        return None if answer is None else answer["approved"]
+
+    def withdraw_approval(self, id: str) -> bool:
+        """
+        Tells the satellite to stop asking for an approval, because it is settled or given up.
+        Only sends, never waits, and is remembered, so an ask_approval for the id which
+        comes after is not sent.
+
+        Args:
+            id: The request's id, as for ask_approval.
+
+        Returns:
+            Whether the satellite was told.
+        """
+        with self._notes_lock:
+            self._withdrawn.append(f"approval-{id}")
+        return self.send("approval_withdraw", id=f"approval-{id}")
+
     def _ask(self, id: str, kind: str, payload: bytes, wait: float, **fields) -> Optional[Dict]:
         """
         Sends a request and waits for the satellite's answer to it.
@@ -968,6 +1014,23 @@ class RemoteSatellite:
         if isinstance(id, str) and id.startswith(prefix):
             return self._note_waits.get(id)
         return None
+
+    def _approval_answer(self, message: Dict, payload: bytes):
+        """The satellite's answer to an approval: taken only once, and only for one asked of this satellite."""
+        approved = message.get("approved")
+        with self._notes_lock:
+            waiting = self._waiting_for("approval-", message.get("id"))
+            # Not for an id never asked, nor one already answered (whose asker hasn't yet
+            # forgotten it), nor one which isn't plainly yes or no. A late answer to one
+            # given up is the same as for notes: nothing to mind.
+            if waiting is None or waiting.arrived.is_set() or not isinstance(approved, bool):
+                if waiting is not None or not isinstance(approved, bool):
+                    logger.warning(f"The {self.name} satellite sent an approval answer which was dropped")
+                else:
+                    logger.warning(f"The {self.name} satellite answered an approval which isn't being asked")
+                return
+            waiting.answer = {"approved": approved}
+            waiting.arrived.set()
 
     def _computer_done(self, message: Dict, payload: bytes):
         """The satellite's answer to a computer request: what it said, and for volume the level and mute."""
