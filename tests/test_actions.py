@@ -3651,6 +3651,10 @@ class FakeComputerControl:
     def offered(self):
         return self.is_offered
 
+    def has_microphone(self):
+        # Not a computer whose own microphone can be muted - see the pc_and_pi tests for one.
+        return False
+
     def _did(self, *asked):
         self.asked.append(asked)
         return {"success": True, "message": "Opening Fortnite."}
