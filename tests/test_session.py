@@ -1397,6 +1397,16 @@ def test_a_note_which_the_list_wont_take_says_so(brain, connect, make_session):
     assert (result.ok, result.say) == (False, "Your PC's off, and I couldn't put it on your notepad list either.")
 
 
+def test_a_note_which_the_list_was_slow_to_take_says_nova_is_unsure(brain, connect, make_session):
+    # Home Assistant may well have added it, so it isn't said to have failed.
+    reply = {"success": False, "unsure": True, "message": "Home Assistant was slow, so I'm not sure ... Have a look."}
+    pi, lists, _ = _pc_asleep(brain, connect, make_session, lists=FakeLists(reply))
+    result = _note(pi, where="my PC")
+    assert (result.ok, result.say) == (
+        False, "Your PC's off, and Home Assistant was slow, so I'm not sure it went on your notepad list. Have a look.")
+    assert len(lists.added) == 1
+
+
 def test_a_note_put_on_the_list_never_logs_its_text(brain, connect, make_session, caplog):
     pi, lists, _ = _pc_asleep(brain, connect, make_session)
     caplog.set_level(logging.DEBUG)

@@ -1032,7 +1032,7 @@ class Session:
 
         Returns:
             Dict with 'success' True only if it went on the list, and the 'message' to say, which
-            starts with why.
+            starts with why. A failure may be unsure, if Home Assistant was too slow to say.
         """
         said = why.removesuffix(".")
         # A list's thing is a line, which a note's lines would otherwise run on from.
@@ -1042,6 +1042,11 @@ class Session:
                     "message": f"{said}, and that note's too long for your notepad list, so it wasn't saved."}
         lists = self.brain.lists
         added = lists.add([item], "notes") if lists is not None else {}
+        if added.get("unsure"):
+            # Home Assistant may well have added it, so "couldn't" would be wrong.
+            return {"success": False,
+                    "message": f"{said}, and Home Assistant was slow, so I'm not sure it went on your notepad "
+                               f"list. Have a look."}
         if not added.get("success"):
             return {"success": False, "message": f"{said}, and I couldn't put it on your notepad list either."}
         # Lists says "Added <item> to your notepad list.", which names the list as it's called in Home Assistant.
