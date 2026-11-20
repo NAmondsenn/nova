@@ -319,6 +319,7 @@ IN_AND_OUT = {
     ("football", "check_every"): ([10, 30, 60], [9, 61, 30.5, True]),
     ("football", "stale_after"): ([120, 300], [119, 301, 200.5, True]),
     ("football", "kickoff_minutes"): ([2, 15, 120], [1, 121, 15.5, True]),
+    ("computer", "mic_mute_minutes"): ([1, 60, 1440], [0, 1441, 30.5, True]),
     # 0 is no buffer, no heads-up, no percentage and no asking Google at all.
     ("journeys", "buffer_minutes"): ([0, 10, 60], [-1, 61, 10.5, True]),
     ("journeys", "reminder_minutes"): ([0, 5, 30], [-1, 31, 5.5, True]),
@@ -868,6 +869,19 @@ def test_a_search_site_which_isnt_google_duckduckgo_or_bing_is_refused(tmp_path)
     with pytest.raises(ConfigError) as caught:
         Config(path=str(tmp_path / "config.yaml"))
     assert "'computer.search_site' should be one of google, duckduckgo, bing, not 'yahoo'" in str(caught.value)
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "1441", "2.5", "lots"])
+def test_mic_mute_minutes_is_a_whole_number_from_1_to_1440(tmp_path, value):
+    (tmp_path / "config.yaml").write_text(f"computer:\n  mic_mute_minutes: {value}\n")
+    with pytest.raises(ConfigError) as caught:
+        Config(path=str(tmp_path / "config.yaml"))
+    assert "'computer.mic_mute_minutes'" in str(caught.value)
+
+
+def test_mic_mute_minutes_is_an_hour_by_default(tmp_path):
+    assert Config(path=str(tmp_path / "none.yaml")).section("computer")["mic_mute_minutes"] == 60
+    assert limit_problem("computer", "mic_mute_minutes", 90) is None
 
 
 def test_the_screen_orbs_place_and_size_are_choices(tmp_path):

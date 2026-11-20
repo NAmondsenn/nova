@@ -29,6 +29,7 @@ class FakeEndpoint:
         self._level = level
 
     def muted(self):
+        self.threads.add(threading.current_thread().name)
         return self._muted
 
     def set_mute(self, mute):
@@ -37,12 +38,18 @@ class FakeEndpoint:
 
 
 class FakeCoreAudio:
-    def __init__(self, endpoint):
+    def __init__(self, endpoint, microphone=None):
         self.made_on = threading.current_thread().name
         self._endpoint = endpoint
+        self._microphone = microphone
 
     def endpoint(self):
         return self._endpoint
+
+    def microphone(self):
+        if self._microphone is None:
+            raise OSError("no microphone")
+        return self._microphone
 
 
 @pytest.fixture
@@ -51,8 +58,13 @@ def endpoint():
 
 
 @pytest.fixture
-def volume(endpoint):
-    made = SystemVolume(lambda: FakeCoreAudio(endpoint))
+def microphone():
+    return FakeEndpoint(level=0.8)
+
+
+@pytest.fixture
+def volume(endpoint, microphone):
+    made = SystemVolume(lambda: FakeCoreAudio(endpoint, microphone))
     yield made
     made.close()
 
@@ -148,3 +160,76 @@ def test_unmute_if_muted_without_a_volume_raises():
     with pytest.raises(RuntimeError):
         made.unmute_if_muted()
     made.close()
+
+
+# The microphone (20 Nov): "mute the mic" at the PC mutes Windows' own, for everything.
+
+def test_the_microphone_is_muted_and_unmuted_on_its_own_thread(volume, endpoint, microphone):
+    assert volume.mute_microphone(True) is True
+    assert microphone._muted is True and microphone._level == 0.8
+    assert volume.mute_microphone(False) is False
+    assert microphone._muted is False
+    assert microphone.threads == {"windows-volume"}
+    # The output is left as it was.
+    assert endpoint._muted is False and endpoint.threads == set()
+
+
+def test_microphone_muted_reads_it_on_its_own_thread(volume, microphone):
+    assert volume.microphone_muted() is False
+    microphone._muted = True
+    assert volume.microphone_muted() is True
+    assert microphone.threads == {"windows-volume"}
+
+
+def test_unmute_microphone_if_muted_only_unmutes_a_muted_one(volume, endpoint, microphone):
+    assert volume.unmute_microphone_if_muted() is False
+    microphone._muted = True
+    assert volume.unmute_microphone_if_muted() is True
+    assert microphone._muted is False and microphone._level == 0.8
+    assert endpoint._muted is False
+
+
+def test_no_microphone_is_raised_to_the_caller(endpoint):
+    made = SystemVolume(lambda: FakeCoreAudio(endpoint))
+    try:
+        with pytest.raises(OSError):
+            made.mute_microphone(True)
+        with pytest.raises(OSError):
+            made.unmute_microphone_if_muted()
+        # The output still works.
+        assert made.change(level=20) == {"level": 20, "muted": False}
+    finally:
+        made.close()
+
+
+def test_the_microphone_without_a_volume_raises():
+    made = SystemVolume(lambda: (_ for _ in ()).throw(OSError("none")))
+    with pytest.raises(RuntimeError):
+        made.mute_microphone(True)
+    with pytest.raises(RuntimeError):
+        made.unmute_microphone_if_muted()
+    made.close()
+
+
+def test_core_audio_asks_for_the_default_capture_endpoint_for_the_microphone():
+    # eCapture and eConsole, through the same IAudioEndpointVolume as the output.
+    asked = []
+
+    class Enumerator:
+        def GetDefaultAudioEndpoint(self, flow, role):
+            asked.append((flow, role))
+            return Device()
+
+    class Device:
+        def Activate(self, iid, context, params):
+            return Activated()
+
+    class Activated:
+        def QueryInterface(self, interface):
+            return "volume"
+
+    core = pc_volume._CoreAudio.__new__(pc_volume._CoreAudio)
+    core._enumerator, core._interface, core._clsctx = Enumerator(), type("I", (), {"_iid_": "iid"}), 0
+    core.microphone()
+    core.endpoint()
+    assert asked == [(1, 0), (0, 0)]

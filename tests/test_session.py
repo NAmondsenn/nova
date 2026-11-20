@@ -28,10 +28,12 @@ from voice_assistant import ha_device, music, network, notes, paths, protocol, s
 from voice_assistant import session as session_module
 from voice_assistant.actions import Action
 from voice_assistant.brain import Brain
+from voice_assistant.choices import ChoiceStore
 from voice_assistant.clock import Clock
 from voice_assistant.config import Config
 from voice_assistant.computers import ComputerControl, Computers
 from voice_assistant.conversation import Reply
+from voice_assistant.lists import Lists
 from voice_assistant.media_watch import MediaWatcher
 from voice_assistant.navidrome import NavidromePlayer
 from voice_assistant.recording import RATE, AudioFeed
@@ -261,6 +263,7 @@ def brain(tmp_path, monkeypatch, make_config):
                            ring_on=lambda name: name, room_of=lambda name: [name], room_sessions=lambda name: [],
                            spoken_name=lambda name: name, notes_saved_on=lambda: [],
                            names_satellite=lambda said: False,
+                           session_for=lambda name: None,
                            routines=Routines(path=str(tmp_path / "routines.json")), ntfy=None, weather=None,
                            batteries=None, lists=None, pc=None, registry=None, calendar=None, media=None,
                            downloads=None, football=None, listening=None, wrapped_store=None, usage=None, new_music_playlist=None,
@@ -1290,12 +1293,155 @@ def test_a_note_named_for_a_satellite_which_cant_save_notes_says_so(brain, conne
     assert pc_asked == [] and pi_asked == []
 
 
-def test_a_note_for_a_pc_which_is_asleep_says_so(brain, connect, make_session):
+class FakeLists:
+    """Stands in for Lists, saying what it was asked to add and, for each, what Lists says of the list it went on."""
+
+    def __init__(self, reply=None):
+        self.added = []
+        self.reply = reply
+
+    def add(self, items, said):
+        self.added.append((items, said))
+        if self.reply is not None:
+            return self.reply
+        return {"success": True, "message": f"Added {items[0]} to your notepad list."}
+
+
+def _pc_asleep(brain, connect, make_session, lists=None, off=True):
+    """
+    The Pi's session with the PC not connected, and the lists to put notes on.
+
+    Args:
+        lists: The lists, or None for FakeLists.
+        off: Whether Home Assistant says the PC is off ("Your PC's off.") - else only that Nova isn't running on it.
+
+    Returns:
+        The Pi's session, the lists, and the notes the PC was asked to save (none, while it's off).
+    """
     pi, pc, pc_asked, _ = _at_the_pi(brain, connect, make_session, pc_connected=False)
+    if off:
+        brain.not_connected = lambda name: "Your PC's off."
+    brain.lists = FakeLists() if lists is None else lists
+    return pi, brain.lists, pc_asked
+
+
+def test_a_note_for_a_pc_which_is_asleep_goes_on_the_notepad_list(brain, connect, make_session):
+    pi, lists, pc_asked = _pc_asleep(brain, connect, make_session)
+    # Named or not: the PC is the one which would have saved it.
     for params in ({"where": "my PC"}, {}):
         result = _note(pi, "Swimming", "I'm going swimming.", **params)
-        assert (result.ok, result.say) == (False, "Nova isn't running on Nathaniel's PC.")
+        assert (result.ok, result.say, result.confirm) == (
+            True, "Your PC's off, so I've put it on your notepad list instead.", "speak")
+    # The list Nova means by "notes", as manage_list adds to it.
+    assert lists.added == [(["I'm going swimming."], "notes")] * 2
     assert pc_asked == []
+
+
+def test_a_note_for_a_pc_with_no_nova_running_goes_on_the_list_too(brain, connect, make_session):
+    pi, lists, _ = _pc_asleep(brain, connect, make_session, off=False)
+    result = _note(pi, "Swimming", "I'm going swimming.", where="my PC")
+    assert (result.ok, result.say) == (
+        True, "Nova isn't running on Nathaniel's PC, so I've put it on your notepad list instead.")
+    assert lists.added == [(["I'm going swimming."], "notes")]
+
+
+def test_a_note_put_on_the_list_says_the_name_the_list_has(brain, connect, make_session, tmp_path):
+    # As the real Lists words it, for a list Home Assistant calls "Notes".
+    class FakeHome:
+        added = []
+
+        def todo_lists(self):
+            return [{"id": "todo.notes", "name": "Notes", "count": 0, "aliases": []}]
+
+        def add_item(self, list_id, item):
+            self.added.append((list_id, item))
+
+    home = FakeHome()
+    lists = Lists(home, ChoiceStore(str(tmp_path / "lists.json"), {"main": None}))
+    pi, _, _ = _pc_asleep(brain, connect, make_session, lists=lists)
+    # The note's own "to your" isn't taken for where the list's name starts.
+    result = _note(pi, "Gift", "Send it to your mum.", where="my PC")
+    assert (result.ok, result.say) == (True, "Your PC's off, so I've put it on your notes list instead.")
+    assert home.added == [("todo.notes", "Send it to your mum.")]
+
+
+def test_a_note_put_on_the_list_is_one_line(brain, connect, make_session):
+    pi, lists, _ = _pc_asleep(brain, connect, make_session)
+    assert _note(pi, "Shopping", "  Milk\r\n eggs \n\n\nbread\n").ok
+    assert lists.added == [(["Milk eggs bread"], "notes")]
+
+
+def test_a_note_put_on_the_list_is_added_up_to_255_characters(brain, connect, make_session):
+    pi, lists, _ = _pc_asleep(brain, connect, make_session)
+    assert _note(pi, text="x" * 255).ok
+    assert lists.added == [(["x" * 255], "notes")]
+    # Counted as it goes on the list, not as it was said: a last newline is no more.
+    assert _note(pi, text="x" * 255 + "\n").ok
+    assert lists.added[-1] == (["x" * 255], "notes")
+    result = _note(pi, text="x" * 256)
+    assert (result.ok, result.say) == (
+        False, "Your PC's off, and that note's too long for your notepad list, so it wasn't saved.")
+    assert len(lists.added) == 2
+
+
+def test_a_note_which_the_list_wont_take_says_so(brain, connect, make_session):
+    for reply in ({"success": False, "message": "I couldn't add that to your notepad list."},
+                  {"success": False, "message": "I haven't got a list called that."}):
+        pi, lists, _ = _pc_asleep(brain, connect, make_session, lists=FakeLists(reply))
+        result = _note(pi, where="my PC")
+        assert (result.ok, result.say) == (False, "Your PC's off, and I couldn't put it on your notepad list either.")
+        assert len(lists.added) == 1
+    # With no Home Assistant there are no lists at all.
+    pi, lists, _ = _pc_asleep(brain, connect, make_session)
+    brain.lists = None
+    result = _note(pi, where="my PC")
+    assert (result.ok, result.say) == (False, "Your PC's off, and I couldn't put it on your notepad list either.")
+
+
+def test_a_note_which_the_list_was_slow_to_take_says_nova_is_unsure(brain, connect, make_session):
+    # Home Assistant may well have added it, so it isn't said to have failed.
+    reply = {"success": False, "unsure": True, "message": "Home Assistant was slow, so I'm not sure ... Have a look."}
+    pi, lists, _ = _pc_asleep(brain, connect, make_session, lists=FakeLists(reply))
+    result = _note(pi, where="my PC")
+    assert (result.ok, result.say) == (
+        False, "Your PC's off, and Home Assistant was slow, so I'm not sure it went on your notepad list. Have a look.")
+    assert len(lists.added) == 1
+
+
+def test_a_note_put_on_the_list_never_logs_its_text(brain, connect, make_session, caplog):
+    pi, lists, _ = _pc_asleep(brain, connect, make_session)
+    caplog.set_level(logging.DEBUG)
+    assert _note(pi, "Bins", "Green on Tuesday, secret.", where="my PC").ok
+    assert "secret" not in caplog.text
+
+
+def test_a_note_is_not_put_on_the_list_for_any_other_reason(brain, connect, make_session):
+    # Where it could still be, or wasn't asked for, or can't be helped: said as it was before.
+    pi, pc, pc_asked, pi_asked = _at_the_pi(brain, connect, make_session, [None, {"error": "The folder's full."}])
+    brain.lists = lists = FakeLists()
+    # The PC didn't answer in time, so the file may yet land.
+    assert _note(pi, where="my PC").say == "Nathaniel's PC didn't answer, so the note wasn't saved."
+    # The PC answered with an error.
+    assert _note(pi, where="my PC").say == "I couldn't save it on Nathaniel's PC: The folder's full."
+    # The text is over what a note may be, which the brain refuses before it is sent.
+    assert _note(pi, text="x" * (notes.MOST_TEXT + 1)).say == (
+        "I couldn't save it on Nathaniel's PC: That note's too long to save.")
+    # A satellite which can't save notes was named.
+    assert _note(pc, where="the Pi").say == "The Pi can't save notes."
+    assert lists.added == []
+    # Two computers could have saved it: which one is asked.
+    brain.rooms.seen("mac", True, "mac", True)
+    brain.satellites = lambda: ["bedroom", "pc", "mac"]
+    assert _note(pi).say == "Which one: Nathaniel's PC or the Mac?"
+    assert lists.added == []
+
+
+def test_a_note_at_a_computer_which_is_connected_is_not_put_on_the_list(brain, connect, make_session):
+    pi, pc, pc_asked, _ = _at_the_pi(brain, connect, make_session)
+    brain.lists = lists = FakeLists()
+    assert _note(pi, where="my PC").say == "Saved to the Downloads on Nathaniel's PC as Bins."
+    assert _note(pc).say == "Saved to your Downloads as Bins."
+    assert lists.added == [] and len(pc_asked) == 2
 
 
 def test_a_note_which_goes_wrong_on_another_satellite_names_it(brain, connect, make_session):
@@ -1498,11 +1644,13 @@ def pi_and_pc(brain, connect, make_session):
 def test_mute_at_the_pi_mutes_the_pi(pi_and_pc):
     pi, pc = pi_and_pc.pi, pi_and_pc.pc
     result = pi.actions.execute(Action("mute_microphone", {"muted": True}))
-    assert (result.ok, result.say) == (True, "Microphone off.")
+    # Said with a sound, not words: the message is only logged.
+    assert (result.ok, result.say, result.confirm, result.sound) == (True, "Microphone off.", "sound", "mic_off.wav")
     assert pi.muted and not pc.muted
     # The settings page's and Home Assistant's mute, so its switch shows it.
     assert pi._device_controls().muted()
-    assert pi.actions.execute(Action("mute_microphone", {"muted": False})).say == "Microphone on."
+    on = pi.actions.execute(Action("mute_microphone", {"muted": False}))
+    assert (on.say, on.confirm, on.sound) == ("Microphone on.", "sound", "mic_on.wav")
     assert not pi.muted
     # Spoken words reach it the same way.
     pi.actions.execute(pi.intents.match("Stop listening.")["actions"][0])
@@ -1512,12 +1660,12 @@ def test_mute_at_the_pi_mutes_the_pi(pi_and_pc):
 def test_mute_at_the_pc_mutes_the_rooms_always_on_pi(pi_and_pc, brain):
     pi, pc = pi_and_pc.pi, pi_and_pc.pc
     result = pc.actions.execute(Action("mute_microphone", {"muted": True}))
-    assert (result.ok, result.say) == (True, "The Pi's microphone is off.")
-    assert pi.muted and not pc.muted
+    assert (result.ok, result.say, result.confirm) == (True, "The Pi's microphone is off.", "sound")
+    assert result.sound == "mic_off.wav" and pi.muted and not pc.muted
     # Back on from the PC, by name.
     result = pc.actions.execute(Action("mute_microphone", {"muted": False, "where": "the Pi"}))
-    assert (result.ok, result.say) == (True, "The Pi's microphone is on.")
-    assert not pi.muted
+    assert (result.ok, result.say, result.confirm) == (True, "The Pi's microphone is on.", "sound")
+    assert result.sound == "mic_on.wav" and not pi.muted
     # A name he gave it is said as he wrote it, capitalised to start the sentence.
     brain.rooms.set_called("bedroom", ["bedroom Pi"])
     assert pc.actions.execute(Action("mute_microphone", {"muted": True})).say == "Bedroom Pi's microphone is off."
@@ -1556,14 +1704,17 @@ def test_stop_listening_while_the_pi_rings_stops_it_first(pi_and_pc, pi_ringing)
     # Muted with the alarm still going, the Pi couldn't hear "Nova, stop", and it would climb to full volume.
     pi = pi_and_pc.pi
     result = pi.actions.execute(pi.intents.match("Stop listening.")["actions"][0])
-    assert (result.ok, result.say) == (True, "Stopped, and microphone off.")
+    assert (result.ok, result.say, result.confirm) == (True, "Stopped, and microphone off.", "sound")
+    assert result.sound == "mic_off.wav"
     assert pi_ringing == set() and pi.muted
 
 
 def test_mute_at_the_pc_while_the_pi_rings_stops_it_first(pi_and_pc, pi_ringing, brain):
     pi, pc = pi_and_pc.pi, pi_and_pc.pc
-    result = pc.actions.execute(pc.intents.match("Mute.")["actions"][0])
-    assert (result.ok, result.say) == (True, "Stopped, and the Pi's microphone is off.")
+    # "Stop listening": a plain "mute" at a PC which can reach Windows' sound asks which (20 Nov).
+    result = pc.actions.execute(pc.intents.match("Stop listening.")["actions"][0])
+    assert (result.ok, result.say, result.confirm) == (True, "Stopped, and the Pi's microphone is off.", "sound")
+    assert result.sound == "mic_off.wav"
     assert pi_ringing == set() and pi.muted and not pc.muted
     # A name he gave it keeps its own case mid-sentence.
     pi.set_muted(False)
@@ -1573,10 +1724,132 @@ def test_mute_at_the_pc_while_the_pi_rings_stops_it_first(pi_and_pc, pi_ringing,
         "Stopped, and Bedroom Pi's microphone is off."
 
 
+# The PC's own microphone in Windows (his rulings, 20 Nov)
+
+@pytest.fixture
+def windows_pc(pi_and_pc, monkeypatch):
+    """The PC of pi_and_pc saying it can reach Windows' sound and microphone, which answer as Windows would."""
+    pc = pi_and_pc.pc
+    windows = SimpleNamespace(asked=[], mic_muted=False, muted=False)
+
+    def ask_computer(action, **fields):
+        windows.asked.append((action, fields))
+        if action == "mic":
+            windows.mic_muted = fields["mute"]
+            return {"said": "Microphone off." if fields["mute"] else "Microphone on.", "muted": fields["mute"]}
+        windows.muted = fields.get("mute", windows.muted)
+        return {"level": 40, "muted": windows.muted}
+
+    monkeypatch.setattr(pc.satellite, "system_volume", True)
+    monkeypatch.setattr(pc.satellite, "ask_computer", ask_computer)
+    # "The Pi" names a satellite, as the brain would say.
+    for session in (pi_and_pc.pi, pc):
+        monkeypatch.setattr(session.intents, "names_satellite", lambda said: said == "the pi")
+    # Claude, if asked, says only this.
+    monkeypatch.setattr(pc.llm, "process_query", lambda text, **kwargs: {"response": "Claude's answer.",
+                                                                          "actions": [], "success": True})
+    pi_and_pc.windows = windows
+    return pi_and_pc
+
+
+def test_mute_the_mic_at_the_pc_mutes_windows_microphone_with_a_sound(windows_pc):
+    pi, pc, windows = windows_pc.pi, windows_pc.pc, windows_pc.windows
+    reply = pc.conversation.handle("Mute the mic.")
+    assert (reply.say, reply.sounds) == ("", [("mic_off.wav", "general")])
+    assert windows.asked == [("mic", {"mute": True, "minutes": 60})] and windows.mic_muted
+    # Nova's own listening, on the Pi and the PC, is left alone.
+    assert not pi.muted and not pc.muted
+    reply = pc.conversation.handle("Unmute the microphone.")
+    assert (reply.say, reply.sounds) == ("", [("mic_on.wav", "general")])
+    assert windows.asked[-1] == ("mic", {"mute": False}) and not windows.mic_muted
+
+
+@pytest.mark.parametrize("answer", ["The mic.", "mic", "Microphone.", "the microphone please", "Nova, mute the mic."])
+def test_plain_mute_at_the_pc_asks_and_the_mic_answer_mutes_windows_microphone(windows_pc, answer):
+    pc, windows = windows_pc.pc, windows_pc.windows
+    asked = pc.conversation.handle("Mute.")
+    assert asked.say == "The mic or the audio?" and asked.listen_again
+    assert windows.asked == []
+    # The answer, heard without the wake word.
+    reply = pc.conversation.handle(answer, follow_up=True)
+    assert (reply.say, reply.sounds) == ("", [("mic_off.wav", "general")])
+    assert windows.asked == [("mic", {"mute": True, "minutes": 60})]
+    assert not windows_pc.pi.muted
+
+
+@pytest.mark.parametrize("answer", ["The audio.", "sound", "Audio please.", "the sound"])
+def test_plain_mute_at_the_pc_asks_and_the_audio_answer_mutes_windows_sound(windows_pc, answer):
+    pc, windows = windows_pc.pc, windows_pc.windows
+    pc.conversation.handle("Mute.")
+    reply = pc.conversation.handle(answer, follow_up=True)
+    assert reply.say == "Muted." and windows.asked == [("volume", {"mute": True})]
+
+
+def test_plain_unmute_at_the_pc_asks_too(windows_pc):
+    pc, windows = windows_pc.pc, windows_pc.windows
+    assert pc.conversation.handle("Unmute.").say == "The mic or the audio?"
+    reply = pc.conversation.handle("the mic", follow_up=True)
+    assert reply.sounds == [("mic_on.wav", "general")] and windows.asked == [("mic", {"mute": False})]
+    assert pc.conversation.handle("Unmute.").say == "The mic or the audio?"
+    pc.conversation.handle("audio", follow_up=True)
+    assert windows.asked[-1] == ("volume", {"mute": False})
+
+
+def test_anything_else_said_back_to_which_is_a_fresh_request(windows_pc):
+    pc, windows = windows_pc.pc, windows_pc.windows
+    pc.conversation.handle("Mute.")
+    assert pc.conversation.handle("What's the capital of France?", follow_up=True).say == "Claude's answer."
+    assert windows.asked == []
+    # And it's gone: "the mic" now is no answer to anything.
+    pc.conversation.handle("the mic", follow_up=True)
+    assert windows.asked == []
+
+
+def test_stop_listening_and_a_device_named_at_the_pc_are_unchanged(windows_pc):
+    pi, pc, windows = windows_pc.pi, windows_pc.pc, windows_pc.windows
+    reply = pc.conversation.handle("Stop listening.")
+    assert reply.sounds == [("mic_off.wav", "general")] and pi.muted
+    pc.conversation.handle("Unmute the Pi.")
+    assert not pi.muted
+    pc.conversation.handle("Mute the Pi.")
+    assert pi.muted
+    assert windows.asked == []
+
+
+def test_plain_mute_at_the_pc_stops_the_pi_ringing_in_its_room_rather_than_asking(windows_pc, brain, monkeypatch):
+    pi, pc, windows = windows_pc.pi, windows_pc.pc, windows_pc.windows
+    ringing = {"bedroom"}
+    monkeypatch.setattr(brain, "room_of", lambda name: [name] + [other for other in ("pc", "bedroom") if other != name])
+    monkeypatch.setattr(brain.clock, "is_ringing", lambda satellite=None: bool(ringing & set(
+        satellite if isinstance(satellite, list) else [satellite])))
+
+    def dismiss(satellite=None):
+        ringing.clear()
+        return {"success": True, "message": "Okay."}
+
+    monkeypatch.setattr(brain.clock, "dismiss", dismiss)
+    reply = pc.conversation.handle("Mute.")
+    assert reply.say != "The mic or the audio?" and not reply.listen_again
+    assert ringing == set() and windows.asked == [] and not pi.muted
+
+
+def test_plain_mute_at_the_pi_still_mutes_the_pi(windows_pc):
+    pi, windows = windows_pc.pi, windows_pc.windows
+    reply = pi.conversation.handle("Mute.")
+    assert reply.sounds == [("mic_off.wav", "general")] and pi.muted and windows.asked == []
+
+
+def test_an_older_pc_satellite_which_doesnt_know_mic_says_so(windows_pc, monkeypatch):
+    pc = windows_pc.pc
+    monkeypatch.setattr(pc.satellite, "ask_computer", lambda action, **fields: {
+        "error": "I can't do that on this computer."})
+    assert pc.conversation.handle("Mute the mic.").say == "I can't do that on this computer."
+
+
 def test_unmute_leaves_a_ring_alone(pi_and_pc, pi_ringing):
     pi_and_pc.pi.set_muted(True)
     result = pi_and_pc.pc.actions.execute(Action("mute_microphone", {"muted": False, "where": "the Pi"}))
-    assert result.say == "The Pi's microphone is on." and pi_ringing == {"bedroom"}
+    assert (result.say, result.sound) == ("The Pi's microphone is on.", "mic_on.wav") and pi_ringing == {"bedroom"}
 
 
 def test_mute_a_satellite_not_connected_says_so(pi_and_pc, brain):

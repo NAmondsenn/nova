@@ -133,6 +133,8 @@ EDITABLE = [
     ("journeys", "distance_unit", "Distances said in", "now"),
     # Read at each "search for" on a computer.
     ("computer", "search_site", "Search site for 'search for' on a computer", "now"),
+    # Sent with each "mute the mic" at the PC.
+    ("computer", "mic_mute_minutes", "Minutes the PC's microphone stays muted", "now"),
     # Sent to a push-to-talk satellite with its state, so a save reaches it at once - see Session.send_state.
     ("computer", "screen_orb", "Show Nova on the computer's screen while it listens and speaks", "now"),
     ("computer", "screen_orb_place", "Where on the screen", "now"),

@@ -28,7 +28,7 @@ from typing import Callable, Dict, Iterator, List, Optional, Tuple
 import numpy as np
 
 from voice_assistant import paths, pc_apps, pc_windows, protocol, storage, watchdog
-from voice_assistant.computers import NOT_A_WEB_ADDRESS, safe_url, url_host
+from voice_assistant.computers import MIC_MUTE_MINUTES, NOT_A_WEB_ADDRESS, safe_url, url_host
 from voice_assistant.config import Config, ConfigError
 from voice_assistant.echo import make_echo_canceller
 from voice_assistant.fallback import AlarmCopy, FallbackRinger, Phrase, StateCopy
@@ -53,6 +53,23 @@ logger = logging.getLogger(__name__)
 # when starting means the last run didn't, which the brain is told as it connects. The
 # same mark the Pi left before it was a satellite.
 RUNNING_MARK = os.path.join(paths.DATA_DIR, "running")
+
+# When the PC's own microphone, muted by Nova, comes back on by itself - {"until": epoch
+# seconds} - kept so a restart of the satellite keeps the hour. See
+# docs/superpowers/specs/2026-11-20-mute-means-the-microphone-design.md.
+MIC_MUTE_FILE = os.path.join(paths.DATA_DIR, "mic_muted_until.json")
+
+# The seconds in each of the minutes a mute of the PC's microphone lasts - computer.mic_mute_minutes,
+# or computers.MIC_MUTE_MINUTES when the brain doesn't say - a constant so the tests can shorten it.
+MINUTE = 60
+
+# The longest the wait for a mute to run out goes without looking at the clock again: Windows
+# counts a wait's time only while the PC is awake, so one long wait would end late by however
+# long the PC slept.
+MIC_LOOK_EVERY = 30
+
+# Played when the PC's microphone comes back on by itself.
+MIC_ON_SOUND = "mic_on.wav"
 
 # The pieces a recording is sent in, in seconds of it - small, so the brain hears the
 # user as they speak, and can tell the moment they've stopped.
@@ -137,6 +154,7 @@ NOT_HERE = "That's not on this PC any more."
 COULDNT_OPEN = "That couldn't be opened."
 NOTHING_TO_CLOSE = "There's nothing to close."
 NO_VOLUME = "This computer's volume can't be changed."
+NO_MICROPHONE = "This computer's microphone can't be changed."
 CANT_DO = "I can't do that on this computer."
 
 
@@ -353,6 +371,17 @@ class Satellite:
             self.opens = pc_windows.load()
             volume = SystemVolume()
             self.system_volume = volume if volume.available else None
+        # Windows' microphone, muted by Nova until a time, when it comes back on by itself - or
+        # None. Held open says a press has unmuted it for its recording, to be muted again when
+        # the recording ends. Both under _mic_lock, held while Windows is asked, so the press,
+        # the brain and the time running out never cross. _mic_changed wakes the thread
+        # which waits for the time.
+        self._mic_lock = threading.Lock()
+        self._mic_until: Optional[float] = self._load_mic_mute() if self.system_volume is not None else None
+        self._mic_held_open = False
+        self._mic_changed = threading.Event()
+        # Whether looking at Windows' microphone has failed, so it's only logged the once.
+        self._mic_look_failed = False
         # Nova's orb on the PC's screen, while it listens, thinks and speaks there - only
         # on a push-to-talk satellite on Windows, which is the PC, and only where its
         # window can be made, else None and nothing is shown. What it shows is worked out
@@ -474,6 +503,8 @@ class Satellite:
                                       system_volume=self.system_volume is not None)
             self.link.start()
             threading.Thread(target=self._ring_when_due, daemon=True, name="fallback").start()
+            if self.system_volume is not None:
+                threading.Thread(target=self._unmute_mic_when_due, daemon=True, name="microphone").start()
             if self.opens:
                 threading.Thread(target=self._keep_apps, daemon=True, name="apps").start()
                 threading.Thread(target=self._keep_windows, daemon=True, name="windows").start()
@@ -606,8 +637,9 @@ class Satellite:
     def _unmute_windows(self):
         """
         Unmutes Windows as a press starts listening, so its sound and Nova's reply are
-        heard. Before the sound, and never in its way: a failure is logged and the press
-        goes on.
+        heard - and its microphone, for this turn only, so Nova hears him and his answer to
+        any question she asks (see _mute_mic_again). Before the sound and the recording, and
+        never in their way: a failure is logged and the press goes on.
         """
         if self.system_volume is None:
             return
@@ -616,6 +648,43 @@ class Satellite:
                 logger.info("Windows was muted, so it's unmuted for the press")
         except Exception as e:
             logger.warning(f"Couldn't check whether Windows is muted ({type(e).__name__})")
+            if isinstance(e, TimeoutError):
+                # Its thread is stuck, so the microphone would only wait as long again.
+                return
+        # Muted by Nova or by hand, it's the same: on for the turn, and muted again after. Only
+        # ever set here, never cleared: a second press in the same turn finds it on, and the
+        # turn's end still owes it the mute.
+        with self._mic_lock:
+            try:
+                opened = self.system_volume.unmute_microphone_if_muted()
+            except Exception as e:
+                logger.warning(f"Couldn't check whether Windows' microphone is muted ({type(e).__name__})")
+                return
+            if opened:
+                self._mic_held_open = True
+        if opened:
+            logger.info("Windows' microphone was muted, so it's unmuted for this turn")
+
+    def _mute_mic_again(self):
+        """
+        Mutes Windows' microphone again once a press's turn is over - when the brain lets
+        announcements back (allow), after any question and its answer, or when the brain is
+        lost or the satellite stops - if the press unmuted it, the hour of a mute by Nova
+        carrying on as it was. Not if the hour ran out meanwhile, or the brain has since been
+        told to mute or unmute it, which have each let it go.
+        """
+        if self.system_volume is None:
+            return
+        with self._mic_lock:
+            if not self._mic_held_open:
+                return
+            self._mic_held_open = False
+            try:
+                self.system_volume.mute_microphone(True)
+            except Exception as e:
+                logger.warning(f"Couldn't mute Windows' microphone again after the recording ({type(e).__name__})")
+                return
+        logger.info("Windows' microphone is muted again, as it was before the press")
 
     def _keep_clip(self, score: float):
         """
@@ -736,6 +805,8 @@ class Satellite:
             if ended == "dropped":
                 self._save_timeline(outcome="no_brain")
         if ended == "dropped":
+            # No turn follows, nor perhaps a disconnect, if the brain went just as this began.
+            self._mute_mic_again()
             self._say_cant_reach()
 
     def _send_follow_up(self):
@@ -891,9 +962,15 @@ class Satellite:
             if self._turn_open:
                 self._save_timeline()
             self._turn_open = False
+            # The end of the turn before, which came as a press began this one: its
+            # recording still has the microphone, and this turn's own end mutes it.
+            recording = self._recording
+            stale = recording is not None and not recording.is_set()
         # A turn which said nothing is over, so the orb isn't left waiting for its words.
         self._orb_states.turn_ended()
         self.speaker.allow(message["kind"])
+        if not stale:
+            self._mute_mic_again()
 
     def _play_sound(self, message: Dict, payload: bytes):
         kind = message.get("kind", "reply")
@@ -1229,10 +1306,13 @@ class Satellite:
 
         Returns:
             The answer for computer_done - {"said": ...} or {"error": ...}, and for volume
-            the level and mute - and what to do once it's sent, if anything.
+            the level and mute, for the microphone its mute - and what to do once it's sent,
+            if anything.
         """
         if action == "volume":
             return self._change_volume(message), None
+        if action == "mic":
+            return self._mute_microphone(message), None
         if not self.opens or action not in protocol.COMPUTER_ACTIONS:
             return {"error": CANT_DO}, None
         if action == "open":
@@ -1304,6 +1384,124 @@ class Satellite:
             return {"error": NO_VOLUME}
         logger.info(f"Windows' volume is at {now['level']} percent{', muted' if now['muted'] else ''}")
         return {"said": "Muted." if now["muted"] else f"Volume {now['level']} percent.", **now}
+
+    def _mute_microphone(self, message: Dict) -> Dict:
+        """
+        Mutes or unmutes Windows' own microphone as the brain asked, and says whether it's muted
+        now. A mute lasts the minutes the brain sent (MIC_MUTE_MINUTES if none, from an older
+        brain), each mute starting them again; an unmute ends them.
+        """
+        mute, minutes = message.get("mute"), message.get("minutes", MIC_MUTE_MINUTES)
+        if not isinstance(mute, bool) or not (_whole(minutes) and minutes > 0):
+            return {"error": CANT_DO}
+        if self.system_volume is None:
+            return {"error": NO_MICROPHONE}
+        with self._mic_lock:
+            try:
+                muted = self.system_volume.mute_microphone(mute)
+            except Exception as e:
+                logger.warning(f"Couldn't change Windows' microphone ({type(e).__name__})")
+                return {"error": NO_MICROPHONE}
+            # Said by voice, so a press's recording ending doesn't change it back.
+            self._mic_held_open = False
+            self._keep_mic_mute(time.time() + minutes * MINUTE if muted else None)
+        self._mic_changed.set()
+        logger.info(f"Windows' microphone is {f'muted for {minutes} minutes' if muted else 'on'}")
+        return {"said": "Microphone off." if muted else "Microphone on.", "muted": muted}
+
+    def _load_mic_mute(self) -> Optional[float]:
+        """When a mute of Windows' microphone by Nova from before a restart ends - or None for none."""
+        try:
+            kept = storage.load_json(MIC_MUTE_FILE)
+        except (OSError, ValueError) as e:
+            logger.warning(f"Couldn't read when Windows' microphone comes back on ({type(e).__name__})")
+            return None
+        until = kept.get("until") if isinstance(kept, dict) else None
+        return float(until) if isinstance(until, (int, float)) and not isinstance(until, bool) else None
+
+    def _keep_mic_mute(self, until: Optional[float]):
+        """Notes when Windows' microphone comes back on, or that it won't, here and in MIC_MUTE_FILE. Call with _mic_lock held."""
+        self._mic_until = until
+        try:
+            if until is None:
+                if os.path.exists(MIC_MUTE_FILE):
+                    os.remove(MIC_MUTE_FILE)
+            else:
+                storage.save_json(MIC_MUTE_FILE, {"until": until})
+        except OSError as e:
+            # Kept here all the same: only a restart before it's due would lose it.
+            logger.warning(f"Couldn't keep when Windows' microphone comes back on ({type(e).__name__})")
+
+    def _unmute_mic_when_due(self):
+        """Waits for a mute of Windows' microphone by Nova to run out, and turns it back on, until the satellite stops."""
+        while not self._finished.is_set():
+            # Cleared before looking, so a change made while looking isn't missed.
+            self._mic_changed.clear()
+            with self._mic_lock:
+                until = self._mic_until
+            if until is not None and time.time() >= until:
+                self._mic_mute_ran_out(until)
+                continue
+            if until is not None and self._mic_on_by_hand(until):
+                continue
+            # In slices, looking at the clock again after each, as the PC may sleep meanwhile.
+            self._mic_changed.wait(None if until is None else min(until - time.time(), MIC_LOOK_EVERY))
+
+    def _mic_on_by_hand(self, until: float) -> bool:
+        """
+        Ends Nova's mute of Windows' microphone, with nothing played, if he has turned the
+        microphone back on himself (his mic's touch button, or Windows) - so a mute of his own
+        after that isn't undone when the hour would have run out. Not while a press's turn
+        holds it open. Looked at once each slice of the wait for the hour.
+
+        Args:
+            until: When the mute is due to run out, so one changed since is left alone.
+
+        Returns:
+            Whether the mute was ended.
+        """
+        with self._mic_lock:
+            if self._mic_until != until or self._mic_held_open:
+                return False
+            try:
+                muted = self.system_volume.microphone_muted()
+            except Exception as e:
+                # Once, rather than every 30 seconds; the hour runs out as it would have.
+                if not self._mic_look_failed:
+                    logger.warning(f"Couldn't look at whether Windows' microphone is muted ({type(e).__name__})")
+                    self._mic_look_failed = True
+                return False
+            if muted:
+                return False
+            self._keep_mic_mute(None)
+        logger.info("Windows' microphone was turned back on by hand, so Nova's mute of it is over")
+        return True
+
+    def _mic_mute_ran_out(self, until: float):
+        """
+        Turns Windows' microphone back on as Nova's mute runs out, with mic_on.wav - only if it's
+        still muted (even by hand during a press's turn), or a press's turn has it open, which
+        then leaves it on. One turned back on by hand meanwhile is left as it is, and nothing plays.
+
+        Args:
+            until: When it was due, so a mute or unmute since is left alone.
+        """
+        with self._mic_lock:
+            if self._mic_until != until:
+                return
+            self._keep_mic_mute(None)
+            held, self._mic_held_open = self._mic_held_open, False
+            try:
+                # Asked whatever the press did: he may have muted it by hand during the turn.
+                back_on = self.system_volume.unmute_microphone_if_muted() or held
+            except Exception as e:
+                logger.warning(f"Couldn't turn Windows' microphone back on ({type(e).__name__})")
+                return
+        if not back_on:
+            logger.info("Nova's mute of Windows' microphone ran out, but it was already on")
+            return
+        logger.info("Nova's mute of Windows' microphone ran out, so it's back on")
+        self.speaker.play_file(os.path.join(self.sounds_folder, MIC_ON_SOUND), volume=self.state.volume("general"))
 
     def _restart(self, message: Dict, payload: bytes):
         logger.info("Restarting, as the brain asked")
@@ -1457,6 +1655,8 @@ class Satellite:
         for each in playing:
             each.playback.stop()
             each.let_go()
+        # Nobody is left to end the turn which a press opened the microphone for.
+        self._mute_mic_again()
         if waiting:
             # After the brain's own sounds have stopped, so it isn't stopped with them.
             # It lets the alarms ring again too.
@@ -1503,6 +1703,7 @@ class Satellite:
         """
         self._stopping = True
         self._finished.set()
+        self._mic_changed.set()
         # So the list threads see it now, not at their next look.
         self._apps_wanted.set()
         self._windows_wanted.set()
@@ -1514,6 +1715,8 @@ class Satellite:
         if self.media is not None:
             self.media.close()
         if self.system_volume is not None:
+            # Never left open by a press past the satellite's own end.
+            self._mute_mic_again()
             self.system_volume.close()
         if self.orb is not None:
             self.orb.close()

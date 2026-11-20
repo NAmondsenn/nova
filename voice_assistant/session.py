@@ -93,6 +93,10 @@ TYPED_ANSWER_WAIT = 60
 # Nova box takes, so only something else sending to its topic is ever cut short.
 ASK_MOST = 255
 
+# The most characters a note may have to be put on the notepad list, as one thing, when its
+# computer is off. A longer one is said not to fit, not cut short.
+LIST_ITEM_MOST = 255
+
 
 # The longest timer the Nova view's Add timer box sets, in seconds.
 LONGEST_TIMER = 24 * 3600
@@ -1005,10 +1009,12 @@ class Session:
                 (see Brain.ring_on) - the PC only listens while its key is held.
 
         Returns:
-            Dict with 'success' and what to say: "Microphone off." for this one, "The Pi's
-            microphone is off." for another, after "Stopped, and" if what rang there was
-            stopped first; or why not, when the words name none, or one which isn't
-            connected or which only listens on a press of its key.
+            Dict with 'success' and a 'message'. A success is confirmed by a sound, mic_off.wav
+            or mic_on.wav, played where it was spoken, and its message is only logged:
+            "Microphone off.", "The Pi's microphone is off." for another, after "Stopped,
+            and" if what rang there was stopped first. A failure says why not, when the
+            words name none, or one which isn't connected or which only listens on a press
+            of its key.
         """
         here = self.satellite.name
         if where:
@@ -1038,7 +1044,8 @@ class Session:
             said = f"microphone {state}." if stopped else f"Microphone {state}."
         else:
             said = f"{spoken if stopped else starting}'s microphone is {state}."
-        return {"success": True, "message": f"Stopped, and {said}" if stopped else said}
+        return {"success": True, "message": f"Stopped, and {said}" if stopped else said,
+                "sound": f"mic_{state}.wav", "sound_category": "general"}
 
     def _save_note(self, title: str, text: str, where: Optional[str] = None) -> Dict:
         """
@@ -1052,7 +1059,8 @@ class Session:
 
         Returns:
             Dict with 'success' and the 'message' to say - "Saved to your Downloads as Bins." or, on
-            another satellite, "Saved to the Downloads on the PC as Bins.", or why it wasn't saved.
+            another satellite, "Saved to the Downloads on the PC as Bins.", or why it wasn't saved. For
+            a computer which isn't connected, the note goes on the notepad list instead, and that's said.
         """
         name, problem = self.brain.notes_for(self.satellite.name, where)
         if name is None:
@@ -1062,8 +1070,9 @@ class Session:
         else:
             session = self.brain.session_for(name)
             if session is None:
-                # Gone since it was chosen.
-                return {"success": False, "message": self.brain.not_connected(name)}
+                # Asleep, or Nova isn't running there. Not for a computer which was asked and didn't
+                # answer: its file may yet land, and a copy on the list as well would be a duplicate.
+                return self._note_on_the_list(text, self.brain.not_connected(name))
             satellite = session.satellite
         # The satellite refuses it too, but a runaway reply shouldn't have to cross the link first.
         if len(text) > MOST_TEXT:
@@ -1083,6 +1092,39 @@ class Session:
             return {"success": True, "message": f"Saved to your Downloads as {saved_as}."}
         # Said where it went, as it isn't where the user is to see it.
         return {"success": True, "message": f"Saved to the Downloads on {self.brain.spoken_name(name)} as {saved_as}."}
+
+    def _note_on_the_list(self, text: str, why: str) -> Dict:
+        """
+        Puts a note on the notepad list - the one "notes" means to the lists - for a computer which
+        can't be asked to save it, so it isn't lost.
+
+        Args:
+            text: What the note says, which goes on as one line. Never logged.
+            why: Why it can't be saved on the computer, e.g. "Your PC's off.".
+
+        Returns:
+            Dict with 'success' True only if it went on the list, and the 'message' to say, which
+            starts with why. A failure may be unsure, if Home Assistant was too slow to say.
+        """
+        said = why.removesuffix(".")
+        # A list's thing is a line, which a note's lines would otherwise run on from.
+        item = " ".join(line.strip() for line in text.splitlines() if line.strip())
+        if len(item) > LIST_ITEM_MOST:
+            return {"success": False,
+                    "message": f"{said}, and that note's too long for your notepad list, so it wasn't saved."}
+        lists = self.brain.lists
+        added = lists.add([item], "notes") if lists is not None else {}
+        if added.get("unsure"):
+            # Home Assistant may well have added it, so "couldn't" would be wrong.
+            return {"success": False,
+                    "message": f"{said}, and Home Assistant was slow, so I'm not sure it went on your notepad "
+                               f"list. Have a look."}
+        if not added.get("success"):
+            return {"success": False, "message": f"{said}, and I couldn't put it on your notepad list either."}
+        # Lists says "Added <item> to your notepad list.", which names the list as it's called in Home Assistant.
+        _, found, name = added["message"].removesuffix(".").rpartition(" to your ")
+        where = f"your {name}" if found else "your notes list"
+        return {"success": True, "message": f"{said}, so I've put it on {where} instead."}
 
     def _note_not_saved(self, why: str, name: str) -> Dict:
         """

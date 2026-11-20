@@ -67,6 +67,7 @@ UNAVAILABLE = {
     "notes": NO_NOTES,
     "computer": "There's no computer here to open things on.",
     "microphone": "The microphone can't be muted from here.",
+    "computer_mic": "This device's own microphone can't be muted by Nova.",
 }
 
 # What's said when the new-music playlist isn't there - before Nova's first morning making it,
@@ -164,6 +165,39 @@ class Action:
                                      for name, value in self.params.items()})
 
 
+@dataclass(frozen=True)
+class Choice:
+    """
+    A question with set answers, each doing its own thing - "The mic or the audio?" - asked
+    first as a yes or no question is, and answered the same way: only by the very next thing
+    said, with anything else a fresh request (see ActionResult.ask_first, Conversation.handle).
+
+    Attributes:
+        answers: (pattern, Action) pairs, in order. The first pattern which matches the whole
+            answer, tidied as a yes is ("Nova, the mic please." is "the mic"), runs its Action.
+    """
+    answers: Tuple[Tuple[str, Action], ...]
+
+    def chosen(self, said: str) -> Optional[Action]:
+        """
+        Args:
+            said: The answer, tidied.
+
+        Returns:
+            The Action it chooses, or None if it chooses none.
+        """
+        return next((action for pattern, action in self.answers if re.fullmatch(pattern, said)), None)
+
+
+# The answers to "The mic or the audio?" - "the mic", "microphone", "mute the sound" - each with the
+# question's own verb, if one is said: "mute the audio" isn't an answer to "Unmute.", so it's a
+# fresh request.
+MIC_ANSWER = r"(?:{verb} )?(?:the |my )?(?:mic|microphone)"
+SOUND_ANSWER = r"(?:{verb} )?(?:the |my )?(?:audio|sound)"
+# Asked at the PC of a plain "mute" or "unmute", which could be either (his ruling, 20 Nov).
+MIC_OR_AUDIO = "The mic or the audio?"
+
+
 def _shown(value: Any, host: bool) -> str:
     """What's logged of a value which isn't - its host, for a web address which is one, else its length."""
     if not isinstance(value, str):
@@ -196,7 +230,8 @@ class ActionResult:
         private: Whether what it says is the user's alone - where their phone is - and
             so kept from Claude when it was asked for locally (see Conversation.handle).
         ask_first: What to do if the user says yes to the question it asks - shutting
-            the PC down, after "Shut down the PC?" - or None (see Conversation.handle).
+            the PC down, after "Shut down the PC?" - or a Choice, for a question with set
+            answers ("The mic or the audio?"), or None (see Conversation.handle).
         after_said: Something to do once the reply has been said, not before - putting the PC
             to sleep, so "Putting your PC to sleep." is heard - or None. Gives {"success",
             "message"} (see Reply.after).
@@ -208,7 +243,7 @@ class ActionResult:
     sound_category: str = "general"
     understood: bool = True
     private: bool = False
-    ask_first: Optional[Action] = None
+    ask_first: Union[Action, Choice, None] = None
     after_said: Optional[Callable[[], Dict]] = None
 
     @classmethod
@@ -606,8 +641,12 @@ class ActionExecutor:
     def _set_up(self, name: str) -> bool:
         """
         Whether the part of the assistant a tool needs is there - for the computer, one which opens things,
-        and for notes, a satellite which saves them, whichever one the user is talking to.
+        and for notes, a satellite which saves them, whichever one the user is talking to - and for the
+        computer's own microphone, being at one which can mute it.
         """
+        if name == "computer_mic":
+            # Only at a computer which said it can reach Windows' volume, whatever it opens.
+            return self.computer is not None and self.computer.has_microphone()
         part = getattr(self, name)
         if name == "computer":
             return part is not None and part.offered()
@@ -1523,7 +1562,8 @@ class ActionExecutor:
                 "or audio ('mute the sound', 'turn the audio off on the PC', 'unmute the "
                 "sound'). At a computer it's the system volume's mute; anywhere else it's "
                 "that device's music only, never alarms, timers or the assistant's voice. "
-                "A plain 'mute' or 'unmute' is the microphone: use mute_microphone."
+                "A plain 'mute' or 'unmute' is the microphone: use mute_microphone - at a "
+                "computer, mute_computer_mic."
             ),
         },
     )
@@ -1580,6 +1620,35 @@ class ActionExecutor:
     )
     def mute_microphone(self, muted: bool, where: Optional[str] = None):
         return self.microphone(bool(muted), where or None)
+
+    @tool(
+        "Mute or unmute the microphone of the computer the user is talking at, in Windows itself, so "
+        "nothing on it hears them - for 'mute the mic', 'mute my microphone', 'turn the mic back on' said "
+        "at a computer. It comes back on by itself after a while. Not 'stop listening', which is "
+        "mute_microphone's, nor a device named.",
+        needs="computer_mic",
+        required=["muted"],
+        muted={"type": "boolean", "description": "True to mute it, false to unmute it."},
+    )
+    def mute_computer_mic(self, muted: bool):
+        return self.computer.microphone(bool(muted))
+
+    # Only run by the local rules, for a plain "mute" or "unmute" at a computer, which could be
+    # its microphone or its sound: whichever is said back is done (Conversation.handle).
+    @tool(
+        "Ask whether a plain 'mute' at a computer is its microphone or its sound.",
+        needs="computer_mic",
+        required=["muted"],
+        for_model=False,
+        muted={"type": "boolean", "description": "True for mute, false for unmute."},
+    )
+    def mute_which(self, muted: bool):
+        muted = bool(muted)
+        verb = "mute" if muted else "unmute"
+        return {"success": True, "message": MIC_OR_AUDIO, "ask_first": Choice((
+            (MIC_ANSWER.format(verb=verb), Action("mute_computer_mic", {"muted": muted})),
+            (SOUND_ANSWER.format(verb=verb), Action("set_volume", {"mute": muted})),
+        ))}
 
     @staticmethod
     def _with_beep(category: str, result: Dict) -> Dict:
@@ -2069,9 +2138,13 @@ class ActionExecutor:
                                    lambda first, days: self.calendar.activity(activity or "", first, days))
 
     @tool(
-        "Add an event to the user's Google calendar, for 'put the dentist on Thursday at 3'. start and end are "
-        "local 'YYYY-MM-DD HH:MM', or 'YYYY-MM-DD' for all day; leave end out for an hour. Give calendar only "
-        "when the user names one, e.g. 'work'. What was added is said for you, so just reply 'Okay.'",
+        "Add an event to the user's Google calendar, for 'put the dentist on Thursday at 3'. Never call this when "
+        "the user says remove, cancel, delete, take off or clear - remove_from_calendar is for those, even when the "
+        "rest of the sentence is garbled ('Remove, go to the dentist next Thursday' removes the dentist, it never "
+        "adds one). start and end are local 'YYYY-MM-DD HH:MM', or 'YYYY-MM-DD' for all day; leave end out for an "
+        "hour. Give calendar only when the user names one, e.g. 'work'. Give repeat only when the user says it "
+        "repeats - 'every weekday', 'every Tuesday', 'each month', 'every year' - and never otherwise: start is "
+        "then the first one. What was added is said for you, so just reply 'Okay.'",
         needs="calendar",
         required=["summary", "start"],
         summary={"type": "string", "description": "What the event is, as it'd be written on the calendar, e.g. "
@@ -2080,18 +2153,41 @@ class ActionExecutor:
         end={"type": "string", "description": "When it ends, only when the user said - an end day is included."},
         all_day={"type": "boolean", "description": "Whether it's all day. Leave out for a day without a time."},
         calendar={"type": "string", "description": "The calendar the user named, as they said it."},
+        repeat={"type": "string", "enum": ["daily", "weekdays", "weekly", "monthly", "yearly"],
+                "description": "How often it repeats, only when the user said it does: 'weekdays' is Monday to "
+                               "Friday. Leave out for an event which happens once."},
+        repeat_on={"type": "array", "items": {"type": "string", "enum": [
+            "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]},
+                   "description": "Only for 'weekly': the weekdays it's on, e.g. ['Monday', 'Wednesday']. Leave "
+                                  "out for the weekday start falls on."},
+        repeat_every={"type": "integer", "minimum": 1,
+                      "description": "Every how many days, weeks, months or years, e.g. 2 for 'every other week'. "
+                                     "Leave out for every one."},
+        repeat_until={"type": "string", "description": "The last day it repeats on, 'YYYY-MM-DD', only when the user "
+                                                       "said when it stops."},
+        repeat_times={"type": "integer", "minimum": 1,
+                      "description": "How many times it happens in all, only when the user said so, e.g. 10 - "
+                                     "never with repeat_until."},
     )
     def add_to_calendar(self, summary: Optional[str] = None, start: Optional[str] = None, end: Optional[str] = None,
-                        all_day: Optional[bool] = None, calendar: Optional[str] = None):
-        return self.calendar.add(summary or "", start or "", end=end, all_day=all_day, calendar=calendar)
+                        all_day: Optional[bool] = None, calendar: Optional[str] = None,
+                        repeat: Optional[str] = None, repeat_on: Optional[List[str]] = None,
+                        repeat_every: Optional[int] = None, repeat_until: Optional[str] = None,
+                        repeat_times: Optional[int] = None):
+        # Only what was given, so a repeat is only ever passed on for one the user asked for.
+        repeats = {name: value for name, value in (("repeat", repeat), ("repeat_on", repeat_on),
+                                                   ("repeat_every", repeat_every), ("repeat_until", repeat_until),
+                                                   ("repeat_times", repeat_times)) if value is not None}
+        return self.calendar.add(summary or "", start or "", end=end, all_day=all_day, calendar=calendar, **repeats)
 
     @tool(
         "Remove an event from the user's Google calendar, for 'cancel the dentist', 'take the gym off my "
         "calendar on Friday' or 'get rid of my yoga classes'. Give search, and the day and time only when the "
         "user said them. Give following only for 'all of them', 'every week' or 'from now on' - it removes "
-        "only that one and the ones after it, never earlier ones. What was done is said for you, so just reply "
-        "'Okay.' When Nova lists several and asks which, call again with the day, time or calendar the user "
-        "picks.",
+        "only that one and the ones after it, never earlier ones. Following also means every event of that "
+        "name from then on, for 'all my gym sessions', 'all of them' or 'every one', even when each is an event "
+        "of its own. What was done is said for you, so just reply 'Okay.' When Nova lists several and asks "
+        "which, call again with the day, time or calendar the user picks.",
         needs="calendar",
         required=["search"],
         search={"type": "string", "description": "A word from the event's name as it'd be written on the "
@@ -2101,8 +2197,9 @@ class ActionExecutor:
                                               "YYYY-MM-DD, worked out from today's date."},
         time={"type": "string", "description": "Only when the user said what time, for the event as it is now: "
                                                "HH:MM, 24-hour."},
-        following={"type": "boolean", "description": "True only for 'all of them', 'every week' or 'from now "
-                                                     "on'. Leave out for just the one."},
+        following={"type": "boolean", "description": "True only for 'all of them', 'all my gym sessions', "
+                                                     "'every one', 'every week' or 'from now on'. Leave out for "
+                                                     "just the one."},
         calendar={"type": "string", "description": "The calendar the user named, as they said it, only when they "
                                                    "named one or Nova asked which."},
     )
@@ -2120,8 +2217,10 @@ class ActionExecutor:
         "When only the time changes, give the time alone - never guess a day - and with following, always the "
         "time alone unless the user named a new day. Leave out whatever isn't changing. Give following only for 'all of them', "
         "'every week' or 'from now on' - it changes only that one and the ones after it, never earlier ones, and "
-        "only their time, not their days. What was done is said for you, so just reply 'Okay.' When Nova lists "
-        "several and asks which, call again with the day, time or calendar the user picks.",
+        "only their time, not their days. Following also means every event of that name from then on, for "
+        "'all my gym sessions', 'all of them' or 'every one', even when each is an event of its own. What was "
+        "done is said for you, so just reply 'Okay.' When Nova lists several and asks which, call again with "
+        "the day, time or calendar the user picks.",
         needs="calendar",
         required=["search"],
         search={"type": "string", "description": "A word from the event's name as it'd be written on the "
@@ -2138,8 +2237,9 @@ class ActionExecutor:
                                                   "included, and 'HH:MM' alone is on the start's day."},
         new_name={"type": "string", "description": "What it should be called, as it'd be written on the "
                                                    "calendar, e.g. 'Planning'."},
-        following={"type": "boolean", "description": "True only for 'all of them', 'every week' or 'from now "
-                                                     "on'. Leave out for just the one."},
+        following={"type": "boolean", "description": "True only for 'all of them', 'all my gym sessions', "
+                                                     "'every one', 'every week' or 'from now on'. Leave out for "
+                                                     "just the one."},
         calendar={"type": "string", "description": "The calendar the user named, as they said it, only when they "
                                                    "named one or Nova asked which."},
     )

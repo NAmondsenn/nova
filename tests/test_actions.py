@@ -362,11 +362,13 @@ def test_mute_microphone_is_the_sessions_and_offered_to_claude():
 
     def microphone(muted, where):
         asked.append((muted, where))
-        return {"success": True, "message": "Microphone off."}
+        return {"success": True, "message": "Microphone off.", "sound": "mic_off.wav"}
 
     executor = ActionExecutor(microphone=microphone)
     result = executor.execute(Action("mute_microphone", {"muted": True}))
-    assert (result.ok, result.say) == (True, "Microphone off.")
+    assert (result.ok, result.say, result.confirm, result.sound) == (True, "Microphone off.", "sound", "mic_off.wav")
+    # Confirmed by the sound alone, even when Claude asked and has its own "Okay." to say.
+    assert confirm([result], fallback="Okay.") == ([("mic_off.wav", "general")], [])
     executor.execute(Action("mute_microphone", {"muted": False, "where": "the Pi"}, from_model=True))
     assert asked == [(True, None), (False, "the Pi")]
     schema = next(tool for tool in executor.tool_schemas() if tool["name"] == "mute_microphone")
@@ -376,6 +378,33 @@ def test_mute_microphone_is_the_sessions_and_offered_to_claude():
     bare = ActionExecutor()
     assert all(tool["name"] != "mute_microphone" for tool in bare.tool_schemas())
     assert not bare.execute(Action("mute_microphone", {"muted": True})).ok
+
+
+def test_the_pcs_own_microphone_is_offered_only_at_a_pc_which_can_reach_it(pc_and_pi):
+    offered = {tool["name"]: tool for tool in pc_and_pi.pc.actions.tool_schemas()}
+    assert "mute_computer_mic" in offered and "mute_microphone" in offered["mute_computer_mic"]["description"]
+    # The question is the local rules' alone.
+    assert "mute_which" not in offered
+    assert not pc_and_pi.pc.actions.execute(Action("mute_which", {"muted": True}, from_model=True)).ok
+    # Not at the Pi, which has no Windows to mute.
+    assert "mute_computer_mic" not in {tool["name"] for tool in pc_and_pi.pi.actions.tool_schemas()}
+    refused = pc_and_pi.pi.actions.execute(Action("mute_computer_mic", {"muted": True}))
+    assert not refused.ok and pc_and_pi.windows.asked == []
+
+
+def test_mute_which_asks_the_mic_or_the_audio(pc_and_pi):
+    result = pc_and_pi.pc.actions.execute(Action("mute_which", {"muted": False}))
+    assert (result.ok, result.say) == (True, "The mic or the audio?")
+    assert result.ask_first.chosen("the mic") == Action("mute_computer_mic", {"muted": False})
+    assert result.ask_first.chosen("microphone") == Action("mute_computer_mic", {"muted": False})
+    assert result.ask_first.chosen("unmute the audio") == Action("set_volume", {"mute": False})
+    assert result.ask_first.chosen("sound") == Action("set_volume", {"mute": False})
+    assert result.ask_first.chosen("both") is None and result.ask_first.chosen("the mic and the lights") is None
+    # The other verb is no answer: "mute the audio" after "Unmute." is a fresh request.
+    assert result.ask_first.chosen("mute the audio") is None and result.ask_first.chosen("mute the mic") is None
+    muting = pc_and_pi.pc.actions.execute(Action("mute_which", {"muted": True})).ask_first
+    assert muting.chosen("mute the audio") == Action("set_volume", {"mute": True})
+    assert muting.chosen("unmute the mic") is None
 
 
 def test_mute_at_pc(pc_and_pi):
@@ -1014,24 +1043,75 @@ def test_add_to_calendar_is_only_offered_once_google_is_set_up():
         def activity_calendars(self):
             return {}
 
-        def add(self, summary, start, end=None, all_day=None, calendar=None):
-            self.asked = (summary, start, end, all_day, calendar)
+        def add(self, summary, start, end=None, all_day=None, calendar=None, **repeats):
+            self.asked = (summary, start, end, all_day, calendar, repeats)
             return {"success": True, "message": "Added Shift to Work, Saturday the 31st at 9 AM."}
 
     calendar = FakeCalendar()
     executor = ActionExecutor(calendar=calendar)
     offered = {schema["name"]: schema for schema in executor.tool_schemas()}
     assert offered["add_to_calendar"]["description"] == (
-        "Add an event to the user's Google calendar, for 'put the dentist on Thursday at 3'. start and end are "
-        "local 'YYYY-MM-DD HH:MM', or 'YYYY-MM-DD' for all day; leave end out for an hour. Give calendar only "
-        "when the user names one, e.g. 'work'. What was added is said for you, so just reply 'Okay.'")
+        "Add an event to the user's Google calendar, for 'put the dentist on Thursday at 3'. Never call this when "
+        "the user says remove, cancel, delete, take off or clear - remove_from_calendar is for those, even when the "
+        "rest of the sentence is garbled ('Remove, go to the dentist next Thursday' removes the dentist, it never "
+        "adds one). start and end are local 'YYYY-MM-DD HH:MM', or 'YYYY-MM-DD' for all day; leave end out for an "
+        "hour. Give calendar only when the user names one, e.g. 'work'. Give repeat only when the user says it "
+        "repeats - 'every weekday', 'every Tuesday', 'each month', 'every year' - and never otherwise: start is "
+        "then the first one. What was added is said for you, so just reply 'Okay.'")
     assert offered["add_to_calendar"]["input_schema"]["required"] == ["summary", "start"]
-    assert set(offered["add_to_calendar"]["input_schema"]["properties"]) == {"summary", "start", "end", "all_day",
-                                                                           "calendar"}
+    assert set(offered["add_to_calendar"]["input_schema"]["properties"]) == {
+        "summary", "start", "end", "all_day", "calendar", "repeat", "repeat_on", "repeat_every", "repeat_until",
+        "repeat_times"}
     result = executor.execute(Action("add_to_calendar", {"summary": "Shift", "start": "2026-10-31 09:00",
                                                          "calendar": "work"}, from_model=True))
-    assert calendar.asked == ("Shift", "2026-10-31 09:00", None, None, "work")
+    assert calendar.asked == ("Shift", "2026-10-31 09:00", None, None, "work", {})
     assert (result.ok, result.say) == (True, "Added Shift to Work, Saturday the 31st at 9 AM.")
+
+
+def test_adding_is_never_for_a_sentence_that_says_remove():
+    # A garbled "Remove, go to the dentist next Thursday" once made Claude add a dentist event.
+    class FakeCalendar:
+        def activity_calendars(self):
+            return {}
+
+    description = {schema["name"]: schema for schema in ActionExecutor(calendar=FakeCalendar()).tool_schemas()}[
+        "add_to_calendar"]["description"]
+    for words in ("Never call this when the user says remove, cancel, delete, take off or clear",
+                  "remove_from_calendar is for those", "even when the rest of the sentence is garbled",
+                  "'Remove, go to the dentist next Thursday' removes the dentist, it never adds one"):
+        assert words in description, words
+    # The ban comes before what the tool is told to do, where it's read first.
+    assert description.index("Never call this") < description.index("start and end are")
+
+
+def test_add_to_calendar_passes_a_repeat_on_and_only_when_it_is_given():
+    class FakeCalendar:
+        def activity_calendars(self):
+            return {}
+
+        def add(self, summary, start, end=None, all_day=None, calendar=None, **repeats):
+            self.asked = (summary, start, repeats)
+            return {"success": True, "message": "Added."}
+
+    calendar = FakeCalendar()
+    executor = ActionExecutor(calendar=calendar)
+    properties = {schema["name"]: schema for schema in executor.tool_schemas()}["add_to_calendar"][
+        "input_schema"]["properties"]
+    # The kinds Nova builds a rule for, the weekdays, and whole numbers - Claude never writes a rule.
+    assert properties["repeat"]["enum"] == ["daily", "weekdays", "weekly", "monthly", "yearly"]
+    assert properties["repeat_on"]["type"] == "array" and properties["repeat_on"]["items"]["enum"] == [
+        "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    assert properties["repeat_every"]["type"] == properties["repeat_times"]["type"] == "integer"
+    assert properties["repeat_until"]["type"] == "string" and "YYYY-MM-DD" in properties["repeat_until"]["description"]
+
+    executor.execute(Action("add_to_calendar", {
+        "summary": "Gym", "start": "2026-11-23 08:00", "repeat": "weekly", "repeat_on": ["Monday", "Wednesday"],
+        "repeat_every": 2, "repeat_until": "2026-12-18", "repeat_times": 10}, from_model=True))
+    assert calendar.asked == ("Gym", "2026-11-23 08:00", {
+        "repeat": "weekly", "repeat_on": ["Monday", "Wednesday"], "repeat_every": 2, "repeat_until": "2026-12-18",
+        "repeat_times": 10})
+    executor.execute(Action("add_to_calendar", {"summary": "Gym", "start": "2026-11-23 08:00"}, from_model=True))
+    assert calendar.asked == ("Gym", "2026-11-23 08:00", {})
 
 
 # Removing, moving and renaming calendar events
@@ -1114,6 +1194,17 @@ def test_the_change_tool_says_how_a_day_alone_or_a_time_alone_is_given():
     assert "always with following" not in description
     # Adding is another matter: there a date alone is all day.
     assert "for all day" in offered["add_to_calendar"]["description"]
+
+
+def test_the_change_tools_say_following_covers_every_event_of_that_name_from_then_on():
+    # Five gym sessions made one by one are five events, so "all my gym sessions" is following too.
+    offered = {schema["name"]: schema for schema in ActionExecutor(calendar=RecordingChangeCalendar()).tool_schemas()}
+    for tool in ("remove_from_calendar", "change_calendar_event"):
+        description = offered[tool]["description"]
+        assert "Following also means every event of that name from then on" in description, tool
+        for words in ("'all my gym sessions'", "'all of them'", "'every one'", "even when each is an event of its own"):
+            assert words in description, (tool, words)
+        assert "'all my gym sessions'" in offered[tool]["input_schema"]["properties"]["following"]["description"], tool
 
 
 def test_an_unreadable_day_is_said():
@@ -3564,6 +3655,10 @@ class FakeComputerControl:
 
     def offered(self):
         return self.is_offered
+
+    def has_microphone(self):
+        # Not a computer whose own microphone can be muted - see the pc_and_pi tests for one.
+        return False
 
     def _did(self, *asked):
         self.asked.append(asked)

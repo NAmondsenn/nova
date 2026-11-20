@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
-from voice_assistant.actions import Action, ActionExecutor, ActionResult, confirm
+from voice_assistant.actions import Action, ActionExecutor, ActionResult, Choice, confirm
 from voice_assistant.clock_ringing import Where, heard_in
 from voice_assistant.devices import told_claude
 from voice_assistant.journeys import told_claude as journey_told_claude
@@ -163,9 +163,10 @@ class Conversation:
         self.reminder_offered = False
         self.reminder_answer_pending = False
         # What a yes to the question just asked would do - shutting the PC down, after
-        # "Shut down the PC?" - or None. Only ever the very next thing said in the same
+        # "Shut down the PC?" - or, for a question with set answers, what each would do
+        # ("The mic or the audio?"), or None. Only ever the very next thing said in the same
         # conversation answers it, so a new wake word drops it.
-        self.asked_first: Optional[Action] = None
+        self.asked_first: Union[Action, Choice, None] = None
         # Earlier conversations are only remembered for a few minutes, so this
         # morning's "play that one" doesn't colour tonight's "yes".
         self.llm.forget_stale_history()
@@ -189,22 +190,27 @@ class Conversation:
         # Answering "Shut down the PC?" or "Do you want me to download it?" - read before
         # anything else, the follow-up window's going straight to Claude included, and only
         # once: whatever's said next drops it. Only a yes runs it, and as Nova's own action,
-        # never the model's.
+        # never the model's. A question with set answers ("The mic or the audio?") runs the
+        # one said back.
         asked_first, self.asked_first = self.asked_first, None
         if asked_first is not None:
-            answer = agreed(text) if follow_up else None
+            chosen, answer = _answer_to(asked_first, text) if follow_up else (None, None)
             if answer is not None:
                 timeline.note(outcome="asked_first_answer")
-                result = self._run([Action(asked_first.tool, asked_first.params)])[0] if answer else None
+                result = self._run([Action(chosen.tool, chosen.params)])[0] if answer else None
                 said = result.say if result is not None else "Okay, I'll leave it."
-                logger.info(f"{asked_first.tool} {'run' if answer else 'not run'} on the user's answer")
+                logger.info(f"{chosen.tool} {'run' if answer else 'not run'} on the user's answer")
                 # Kept for Claude even when nothing's said now - "Asked SoulSync for Gooba. It
                 # usually takes a few minutes..." - as the API refuses an exchange with no reply.
                 self.llm.remember(text, said)
-                if result is not None and result.ok and result.confirm == "later":
+                if result is None:
+                    return Reply(say=said)
+                if result.ok and result.confirm == "later":
                     # "Gooba requested." comes once SoulSync has it.
                     return Reply()
-                return Reply(say=said)
+                # As if asked for outright: the mic's own sound, rather than "Microphone off.".
+                sounds, messages = confirm([result], self.chime_enabled)
+                return Reply(say=" ".join(messages), sounds=sounds)
             # Anything else is a fresh request, and nothing is done.
 
         # Answering the assistant's own "shall I turn that reminder off?". Checked
@@ -505,6 +511,38 @@ def agreed(text: str) -> Optional[bool]:
         None - after its punctuation and quote marks, a "nova" at the start and a "please" at
         the end are taken off.
     """
+    said = _plain_answer(text)
+    if said in AGREED:
+        return True
+    if said in DECLINED:
+        return False
+    return None
+
+
+def _answer_to(asked: Union[Action, Choice], text: str) -> Tuple[Optional[Action], Optional[bool]]:
+    """
+    What the answer to a question asked first does.
+
+    Args:
+        asked: The Action a yes runs, or a Choice of answers.
+        text: What the user said back.
+
+    Returns:
+        (the Action to run or not, True to run it, False for a no) - or (None, None) when it isn't
+        an answer, so it's a fresh request. A Choice has no no: only an answer it knows counts.
+    """
+    if isinstance(asked, Choice):
+        chosen = asked.chosen(_plain_answer(text))
+        return (chosen, True) if chosen is not None else (None, None)
+    answer = agreed(text)
+    return (asked, answer) if answer is not None else (None, None)
+
+
+def _plain_answer(text: str) -> str:
+    """
+    An answer to a question tidied to its words: lower case, without its punctuation and quote
+    marks, a "nova" at the start or a "please" at the end.
+    """
     # Digits and other scripts stay words, so "Yes, 10." - most likely in ten minutes - isn't a
     # plain yes. Only the quote marks around a word go, so "'yes'" is one and "don't" stays.
     text = text.lower().replace("\u2018", "'").replace("\u2019", "'")
@@ -514,17 +552,12 @@ def agreed(text: str) -> Optional[bool]:
         words = words[1:]
     if words[-1:] == ["please"]:
         words = words[:-1]
-    said = " ".join(words)
-    if said in AGREED:
-        return True
-    if said in DECLINED:
-        return False
-    return None
+    return " ".join(words)
 
 
-def _only_question(reply: str, results: List[ActionResult]) -> Optional[Action]:
+def _only_question(reply: str, results: List[ActionResult]) -> Union[Action, Choice, None]:
     """
-    What a yes to the reply would do - only when exactly one result asks first and its
+    What a yes (or, for a Choice, each answer) to the reply would do - only when exactly one result asks first and its
     question is the whole of what's asked: the reply's last sentence, with no other ending
     "?". "Shut down the PC? Which light?" asks two things, so a yes does neither.
 
