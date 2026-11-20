@@ -36,7 +36,7 @@ import secrets
 import threading
 import time
 from datetime import date, datetime, time as day_time, timedelta, timezone
-from typing import Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Callable, Dict, List, NamedTuple, Optional, Set, Tuple, Union
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
@@ -197,6 +197,14 @@ MOST_OTHERS_IN_OVERVIEW = 5
 # most matches said.
 SEARCH_DAYS = 90
 MOST_FOUND = 3
+
+# The most events "all of them" changes at once - a series counting as one. Past that nothing is
+# changed and the number is said, so "remove all my gym sessions" misheard as "remove all my
+# sessions" can't empty the calendar.
+MOST_AT_ONCE = 20
+
+# What's said for another day with "all of them", which would need a series' rule changed too.
+TIME_ONLY = "I can only change the time for all of them. Move the days in Google Calendar."
 
 # How long an event added with no end lasts.
 DEFAULT_LENGTH = timedelta(hours=1)
@@ -1034,19 +1042,40 @@ class GoogleCalendar:
             search: A word or two from its name, e.g. "dentist".
             day: The day it's on, if the user said - else it's looked for from today.
             at: The time it starts, "HH:MM", if the user said.
-            following: Whether to remove it from this one on, for "all of them" or "every week".
+            following: Whether to remove it from this one on, for "all of them" or "every week" - and
+                every event of that name from the day given on, or now, for several which aren't one
+                series, each one-off and each series once (see _all_to_change).
             calendar: The calendar it's on, if the user named one - "work" is Work.
             today: Today's date - only given by the tests.
             now: The time now - only given by the tests.
 
         Returns:
             Dict with 'success' and what was removed, or why not, as the 'message' - and once
-            it's removed, an 'undo', which puts it back.
+            it's removed, an 'undo', which puts it back - or all of them.
         """
         today, now = _today_and_now(today, now)
-        found = self._to_change(search, day, at, following, today, now, calendar)
+        found = (self._all_to_change if following else self._to_change)(search, day, at, today, now, calendar)
         if isinstance(found, str):
             return {"success": False, "message": found}
+        if not isinstance(found, _Found):
+            return self._remove_one(found, False, today)
+        if len(found.units) > 1:
+            return self._remove_all(found, day, today)
+        return _and_left(self._remove_one(found.units[0], True, today), found.left)
+
+    def _remove_one(self, found: Dict, following: bool, today: date) -> Dict:
+        """
+        Removes one event - or, from this one on, a repeating event's series - and says it.
+
+        Args:
+            found: The event, as _to_change gives it.
+            following: Whether it's from this one on, for one time of a repeating event.
+            today: Today's date.
+
+        Returns:
+            Dict with 'success' and what was removed, or why not, as the 'message' - and once
+            it's removed, an 'undo', which puts it back.
+        """
         summary = found["summary"]
         try:
             if following and found["recurring_id"]:
@@ -1073,6 +1102,59 @@ class GoogleCalendar:
             return _not_changed(e)
         logger.info("Removed an event from Google's calendar")
         return {"success": True, "message": message, "undo": undo}
+
+    def _remove_all(self, found: "_Found", day: Optional[date], today: date) -> Dict:
+        """
+        Removes each of several events, for "cancel all my gym sessions" - each repeating series from
+        its earliest time found on, as it would alone, and each one-off on its own.
+
+        Args:
+            found: The events, as _all_to_change gives them - more than one.
+            day: The day the user said to start from, or None.
+            today: Today's date.
+
+        Returns:
+            Dict with 'success' and what was removed as one sentence, or why not, as the 'message' - and
+            once any is removed, an 'undo', which puts every one back.
+        """
+        on = f" from {spoken_day(day, today)} on" if day else ""
+        return self._for_each(found, lambda unit: self._remove_one(unit, True, today),
+                              lambda count: f"Removed {count} {found.units[0]['summary']} events{on}", "")
+
+    def _for_each(self, found: "_Found", act: Callable[[Dict], Dict], said: Callable[[str], str],
+                  as_was: str) -> Dict:
+        """
+        Does the same to each of several events, one after the other, for "all of them" - each sent
+        once as it would be alone - and says it as one. Whichever fails stops it: the ones done stay
+        done and keep their undo, and what was done and what failed is said.
+
+        Args:
+            found: The events, as _all_to_change gives them - more than one.
+            act: Does it to one, as remove or change would alone, and gives that one's reply.
+            said: What's said of how many are done, without its full stop - given "5", "Removed 5 Gym events
+                from Saturday on", and given "2 of the 5", "Removed 2 of the 5 Gym events from Saturday on".
+            as_was: What the undo says after "back": "" or " as they were".
+
+        Returns:
+            Dict with 'success' and the 'message', and an 'undo' once any is done, which takes back each, the
+            last done first.
+        """
+        units, done, failed = found.units, [], None
+        for unit in units:
+            reply = act(unit)
+            if not reply["success"]:
+                failed = reply
+                break
+            done.append(reply)
+        if not done:
+            return failed
+        undo = _undo_all([reply["undo"] for reply in done], units[0]["summary"], as_was)
+        if failed is None:
+            return _and_left({"success": True, "message": f"{said(str(len(done)))}.", "undo": undo}, found.left)
+        untouched = len(units) - len(done) - 1
+        rest = f" I haven't touched the other {untouched}." if untouched else ""
+        return {"success": True, "message": f"{said(f'{len(done)} of the {len(units)}')}. {failed['message']}{rest}",
+                "undo": undo}
 
     def _remove_following(self, found: Dict, today: date) -> Tuple[str, Callable[[], Dict]]:
         """
@@ -1159,7 +1241,9 @@ class GoogleCalendar:
         mistake is heard, and undone by "undo that". Only that day's of a repeating event, unless
         following: then from that one on, as Google Calendar's "this and following events" does,
         so the times before it stay - and then only its time of day can move, not its day, which
-        a time alone is: it's on the day of the one found. It's sent once, never again by itself.
+        a time alone is: it's on the day of the one found. With several events of the name which
+        aren't one series, each of them - a series once, a one-off on its own day. It's sent once,
+        never again by itself.
 
         Args:
             search: A word or two from its name, e.g. "dentist".
@@ -1195,29 +1279,40 @@ class GoogleCalendar:
             # year misheard. A time alone has no day yet - see below.
             if not isinstance(first, day_time) and (first.date() if isinstance(first, datetime) else first) < today:
                 return {"success": False, "message": DAY_GONE}
-        found = self._to_change(search, day, at, following, today, now, calendar)
+        found = (self._all_to_change if following else self._to_change)(search, day, at, today, now, calendar)
         if isinstance(found, str):
             return {"success": False, "message": found}
-        # A time alone - "move the dentist to 5" - is on the event's own day, which the user needn't
-        # say and Claude can't know, then checked as a day said is. An end alone is on its start's.
-        if isinstance(first, day_time):
-            first = datetime.combine(_day_of(found), first).astimezone()
-            if first.date() < today:
-                return {"success": False, "message": DAY_GONE}
-        if isinstance(last, day_time):
-            last = datetime.combine(first.date() if isinstance(first, datetime) else first, last).astimezone()
-        try:
-            times = _moved_times(first, last, found) if first is not None else None
-        except READ_FAILURES as e:
-            return _not_changed(e)
+        if isinstance(found, _Found) and len(found.units) > 1:
+            return self._change_all(found, first, last, new_name, day, today)
+        left = 0
+        if isinstance(found, _Found):
+            found, left = found.units[0], found.left
+        times = _new_times(first, last, found, today) if first is not None else None
         if isinstance(times, str):
             return {"success": False, "message": times}
+        # Another day for every time would need the series' rule changed too - "every Tuesday"
+        # to Wednesdays - which is left to Google Calendar.
+        if following and found["recurring_id"] and times and _first_day(times[0]) != _day_of(found):
+            return {"success": False, "message": TIME_ONLY}
+        return _and_left(self._change_one(found, following, times, new_name, today), left)
+
+    def _change_one(self, found: Dict, following: bool, times: Optional[Tuple[Dict, Dict]], new_name: str,
+                    today: date) -> Dict:
+        """
+        Changes one event - or, from this one on, a repeating event's series - and says it.
+
+        Args:
+            found: The event, as _to_change gives it.
+            following: Whether it's from this one on, for one time of a repeating event.
+            times: Its new start and end, as Google takes them - or None to leave them.
+            new_name: What it's to be called, or "" to leave its name.
+            today: Today's date.
+
+        Returns:
+            Dict with 'success' and what was changed, or why not, as the 'message' - and once
+            it's changed, an 'undo', which puts it back as it was.
+        """
         if following and found["recurring_id"]:
-            # Another day for every time would need the series' rule changed too - "every Tuesday"
-            # to Wednesdays - which is left to Google Calendar.
-            if times and _first_day(times[0]) != _day_of(found):
-                return {"success": False, "message": "I can only change the time for all of them. Move the days in "
-                                                     "Google Calendar."}
             return self._change_following(found, times, new_name, today)
         summary = found["summary"]
         # A time a repeating event is on has an id of its own, so this changes that day only.
@@ -1248,6 +1343,54 @@ class GoogleCalendar:
         return {"success": True, "message": message,
                 "undo": _undo(new_name or summary, lambda: self._send_once("PATCH", url, back), undone,
                               f"I can't tell whether {summary} was put back.")}
+
+    def _change_all(self, found: "_Found", first: Union[date, datetime, day_time, None],
+                    last: Union[date, datetime, day_time, None], new_name: str, day: Optional[date],
+                    today: date) -> Dict:
+        """
+        Moves or renames each of several events, for "move all my gym sessions to 7" - each repeating
+        series from its earliest time found on, as it would alone, and each one-off on its own day.
+
+        Args:
+            found: The events, as _all_to_change gives them - more than one.
+            first: When they're to start, as _time_said reads it, or None to leave them.
+            last: When they're to end, the same way, or None.
+            new_name: What they're to be called, or "" to leave their names.
+            day: The day the user said to start from, or None.
+            today: Today's date.
+
+        Returns:
+            Dict with 'success' and what was changed as one sentence, or why not, as the 'message' - and
+            once any is changed, an 'undo', which puts every one back as it was.
+        """
+        units = found.units
+        # A day alone is another day, or none, for each: only a time of day moves them all.
+        if isinstance(first, date) and not isinstance(first, datetime):
+            return {"success": False, "message": TIME_ONLY}
+        timed = {}
+        # Each on its own day, all checked before the first is sent, so nothing is half done for want of one.
+        for unit in units:
+            times = _new_times(first, last, unit, today) if first is not None else None
+            if isinstance(times, str):
+                return {"success": False, "message": times}
+            if times and _first_day(times[0]) != _day_of(unit):
+                return {"success": False, "message": TIME_ONLY}
+            timed[unit["calendar_id"], unit["id"]] = times
+        on = f" from {spoken_day(day, today)} on" if day else ""
+        events = f"{units[0]['summary']} events"
+        if first is not None:
+            # Every one is moved to the same time, each on its own day.
+            at = _clock_said(_read_event({"start": timed[units[0]["calendar_id"], units[0]["id"]][0]})["start"])
+
+        def said(count: str) -> str:
+            if first is None:
+                return f"Renamed {count} {events} to {new_name}{on}"
+            moved = f"Moved {count} {events} to {at}{on}"
+            return f"{moved} and renamed them {new_name}" if new_name else moved
+
+        return self._for_each(
+            found, lambda unit: self._change_one(unit, True, timed[unit["calendar_id"], unit["id"]], new_name, today),
+            said, " as they were")
 
     def _change_following(self, found: Dict, times: Optional[Tuple[Dict, Dict]], new_name: str, today: date) -> Dict:
         """
@@ -1495,31 +1638,24 @@ class GoogleCalendar:
             return False
         return True
 
-    def _to_change(self, search: str, day: Optional[date], at: Optional[str], following: bool, today: date,
-                   now: datetime, calendar: Optional[str] = None) -> Union[Dict, str]:
+    def _matching(self, search: str, day: Optional[date], at: Optional[str], following: bool, today: date,
+                  calendar: Optional[str] = None) -> Union[List[Dict], str]:
         """
-        The one event a change is for: matched by its words, as find matches them, on the day
-        given or from today over SEARCH_DAYS - then at the time given, and on the calendar
-        named, if they were.
-
-        A time a repeating event was on that has started is never one: earlier times are the
-        record of past shifts and lectures, so they stay as they were. One moved since has started
-        when the time it was meant to be has, too - see _started. A one-off is changed whenever it
-        was.
+        The events a change may be for: matched by their words, as find matches them, on the day
+        given or from today over SEARCH_DAYS - then at the time given, and on the calendar named,
+        if they were. For all of them from a day on, that day's and the SEARCH_DAYS after it.
 
         Args:
             search: A word or two from its name, e.g. "dentist".
             day: The day it's on, or None.
             at: The time it starts, "HH:MM", or None.
-            following: Whether it's from this one on - then of several times of one series,
-                it's the earliest.
+            following: Whether it's from this one on, or all of them.
             today: Today's date.
-            now: The time now.
             calendar: The calendar it's on, as the user named it, or None.
 
         Returns:
-            The event, as events gives it with whole - or what to say when there isn't the
-            one, or it's not Nova's to change.
+            The events, as events gives them with whole, earliest first - or what to say when
+            there are none, or it can't be asked.
         """
         words = [word for word in (each.strip(".,!?'\"") for each in (search or "").split()) if word]
         if not words:
@@ -1533,7 +1669,8 @@ class GoogleCalendar:
         # "Every week from last Tuesday" would change the times since then, which have already been.
         if following and day is not None and day < today:
             return DAY_GONE
-        first, days = (day, 1) if day else (today, SEARCH_DAYS)
+        # "All of them from Tuesday on" is every one from then, not that Tuesday's alone.
+        first, days = (day or today, SEARCH_DAYS) if following else ((day, 1) if day else (today, SEARCH_DAYS))
         named = []
         try:
             if isinstance(calendar, str) and calendar.strip():
@@ -1553,17 +1690,41 @@ class GoogleCalendar:
             timed = [event for event in found if not event["all_day"]]
             found = [event for event in timed if (event["start"].hour, event["start"].minute) == clock] or \
                 [event for event in timed if event["start"].hour == clock[0]]
-        to_come = [event for event in found if not (event["recurring_id"] and _started(event, now))]
-        if found and not to_come:
-            return DAY_GONE
-        found = to_come
-        series = {(event["calendar_id"], event["recurring_id"]) for event in found}
-        if following and len(series) == 1 and found[0]["recurring_id"]:
-            found = found[:1]
         if not found:
             # On the calendar the user named, as it's said - "on Work" - else on their calendars as a whole.
             where = f"on {joined([spoken_name(each) for each in named])}" if named else "on your calendar"
             return f"I can't find the {' '.join(words)} {where}{f' {_on(day, today)}' if day else ''}."
+        return found
+
+    def _to_change(self, search: str, day: Optional[date], at: Optional[str], today: date, now: datetime,
+                   calendar: Optional[str] = None) -> Union[Dict, str]:
+        """
+        The one event a change is for: matched as _matching has it.
+
+        A time a repeating event was on that has started is never one: earlier times are the
+        record of past shifts and lectures, so they stay as they were. One moved since has started
+        when the time it was meant to be has, too - see _started. A one-off is changed whenever it
+        was.
+
+        Args:
+            search: A word or two from its name, e.g. "dentist".
+            day: The day it's on, or None.
+            at: The time it starts, "HH:MM", or None.
+            today: Today's date.
+            now: The time now.
+            calendar: The calendar it's on, as the user named it, or None.
+
+        Returns:
+            The event, as events gives it with whole - or what to say when there isn't the
+            one, or it's not Nova's to change.
+        """
+        found = self._matching(search, day, at, False, today, calendar)
+        if isinstance(found, str):
+            return found
+        to_come = [event for event in found if not (event["recurring_id"] and _started(event, now))]
+        if not to_come:
+            return DAY_GONE
+        found = to_come
         if len(found) > 1:
             # Named by their calendars too when they're on more than one - a lecture at 11 on
             # Uni and on the user's own would otherwise be said twice the same.
@@ -1574,13 +1735,51 @@ class GoogleCalendar:
             if len(found) > MOST_FOUND:
                 said.append(f"{len(found) - MOST_FOUND} more")
             return f"I found {len(found)}: {'; '.join(said[:-1])}; and {said[-1]}. Which one?"
-        event = found[0]
-        if not event["writable"]:
-            return "I can't change that, Google only lets me change your own calendars."
-        # Changing it would tell whoever sent it.
-        if event["invite"]:
-            return "That's an invite from someone else. Change it in Google Calendar."
-        return event
+        return _not_ours(found[0]) or found[0]
+
+    def _all_to_change(self, search: str, day: Optional[date], at: Optional[str], today: date, now: datetime,
+                       calendar: Optional[str] = None) -> Union["_Found", str]:
+        """
+        Every event a change from this one on is for - "all of them", "all my gym sessions": those
+        _matching finds from the day given on, or from now, of which each repeating series is one,
+        at its earliest time to come, and each one-off is one of its own.
+
+        Nothing that has started is one, whether it repeats or not: the times of a series that are
+        over are the record of them, and so is a session already done. Those on a calendar Nova can
+        only read, and invites, are left out - counted, to be said.
+
+        Args:
+            search: A word or two from its name, e.g. "gym".
+            day: The day to start from, or None for now.
+            at: The time it starts, "HH:MM", or None.
+            today: Today's date.
+            now: The time now.
+            calendar: The calendar it's on, as the user named it, or None.
+
+        Returns:
+            The events to change and how many were left out - or what to say when there are none, or
+            there are more than MOST_AT_ONCE, or it can't be asked.
+        """
+        found = self._matching(search, day, at, True, today, calendar)
+        if isinstance(found, str):
+            return found
+        to_come = [event for event in found if not _started(event, now)]
+        if not to_come:
+            return DAY_GONE
+        units, series = [], set()
+        for event in to_come:
+            # Earliest first, so a series' first time to come is the one that stands for it.
+            if event["recurring_id"]:
+                if (event["calendar_id"], event["recurring_id"]) in series:
+                    continue
+                series.add((event["calendar_id"], event["recurring_id"]))
+            units.append(event)
+        ours = [event for event in units if not _not_ours(event)]
+        if not ours:
+            return _not_ours(units[0])
+        if len(ours) > MOST_AT_ONCE:
+            return f"That's {len(ours)} events - say a day to start from, or fewer."
+        return _Found(ours, len(units) - len(ours))
 
     def _calendar_to_add_to(self, named: Optional[str]) -> Union[str, Tuple[Dict, Dict]]:
         """
@@ -1769,6 +1968,14 @@ class _SeriesUnreadable(ValueError):
     """A repeating event's rules can't be used: Google gave none, or none of the times the new series needs."""
 
 
+class _Found(NamedTuple):
+    """The events "all of them" is for: each series once, by its earliest time to come, and each one-off."""
+
+    units: List[Dict]
+    # How many more matched but aren't Nova's to change - on a calendar it can only read, or an invite.
+    left: int
+
+
 # What reading the calendar can fail with: no sign-in, Google out of reach or refusing,
 # or an answer of the wrong shape.
 READ_FAILURES = (SignInNeeded, requests.RequestException, ValueError, KeyError, TypeError)
@@ -1853,6 +2060,51 @@ def _undo(summary: str, write: Callable[[], Union[Dict, str, None]], done: str, 
         return {"success": True, "message": done}
 
     return undo
+
+
+def _not_ours(event: Dict) -> Optional[str]:
+    """What's said of an event read which Nova can't change - on a calendar it can only read, or an invite - or None."""
+    if not event["writable"]:
+        return "I can't change that, Google only lets me change your own calendars."
+    # Changing it would tell whoever sent it.
+    if event["invite"]:
+        return "That's an invite from someone else. Change it in Google Calendar."
+    return None
+
+
+def _undo_all(undos: List[Callable[[], Dict]], summary: str, as_was: str) -> Callable[[], Dict]:
+    """
+    How to take back several changes made together, for "undo that": the last made first, each sent once
+    - and every one is tried, as one that can't be put back doesn't stop the rest.
+
+    Args:
+        undos: Each change's own undo, in the order they were made.
+        summary: The first event's name, e.g. "Gym", for "the 5 Gym events".
+        as_was: What's said after "back": "" or " as they were".
+
+    Returns:
+        The undo, which answers with 'success' and a 'message' - how many came back, and that the rest are
+        to be checked, if not every one did.
+    """
+    def undo() -> Dict:
+        total = len(undos)
+        came = sum(1 for take_back in reversed(undos) if take_back()["success"])
+        if came == total:
+            return {"success": True, "message": f"Put the {total} {summary} events back{as_was}."}
+        if not came:
+            return {"success": False, "message": f"I couldn't put the {total} {summary} events back. Check them in "
+                                                 "Google Calendar."}
+        return {"success": False, "message": f"Put {came} of the {total} {summary} events back{as_was}. Check the "
+                                             "rest in Google Calendar."}
+
+    return undo
+
+
+def _and_left(reply: Dict, left: int) -> Dict:
+    """What's said of a change made, and how many were left out as not Nova's to change: "..., and left 1 I can't change."."""
+    if not left or not reply.get("success"):
+        return reply
+    return {**reply, "message": f"{reply['message'].rstrip('.')}, and left {left} I can't change."}
 
 
 def _event_url(calendar_id: str, event_id: str) -> str:
@@ -2099,6 +2351,33 @@ def _moved_times(first: Union[date, datetime], last: Union[date, datetime, None]
     if last <= first:
         return "That ends before it starts."
     return {"dateTime": first.isoformat()}, {"dateTime": last.isoformat()}
+
+
+def _new_times(first: Union[date, datetime, day_time], last: Union[date, datetime, day_time, None], event: Dict,
+               today: date) -> Union[Tuple[Dict, Dict], str]:
+    """
+    An event's new start and end, for the times the user said - a time alone being on the event's own day, which
+    they needn't say and Claude can't know, then checked as a day said is.
+
+    Args:
+        first: When it's to start, as _time_said reads it.
+        last: When it's to end, the same way, or None. A time alone is on the start's day.
+        event: The event, as events gives it with whole.
+        today: Today's date.
+
+    Returns:
+        (start, end) as _moved_times gives them - or what to say when they can't be used.
+    """
+    if isinstance(first, day_time):
+        first = datetime.combine(_day_of(event), first).astimezone()
+        if first.date() < today:
+            return DAY_GONE
+    if isinstance(last, day_time):
+        last = datetime.combine(first.date() if isinstance(first, datetime) else first, last).astimezone()
+    try:
+        return _moved_times(first, last, event)
+    except READ_FAILURES as e:
+        return _not_changed(e)["message"]
 
 
 def _zone_named(zone: Optional[str]) -> Optional[ZoneInfo]:

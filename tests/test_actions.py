@@ -1092,6 +1092,17 @@ def test_the_change_tool_says_how_a_day_alone_or_a_time_alone_is_given():
     assert "for all day" in offered["add_to_calendar"]["description"]
 
 
+def test_the_change_tools_say_following_covers_every_event_of_that_name_from_then_on():
+    # Five gym sessions made one by one are five events, so "all my gym sessions" is following too.
+    offered = {schema["name"]: schema for schema in ActionExecutor(calendar=RecordingChangeCalendar()).tool_schemas()}
+    for tool in ("remove_from_calendar", "change_calendar_event"):
+        description = offered[tool]["description"]
+        assert "Following also means every event of that name from then on" in description, tool
+        for words in ("'all my gym sessions'", "'all of them'", "'every one'", "even when each is an event of its own"):
+            assert words in description, (tool, words)
+        assert "'all my gym sessions'" in offered[tool]["input_schema"]["properties"]["following"]["description"], tool
+
+
 def test_an_unreadable_day_is_said():
     calendar = RecordingChangeCalendar()
     executor = ActionExecutor(calendar=calendar)

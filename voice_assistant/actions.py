@@ -2059,9 +2059,10 @@ class ActionExecutor:
         "Remove an event from the user's Google calendar, for 'cancel the dentist', 'take the gym off my "
         "calendar on Friday' or 'get rid of my yoga classes'. Give search, and the day and time only when the "
         "user said them. Give following only for 'all of them', 'every week' or 'from now on' - it removes "
-        "only that one and the ones after it, never earlier ones. What was done is said for you, so just reply "
-        "'Okay.' When Nova lists several and asks which, call again with the day, time or calendar the user "
-        "picks.",
+        "only that one and the ones after it, never earlier ones. Following also means every event of that "
+        "name from then on, for 'all my gym sessions', 'all of them' or 'every one', even when each is an event "
+        "of its own. What was done is said for you, so just reply 'Okay.' When Nova lists several and asks "
+        "which, call again with the day, time or calendar the user picks.",
         needs="calendar",
         required=["search"],
         search={"type": "string", "description": "A word from the event's name as it'd be written on the "
@@ -2071,8 +2072,9 @@ class ActionExecutor:
                                               "YYYY-MM-DD, worked out from today's date."},
         time={"type": "string", "description": "Only when the user said what time, for the event as it is now: "
                                                "HH:MM, 24-hour."},
-        following={"type": "boolean", "description": "True only for 'all of them', 'every week' or 'from now "
-                                                     "on'. Leave out for just the one."},
+        following={"type": "boolean", "description": "True only for 'all of them', 'all my gym sessions', "
+                                                     "'every one', 'every week' or 'from now on'. Leave out for "
+                                                     "just the one."},
         calendar={"type": "string", "description": "The calendar the user named, as they said it, only when they "
                                                    "named one or Nova asked which."},
     )
@@ -2090,8 +2092,10 @@ class ActionExecutor:
         "When only the time changes, give the time alone - never guess a day - and with following, always the "
         "time alone unless the user named a new day. Leave out whatever isn't changing. Give following only for 'all of them', "
         "'every week' or 'from now on' - it changes only that one and the ones after it, never earlier ones, and "
-        "only their time, not their days. What was done is said for you, so just reply 'Okay.' When Nova lists "
-        "several and asks which, call again with the day, time or calendar the user picks.",
+        "only their time, not their days. Following also means every event of that name from then on, for "
+        "'all my gym sessions', 'all of them' or 'every one', even when each is an event of its own. What was "
+        "done is said for you, so just reply 'Okay.' When Nova lists several and asks which, call again with "
+        "the day, time or calendar the user picks.",
         needs="calendar",
         required=["search"],
         search={"type": "string", "description": "A word from the event's name as it'd be written on the "
@@ -2108,8 +2112,9 @@ class ActionExecutor:
                                                   "included, and 'HH:MM' alone is on the start's day."},
         new_name={"type": "string", "description": "What it should be called, as it'd be written on the "
                                                    "calendar, e.g. 'Planning'."},
-        following={"type": "boolean", "description": "True only for 'all of them', 'every week' or 'from now "
-                                                     "on'. Leave out for just the one."},
+        following={"type": "boolean", "description": "True only for 'all of them', 'all my gym sessions', "
+                                                     "'every one', 'every week' or 'from now on'. Leave out for "
+                                                     "just the one."},
         calendar={"type": "string", "description": "The calendar the user named, as they said it, only when they "
                                                    "named one or Nova asked which."},
     )
