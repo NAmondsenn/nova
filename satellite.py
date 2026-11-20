@@ -13,6 +13,7 @@ and answers the wake word with the recorded "I can't reach the server".
 """
 
 import itertools
+import json
 import logging
 import math
 import os
@@ -26,7 +27,8 @@ from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 
-from voice_assistant import paths, protocol, storage, watchdog
+from voice_assistant import paths, pc_apps, pc_windows, protocol, storage, watchdog
+from voice_assistant.computers import NOT_A_WEB_ADDRESS, safe_url, url_host
 from voice_assistant.config import Config, ConfigError
 from voice_assistant.echo import make_echo_canceller
 from voice_assistant.fallback import AlarmCopy, FallbackRinger, Phrase, StateCopy
@@ -34,6 +36,7 @@ from voice_assistant.logging_setup import setup_logging
 from voice_assistant.machine import downloads_folder, machine_kind
 from voice_assistant.microphone import RATE, Microphone
 from voice_assistant.notes import NoteRefused, save_note
+from voice_assistant.pc_volume import SystemVolume
 from voice_assistant.press import PressListener
 from voice_assistant.satellite_link import SILENT_FOR, SatelliteLink
 from voice_assistant.speaker import BLOCK_SECONDS, Playback, Speaker
@@ -116,6 +119,24 @@ SETTLE_WAIT = SILENT_FOR
 # delay, and the echo canceller's.
 OWN_SOUND_LINGERS = 2.5
 
+# How often a satellite which opens things builds its list of them again, and how often
+# it looks at which programs have a window open, in seconds - each sent to the brain
+# only when it has changed, or the brain is new.
+APPS_EVERY = 600
+WINDOWS_EVERY = 3
+
+# The most apps and window names sent, as many as the brain takes (remote.MOST_APPS and
+# MOST_WINDOWS): more than a person has, so only a guard.
+MOST_APPS = 3000
+MOST_WINDOWS = 200
+
+# Said back when something asked of the computer can't be done.
+NOT_HERE = "That's not on this PC any more."
+COULDNT_OPEN = "That couldn't be opened."
+NOTHING_TO_CLOSE = "There's nothing to close."
+NO_VOLUME = "This computer's volume can't be changed."
+CANT_DO = "I can't do that on this computer."
+
 
 class _FromBrain:
     """One of the brain's playbacks, which it knows by its id."""
@@ -189,6 +210,16 @@ def _speaker(device_name) -> Optional[str]:
     logger.warning(f"spotify.device_name isn't text of up to {protocol.MAX_SPEAKER} characters, "
                    f"so the brain plays Spotify on its own speaker name: {ascii(device_name)[:80]}")
     return None
+
+
+def _on_windows() -> bool:
+    """Whether the satellite runs on Windows, the one system it opens things and sets the volume on."""
+    return sys.platform == "win32"
+
+
+def _whole(value) -> bool:
+    """Whether a value from the brain is a whole number - JSON's true and false aren't."""
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _machine_and_notes() -> Tuple[Optional[str], bool]:
@@ -307,6 +338,26 @@ class Satellite:
             media = WindowsMedia(self._media_pressed)
             self.media = media if media.available else None
 
+        # Opening and closing things, and Windows' own volume - only on Windows, and only
+        # where the Windows parts of each can be had, else the hello says neither.
+        self.opens = False
+        self.system_volume: Optional[SystemVolume] = None
+        if _on_windows():
+            self.opens = pc_windows.load()
+            volume = SystemVolume()
+            self.system_volume = volume if volume.available else None
+        # The things this computer can open, by id, with what launches each - which never
+        # leaves it. Built on a thread of its own, and read by the computer requests'.
+        self._apps: Dict[str, Dict] = {}
+        self._apps_lock = threading.Lock()
+        # Counted up each time the brain is reached, so a list sent to the last one is
+        # sent again to the next - and what was last sent of each list, with the count it
+        # was sent at. Set wakes each list's thread to send it.
+        self._connection = 0
+        self._sent: Dict[str, Tuple[int, bytes]] = {}
+        self._apps_wanted = threading.Event()
+        self._windows_wanted = threading.Event()
+
         # Made in run(), once it's known whether the last run stopped properly.
         self.link: Optional[SatelliteLink] = None
         # Made there too, if this satellite is pressed.
@@ -374,6 +425,7 @@ class Satellite:
             "phrase": lambda message, payload: self.phrase.replace(payload, message["rate"]),
             "away_settled": self._away_settled,
             "save_note": self._save_note,
+            "computer": self._computer,
             "restart": self._restart,
         }
 
@@ -399,9 +451,13 @@ class Satellite:
                                       self._note_start(), self._on_message, self._on_connected,
                                       speaker=self.spotify_speaker, push_to_talk=self.push_to_talk,
                                       machine=self.machine, saves_notes=self.saves_notes,
-                                      media_controls=self.media is not None)
+                                      media_controls=self.media is not None, opens=self.opens,
+                                      system_volume=self.system_volume is not None)
             self.link.start()
             threading.Thread(target=self._ring_when_due, daemon=True, name="fallback").start()
+            if self.opens:
+                threading.Thread(target=self._keep_apps, daemon=True, name="apps").start()
+                threading.Thread(target=self._keep_windows, daemon=True, name="windows").start()
             logger.info(f"Satellite '{self.name}' ready, for its brain at {self.address}")
             self._listen_forever()
         finally:
@@ -996,6 +1052,172 @@ class Satellite:
             logger.info(f"Saved a note as {file}")
             self.link.send("note_saved", id=id, file=file)
 
+    def _send_list(self, kind: str, items: list):
+        """
+        Sends the brain one of the lists, apps or windows, as a JSON payload - unless this
+        brain already has it as it is.
+        """
+        payload = json.dumps(items, ensure_ascii=False).encode("utf-8")
+        if len(payload) > protocol.MAX_AUDIO:
+            logger.warning(f"The {kind} list is too long to send, so the brain keeps the last one")
+            return
+        connection = self._connection
+        if self._sent.get(kind) == (connection, payload) or self.link is None:
+            return
+        if self.link.send(kind, payload):
+            self._sent[kind] = (connection, payload)
+
+    def _keep_apps(self):
+        """
+        Builds the list of things this computer can open, as it starts and every
+        APPS_EVERY seconds after, and sends it to the brain - without what launches each.
+        """
+        build_at = 0.0
+        while not self._finished.is_set():
+            self._apps_wanted.clear()
+            if time.monotonic() >= build_at:
+                try:
+                    items = pc_apps.catalogue()
+                except Exception as e:
+                    logger.warning(f"Couldn't list what this computer can open ({type(e).__name__})")
+                else:
+                    with self._apps_lock:
+                        self._apps = {item["id"]: item for item in items}
+                    logger.info(f"Found {len(items)} things this computer can open")
+                build_at = time.monotonic() + APPS_EVERY
+            with self._apps_lock:
+                apps = list(self._apps.values())
+            self._send_list("apps", [{key: app[key] for key in ("id", "name", "kind")} for app in apps[:MOST_APPS]])
+            self._apps_wanted.wait(max(0.0, build_at - time.monotonic()))
+
+    def _keep_windows(self):
+        """Looks at which programs have a window open every WINDOWS_EVERY seconds, and sends the brain their names."""
+        failing = False
+        while not self._finished.is_set():
+            self._windows_wanted.clear()
+            try:
+                names = pc_windows.open_windows()
+            except Exception as e:
+                # Once until it works again, as it's looked at every few seconds.
+                if not failing:
+                    logger.warning(f"Couldn't list the open windows ({type(e).__name__})")
+                failing = True
+            else:
+                failing = False
+                self._send_list("windows", names[:MOST_WINDOWS])
+            self._windows_wanted.wait(WINDOWS_EVERY)
+
+    def _computer(self, message: Dict, payload: bytes):
+        id = message.get("id")
+        if not isinstance(id, str):
+            # Nothing could be answered, and the brain has given up waiting by now.
+            logger.warning("The brain asked for something on this computer without an id, so it wasn't done")
+            return
+        # On a thread of its own, as this is the link's reader: Windows opening something,
+        # or bringing it to the front, never holds up hearing the brain.
+        threading.Thread(target=self._do_on_computer, args=(id, message), daemon=True, name="computer").start()
+
+    def _do_on_computer(self, id: str, message: Dict):
+        """
+        Does what the brain asked on this computer and tells it how it went - then, for
+        something opened, brings it to the front.
+
+        Args:
+            id: What the brain knows the request by, to say in the answer.
+            message: The computer message, with its action and what that needs.
+        """
+        action = message.get("action")
+        then = None
+        try:
+            answer, then = self._on_computer(action, message)
+        except Exception as e:
+            # Only what kind of failure, as some exceptions carry what they were handed.
+            logger.error(f"Something asked of this computer failed ({type(e).__name__})")
+            answer = {"error": CANT_DO}
+        if not self.link.send("computer_done", id=id, **answer):
+            logger.info("The brain can't be reached to say how something asked of this computer went")
+        if then is not None:
+            then()
+
+    def _on_computer(self, action, message: Dict) -> Tuple[Dict, Optional[Callable[[], object]]]:
+        """
+        Does one action of protocol.COMPUTER_ACTIONS.
+
+        Returns:
+            The answer for computer_done - {"said": ...} or {"error": ...}, and for volume
+            the level and mute - and what to do once it's sent, if anything.
+        """
+        if action == "volume":
+            return self._change_volume(message), None
+        if not self.opens or action not in protocol.COMPUTER_ACTIONS:
+            return {"error": CANT_DO}, None
+        if action == "open":
+            # Only ever something from this computer's own list, by the id it gave it.
+            item = message.get("item")
+            with self._apps_lock:
+                app = self._apps.get(item) if isinstance(item, str) else None
+            if app is None:
+                logger.info("Asked to open something which isn't in this computer's list")
+                return {"error": NOT_HERE}, None
+            logger.info(f"Opening {app['name']}")
+            return self._open(app["target"], f"Opening {app['name']}.", browser=False)
+        if action == "open_url":
+            # Checked again here, so nothing but an https:// address is ever opened.
+            url = message.get("url")
+            checked = safe_url(url) if isinstance(url, str) else None
+            if checked is None:
+                logger.info("Refused to open something which isn't a web address it may")
+                return {"error": NOT_A_WEB_ADDRESS}, None
+            # The host alone: the rest of an address can hold what's his.
+            logger.info(f"Opening a page on {url_host(checked)}")
+            return self._open(checked, f"Opening {url_host(checked)}.", browser=True)
+        if action == "close":
+            name = message.get("name")
+            if not isinstance(name, str) or not name.strip():
+                return {"error": CANT_DO}, None
+            closed = pc_windows.close(name)
+            if closed is None:
+                return {"error": f"{name.strip()} isn't open."}, None
+            logger.info(f"Closing {closed}")
+            return {"said": f"Closing {closed}."}, None
+        closed = pc_windows.close_front()
+        if closed is None:
+            return {"error": NOTHING_TO_CLOSE}, None
+        logger.info(f"Closing {closed}, which was in front")
+        return {"said": f"Closing {closed}."}, None
+
+    def _open(self, target: str, said: str, browser: bool) -> Tuple[Dict, Optional[Callable[[], object]]]:
+        """Opens an app's target or a web address, then has it brought to the front once the brain has its answer."""
+        before = pc_windows.ready_to_open()
+        try:
+            pc_windows.start(target)
+        except OSError as e:
+            logger.warning(f"Windows couldn't open it ({type(e).__name__})")
+            return {"error": COULDNT_OPEN}, None
+        return {"said": said}, lambda: pc_windows.bring_to_front(before, browser=browser)
+
+    def _change_volume(self, message: Dict) -> Dict:
+        """Changes Windows' own volume as the brain asked, and says what it is now."""
+        if self.system_volume is None:
+            return {"error": NO_VOLUME}
+        change = {}
+        direction, step, level, mute = (message.get(key) for key in ("direction", "step", "level", "mute"))
+        if direction in ("up", "down"):
+            change["direction"] = direction
+            if _whole(step) and 0 < step <= 100:
+                change["step"] = step
+        if _whole(level):
+            change["level"] = level
+        if isinstance(mute, bool):
+            change["mute"] = mute
+        try:
+            now = self.system_volume.change(**change)
+        except Exception as e:
+            logger.warning(f"Couldn't change Windows' volume ({type(e).__name__})")
+            return {"error": NO_VOLUME}
+        logger.info(f"Windows' volume is at {now['level']} percent{', muted' if now['muted'] else ''}")
+        return {"said": "Muted." if now["muted"] else f"Volume {now['level']} percent.", **now}
+
     def _restart(self, message: Dict, payload: bytes):
         logger.info("Restarting, as the brain asked")
         self.stop(1)
@@ -1058,6 +1280,10 @@ class Satellite:
         if not connected:
             self._forget_the_brain()
             return
+        # A new brain, or the same one started again, has neither list yet.
+        self._connection += 1
+        self._apps_wanted.set()
+        self._windows_wanted.set()
         with self._lock:
             # The brain takes over whatever is still ringing, which it hears is - having
             # been off as it came due, it wouldn't know to ring it otherwise. It's only
@@ -1180,6 +1406,9 @@ class Satellite:
         """
         self._stopping = True
         self._finished.set()
+        # So the list threads see it now, not at their next look.
+        self._apps_wanted.set()
+        self._windows_wanted.set()
         if self.press_listener is not None:
             # First, so no press arrives to start a recording of a satellite shutting down.
             self.press_listener.close()
@@ -1187,6 +1416,8 @@ class Satellite:
             self.link.stop()
         if self.media is not None:
             self.media.close()
+        if self.system_volume is not None:
+            self.system_volume.close()
         self.ringer.quiet()
         with self._lock:
             self._save_timeline()

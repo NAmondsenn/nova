@@ -1328,7 +1328,7 @@ def test_the_away_report_is_sent_on_connecting(brain, make, tmp_path):
     assert brain.hellos == [{"name": "bedroom", "hostname": socket.gethostname(), "sample_rate": 48000,
                              "unclean": True, "speaker": None,
                              "push_to_talk": False, "machine": "pi", "saves_notes": False,
-                             "media_controls": False}]
+                             "media_controls": False, "opens": False, "system_volume": False}]
 
 
 def test_the_satellite_tells_the_brain_its_spotify_speaker(brain, make):
@@ -2564,3 +2564,229 @@ def test_the_media_controls_are_closed_with_the_satellite(brain, make, windows):
     made.stop()
     assert wait_for(lambda: made.exited)
     assert media.closed
+
+
+# Opening and closing things on the PC, and its own volume
+
+class FakePcWindows:
+    """Stands in for pc_windows: some programs open, and what was opened, closed and brought to the front."""
+
+    def __init__(self, loads=True):
+        self.loads = loads
+        self.open = ["Discord", "Notepad"]
+        self.front = "Notepad"
+        self.started = []
+        self.fronted = []
+        self.closed = []
+
+    def load(self):
+        return self.loads
+
+    def open_windows(self):
+        return list(self.open)
+
+    def close(self, name):
+        found = next((each for each in self.open if each.lower() == name.lower()), None)
+        if found is not None:
+            self.closed.append(found)
+        return found
+
+    def close_front(self):
+        return self.front
+
+    def ready_to_open(self):
+        return frozenset({1})
+
+    def start(self, target):
+        self.started.append(target)
+
+    def bring_to_front(self, before, browser=False):
+        self.fronted.append((before, browser))
+
+
+class FakeSystemVolume:
+    """Stands in for SystemVolume, keeping each change asked of it."""
+
+    available = True
+
+    def __init__(self):
+        self.changes = []
+        self.closed = False
+
+    def change(self, **change):
+        self.changes.append(change)
+        return {"level": 30, "muted": change.get("mute") is True}
+
+    def close(self):
+        self.closed = True
+
+
+class NoSystemVolume(FakeSystemVolume):
+    available = False
+
+
+PC_APPS = [{"id": "aaaaaaaaaaaa", "name": "Fortnite", "kind": "epic",
+            "target": "com.epicgames.launcher://apps/fn%3Ax%3AFortnite?action=launch&silent=true"},
+           {"id": "bbbbbbbbbbbb", "name": "Notepad", "kind": "app", "target": "shell:AppsFolder\\notepad"}]
+
+
+@pytest.fixture
+def pc(monkeypatch, downloads):
+    """Has satellites take this for Windows, with fakes of its windows, its apps and its volume."""
+    fake = FakePcWindows()
+    monkeypatch.setattr(satellite, "_on_windows", lambda: True)
+    monkeypatch.setattr(satellite, "pc_windows", fake)
+    monkeypatch.setattr(satellite, "pc_apps", types.SimpleNamespace(catalogue=lambda: [dict(app) for app in PC_APPS]))
+    monkeypatch.setattr(satellite, "SystemVolume", FakeSystemVolume)
+    return fake
+
+
+def computer_answers(brain):
+    return brain.messages("computer_done")
+
+
+def ask_computer(brain, id, **fields):
+    brain.say("computer", id=id, **fields)
+    assert wait_for(lambda: any(answer["id"] == id for answer in computer_answers(brain)))
+    return next(answer for answer in computer_answers(brain) if answer["id"] == id)
+
+
+def sent_lists(brain, kind):
+    return [json.loads(payload) for message, payload in brain.received if message["type"] == kind]
+
+
+def test_hello_flags_only_on_windows(brain, make, monkeypatch, downloads):
+    # Not on Windows: neither, even with the Windows parts to hand.
+    monkeypatch.setattr(satellite, "pc_windows", FakePcWindows())
+    monkeypatch.setattr(satellite, "SystemVolume", FakeSystemVolume)
+    made = pressable(brain, make)
+    assert brain.hellos[-1]["opens"] is False and brain.hellos[-1]["system_volume"] is False
+    assert made.system_volume is None and brain.messages("apps") == []
+    made.stop()
+    assert wait_for(lambda: made.exited)
+
+    # On Windows, but with neither part loading: neither.
+    monkeypatch.setattr(satellite, "_on_windows", lambda: True)
+    monkeypatch.setattr(satellite, "pc_windows", FakePcWindows(loads=False))
+    monkeypatch.setattr(satellite, "SystemVolume", NoSystemVolume)
+    made = pressable(brain, make)
+    assert brain.hellos[-1]["opens"] is False and brain.hellos[-1]["system_volume"] is False
+    made.stop()
+    assert wait_for(lambda: made.exited)
+
+    # On Windows with both: both.
+    monkeypatch.setattr(satellite, "pc_windows", FakePcWindows())
+    monkeypatch.setattr(satellite, "SystemVolume", FakeSystemVolume)
+    pressable(brain, make)
+    assert brain.hellos[-1]["opens"] is True and brain.hellos[-1]["system_volume"] is True
+
+
+def test_targets_never_sent(brain, make, pc):
+    pressable(brain, make)
+    assert wait_for(lambda: sent_lists(brain, "apps"))
+    assert sent_lists(brain, "apps")[0] == [{"id": "aaaaaaaaaaaa", "name": "Fortnite", "kind": "epic"},
+                                            {"id": "bbbbbbbbbbbb", "name": "Notepad", "kind": "app"}]
+    assert not [payload for message, payload in brain.received if b"target" in payload or b"launcher" in payload]
+
+
+def test_the_open_windows_are_sent_when_they_change(brain, make, pc, monkeypatch):
+    monkeypatch.setattr(satellite, "WINDOWS_EVERY", 0.02)
+    pressable(brain, make)
+    assert wait_for(lambda: sent_lists(brain, "windows"))
+    time.sleep(0.1)
+    # Looked at again and again, but sent once, as nothing changed.
+    assert sent_lists(brain, "windows") == [["Discord", "Notepad"]]
+    pc.open = ["Discord"]
+    assert wait_for(lambda: len(sent_lists(brain, "windows")) == 2)
+    assert sent_lists(brain, "windows")[1] == ["Discord"]
+
+
+def test_both_lists_are_sent_again_to_a_brain_reached_again(brain, make, pc):
+    made = pressable(brain, make)
+    assert wait_for(lambda: sent_lists(brain, "apps") and sent_lists(brain, "windows"))
+    brain.up = False
+    brain.sockets[-1].shutdown(socket.SHUT_RDWR)
+    assert wait_for(lambda: not connected(made))
+    brain.up = True
+    assert wait_for(lambda: len(sent_lists(brain, "apps")) == 2 and len(sent_lists(brain, "windows")) == 2)
+
+
+def test_open_unknown_id_refused(brain, make, pc):
+    pressable(brain, make)
+    assert ask_computer(brain, "computer-1", action="open", item="cccccccccccc") == {
+        "type": "computer_done", "id": "computer-1", "error": "That's not on this PC any more."}
+    # Not even what launches one, given as its id.
+    assert ask_computer(brain, "computer-2", action="open", item=PC_APPS[1]["target"])["error"] == \
+        "That's not on this PC any more."
+    assert pc.started == []
+
+
+def test_open_launches_from_the_list_then_brings_it_to_the_front(brain, make, pc):
+    made = pressable(brain, make)
+    assert wait_for(lambda: made._apps)
+    assert ask_computer(brain, "computer-1", action="open", item="aaaaaaaaaaaa") == {
+        "type": "computer_done", "id": "computer-1", "said": "Opening Fortnite."}
+    assert pc.started == [PC_APPS[0]["target"]]
+    assert wait_for(lambda: pc.fronted == [(frozenset({1}), False)])
+
+
+@pytest.mark.parametrize("url", ["http://example.com", "file:///C:/Windows/System32/cmd.exe",
+                                 "https://user:password@example.com/", "C:\\Windows\\notepad.exe",
+                                 "https://example.com/" + "a" * 2000, "javascript:alert(1)", 7])
+def test_open_url_rechecked(brain, make, pc, url):
+    pressable(brain, make)
+    assert ask_computer(brain, "computer-1", action="open_url", url=url)["error"] == \
+        "That isn't a web address I can open."
+    assert pc.started == []
+
+
+def test_an_https_address_opens_in_the_browser_which_is_brought_to_the_front(brain, make, pc, caplog):
+    pressable(brain, make)
+    with caplog.at_level(logging.INFO):
+        answer = ask_computer(brain, "computer-1", action="open_url", url="https://www.bbc.co.uk/news?private=1")
+    assert answer["said"] == "Opening www.bbc.co.uk."
+    assert pc.started == ["https://www.bbc.co.uk/news?private=1"]
+    assert wait_for(lambda: pc.fronted == [(frozenset({1}), True)])
+    # Only the host is logged.
+    assert "private" not in caplog.text
+
+
+def test_close_answers_with_the_name_closed_or_that_it_isnt_open(brain, make, pc):
+    pressable(brain, make)
+    assert ask_computer(brain, "computer-1", action="close", name="discord")["said"] == "Closing Discord."
+    assert ask_computer(brain, "computer-2", action="close", name="Steam")["error"] == "Steam isn't open."
+    assert pc.closed == ["Discord"]
+
+
+def test_close_front_answers_with_the_program_or_nothing_to_close(brain, make, pc):
+    pressable(brain, make)
+    assert ask_computer(brain, "computer-1", action="close_front")["said"] == "Closing Notepad."
+    pc.front = None
+    assert ask_computer(brain, "computer-2", action="close_front")["error"] == "There's nothing to close."
+
+
+def test_volume_answers_with_the_level_and_mute(brain, make, pc):
+    made = pressable(brain, make)
+    assert ask_computer(brain, "computer-1", action="volume", direction="up", step=5) == {
+        "type": "computer_done", "id": "computer-1", "said": "Volume 30 percent.", "level": 30, "muted": False}
+    assert ask_computer(brain, "computer-2", action="volume", mute=True)["muted"] is True
+    # What makes no sense is left out: a level of true, a step which is text.
+    ask_computer(brain, "computer-3", action="volume", level=True, direction="down", step="lots")
+    assert made.system_volume.changes == [{"direction": "up", "step": 5}, {"mute": True}, {"direction": "down"}]
+
+
+def test_a_pc_which_opens_nothing_refuses_to(brain, make, pc, monkeypatch):
+    monkeypatch.setattr(satellite, "pc_windows", FakePcWindows(loads=False))
+    monkeypatch.setattr(satellite, "SystemVolume", NoSystemVolume)
+    pressable(brain, make)
+    assert ask_computer(brain, "computer-1", action="close_front")["error"] == "I can't do that on this computer."
+    assert ask_computer(brain, "computer-2", action="volume", level=10)["error"] == \
+        "This computer's volume can't be changed."
+
+
+def test_the_system_volume_is_closed_with_the_satellite(brain, make, pc):
+    made = pressable(brain, make)
+    volume = made.system_volume
+    made.stop()
+    assert wait_for(lambda: made.exited)
+    assert volume.closed
