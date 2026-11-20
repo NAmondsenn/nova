@@ -1622,11 +1622,13 @@ def pi_and_pc(brain, connect, make_session):
 def test_mute_at_the_pi_mutes_the_pi(pi_and_pc):
     pi, pc = pi_and_pc.pi, pi_and_pc.pc
     result = pi.actions.execute(Action("mute_microphone", {"muted": True}))
-    assert (result.ok, result.say) == (True, "Microphone off.")
+    # Said with a sound, not words: the message is only logged.
+    assert (result.ok, result.say, result.confirm, result.sound) == (True, "Microphone off.", "sound", "mic_off.wav")
     assert pi.muted and not pc.muted
     # The settings page's and Home Assistant's mute, so its switch shows it.
     assert pi._device_controls().muted()
-    assert pi.actions.execute(Action("mute_microphone", {"muted": False})).say == "Microphone on."
+    on = pi.actions.execute(Action("mute_microphone", {"muted": False}))
+    assert (on.say, on.confirm, on.sound) == ("Microphone on.", "sound", "mic_on.wav")
     assert not pi.muted
     # Spoken words reach it the same way.
     pi.actions.execute(pi.intents.match("Stop listening.")["actions"][0])
@@ -1636,12 +1638,12 @@ def test_mute_at_the_pi_mutes_the_pi(pi_and_pc):
 def test_mute_at_the_pc_mutes_the_rooms_always_on_pi(pi_and_pc, brain):
     pi, pc = pi_and_pc.pi, pi_and_pc.pc
     result = pc.actions.execute(Action("mute_microphone", {"muted": True}))
-    assert (result.ok, result.say) == (True, "The Pi's microphone is off.")
-    assert pi.muted and not pc.muted
+    assert (result.ok, result.say, result.confirm) == (True, "The Pi's microphone is off.", "sound")
+    assert result.sound == "mic_off.wav" and pi.muted and not pc.muted
     # Back on from the PC, by name.
     result = pc.actions.execute(Action("mute_microphone", {"muted": False, "where": "the Pi"}))
-    assert (result.ok, result.say) == (True, "The Pi's microphone is on.")
-    assert not pi.muted
+    assert (result.ok, result.say, result.confirm) == (True, "The Pi's microphone is on.", "sound")
+    assert result.sound == "mic_on.wav" and not pi.muted
     # A name he gave it is said as he wrote it, capitalised to start the sentence.
     brain.rooms.set_called("bedroom", ["bedroom Pi"])
     assert pc.actions.execute(Action("mute_microphone", {"muted": True})).say == "Bedroom Pi's microphone is off."
@@ -1680,14 +1682,16 @@ def test_stop_listening_while_the_pi_rings_stops_it_first(pi_and_pc, pi_ringing)
     # Muted with the alarm still going, the Pi couldn't hear "Nova, stop", and it would climb to full volume.
     pi = pi_and_pc.pi
     result = pi.actions.execute(pi.intents.match("Stop listening.")["actions"][0])
-    assert (result.ok, result.say) == (True, "Stopped, and microphone off.")
+    assert (result.ok, result.say, result.confirm) == (True, "Stopped, and microphone off.", "sound")
+    assert result.sound == "mic_off.wav"
     assert pi_ringing == set() and pi.muted
 
 
 def test_mute_at_the_pc_while_the_pi_rings_stops_it_first(pi_and_pc, pi_ringing, brain):
     pi, pc = pi_and_pc.pi, pi_and_pc.pc
     result = pc.actions.execute(pc.intents.match("Mute.")["actions"][0])
-    assert (result.ok, result.say) == (True, "Stopped, and the Pi's microphone is off.")
+    assert (result.ok, result.say, result.confirm) == (True, "Stopped, and the Pi's microphone is off.", "sound")
+    assert result.sound == "mic_off.wav"
     assert pi_ringing == set() and pi.muted and not pc.muted
     # A name he gave it keeps its own case mid-sentence.
     pi.set_muted(False)
@@ -1700,7 +1704,7 @@ def test_mute_at_the_pc_while_the_pi_rings_stops_it_first(pi_and_pc, pi_ringing,
 def test_unmute_leaves_a_ring_alone(pi_and_pc, pi_ringing):
     pi_and_pc.pi.set_muted(True)
     result = pi_and_pc.pc.actions.execute(Action("mute_microphone", {"muted": False, "where": "the Pi"}))
-    assert result.say == "The Pi's microphone is on." and pi_ringing == {"bedroom"}
+    assert (result.say, result.sound) == ("The Pi's microphone is on.", "mic_on.wav") and pi_ringing == {"bedroom"}
 
 
 def test_mute_a_satellite_not_connected_says_so(pi_and_pc, brain):

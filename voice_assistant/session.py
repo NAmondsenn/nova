@@ -988,10 +988,12 @@ class Session:
                 (see Brain.ring_on) - the PC only listens while its key is held.
 
         Returns:
-            Dict with 'success' and what to say: "Microphone off." for this one, "The Pi's
-            microphone is off." for another, after "Stopped, and" if what rang there was
-            stopped first; or why not, when the words name none, or one which isn't
-            connected or which only listens on a press of its key.
+            Dict with 'success' and a 'message'. A success is confirmed by a sound, mic_off.wav
+            or mic_on.wav, played where it was spoken, and its message is only logged:
+            "Microphone off.", "The Pi's microphone is off." for another, after "Stopped,
+            and" if what rang there was stopped first. A failure says why not, when the
+            words name none, or one which isn't connected or which only listens on a press
+            of its key.
         """
         here = self.satellite.name
         if where:
@@ -1021,7 +1023,8 @@ class Session:
             said = f"microphone {state}." if stopped else f"Microphone {state}."
         else:
             said = f"{spoken if stopped else starting}'s microphone is {state}."
-        return {"success": True, "message": f"Stopped, and {said}" if stopped else said}
+        return {"success": True, "message": f"Stopped, and {said}" if stopped else said,
+                "sound": f"mic_{state}.wav", "sound_category": "general"}
 
     def _save_note(self, title: str, text: str, where: Optional[str] = None) -> Dict:
         """

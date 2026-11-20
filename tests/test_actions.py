@@ -362,11 +362,13 @@ def test_mute_microphone_is_the_sessions_and_offered_to_claude():
 
     def microphone(muted, where):
         asked.append((muted, where))
-        return {"success": True, "message": "Microphone off."}
+        return {"success": True, "message": "Microphone off.", "sound": "mic_off.wav"}
 
     executor = ActionExecutor(microphone=microphone)
     result = executor.execute(Action("mute_microphone", {"muted": True}))
-    assert (result.ok, result.say) == (True, "Microphone off.")
+    assert (result.ok, result.say, result.confirm, result.sound) == (True, "Microphone off.", "sound", "mic_off.wav")
+    # Confirmed by the sound alone, even when Claude asked and has its own "Okay." to say.
+    assert confirm([result], fallback="Okay.") == ([("mic_off.wav", "general")], [])
     executor.execute(Action("mute_microphone", {"muted": False, "where": "the Pi"}, from_model=True))
     assert asked == [(True, None), (False, "the Pi")]
     schema = next(tool for tool in executor.tool_schemas() if tool["name"] == "mute_microphone")
