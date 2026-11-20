@@ -1751,6 +1751,8 @@ class Session:
                     self._play_announcement(self.speaker.play_stream(
                         tts.stream(reply.say), tts.sample_rate, volume=self.volume.get("general"),
                         kind="announcement"))
+                # Once it's said, or when nothing was - as for a reply to the user.
+                self._run_after(reply.after)
         except Exception as e:
             logger.error(f"A routine failed: {e}", exc_info=True)
         finally:

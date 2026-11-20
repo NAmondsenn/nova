@@ -1960,6 +1960,22 @@ def test_a_routine_clears_a_typed_question(brain, make_session):
     assert session._typed_question is None
 
 
+def test_a_routine_does_what_is_left_until_after_it_is_said(brain, make_session):
+    # A routine's "lock my PC" at a PC is pressed once the routine's words are said, or when it says nothing.
+    session = make_session()
+    order = []
+    session.music = SimpleNamespace(hold=lambda: None, release=lambda after=0: None)
+    session._play_announcement = lambda playback, still_wanted=None: order.append("said")
+    session.speaker = SimpleNamespace(play_stream=lambda *args, **kwargs: None, close=lambda: None)
+    brain.tts = SimpleNamespace(stream=lambda message: None, sample_rate=22050)
+    after = [lambda: order.append("press") or {"success": True}]
+    session.conversation = SimpleNamespace(start=lambda: None, run_routine=lambda routine: Reply(say="Night.", after=after))
+    session.run_routine({"name": "Night", "steps": ["lock my pc"]})
+    session.conversation.run_routine = lambda routine: Reply(after=after)
+    session.run_routine({"name": "Night", "steps": ["lock my pc"]})
+    assert order == ["said", "press", "press"]
+
+
 def test_an_answer_typed_before_its_question_is_talked_over_is_answered_after(brain, connect, make_session):
     # Kept as a fresh request rather than lost, once the wake word said over the question is answered.
     satellite, pi = connect()
