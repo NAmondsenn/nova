@@ -73,15 +73,6 @@ CLOSE_WAIT = 2
 # What the orb can be asked to show.
 STATES = ("listening", "thinking", "speaking", "hidden")
 
-# How many showings in a row may fail before the orb gives up until the satellite
-# restarts. While the desktop is away - a remote session left disconnected, the screens
-# changing as a monitor sleeps, a graphics driver resetting - Windows can refuse each
-# showing until it is back, which costs one frame and no log line each time, so the orb
-# keeps trying through a good few of them: a spoken reminder while the PC is locked is
-# an everyday thing. A window which fails this many times running, with no frame going
-# up in between, is broken in a way trying again won't mend.
-GIVE_UP_AFTER = 10
-
 # The clock's easings, as the four numbers of a CSS cubic-bezier(): `ease`, which is what
 # its opacity transition has by default, and the one its blob grows in with, which
 # overshoots a little before it settles.
@@ -427,8 +418,8 @@ class ScreenOrb:
 
     If the window can't be made, that is logged once and the orb does nothing for the
     rest of the run. A showing which can't be drawn, as while the desktop is away, is
-    taken down and dropped, and the next one is tried afresh: only the first such failure
-    is logged, and the orb gives up only once GIVE_UP_AFTER showings in a row have failed.
+    taken down and dropped, and the next one is tried afresh, however many have failed
+    before it: only the first such failure is logged.
     """
 
     def __init__(self, backend: Optional[Callable[[], object]] = None):
@@ -459,9 +450,7 @@ class ScreenOrb:
         # Whether a frame is up on the screen, and when it was drawn.
         self._up = False
         self._drawn_at = 0.0
-        # How many showings have failed since a frame last went up, and whether a failed
-        # showing has been logged yet.
-        self._failed_in_a_row = 0
+        # Whether a failed showing has been logged yet.
         self._failure_logged = False
         if self._make is None:
             return
@@ -581,8 +570,7 @@ class ScreenOrb:
                 drawn = self._draw(backend, now)
             except Exception as e:
                 drawn = False
-                if not self._drop(backend, e):
-                    return
+                self._drop(backend, e)
             due = now + FRAME if drawn else None
 
     def _take(self, note: tuple, backend, now: float) -> None:
@@ -628,20 +616,22 @@ class ScreenOrb:
         backend.put(frame, *self._spot)
         self._up = True
         self._drawn_at = now
-        self._failed_in_a_row = 0
         return True
 
-    def _drop(self, backend, error: Exception) -> bool:
+    def _drop(self, backend, error: Exception) -> None:
         """
         Drops a showing which failed part way through drawing: takes the window down if
         it can, and forgets what was shown, so the next thing shown starts afresh.
 
+        It never gives up on the orb. While the desktop is away - the PC locked, a remote
+        session left disconnected, a graphics driver resetting - Windows refuses every
+        showing until it is back, and a spoken reminder while the PC is locked is an
+        everyday thing. Trying each one costs a frame and, after the first, no log line,
+        and the orb is there again for the first showing once the desktop is back.
+
         Args:
             backend: The window.
             error: What the failure raised.
-
-        Returns:
-            Whether to carry on: False once GIVE_UP_AFTER showings in a row have failed.
         """
         self._fade = Fade()
         self._up = False
@@ -650,18 +640,11 @@ class ScreenOrb:
             backend.hide()
         except Exception:
             logger.debug("Couldn't take down the window for Nova's orb", exc_info=True)
-        self._failed_in_a_row += 1
         logger.debug("How drawing Nova's orb on the screen failed", exc_info=error)
         if not self._failure_logged:
             self._failure_logged = True
             logger.warning(f"Couldn't draw Nova's orb on the screen ({type(error).__name__}), so it was left off "
                            f"this time; it tries again each time it shows")
-        if self._failed_in_a_row < GIVE_UP_AFTER:
-            return True
-        self._quiet = True
-        logger.info(f"Nova's orb on the screen failed {GIVE_UP_AFTER} times in a row, so it's off until the "
-                    f"satellite restarts")
-        return False
 
     def _hide(self, backend) -> None:
         """Takes the window down, if a frame is up."""
