@@ -53,6 +53,7 @@ import yaml
 from voice_assistant import paths, satellite_names, storage, timeline
 from voice_assistant.batteries import HOME_FAILURES
 from voice_assistant.clock import format_duration
+from voice_assistant.computers import match_app, plain as plain_app
 from voice_assistant.config import CHOICES, LIMITS, Config, ConfigError, check, clashes, limit_problem
 from voice_assistant.devices import AppDevice
 from voice_assistant.football import FootballUnavailable
@@ -130,6 +131,8 @@ EDITABLE = [
     ("journeys", "heavy_percent", "Percent over a clear road that make traffic heavy", "now"),
     ("journeys", "monthly_requests", "Most journeys Nova asks Google for in a month", "now"),
     ("journeys", "distance_unit", "Distances said in", "now"),
+    # Read at each "search for" on a computer.
+    ("computer", "search_site", "Search site for 'search for' on a computer", "now"),
     ("home_assistant", "url", "Home Assistant's address", "restart"),
     ("ntfy", "url", "Your ntfy server", "restart"),
     ("ntfy", "alerts", "Topics read out as they arrive, separated by commas", "restart"),
@@ -252,6 +255,9 @@ SATELLITES_UNREADABLE = "The satellites' file can't be read, so nothing was chan
 # the box stays something to read, and what's said in a reply stays short.
 MOST_CALLED = 5
 LONGEST_CALLED = 30
+# The most short names for apps one computer can be given, and the longest one.
+MOST_APP_NAMES = 30
+LONGEST_APP_NAME = 40
 
 
 def _kind(default: Any) -> str:
@@ -625,6 +631,10 @@ class SettingsPage:
         whether it saves notes, the other names he has given it and, if Spotify is the
         player, the speaker it plays on. Never its password.
 
+        A satellite which has said it opens things since the brain started, or is a PC,
+        also has whether he lets it, how many apps it found and his short names for them. With more than one PC in Home
+        Assistant, it has the one chosen, if it was. Nothing here asks Home Assistant.
+
         Args:
             names: The satellites, as the brain has them - the first is the default.
         """
@@ -635,6 +645,8 @@ class SettingsPage:
         # With Navidrome as the player, Spotify plays nowhere, so none is said. Spotify
         # is the player when none is chosen, as with no config at all.
         spotify = self.brain.config is None or _chosen(self.brain.config) == "spotify"
+        computers = self.brain.computers
+        opening = set(computers.known())
         for name in names:
             session = self.brain.session_for(name)
             # One which doesn't say plays on the brain's own - see SpotifyController.
@@ -647,7 +659,13 @@ class SettingsPage:
                           # Never true without journeys, which is what keeps it.
                           "travels": journeys is not None and journeys.travels(name),
                           "machine": rooms.machine(name), "called": rooms.called(name),
-                          "saves_notes": rooms.saves_notes(name)})
+                          "saves_notes": rooms.saves_notes(name),
+                          # A PC keeps its switch and names after the brain restarts, before it's heard from.
+                          "opens": name in opening or rooms.machine(name) == "pc",
+                          "opens_on": rooms.opens_things(name),
+                          "apps_found": len(computers.apps(name)), "app_names": rooms.app_names(name),
+                          # As saved: the PCs it is one of come from home_choices_state, as Home Assistant is slow to ask.
+                          "pc_device": rooms.pc_device(name)})
         return found
 
     def state(self, satellite: Optional[str] = None) -> Dict:
@@ -951,7 +969,8 @@ class SettingsPage:
             "sending": [{"name", "how"}], "weather": [{"id", "name", "chosen"}] or None,
             "pcs": {"pcs": [{"device", "name", "wake"}], "buttons": [{"id", "name"}]} or
             None} - the weather only with more than one entity, the PCs only with a PC and
-            more than one PC or more than one button. Else {"available": False, "message": ...}.
+            more than one PC or more than one button - and "satellite_pcs", the PCs a satellite can be
+            chosen from, as {"device", "name"}, only with more than one PC. Else {"available": False, "message": ...}.
         """
         brain = self.brain
         if brain.home is None:
@@ -980,7 +999,9 @@ class SettingsPage:
             sending.append({"name": device.name, "how": how})
         choose_pc = bool(pcs["pcs"]) and (len(pcs["pcs"]) > 1 or len(pcs["buttons"]) > 1)
         return {"available": True, "lists": lists, "sending": sending,
-                "weather": weather if len(weather) > 1 else None, "pcs": pcs if choose_pc else None}
+                "weather": weather if len(weather) > 1 else None, "pcs": pcs if choose_pc else None,
+                "satellite_pcs": [{"device": each["device"], "name": each["name"]} for each in pcs["pcs"]]
+                if len(pcs["pcs"]) > 1 else []}
 
     def _restart_needed(self, saved: Optional[Config]) -> bool:
         """
@@ -2171,6 +2192,127 @@ class SettingsPage:
         logger.info(f"Settings page: {who} gave the {name} satellite the other names {given!r}")
         return {"success": True, "message": f"{name} is also called {satellite_names.listed(given, 'and')}."}
 
+    def set_opens(self, name, on, who: str) -> Dict:
+        """
+        Lets a satellite open apps and pages, or stops it. See SatelliteRooms.set_opens_things.
+        The types are checked here, as bool("false") would be True.
+
+        Args:
+            name: The satellite, as the page sent it.
+            on: Whether it may.
+            who: The Tailscale login asking, for the log.
+
+        Returns:
+            Dict with 'success' and a 'message'.
+        """
+        if not (isinstance(name, str) and isinstance(on, bool)):
+            return {"success": False, "message": "That didn't make sense."}
+        names = self._satellite_names()
+        if names is None:
+            return {"success": False, "message": SATELLITES_UNREADABLE}
+        if name not in names:
+            return {"success": False, "message": f"There's no satellite called {name}."}
+        try:
+            self.brain.rooms.set_opens_things(name, on)
+        except OSError as e:
+            logger.error(f"Settings page: couldn't save whether the {name} satellite opens things: {e}")
+            return {"success": False, "message": "That couldn't be saved."}
+        logger.info(f"Settings page: {who} {'let' if on else 'stopped'} the {name} satellite "
+                    f"{'open' if on else 'opening'} things")
+        return {"success": True, "message": f"{name} opens things now." if on else f"{name} won't open things now."}
+
+    def set_app_names(self, name, text, who: str) -> Dict:
+        """
+        Gives a satellite's apps the short names he says for them, in place of any they
+        had, so "open GTA" finds Grand Theft Auto. See SatelliteRooms.set_app_names.
+        Nothing is saved if any is refused.
+
+        Args:
+            name: The satellite, as the page sent it.
+            text: Pairs as typed in the page's box, apart by commas: "GTA = Grand Theft
+                Auto V Enhanced, FC = EA SPORTS FC 25". Each right side must fit exactly
+                one app in the satellite's list, as match_app would say. Empty for none.
+            who: The Tailscale login asking, for the log.
+
+        Returns:
+            Dict with 'success' and a 'message'.
+        """
+        if not (isinstance(name, str) and isinstance(text, str)):
+            return {"success": False, "message": "That didn't make sense."}
+        names = self._satellite_names()
+        if names is None:
+            return {"success": False, "message": SATELLITES_UNREADABLE}
+        if name not in names:
+            return {"success": False, "message": f"There's no satellite called {name}."}
+        pairs = [each.strip() for each in text.split(",") if each.strip()]
+        if len(pairs) > MOST_APP_NAMES:
+            return {"success": False, "message": f"That's more than {MOST_APP_NAMES} names."}
+        apps = self.brain.computers.apps(name)
+        # As it's said mid-sentence, "the PC" or the name he gave it.
+        spoken = self.brain.spoken_name(name)
+        given: Dict[str, str] = {}
+        for pair in pairs:
+            alias, _, app = (part.strip() for part in pair.partition("="))
+            if not alias or not app:
+                return {"success": False, "message": f"{pair} isn't a name and an app with = between."}
+            if len(alias) > LONGEST_APP_NAME:
+                return {"success": False, "message": f"A name can't be more than {LONGEST_APP_NAME} characters."}
+            if not plain_app(alias):
+                return {"success": False, "message": f"{alias} has no words in it."}
+            # Matched with no names of his own, so a name can't be pointed at another name.
+            found = match_app(app, apps, {})
+            if found.item is None:
+                return {"success": False, "message": f"I can't find {app} on {spoken}."}
+            given[plain_app(alias)] = found.item["name"]
+        try:
+            self.brain.rooms.set_app_names(name, given)
+        except OSError as e:
+            logger.error(f"Settings page: couldn't save the app names of the {name} satellite: {e}")
+            return {"success": False, "message": "That couldn't be saved."}
+        if not given:
+            logger.info(f"Settings page: {who} cleared the app names of the {name} satellite")
+            return {"success": True, "message": f"{name} has no other names for apps now."}
+        logger.info(f"Settings page: {who} gave the {name} satellite {len(given)} other names for apps")
+        return {"success": True, "message": f"{name} has {len(given)} other names for apps."}
+
+    def set_pc(self, name, device, who: str) -> Dict:
+        """
+        Says which HASS.Agent PC a satellite is, from those Home Assistant has, as the
+        power words need to know. It's checked against what Home Assistant lists now.
+
+        Args:
+            name: The satellite, as the page sent it.
+            device: The PC's Home Assistant device id.
+            who: The Tailscale login asking, for the log.
+
+        Returns:
+            Dict with 'success' and a 'message'.
+        """
+        if not (isinstance(name, str) and isinstance(device, str)):
+            return {"success": False, "message": "That didn't make sense."}
+        names = self._satellite_names()
+        if names is None:
+            return {"success": False, "message": SATELLITES_UNREADABLE}
+        if name not in names:
+            return {"success": False, "message": f"There's no satellite called {name}."}
+        if self.brain.pc is None:
+            return {"success": False, "message": NO_HOME}
+        try:
+            listed = self.brain.pc.overview()["pcs"]
+        except HOME_FAILURES as e:
+            logger.warning(f"Settings page: couldn't read the PCs to choose one for the {name} satellite: {e}")
+            return {"success": False, "message": CANT_REACH_HOME}
+        chosen = next((each for each in listed if each["device"] == device), None)
+        if chosen is None:
+            return {"success": False, "message": "Home Assistant doesn't have that PC."}
+        try:
+            self.brain.rooms.set_pc_device(name, device)
+        except OSError as e:
+            logger.error(f"Settings page: couldn't save which PC the {name} satellite is: {e}")
+            return {"success": False, "message": "That couldn't be saved."}
+        logger.info(f"Settings page: {who} chose which PC the {name} satellite is")
+        return {"success": True, "message": f"{name} is the {chosen['name']} PC now."}
+
     # The clock displays. Their file keeps its own lock, as the satellites' passwords
     # do, so none of these holds _saving either. See docs/decisions/0013.
 
@@ -2472,6 +2614,9 @@ ACTIONS: Dict[str, Callable[[SettingsPage, Dict, str], Dict]] = {
     "/api/satellites/default": lambda page, body, who: page.make_default(body["name"], who),
     "/api/satellites/travels": lambda page, body, who: page.set_travels(body["name"], body["on"], who),
     "/api/satellites/called": lambda page, body, who: page.set_called(body["name"], body["called"], who),
+    "/api/satellites/opens": lambda page, body, who: page.set_opens(body["name"], body["on"], who),
+    "/api/satellites/app-names": lambda page, body, who: page.set_app_names(body["name"], body["text"], who),
+    "/api/satellites/pc": lambda page, body, who: page.set_pc(body["name"], body["device"], who),
     # A new clock's fields are sent as one, as the page adds the satellite it's looking
     # after to every change it sends, which would otherwise be taken for the clock's.
     # Its satellite is always sent - null for the default's.

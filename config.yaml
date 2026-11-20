@@ -150,6 +150,11 @@ conversation:
   # Seconds an exchange is remembered for, once a new conversation starts.
   history_max_age: 300
 
+# What a computer satellite does with "search for ..." (open a search page on it).
+# One of google, duckduckgo or bing. Used straight away.
+computer:
+  search_site: google
+
 # Web search is only used when the query explicitly asks for it
 # (e.g. "search for..."), so normal replies stay fast and free.
 # Each search is billed by Anthropic on top of token costs.

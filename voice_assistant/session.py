@@ -27,6 +27,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from voice_assistant import paths, storage
 from voice_assistant.actions import ActionExecutor
 from voice_assistant.clock_ringing import heard_in
+from voice_assistant.computers import ComputerControl, ComputerHooks
 from voice_assistant.conversation import NOT_CAUGHT, Conversation
 from voice_assistant.ha_device import DeviceControls, NovaDevice
 from voice_assistant.home_assistant import HomeAssistant
@@ -298,7 +299,8 @@ class Session:
         # Everything the assistant can do for the user - see actions.py. The lights are
         # only there once Home Assistant is set up, and the calendar once Google is, and
         # timers and alarms ring on the satellite they were set from, as a download is
-        # said there - or on its room's always-on one, if it's a push-to-talk satellite.
+        # said there - or on its room's always-on one, if it's a push-to-talk satellite. Any
+        # satellite can open things on a computer, the one it's on or another.
         self.actions = ActionExecutor(music=self.music_player, clock=brain.clock, volume=self.volume,
                                       weather=brain.weather, home=self.home, memory=brain.memory,
                                       ntfy=brain.ntfy, satellite=satellite.name, batteries=brain.batteries,
@@ -313,15 +315,20 @@ class Session:
                                       elsewhere=self._elsewhere,
                                       spoken_name=lambda name: brain.spoken_name(name),
                                       settled=lambda: self.music.wait(),
-                                      notes=self._save_note if satellite.saves_notes else None)
+                                      notes=self._save_note if satellite.saves_notes else None,
+                                      computer=ComputerControl(brain, satellite.name), device=self._device,
+                                      at_pc=lambda: brain.rooms.machine(satellite.name) == "pc",
+                                      pc_name=lambda: brain.pc_called(satellite.name))
 
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.
         # The teams followed are given by every name they have, as they are left to Claude, not Assist.
+        # Opening, closing and searching are only a computer's when the brain finds what's said there.
         self.intents = LocalIntents(clock=brain.clock, ntfy=brain.ntfy, home=self.home,
                                     activities=brain.calendar.activity_words if brain.calendar else None,
                                     football=brain.football.known_as if brain.football else None,
-                                    wake_word=self.wake_word, names_satellite=brain.names_satellite)
+                                    wake_word=self.wake_word, names_satellite=brain.names_satellite,
+                                    computer=ComputerHooks.for_satellite(brain, satellite.name))
 
         # The satellite as a device of its own in Home Assistant, over MQTT, or None
         # until mqtt.host is set - see ha_device.py. It's named after the satellite's
@@ -941,6 +948,29 @@ class Session:
             return None, f"{away[:1].upper() + away[1:]} isn't connected."
         return session.actions, None
 
+    def _device(self, said: Optional[str]) -> Tuple[Optional["Session"], Optional[str]]:
+        """
+        Finds the session of the satellite some words name, for its volume.
+
+        Args:
+            said: The words for it, e.g. "the PC", or None for this one.
+
+        Returns:
+            Its session and None - this one, with none named, or if it's the one named; or
+            None and what to say, if the words name none or more than one, or the one named
+            isn't connected ("Your PC's off.").
+        """
+        if not said:
+            return self, None
+        # "Here" and "this device" are this one.
+        name, problem = self.brain.find_satellite(said, here=self.satellite.name)
+        if name is None:
+            return None, problem
+        session = self.brain.session_for(name)
+        if session is None:
+            return None, self.brain.not_connected(name)
+        return session, None
+
     def _save_note(self, title: str, text: str) -> Dict:
         """
         Has the satellite save a note in its Downloads folder, for the user at it.
@@ -1291,14 +1321,34 @@ class Session:
             self._play_sound(sound, volume=self.volume.get(category))
         if reply.shown:
             self._show(f"{self.assistant_name}: {reply.shown}")
+        heard_over = None
         if reply.say:
             heard_over = self._say(reply.say, timeline=timeline, listen=True)
-            if heard_over is not None:
-                # Talked over, so the question goes unanswered - and anything typed for
-                # it is a fresh request, after the one just begun.
-                self._close_answer(keep=True)
-                return heard_over, bool(reply.listen_again)
+        # Once it's said, talked over or not - or when there was nothing to say.
+        self._run_after(reply.after)
+        if heard_over is not None:
+            # Talked over, so the question goes unanswered - and anything typed for
+            # it is a fresh request, after the one just begun.
+            self._close_answer(keep=True)
+            return heard_over, bool(reply.listen_again)
         return None, bool(reply.listen_again)
+
+    @staticmethod
+    def _run_after(after: List[Callable[[], Dict]]) -> None:
+        """
+        Does what was left until a reply had been said, each in turn, whatever happens to
+        the one before - logging a failure by its type, never raising it.
+
+        Args:
+            after: Each gives {"success", "message"}, which is logged only if it failed.
+        """
+        for step in after:
+            try:
+                result = step()
+                if not result.get("success"):
+                    logger.warning(f"Left until the reply was said, and failed: {result.get('message')}")
+            except Exception as e:
+                logger.warning(f"Left until the reply was said, and failed: {type(e).__name__}")
 
     def _say(self, message: str, timeline: Optional[Timeline] = None, listen: bool = False) -> Optional[Dict]:
         """
@@ -1703,6 +1753,8 @@ class Session:
                     self._play_announcement(self.speaker.play_stream(
                         tts.stream(reply.say), tts.sample_rate, volume=self.volume.get("general"),
                         kind="announcement"))
+                # Once it's said, or when nothing was - as for a reply to the user.
+                self._run_after(reply.after)
         except Exception as e:
             logger.error(f"A routine failed: {e}", exc_info=True)
         finally:

@@ -323,6 +323,21 @@ def test_a_notes_text_is_given_to_be_saved_but_never_logged(llm, caplog):
     assert f"<{len(text)} characters>" in logged[0]
 
 
+def test_a_web_page_is_logged_by_its_host_and_a_search_not_at_all(llm, caplog):
+    llm.client = FakeClient(_reply("Okay.", _tool("open_web_page", url="https://example.com/private/path?token=hush"),
+                                   _tool("search_on_computer", words="my hidden words")))
+    with caplog.at_level("DEBUG"):
+        result = llm.process_query("open that page and look something up")
+
+    # What's run is whole.
+    assert result["actions"][0].params["url"] == "https://example.com/private/path?token=hush"
+    assert result["actions"][1].params["words"] == "my hidden words"
+    for hidden in ("private", "token", "hush", "hidden"):
+        assert hidden not in caplog.text
+    logged = [record.getMessage() for record in caplog.records if record.getMessage().startswith("LLM response")]
+    assert len(logged) == 1 and "example.com" in logged[0] and "search_on_computer" in logged[0]
+
+
 def test_what_isnt_a_notes_text_is_logged_as_it_was(llm, caplog):
     llm.client = FakeClient(_reply("Okay.", _tool("set_timer", duration_seconds=600, label="Take the bins out")))
     with caplog.at_level("INFO"):

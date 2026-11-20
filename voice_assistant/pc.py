@@ -242,17 +242,20 @@ class PCPower:
             return None, None, {"success": False, "message": f"Which PC, {', '.join(names[:-1])} or {names[-1]}?"}
         return fits[0], snapshot, None
 
-    def act(self, action: str, name: Optional[str] = None) -> Dict:
+    def act(self, action: str, name: Optional[str] = None, defer: bool = False) -> Dict:
         """
         Does what was asked of the PC - bar shutting down or restarting, which ask first.
 
         Args:
             action: "on", "off", "restart", "sleep", "screen_off", "lock" or "status".
             name: Which PC, as the user said it, or None - needed only with several.
+            defer: Whether to leave pressing sleep, screen off and lock until what's said of
+                it has been, as at the PC - checked first, so the reply is still true.
 
         Returns:
             {"success", "message"}, with "ask_first", the Action to run on a yes, for
-            "off" and "restart" with the PC on.
+            "off" and "restart" with the PC on - or "after_said", for what defer leaves,
+            which presses the button and gives {"success", "message"} when called.
         """
         if action not in ("on", "status", *KINDS):
             return {"success": False, "message": "I didn't catch what to do with your PC."}
@@ -281,7 +284,14 @@ class PCPower:
                     "ask_first": Action("press_pc_button", {"action": action, "name": name})}
         if not pc.on:
             return {"success": False, "message": "Your PC's off."}
-        return self._missing(pc, action) or self._press(pc.buttons[KINDS[action]], KINDS[action], PRESSED[action])
+        missing = self._missing(pc, action)
+        if missing:
+            return missing
+        button, kind = pc.buttons[KINDS[action]], KINDS[action]
+        if defer:
+            return {"success": True, "message": PRESSED[action],
+                    "after_said": lambda: self._press(button, kind, PRESSED[action])}
+        return self._press(button, kind, PRESSED[action])
 
     def press(self, action: str, name: Optional[str] = None) -> Dict:
         """

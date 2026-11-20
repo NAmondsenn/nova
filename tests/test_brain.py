@@ -40,6 +40,7 @@ from voice_assistant.config import Config
 from voice_assistant.displays import Displays
 from voice_assistant.downloads import Downloads
 from voice_assistant.clean_schedule import CleanSchedule
+from voice_assistant.computers import ComputerControl, ComputerHooks
 from voice_assistant.following import FollowWatcher
 from voice_assistant.football import Football
 from voice_assistant.football_watch import FootballChoices, FootballWatcher
@@ -291,7 +292,7 @@ class Satellite:
     """
 
     def __init__(self, brain, name="bedroom", password=BEDROOM, unclean=False, away=NOTHING_AWAY, push_to_talk=False,
-                 machine=None, saves_notes=False, media_controls=False):
+                 machine=None, saves_notes=False, media_controls=False, opens=False):
         self.socket = socket.create_connection(("127.0.0.1", brain.port), timeout=5)
         self.stream = self.socket.makefile("rwb")
         self.lock = threading.Lock()
@@ -300,7 +301,7 @@ class Satellite:
         self.gone = threading.Event()
         try:
             protocol.greet(self.stream, name, f"{name}-pi", password, 48000, unclean, push_to_talk=push_to_talk,
-                           machine=machine, saves_notes=saves_notes, media_controls=media_controls)
+                           machine=machine, saves_notes=saves_notes, media_controls=media_controls, opens=opens)
         except BaseException:
             # As satellite_link does, so the brain sees it hang up.
             self.socket.close()
@@ -454,6 +455,36 @@ def test_connecting_records_machine_and_notes(brain, connect):
     # And kept, so it's known while the satellite is away and after a restart.
     again = SatelliteRooms(os.path.join(paths.DATA_DIR, "satellite_rooms.json"))
     assert again.machine("bedroom") == "pc" and again.saves_notes("bedroom") is True
+
+
+def test_a_computers_apps_and_windows_are_kept_and_its_windows_dropped_as_it_goes(brain, connect):
+    serving(brain)
+    pc = connect(brain, "bedroom", BEDROOM, machine="pc", opens=True)
+    connected(brain)
+    app = {"id": "steam", "name": "Steam", "kind": "app"}
+    pc.say("apps", json.dumps([app]).encode())
+    pc.say("windows", json.dumps(["Steam"]).encode())
+    assert wait_for(lambda: brain.computers.windows("bedroom") == ["Steam"])
+    assert brain.computers.apps("bedroom") == [app]
+
+    pc.go()
+    assert wait_for(lambda: brain.session_for("bedroom") is None)
+    assert wait_for(lambda: brain.computers.windows("bedroom") == [])
+    assert brain.computers.apps("bedroom") == [app]
+
+
+def test_a_computers_lists_survive_the_end_of_the_connection_it_replaced(brain, connect):
+    serving(brain)
+    old = connect(brain, "bedroom", BEDROOM, machine="pc", opens=True)
+    connected(brain)
+    new = connect(brain, "bedroom", BEDROOM, machine="pc", opens=True)
+    assert wait_for(old.gone.is_set)
+    connected(brain)
+    new.say("windows", json.dumps(["Discord"]).encode())
+    assert wait_for(lambda: brain.computers.windows("bedroom") == ["Discord"])
+    # The old one's end, seen by the brain, mustn't wipe the new one's windows.
+    time.sleep(0.3)
+    assert brain.computers.windows("bedroom") == ["Discord"]
 
 
 def test_ring_on(brain, passwords):
@@ -630,6 +661,156 @@ def test_spoken_name_isnt_the_satellites_machine_word(named):
     assert named.spoken_name("pc") == "the PC"
     named.rooms.set_called("pc", ["computer", "Desk"])
     assert named.spoken_name("pc") == "Desk"
+
+
+# Which computer something is opened on
+
+class FakePCPower:
+    """Stands in for PCPower: says whether the PC is on, and keeps which PC it was asked about."""
+
+    def __init__(self, on=True, pcs=None):
+        self.on = on
+        self.pcs = pcs if pcs is not None else [{"device": "dev-1", "name": "Desk PC", "wake": None}]
+        self.asked = []
+
+    def act(self, action, name=None):
+        self.asked.append((action, name))
+        return {"success": True, "message": "Your PC's on." if self.on else "Your PC's off."}
+
+    def overview(self):
+        return {"pcs": self.pcs, "buttons": []}
+
+
+def put_in_session(brain, name, opens=False):
+    """Puts in a connected session for a satellite, by hand - one which says it opens things, if opens."""
+    brain.sessions[name] = FakeSession(
+        brain, SimpleNamespace(name=name, connected=True, close=lambda: None, opens=opens), [])
+
+
+def test_where_spoken_at_pc(named):
+    named.computers.set_apps("pc", [])
+    put_in_session(named, "pc")
+    assert named.computer_for("pc", None) == ("pc", None)
+
+
+def test_where_named_from_pi(named):
+    named.computers.set_apps("pc", [])
+    put_in_session(named, "pc")
+    assert named.computer_for("bedroom", "my PC") == ("pc", None)
+    # One which has never said it opens things can't, connected or not.
+    put_in_session(named, "mac")
+    assert named.computer_for("bedroom", "the Mac") == (None, "The Mac can't open things.")
+    assert named.computer_for("pc", "the Pi") == (None, "The Pi can't open things.")
+    # Words naming none say so, as find_satellite does.
+    assert named.computer_for("bedroom", "the phone")[1].startswith("There's no satellite called the phone.")
+
+
+def test_where_only_one_known(named):
+    named.computers.set_apps("pc", [])
+    put_in_session(named, "pc")
+    assert named.computer_for("bedroom", None) == ("pc", None)
+    # With two that open things and neither spoken at, it isn't for here to choose.
+    named.computers.set_apps("mac", [])
+    assert named.computer_for("bedroom", None) == (None, None)
+    assert named.computer_for("pc", None) == ("pc", None)
+
+
+def test_where_none_known_falls_through(named):
+    put_in_session(named, "pc")
+    assert named.computer_for("bedroom", None) == (None, None)
+    assert named.computer_for("pc", None) == (None, None)
+
+
+def test_where_switch_off(named):
+    named.computers.set_apps("pc", [])
+    put_in_session(named, "pc")
+    named.rooms.set_opens_things("pc", False)
+    assert named.computer_for("pc", None) == (None, None)
+    assert named.computer_for("bedroom", None) == (None, None)
+    assert named.computer_for("bedroom", "the PC") == (None, "The PC can't open things.")
+
+
+def test_where_pc_asleep(named):
+    named.computers.set_apps("pc", [])
+    named.pc = FakePCPower(on=False)
+    # Known from before, but not connected: the PC is off, as Home Assistant says.
+    assert named.computer_for("bedroom", None) == (None, "Your PC's off.")
+    assert named.computer_for("bedroom", "the PC") == (None, "Your PC's off.")
+    # On, but with no Nova on it.
+    named.pc.on = True
+    assert named.computer_for("pc", None) == (None, "Nova isn't running on the PC.")
+    # No Home Assistant to ask.
+    named.pc = None
+    assert named.computer_for("bedroom", None) == (None, "Nova isn't running on the PC.")
+
+
+def test_where_a_named_computer_unheard_since_a_restart_is_asleep_not_unable(named):
+    # The brain restarted with the PC asleep: no list from it yet, but it's still a computer.
+    named.pc = FakePCPower(on=False)
+    assert named.computer_for("bedroom", "the PC") == (None, "Your PC's off.")
+    named.pc.on = True
+    assert named.computer_for("bedroom", "the PC") == (None, "Nova isn't running on the PC.")
+    assert named.computer_for("bedroom", "the Mac") == (None, "Nova isn't running on the Mac.")
+    # Unnamed, with none known, it still falls through.
+    assert named.computer_for("bedroom", None) == (None, None)
+    # Connected without a list, it can't; nor can the Pi, which isn't a computer.
+    put_in_session(named, "pc")
+    assert named.computer_for("bedroom", "the PC") == (None, "The PC can't open things.")
+    assert named.computer_for("pc", "the Pi") == (None, "The Pi can't open things.")
+
+
+def test_where_asks_about_the_pc_chosen_for_it(named):
+    named.computers.set_apps("pc", [])
+    named.pc = FakePCPower(on=False, pcs=[{"device": "dev-1", "name": "Desk PC", "wake": None},
+                                          {"device": "dev-2", "name": "Gaming PC", "wake": None}])
+    named.rooms.set_pc_device("pc", "dev-2")
+    named.computer_for("bedroom", None)
+    assert named.pc.asked == [("status", "Gaming PC")]
+    # One chosen which has gone, or none chosen, asks about no PC in particular: with one PC, it's that one.
+    named.rooms.set_pc_device("pc", "dev-9")
+    named.computer_for("bedroom", None)
+    assert named.pc.asked[-1] == ("status", None)
+
+
+def test_a_named_computer_just_connected_is_still_finding_its_apps(named):
+    # Connected and saying it opens things, but its list hasn't come yet.
+    put_in_session(named, "pc", opens=True)
+    assert named.computer_for("bedroom", "the PC") == (None, "I'm still finding the apps on the PC.")
+    # Turned off on the settings page, it can't, list or not.
+    named.rooms.set_opens_things("pc", False)
+    assert named.computer_for("bedroom", "the PC") == (None, "The PC can't open things.")
+
+
+def test_an_asleep_computer_is_matched_from_the_pi_and_said_to_be_off(named):
+    # The PC sent its list, then went to sleep: "open Fortnite" at the Pi is still its.
+    named.computers.set_apps("pc", [{"id": "f", "name": "Fortnite", "kind": "epic"}])
+    named.pc = FakePCPower(on=False)
+    hooks = ComputerHooks.for_satellite(named, "bedroom")
+    assert hooks.names_app("fortnite", None)
+    assert hooks.opens_somewhere() and hooks.app_called("fortnite")
+    assert not hooks.names_window("fortnite", None)
+    # Deciding whether the rules match never asks Home Assistant; only the reply does.
+    assert named.pc.asked == []
+    assert ComputerControl(named, "bedroom").open("fortnite") == {"success": False, "message": "Your PC's off."}
+    assert named.pc.asked == [("status", None)]
+
+
+def test_computer_meant_never_asks_home_assistant(named):
+    named.computers.set_apps("pc", [])
+    named.pc = FakePCPower(on=False)
+    assert named.computer_meant("bedroom", None) == ("pc", None)
+    assert named.computer_meant("bedroom", "the PC") == ("pc", None)
+    # A computer named but never heard from is still the one meant; the Pi isn't one.
+    assert named.computer_meant("bedroom", "the Mac") == ("mac", None)
+    assert named.computer_meant("pc", "the Pi") == (None, "The Pi can't open things.")
+    assert named.pc.asked == []
+
+
+def test_where_a_mac_asleep_isnt_the_pc(named):
+    named.computers.set_apps("mac", [])
+    named.pc = FakePCPower(on=False)
+    assert named.computer_for("bedroom", None) == (None, "Nova isn't running on the Mac.")
+    assert named.pc.asked == []
 
 
 @pytest.fixture
@@ -1283,6 +1464,19 @@ def test_a_routine_isnt_saved_on_a_satellite_gone_from_the_file(brain, passwords
     assert brain.routines.save({**MORNING, "satellite": "kitchen"}) == {
         "success": False, "message": "There's no satellite called kitchen."}
     assert brain.routines.save({**MORNING, "satellite": "bedroom"})["success"]
+
+
+def test_a_removed_computer_is_no_longer_one_to_open_things_on(brain, passwords):
+    # Away when it's removed, its apps kept from before.
+    passwords.add("pc", "the-pcs-password")
+    # Seen by the brain's look at the passwords, as the server's poll has it.
+    brain._shut_out_removed()
+    brain.computers.set_apps("pc", [{"id": "f", "name": "Fortnite", "kind": "epic"}])
+    brain.computers.set_windows("pc", ["Fortnite"])
+    assert brain.computers.known() == ["pc"]
+    assert brain.remove_satellite("pc") is False
+    assert brain.computers.known() == [] and brain.computers.windows("pc") == []
+    assert brain.computer_meant("bedroom", None) == (None, None)
 
 
 def test_a_removed_satellites_volumes_are_kept(brain, passwords):

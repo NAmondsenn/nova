@@ -34,6 +34,7 @@ CHOICES = {
     ("music", "player"): ("navidrome", "spotify"),
     ("satellite", "trigger"): ("wake_word", "push_to_talk"),
     ("journeys", "distance_unit"): ("miles", "km"),
+    ("computer", "search_site"): ("google", "duckduckgo", "bing"),
 }
 # Battery marks are percentages, and how many each kind of device has - the settings page
 # allows no other number. The battery watcher can't check every 0 seconds or call a

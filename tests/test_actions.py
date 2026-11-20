@@ -14,6 +14,7 @@ import requests
 from voice_assistant import volume as volume_module
 from voice_assistant.actions import NOT_A_COMMAND, Action, ActionExecutor, ActionResult, confirm
 from voice_assistant.batteries import Battery
+from voice_assistant.computers import ComputerControl
 from voice_assistant.downloads import ON_ITS_WAY, Downloads, Wanted
 from voice_assistant.undo import (NOTHING_TO_UNDO, SOMETHING_ELSE_SINCE, TOO_LATE, UNDO_CHANGE_KEPT,
                                    LastChange)
@@ -165,19 +166,20 @@ def test_pause_at_the_pc_pauses_the_pis_music(make_executor):
     assert pc.calls == ["pause"] and pi.calls == []
 
 
-def test_turn_it_up_turns_up_both_when_both_play(make_executor):
-    pc, pi = FakePlayer(playing=True, level=50), FakePlayer(playing=True, level=30)
-    result = make_executor(pc, room_players=lambda: [pc, pi]).execute(Action("set_volume", {"direction": "up"}))
-    assert result.ok and (pc.level, pi.level) == (60, 40)
+def test_volume_at_pi_changes_only_pi_music(make_executor):
+    # The PC is playing in the same room too, and is left alone: volume is the device spoken to's (0034).
+    pi, pc = FakePlayer(playing=True, level=30), FakePlayer(playing=True, level=50)
+    result = make_executor(pi, room_players=lambda: [pi, pc]).execute(Action("set_volume", {"direction": "up"}))
+    assert result.ok and (pi.level, pc.level) == (40, 50)
 
-    # Only what's playing is turned up, even when the music is named.
-    pc, pi = FakePlayer(level=50), FakePlayer(playing=True, level=30)
-    executor = make_executor(pc, room_players=lambda: [pc, pi])
+    # The music named is this one's own, playing or not.
+    pi, pc = FakePlayer(level=30), FakePlayer(playing=True, level=50)
+    executor = make_executor(pi, room_players=lambda: [pi, pc])
     executor.execute(Action("set_volume", {"category": "music", "direction": "down"}))
-    assert (pc.level, pi.level) == (50, 20)
-    # Music playing anywhere in the room is what "turn it down" means.
+    assert (pi.level, pc.level) == (20, 50)
+    # With only the PC's music playing, "turn it down" at the Pi is the Pi's own voice.
     executor.execute(Action("set_volume", {"direction": "down"}))
-    assert (pc.level, pi.level) == (50, 10) and executor.volume.percent("general") == 70
+    assert (pi.level, pc.level) == (20, 50) and executor.volume.percent("general") == 60
 
 
 def test_resume_prefers_its_own_paused_music(make_executor):
@@ -194,6 +196,193 @@ def test_resume_prefers_its_own_paused_music(make_executor):
     pc, pi = FakePlayer(), FakePlayer(playing=True)
     make_executor(pc, room_players=lambda: [pc, pi]).execute(Action("play_music", {}))
     assert pc.calls == ["play"] and pi.calls == []
+
+
+# Volume and mute on the device named, else the one spoken to (0034)
+
+class FakeWindows:
+    """The PC's satellite, with Windows' own volume, which answers each volume request as Windows' keys would."""
+
+    name = "pc"
+    system_volume = True
+
+    def __init__(self, level=30):
+        self.level, self.muted = level, False
+        self.asked = []
+
+    def ask_computer(self, action, **fields):
+        self.asked.append((action, fields))
+        if "mute" in fields:
+            self.muted = fields["mute"]
+        elif "level" in fields:
+            self.level, self.muted = fields["level"], False
+        else:
+            self.level += fields["step"] if fields["direction"] == "up" else -fields["step"]
+            self.muted = False
+        return {"level": self.level, "muted": self.muted}
+
+
+@pytest.fixture
+def pc_and_pi(tmp_path):
+    """
+    The PC and the Pi, in one room, each a session with its own executor, volumes and music,
+    which find each other by name as the brain does - and the volume beeps played on each
+    other than by the conversation spoken in, by its level.
+    """
+    windows = FakeWindows()
+    sessions, spoken = {}, {"pc": "the PC", "bedroom": "the Pi"}
+    named = {"the pc": "pc", "my pc": "pc", "the pi": "bedroom"}
+    pc_music, pi_music = FakePlayer(playing=True, level=50), FakePlayer(level=60)
+
+    def session_for(name):
+        return sessions.get(name)
+
+    brain = SimpleNamespace(find_satellite=lambda said: (named[said], None) if said in named
+                            else (None, f"There's no satellite called {said}."),
+                            session_for=session_for, spoken_name=spoken.get,
+                            not_connected=lambda name: "Your PC's off.", computers=SimpleNamespace(known=lambda: []))
+
+    def make(name, satellite, music):
+        def device(said):
+            if not said:
+                return sessions[name], None
+            if said == "the mac":
+                return None, "Your Mac's off."
+            found, problem = brain.find_satellite(said)
+            return (sessions[found], None) if found else (None, problem)
+
+        volume = VolumeControl(path=str(tmp_path / f"{name}.json"))
+        actions = ActionExecutor(music=music, volume=volume, satellite=name, device=device,
+                                 room_players=lambda: [pc_music, pi_music],
+                                 computer=ComputerControl(brain, name))
+        boops = []
+        sessions[name] = SimpleNamespace(satellite=satellite, actions=actions, volume=volume, boops=boops,
+                                         boop=boops.append)
+        return sessions[name]
+
+    pc = make("pc", windows, pc_music)
+    pi = make("bedroom", SimpleNamespace(name="bedroom"), pi_music)
+    return SimpleNamespace(pc=pc, pi=pi, windows=windows, pc_music=pc_music, pi_music=pi_music)
+
+
+def test_volume_up_at_pc_goes_to_windows(pc_and_pi):
+    result = pc_and_pi.pc.actions.execute(Action("set_volume", {"direction": "up"}))
+    assert pc_and_pi.windows.asked == [("volume", {"direction": "up", "step": 10})]
+    assert (result.ok, result.say) == (True, "Volume 40 percent.")
+    # Beeped at the PC, at Nova's own level there, which Windows' now scales.
+    assert (result.confirm, result.sound, result.sound_category) == ("sound", "volume_beep.wav", "general")
+    # Nova's own volume and the music playing at the PC are left alone.
+    assert pc_and_pi.pc.volume.percent("general") == 70 and pc_and_pi.pc_music.level == 50
+    # A level, and a step he names.
+    pc_and_pi.pc.actions.execute(Action("set_volume", {"level": 25}))
+    pc_and_pi.pc.actions.execute(Action("set_volume", {"category": "music", "direction": "down", "amount": 5}))
+    assert pc_and_pi.windows.asked[1:] == [("volume", {"level": 25}),
+                                           ("volume", {"direction": "down", "step": 5})]
+
+
+def test_a_step_at_pc_is_one_windows_can_take(pc_and_pi):
+    for amount in (500, 0.2):
+        pc_and_pi.pc.actions.execute(Action("set_volume", {"direction": "up", "amount": amount}, from_model=True))
+    assert pc_and_pi.windows.asked == [("volume", {"direction": "up", "step": 100}),
+                                       ("volume", {"direction": "up", "step": 1})]
+
+
+def test_volume_on_pc_from_pi(pc_and_pi):
+    result = pc_and_pi.pi.actions.execute(Action("set_volume", {"direction": "down", "where": "the pc"}))
+    assert pc_and_pi.windows.asked == [("volume", {"direction": "down", "step": 10})]
+    # Said at the Pi, where he is, and beeped at the PC, whose volume it is.
+    assert (result.ok, result.say, result.confirm) == (True, "Volume 20 percent.", "speak")
+    assert pc_and_pi.pc.boops == [0.7] and pc_and_pi.pi.boops == []
+    assert pc_and_pi.pi.volume.percent("general") == 70 and pc_and_pi.pi_music.level == 60
+    # The Pi named at the Pi is the Pi.
+    pc_and_pi.pi.actions.execute(Action("set_volume", {"level": 20, "where": "the pi"}))
+    assert pc_and_pi.pi.volume.percent("general") == 20 and len(pc_and_pi.windows.asked) == 1
+    # One which is off, or none at all, says so.
+    off = pc_and_pi.pi.actions.execute(Action("set_volume", {"direction": "up", "where": "the mac"}))
+    assert (off.ok, off.say) == (False, "Your Mac's off.")
+
+
+def test_volume_on_pi_from_pc_beeps_on_pi(pc_and_pi):
+    result = pc_and_pi.pc.actions.execute(Action("set_volume", {"level": 30, "where": "the pi"}))
+    # Nothing plays on the Pi, so it's Nova's voice there - and Windows is left alone.
+    assert pc_and_pi.pi.volume.percent("general") == 30 and pc_and_pi.windows.asked == []
+    assert result.ok and result.confirm == "speak" and result.say
+    assert pc_and_pi.pi.boops == [0.3] and pc_and_pi.pc.boops == []
+    # With music on the Pi, its music - and the beep at its voice's level, as one at the Pi would be.
+    pc_and_pi.pi_music.playing = True
+    pc_and_pi.pc.actions.execute(Action("set_volume", {"direction": "up", "where": "the pi"}))
+    assert pc_and_pi.pi_music.level == 70 and pc_and_pi.pc_music.level == 50
+    assert pc_and_pi.pi.boops == [0.3, 0.3]
+
+
+def test_volume_named_elsewhere_is_its_music_only_while_it_plays_there(pc_and_pi):
+    # Playing at the Pi, which wasn't paused for him as he spoke at the PC: its music.
+    pi_music = pc_and_pi.pi_music
+    pi_music.is_playing, pi_music.was_playing = (lambda: True), (lambda: False)
+    pc_and_pi.pc.actions.execute(Action("set_volume", {"direction": "down", "where": "the pi"}))
+    assert pi_music.level == 50 and pc_and_pi.pi.volume.percent("general") == 70
+    # Stopped there, though it was playing when last spoken to there: its voice.
+    pi_music.is_playing, pi_music.was_playing = (lambda: False), (lambda: True)
+    pc_and_pi.pc.actions.execute(Action("set_volume", {"direction": "down", "where": "the pi"}))
+    assert pi_music.level == 50 and pc_and_pi.pi.volume.percent("general") == 60
+    # A player which can't say whether it plays, but says what's playing.
+    del pi_music.is_playing
+    pi_music.playing = True
+    pc_and_pi.pc.actions.execute(Action("set_volume", {"direction": "up", "where": "the pi"}))
+    assert pi_music.level == 60
+
+
+def test_alarm_volume_at_pc_stays_nova(pc_and_pi):
+    result = pc_and_pi.pc.actions.execute(Action("set_volume", {"category": "alarm", "direction": "down"}))
+    assert pc_and_pi.pc.volume.percent("alarm") == 90 and pc_and_pi.windows.asked == []
+    assert (result.sound, result.sound_category) == ("volume_beep.wav", "alarm")
+    # Named from the Pi too.
+    pc_and_pi.pi.actions.execute(Action("set_volume", {"category": "alarm", "level": 50, "where": "the pc"}))
+    assert pc_and_pi.pc.volume.percent("alarm") == 50 and pc_and_pi.windows.asked == []
+    assert pc_and_pi.pc.boops == [0.5]
+
+
+def test_claude_set_volume_at_pc_goes_to_windows(pc_and_pi):
+    result = pc_and_pi.pc.actions.execute(Action("set_volume", {"category": "music", "level": 45}, from_model=True))
+    assert result.ok and pc_and_pi.windows.asked == [("volume", {"level": 45})]
+    pc_and_pi.pi.actions.execute(Action("set_volume", {"mute": True, "where": "my pc"}, from_model=True))
+    assert pc_and_pi.windows.asked[-1] == ("volume", {"mute": True})
+    # Claude is told of both, and what they're for.
+    schema = next(tool for tool in pc_and_pi.pc.actions.tool_schemas() if tool["name"] == "set_volume")
+    properties = schema["input_schema"]["properties"]
+    assert properties["where"]["type"] == "string" and "PC" in properties["where"]["description"]
+    assert properties["mute"]["type"] == "boolean" and "unmute" in properties["mute"]["description"]
+
+
+def test_mute_at_pc(pc_and_pi):
+    muted = pc_and_pi.pc.actions.execute(Action("set_volume", {"mute": True}))
+    assert pc_and_pi.windows.asked == [("volume", {"mute": True})]
+    # No beep, which Windows has just muted.
+    assert (muted.ok, muted.say, muted.confirm) == (True, "Muted.", "speak")
+    unmuted = pc_and_pi.pc.actions.execute(Action("set_volume", {"mute": False}))
+    assert pc_and_pi.windows.asked[-1] == ("volume", {"mute": False})
+    assert (unmuted.ok, unmuted.say, unmuted.sound) == (True, "Unmuted.", "volume_beep.wav")
+    # Nova's own volumes and the PC's music are untouched.
+    assert pc_and_pi.pc.volume.percent("general") == 70 and pc_and_pi.pc_music.level == 50
+
+
+def test_mute_at_pi_mutes_music_only_and_unmute_restores(pc_and_pi):
+    pi = pc_and_pi.pi
+    pc_and_pi.pi_music.playing = True
+    muted = pi.actions.execute(Action("set_volume", {"mute": True}))
+    assert muted.ok and pc_and_pi.pi_music.level == 0
+    # Nova's voice, alarms and timers still sound, and the PC's music plays on.
+    assert (pi.volume.percent("general"), pi.volume.percent("alarm")) == (70, 100)
+    assert pc_and_pi.pc_music.level == 50 and pc_and_pi.windows.asked == []
+    unmuted = pi.actions.execute(Action("set_volume", {"mute": False}))
+    assert unmuted.ok and pc_and_pi.pi_music.level == 60
+    # Muted from the PC, beeped on the Pi; and an unmute with nothing muted changes nothing.
+    pc_and_pi.pc.actions.execute(Action("set_volume", {"mute": True, "where": "the pi"}))
+    assert pc_and_pi.pi_music.level == 0 and pi.boops == [0.7]
+    pc_and_pi.pc.actions.execute(Action("set_volume", {"mute": False, "where": "the pi"}))
+    assert pc_and_pi.pi_music.level == 60
+    again = pi.actions.execute(Action("set_volume", {"mute": False}))
+    assert again.ok and pc_and_pi.pi_music.level == 60
 
 
 # Moving the music, and playing on another satellite
@@ -2313,7 +2502,7 @@ class FakePC:
     def __init__(self):
         self.asked = []
 
-    def act(self, action, name=None):
+    def act(self, action, name=None, defer=False):
         self.asked.append(("act", action, name))
         if action == "off":
             return {"success": True, "message": "Shut down the PC?",
@@ -2323,6 +2512,28 @@ class FakePC:
     def press(self, action, name=None):
         self.asked.append(("press", action, name))
         return {"success": True, "message": "Shutting down the PC."}
+
+
+def test_the_pcs_power_words_are_deferred_only_at_a_pc():
+    pc = FakePC()
+    pc.act = lambda action, name=None, defer=False: {"success": True, "message": "Locking your PC.",
+                                                    "after_said": (lambda: {"success": True}) if defer else None}
+    assert ActionExecutor(pc=pc).execute(Action("pc_power", {"action": "lock"})).after_said is None
+    result = ActionExecutor(pc=pc, at_pc=lambda: True).execute(Action("pc_power", {"action": "lock"}))
+    assert (result.say, result.after_said()) == ("Locking your PC.", {"success": True})
+
+
+def test_a_power_word_at_one_of_two_pcs_is_that_ones():
+    pc = FakePC()
+    at_desk = ActionExecutor(pc=pc, at_pc=lambda: True, pc_name=lambda: "Gaming PC")
+    at_desk.execute(Action("pc_power", {"action": "lock"}))
+    # One named is still the one named; and at the Pi none is chosen for it.
+    at_desk.execute(Action("pc_power", {"action": "lock", "name": "Desk PC"}))
+    ActionExecutor(pc=pc, pc_name=lambda: "Gaming PC").execute(Action("pc_power", {"action": "lock"}))
+    assert pc.asked == [("act", "lock", "Gaming PC"), ("act", "lock", "Desk PC"), ("act", "lock", None)]
+    # Asked to shut down, the yes presses that PC's button too.
+    result = at_desk.execute(Action("pc_power", {"action": "off"}))
+    assert result.ask_first.params == {"action": "off", "name": "Gaming PC"}
 
 
 def test_claude_cant_press_the_pcs_button_itself():
@@ -2939,6 +3150,18 @@ def test_a_notes_text_is_only_logged_as_its_length():
     assert other.for_log() is other
 
 
+
+def test_a_web_page_is_only_logged_by_its_host():
+    page = Action("open_web_page", {"url": "https://www.bbc.co.uk/news/private?id=7", "where": "my PC"})
+    assert page.for_log().params == {"url": "<www.bbc.co.uk>", "where": "my PC"}
+    assert page.params["url"] == "https://www.bbc.co.uk/news/private?id=7"
+    # Said bare, it's the same host; one which isn't a web address at all is only its length.
+    assert Action("open_web_page", {"url": "bbc.co.uk/secret"}).for_log().params == {"url": "<bbc.co.uk>"}
+    assert Action("open_web_page", {"url": "file:///c/secret"}).for_log().params == {"url": "<16 characters>"}
+    assert Action("open_web_page", {"url": 5}).for_log().params == {"url": "<not logged>"}
+    # What's searched for is never logged.
+    assert Action("search_on_computer", {"words": "secret things"}).for_log().params == {"words": "<13 characters>"}
+
 # Playlists and liked songs - see playlist_changes.py
 
 ENDLESS = {"id": "s1", "title": "Endless", "artist": "Made Up Band"}
@@ -3271,3 +3494,74 @@ def test_the_playlist_tools_change_things_so_a_later_undo_reaches_only_the_last(
     executor = make_executor(SongPlayer(), playlist_changes=changes)
     executor.execute(Action("add_to_playlists", {"playlists": ["Gym"]}, from_model=True))
     assert executor.execute(UNDO_THAT).say == "Took it back." and undone == [1]
+
+
+# Opening, closing and searching on a computer
+
+class FakeComputerControl:
+    """Stands in for ComputerControl: keeps what it was asked, and whether a computer opens things."""
+
+    def __init__(self, offered=True):
+        self.is_offered = offered
+        self.asked = []
+
+    def offered(self):
+        return self.is_offered
+
+    def _did(self, *asked):
+        self.asked.append(asked)
+        return {"success": True, "message": "Opening Fortnite."}
+
+    def open(self, name, where=None):
+        return self._did("open", name, where)
+
+    def open_url(self, url, where=None):
+        return self._did("open_url", url, where)
+
+    def search(self, words, where=None):
+        return self._did("search", words, where)
+
+    def close(self, name, where=None):
+        return self._did("close", name, where)
+
+
+COMPUTER_TOOLS = {"open_on_computer", "open_web_page", "search_on_computer", "close_on_computer"}
+
+
+def test_tools_offered_only_when_known():
+    def offered(executor):
+        return {tool["name"] for tool in executor.tool_schemas()}
+
+    assert not COMPUTER_TOOLS & offered(ActionExecutor(clock=object()))
+    computer = FakeComputerControl(offered=False)
+    assert not COMPUTER_TOOLS & offered(ActionExecutor(computer=computer))
+    # Once a computer which opens things has been seen - connected or not - all four are.
+    computer.is_offered = True
+    schemas = {tool["name"]: tool for tool in ActionExecutor(computer=computer).tool_schemas()}
+    assert COMPUTER_TOOLS <= set(schemas)
+    for name in COMPUTER_TOOLS:
+        assert "What happened is said for you, so just reply 'Okay.'" in schemas[name]["description"]
+        assert "where" in schemas[name]["input_schema"]["properties"]
+    # Asked for anyway while none is, it's refused.
+    computer.is_offered = False
+    result = ActionExecutor(computer=computer).execute(Action("open_on_computer", {"name": "Fortnite"}, from_model=True))
+    assert (result.ok, result.say) == (False, "There's no computer here to open things on.")
+    assert computer.asked == []
+
+
+def test_computer_tools_pass_what_was_said():
+    computer = FakeComputerControl()
+    executor = ActionExecutor(computer=computer)
+    result = executor.execute(Action("open_on_computer", {"name": "Fortnite", "where": "my PC"}, from_model=True))
+    assert (result.ok, result.say) == (True, "Opening Fortnite.")
+    executor.execute(Action("open_web_page", {"url": "bbc.co.uk"}, from_model=True))
+    executor.execute(Action("search_on_computer", {"words": "rocket league", "where": ""}, from_model=True))
+    executor.execute(Action("close_on_computer", {"name": "this"}, from_model=True))
+    assert computer.asked == [("open", "Fortnite", "my PC"), ("open_url", "bbc.co.uk", None),
+                              ("search", "rocket league", None), ("close", "this", None)]
+    # Nothing to open, or a name that isn't words, asks no computer.
+    for tool, params in (("open_on_computer", {"name": " "}), ("open_web_page", {"url": 5}),
+                         ("search_on_computer", {}), ("close_on_computer", {"name": None})):
+        result = executor.execute(Action(tool, params, from_model=True))
+        assert result.ok is False and result.say
+    assert len(computer.asked) == 4

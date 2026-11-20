@@ -1077,3 +1077,144 @@ def test_speech_the_satellite_couldnt_be_sent_never_counts():
     speaker.play_stream(iter([]), kind="reply")
     assert heard == []
     assert not speaker.speaking
+
+
+def say_json(fake, kind, value):
+    fake.say(kind, json.dumps(value).encode())
+
+
+def test_apps_passed_on_validated(caplog):
+    made = connect(opens=True)
+    satellite, fake, serving = made
+    try:
+        got = []
+        satellite.on_apps = lambda name, apps: got.append((name, apps))
+        good = {"id": "firefox", "name": "Firefox", "kind": "app"}
+        with caplog.at_level(logging.WARNING):
+            say_json(fake, "apps", [good, {"id": "x", "name": "X", "kind": "exe"}])
+            assert wait_for(lambda: got)
+        assert got == [("bedroom", [good])]
+        assert caplog.text.count("dropped") == 1
+    finally:
+        disconnect(*made)
+
+
+def test_apps_that_are_not_a_list_are_ignored(caplog):
+    made = connect(opens=True)
+    satellite, fake, serving = made
+    try:
+        got = []
+        satellite.on_apps = lambda name, apps: got.append(apps)
+        say_json(fake, "apps", {"id": "x"})
+        fake.say("apps", b"not json")
+        fake.say("ping")
+        assert wait_for(lambda: fake.messages("pong"))
+        assert got == []
+    finally:
+        disconnect(*made)
+
+
+def test_apps_ignored_without_opens(pair, caplog):
+    satellite, fake, serving = pair
+    got = []
+    satellite.on_apps = lambda name, apps: got.append(apps)
+    with caplog.at_level(logging.WARNING):
+        say_json(fake, "apps", [{"id": "firefox", "name": "Firefox", "kind": "app"}])
+        fake.say("ping")
+        assert wait_for(lambda: fake.messages("pong"))
+    assert got == []
+    assert "without saying it opens" in caplog.text
+
+
+def test_windows_passed_on_validated():
+    made = connect(opens=True)
+    satellite, fake, serving = made
+    try:
+        got = []
+        satellite.on_windows = lambda name, windows: got.append((name, windows))
+        say_json(fake, "windows", ["Calculator", 5, "x" * 201, "Notepad"])
+        assert wait_for(lambda: got)
+        assert got == [("bedroom", ["Calculator", "Notepad"])]
+    finally:
+        disconnect(*made)
+
+
+def test_windows_ignored_without_opens(pair):
+    satellite, fake, serving = pair
+    got = []
+    satellite.on_windows = lambda name, windows: got.append(windows)
+    say_json(fake, "windows", ["Calculator"])
+    fake.say("ping")
+    assert wait_for(lambda: fake.messages("pong"))
+    assert got == []
+
+
+def ask_in_thread(satellite, results, *args, **kwargs):
+    thread = threading.Thread(target=lambda: results.append(satellite.ask_computer(*args, **kwargs)))
+    thread.start()
+    return thread
+
+
+def test_ask_computer_answered(pair):
+    satellite, fake, serving = pair
+    results = []
+    thread = ask_in_thread(satellite, results, "open", wait=5, app="fortnite")
+    assert wait_for(lambda: fake.messages("computer"))
+    [message] = fake.messages("computer")
+    assert message["action"] == "open" and message["app"] == "fortnite"
+    fake.say("computer_done", id=message["id"], said="Opening Fortnite.")
+    thread.join(5)
+    assert results == [{"said": "Opening Fortnite."}]
+    assert satellite._note_waits == {}
+
+
+def test_ask_computer_passes_on_the_volume_and_error_fields(pair):
+    satellite, fake, serving = pair
+    results = []
+    thread = ask_in_thread(satellite, results, "volume", wait=5, level=30)
+    assert wait_for(lambda: fake.messages("computer"))
+    fake.say("computer_done", id=fake.messages("computer")[0]["id"], level=30, muted=False, error="Nope.")
+    thread.join(5)
+    assert results == [{"level": 30, "muted": False, "error": "Nope."}]
+
+
+def test_ask_ends_when_lost(pair):
+    satellite, fake, serving = pair
+    results = []
+    started = time.monotonic()
+    thread = ask_in_thread(satellite, results, "close_front", wait=30)
+    assert wait_for(lambda: fake.messages("computer"))
+    satellite._lost()
+    thread.join(5)
+    assert results == [None]
+    assert time.monotonic() - started < 1
+
+
+def test_ask_computer_late_answer_ignored(pair):
+    satellite, fake, serving = pair
+    assert satellite.ask_computer("close_front", wait=0.2) is None
+    id = fake.messages("computer")[0]["id"]
+    fake.say("computer_done", id=id, said="Closed.")
+    fake.say("ping")
+    assert wait_for(lambda: fake.messages("pong"))
+    assert satellite._note_waits == {}
+
+
+def test_computer_and_note_waits_are_told_apart(pair):
+    satellite, fake, serving = pair
+    results = []
+    thread = ask_in_thread(satellite, results, "close_front", wait=0.3)
+    assert wait_for(lambda: fake.messages("computer"))
+    # A note's answer is no answer to the computer request.
+    fake.say("note_saved", id=fake.messages("computer")[0]["id"], file="x.txt")
+    thread.join(5)
+    assert results == [None]
+
+
+def test_ask_computer_for_a_satellite_which_has_gone_isnt_waited_for(pair):
+    satellite, fake, serving = pair
+    satellite.close()
+    started = time.monotonic()
+    assert satellite.ask_computer("close_front", wait=30) is None
+    assert time.monotonic() - started < 2
+    assert fake.messages("computer") == []

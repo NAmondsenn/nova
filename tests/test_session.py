@@ -30,6 +30,7 @@ from voice_assistant.actions import Action
 from voice_assistant.brain import Brain
 from voice_assistant.clock import Clock
 from voice_assistant.config import Config
+from voice_assistant.computers import ComputerControl, Computers
 from voice_assistant.conversation import Reply
 from voice_assistant.media_watch import MediaWatcher
 from voice_assistant.navidrome import NavidromePlayer
@@ -256,7 +257,7 @@ def brain(tmp_path, monkeypatch, make_config):
     # A satellite rings where it was set, and is in a room of its own, as the Brain's are until
     # Home Assistant says otherwise.
     return SimpleNamespace(config=config, clock=Clock(config=config, start=False), memory=None,
-                           rooms=SatelliteRooms(str(tmp_path / "satellite_rooms.json")),
+                           rooms=SatelliteRooms(str(tmp_path / "satellite_rooms.json")), computers=Computers(),
                            ring_on=lambda name: name, room_of=lambda name: [name], room_sessions=lambda name: [],
                            spoken_name=lambda name: name,
                            names_satellite=lambda said: False,
@@ -659,6 +660,43 @@ def test_saying_the_wake_word_over_a_reply_stops_it(connect, make_session):
     reply = pi.messages("play_stream")[0]["id"]
     assert wait_for(lambda: any(message.get("id") == reply for message in pi.messages("stop")))
     assert timeline.notes["talked_over"] is True
+
+
+def test_what_is_left_until_after_the_reply_is_done_once_it_is_said(connect, make_session, monkeypatch):
+    session = make_session(connect()[0])
+    order = []
+    reply = Reply(say="Putting your PC to sleep.", after=[lambda: order.append("press") or {"success": True}])
+    monkeypatch.setattr(session, "_say", lambda message, timeline=None, listen=False: order.append("say"))
+    session.conversation = ScriptedConversation(reply)
+    session._reply_to("go to sleep", follow_up=False, timeline=FakeTimeline())
+    assert order == ["say", "press"]
+
+
+def test_after_runs_when_talked_over_or_nothing_is_said(connect, make_session, monkeypatch):
+    session = make_session(connect()[0])
+    ran = []
+    monkeypatch.setattr(session, "_say", lambda message, timeline=None, listen=False: {"talked_over": True})
+    after = [lambda: ran.append("press") or {"success": True}]
+    session.conversation = ScriptedConversation(Reply(say="Locking.", after=after), Reply(after=after))
+    session._reply_to("lock", follow_up=False, timeline=FakeTimeline())
+    session._reply_to("lock", follow_up=False, timeline=FakeTimeline())
+    assert ran == ["press", "press"]
+
+
+def test_after_failure_logged_not_raised(connect, make_session, monkeypatch, caplog):
+    session = make_session(connect()[0])
+    ran = []
+
+    def broken():
+        raise RuntimeError("secret detail")
+
+    monkeypatch.setattr(session, "_say", lambda message, timeline=None, listen=False: None)
+    session.conversation = ScriptedConversation(Reply(say="Locking.", after=[
+        broken, lambda: ran.append("next") or {"success": False, "message": "Couldn't."}]))
+    with caplog.at_level(logging.WARNING):
+        session._reply_to("lock", follow_up=False, timeline=FakeTimeline())
+    assert ran == ["next"]
+    assert "RuntimeError" in caplog.text and "secret detail" not in caplog.text
 
 
 def test_a_wake_word_heard_just_as_the_reply_ends_starts_the_next_request(connect, make_session):
@@ -1159,6 +1197,16 @@ def test_a_note_is_saved_through_the_satellite_and_its_text_is_never_logged(brai
     assert "Bins (2).txt" in caplog.text
 
 
+def test_every_session_can_open_things_on_a_computer(brain, connect, make_session):
+    session = make_session()
+    computer = session.actions.computer
+    assert isinstance(computer, ComputerControl) and computer.brain is brain and computer.satellite == "bedroom"
+    # Offered once a computer which opens things has been seen, wherever the user is.
+    assert "open_on_computer" not in {tool["name"] for tool in session.actions.tool_schemas()}
+    brain.computers.set_apps("pc", [])
+    assert "open_on_computer" in {tool["name"] for tool in session.actions.tool_schemas()}
+
+
 def test_pi_session_has_no_notes_tool(brain, connect, make_session):
     # A satellite which doesn't say it saves notes - the Pi, or one from before there were any.
     session, _ = _at_the_pc(brain, connect, make_session, saves_notes=False)
@@ -1244,6 +1292,41 @@ def test_mute_is_kept_per_satellite_and_sent_to_it(brain, connect, make_session)
     again, _ = connect("bedroom", "bedroom-pi")
     assert make_session(again).muted
     assert not make_session(connect("kitchen", "kitchen-pi")[0]).muted
+
+
+def test_volume_named_at_another_satellite_is_changed_and_beeped_there(brain, connect, make_session):
+    pi, pc = make_session(connect("bedroom")[0]), make_session(connect("pc")[0])
+    named = {"the PC": "pc", "the Mac": "mac"}
+    asked_here = []
+
+    def find_satellite(said, here=None):
+        asked_here.append(here)
+        if said == "this device":
+            return here, None
+        return (named[said], None) if said in named else (None, "Which one: the phone?")
+
+    brain.find_satellite = find_satellite
+    brain.session_for = {"bedroom": pi, "pc": pc}.get
+    brain.not_connected = lambda name: "Your Mac's off."
+    # Itself with none named; else the one named, or what to say.
+    assert pi.actions.device(None) == (pi, None)
+    assert pi.actions.device("the PC") == (pc, None)
+    assert pi.actions.device("the Mac") == (None, "Your Mac's off.")
+    assert pi.actions.device("the phone") == (None, "Which one: the phone?")
+    # "This device" is the one spoken at, as the brain is told.
+    assert pi.actions.device("this device") == (pi, None) and pc.actions.device("this device") == (pc, None)
+    assert set(asked_here) == {"bedroom", "pc"}
+
+    beeps = []
+    pc.speaker = SimpleNamespace(play_file=lambda path, volume: beeps.append((Path(path).name, volume)),
+                                 close=lambda: None)
+    result = pi.actions.execute(Action("set_volume", {"level": 40, "where": "the PC"}))
+    assert result.ok and result.say and result.confirm == "speak"
+    assert pc.volume.percent("general") == 40 and pi.volume.percent("general") == 70
+    assert beeps == [("volume_beep.wav", 0.4)]
+    # A spoken mute is the music's, never the microphone's.
+    pi.actions.execute(Action("set_volume", {"mute": True}))
+    assert not pi.muted
 
 
 def test_volumes_are_kept_per_satellite_and_sent_to_it(brain, connect, make_session):
@@ -1896,6 +1979,22 @@ def test_a_routine_clears_a_typed_question(brain, make_session):
 
     session.run_routine({"name": "Good morning", "steps": ["what's the weather"]})
     assert session._typed_question is None
+
+
+def test_a_routine_does_what_is_left_until_after_it_is_said(brain, make_session):
+    # A routine's "lock my PC" at a PC is pressed once the routine's words are said, or when it says nothing.
+    session = make_session()
+    order = []
+    session.music = SimpleNamespace(hold=lambda: None, release=lambda after=0: None)
+    session._play_announcement = lambda playback, still_wanted=None: order.append("said")
+    session.speaker = SimpleNamespace(play_stream=lambda *args, **kwargs: None, close=lambda: None)
+    brain.tts = SimpleNamespace(stream=lambda message: None, sample_rate=22050)
+    after = [lambda: order.append("press") or {"success": True}]
+    session.conversation = SimpleNamespace(start=lambda: None, run_routine=lambda routine: Reply(say="Night.", after=after))
+    session.run_routine({"name": "Night", "steps": ["lock my pc"]})
+    session.conversation.run_routine = lambda routine: Reply(after=after)
+    session.run_routine({"name": "Night", "steps": ["lock my pc"]})
+    assert order == ["said", "press", "press"]
 
 
 def test_an_answer_typed_before_its_question_is_talked_over_is_answered_after(brain, connect, make_session):

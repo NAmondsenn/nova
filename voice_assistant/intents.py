@@ -24,6 +24,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from voice_assistant.actions import Action
 from voice_assistant.clock import spoken_clock_time
+from voice_assistant.computers import ComputerHooks
 from voice_assistant.lists import names_list
 from voice_assistant.logging_setup import TRANSCRIPT
 from voice_assistant.wake_phrase import DEFAULT_WAKE_WORD
@@ -89,6 +90,16 @@ PC = r"(?:my |the )?(?:pc|computer)"
 MOVED_THING = r"(?:(?:it|this|that|the music|music|the song|this song) )?"
 MOVE_TO = rf"(?:(?:move|switch|change|swap|transfer|take|play) {MOVED_THING}(?:to|onto|over to)|play {MOVED_THING}on)"
 MOVE_WHERE = r"(?P<where>[a-z0-9']+(?: [a-z0-9']+){0,3})"
+
+# A web address said with its dots - "bbc.co.uk", "my-site.com" - as written in the request
+# itself, since the rules see it without them. The last part is letters, so "open 3.5" isn't one.
+DOMAIN = re.compile(r"[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}")
+# Where a computer is, said after "on": "open Fortnite on the PC".
+ON_WHERE = rf"(?: on {MOVE_WHERE})?"
+# Words which stand for something said before, so are never searched for, or closed, as they are.
+PRONOUNS = {"it", "that", "this"}
+# The window in front, as "close this" says it.
+FRONT_WINDOW = r"this|that|this window|the window|it"
 
 # A thing of Home Assistant's for Assist - "the TV", "AdGuard protection", "movie
 # night" - of one to four words, none of them "and", "then" or "plus", so "turn off
@@ -314,7 +325,7 @@ class LocalIntents:
 
     def __init__(self, clock=None, ntfy=None, home=None, activities: Optional[Callable[[], Dict[str, str]]] = None,
                  wake_word: str = DEFAULT_WAKE_WORD, football: Optional[Callable[[], List[str]]] = None,
-                 names_satellite: Optional[Callable[[str], bool]] = None):
+                 names_satellite: Optional[Callable[[str], bool]] = None, computer: Optional[ComputerHooks] = None):
         """
         Args:
             clock: The Clock, to check there's exactly one timer before cancelling
@@ -338,6 +349,9 @@ class LocalIntents:
             names_satellite: Says whether some words name a satellite - Brain.names_satellite.
                 Without it, "play it on my Pi" and the like are left to Claude, as there's no
                 telling "the PC" from "the next song".
+            computer: Says which requests are a computer's to open, close or search, and whether
+                this is a PC, whose bare power words are its own - see ComputerHooks. Without
+                it, those are left to the rules after, or Claude.
         """
         self.clock = clock
         self.ntfy = ntfy
@@ -345,6 +359,7 @@ class LocalIntents:
         self.activities = activities
         self.football = football
         self.names_satellite = names_satellite
+        self.computer = computer
         # How the wake word's last word starts a lone word it's been run into - and, for
         # "Nova", how Nemotron heard it so: "Nova, pause." said in one breath was "Novopause.".
         ending = (wake_word.split() or [""])[-1].lower()
@@ -377,6 +392,24 @@ class LocalIntents:
             (r"louder", lambda match: self._volume({"direction": "up"})),
             (r"quieter|softer|quiter", lambda match: self._volume({"direction": "down"})),
             (r"(?:set (?:the )?)?volume (?:to )?(?P<level>\d{1,3})(?: percent)?", self._volume_level),
+            # The same on a satellite he names - "volume up on the PC", "turn the Pi down", "set
+            # the PC to 30", "PC volume 40" - taken only when the brain says the words name one,
+            # so "set the TV volume to 20" is still Assist's and "turn the heating down" Claude's.
+            (rf"turn (?:it|the volume|the music) (?P<direction>up|down) (?:on|for) {MOVE_WHERE}", self._volume_on),
+            (rf"(?:turn )?(?:the )?volume (?P<direction>up|down) (?:on|for) {MOVE_WHERE}", self._volume_on),
+            (rf"turn {MOVE_WHERE} (?P<direction>up|down)", self._volume_on),
+            (rf"(?:the )?{MOVE_WHERE} volume (?P<direction>up|down)", self._volume_on),
+            (rf"(?P<word>louder|quieter|softer) (?:on|for) {MOVE_WHERE}", self._volume_on),
+            (rf"(?:set (?:the )?)?volume (?:to )?(?P<level>\d{{1,3}})(?: percent)? (?:on|for) {MOVE_WHERE}",
+             self._volume_on),
+            (rf"(?:set )?(?:the )?{MOVE_WHERE} volume (?:to )?(?P<level>\d{{1,3}})(?: percent)?",
+             self._volume_on),
+            (rf"set {MOVE_WHERE} to (?P<level>\d{{1,3}})(?: percent)?", self._volume_on),
+            # Mute and unmute, on the satellite spoken to or one named. Said over something
+            # ringing, or Nova talking, a bare "mute" never gets here: it stops them, as "stop"
+            # does - see Conversation.handle.
+            (r"(?P<un>un)?mute(?: (?:the )?(?:sound|volume|music))?", self._mute),
+            (rf"(?P<un>un)?mute {MOVE_WHERE}", self._mute),
             (r"what(?:'s| is) the time|what time is it(?: now)?|tell me the time", self._time),
             (r"what(?:'s| is) (?:the date|today's date)(?: today)?|what day is it(?: today)?", self._date),
             (r"(?:cancel|stop|delete) (?:the|my) timer", self._cancel_only_timer),
@@ -468,6 +501,31 @@ class LocalIntents:
             (rf"turn off {PC}(?:'s)? (?:screen|monitor)", self._pc("screen_off")),
             (rf"lock {PC}", self._pc("lock")),
             (rf"is {PC} on", self._pc("status")),
+            # Bare power words, said at the PC itself and only as the whole request - so "restart
+            # the song" and "I'm going to sleep after this" never are. At the Pi, as they were.
+            (r"(?:go to )?sleep", self._at_pc("sleep")),
+            (r"lock(?: it| the pc| the computer| my pc| my computer)?", self._at_pc("lock")),
+            (r"(?:turn )?(?:off )?the screen off|screen off|turn off the screen", self._at_pc("screen_off")),
+            (r"shut down|shut it down|power off", self._at_pc("off")),
+            (r"restart|reboot", self._at_pc("restart")),
+            # Opening, closing and searching on a computer - see computers.py. Each is only a
+            # computer's when the hooks say so, so "open the garage" and "close the blinds" go on to
+            # Assist, below, and "start a timer" was a timer above. A web address first, so an app
+            # of its name wins over it, then "close this" before any program called "this".
+            (rf"(?:open|go to) (?P<site>[a-z0-9]+(?: [a-z0-9]+)+?){ON_WHERE}", self._open_site),
+            # "Start" needs an app's whole name, or his own for one, so "start the music" at the PC
+            # never opens the one app with "music" in its name.
+            (rf"(?:open|launch|load up) (?P<app>.+?){ON_WHERE}", self._open_app(partly=True)),
+            (rf"start (?P<app>.+?){ON_WHERE}", self._open_app(partly=False)),
+            # Only "close" for the window in front: "quit it" or "exit that" is about something said before.
+            (rf"close (?:{FRONT_WINDOW}){ON_WHERE}", self._close_this),
+            (rf"(?:close|quit|exit) (?P<app>.+?){ON_WHERE}", self._close_app),
+            # A plain "search for" is the computer's only at one, or with one named: at the Pi it's
+            # Claude's own web search, as it was. With Google said, it's the computer's anywhere.
+            (rf"search for (?P<words>.+?){ON_WHERE}", self._search(site_said=False)),
+            (rf"(?:search google|google) for (?P<words>.+?){ON_WHERE}", self._search(site_said=True)),
+            (rf"google (?P<words>.+?){ON_WHERE}", self._search(site_said=True)),
+            (rf"look up (?P<words>.+?) on google{ON_WHERE}", self._search(site_said=True)),
             # The to-do lists - see lists.py. Assist is asked first for the adding and
             # ticking off, but only with its own list intents (see ActionExecutor), so
             # "take milk off my shopping list", which Assist reads as removing it, is only
@@ -592,6 +650,33 @@ class LocalIntents:
     def _volume_level(self, found) -> Optional[Dict]:
         level = int(found["level"])
         return self._volume({"level": level}) if level <= 100 else None
+
+    def _names_a_satellite(self, where: str) -> bool:
+        return self.names_satellite is not None and self.names_satellite(where)
+
+    def _volume_on(self, found) -> Optional[Dict]:
+        # Only a satellite's: anything else falls through to the rules after. "The PC's
+        # volume" is the PC's.
+        where = re.sub(r"'s$", "", found["where"])
+        if not self._names_a_satellite(where):
+            return None
+        groups = found.groupdict()
+        if groups.get("level") is not None:
+            level = int(groups["level"])
+            if level > 100:
+                return None
+            change = {"level": level}
+        elif groups.get("word"):
+            change = {"direction": "up" if groups["word"] == "louder" else "down"}
+        else:
+            change = {"direction": groups["direction"]}
+        return self._volume({**change, "where": where})
+
+    def _mute(self, found) -> Optional[Dict]:
+        where = found.groupdict().get("where")
+        if where and not self._names_a_satellite(where):
+            return None
+        return self._volume({"mute": not found["un"], **({"where": where} if where else {})})
 
     def _time(self, found) -> Dict:
         now = datetime.now()
@@ -788,6 +873,102 @@ class LocalIntents:
 
     def _pc(self, action: str):
         return lambda found: self._result("Okay.", [Action("pc_power", {"action": action})])
+
+    def _at_pc(self, action: str):
+        """The handler for a bare power word, which is the PC's only when said at it."""
+        def handle(found) -> Optional[Dict]:
+            if self.computer is None or not self.computer.at_pc():
+                return None
+            return self._result("Okay.", [Action("pc_power", {"action": action})])
+        return handle
+
+    def _computer_words(self, found, name: str) -> Tuple[str, Optional[str]]:
+        """
+        What a request for a computer is about, and where.
+
+        Args:
+            found: The rule's match, with an optional "where".
+            name: The group with what it's about, e.g. "app".
+
+        Returns:
+            (what, the words for where or None) - where only if they name a satellite, else
+            they're part of what: "search for pizza on deliveroo" is all one search.
+        """
+        what, where = found[name], found["where"]
+        if where and not (self.names_satellite is not None and self.names_satellite(where)):
+            return f"{what} on {where}", None
+        return what, where
+
+    @staticmethod
+    def _computer_action(tool: str, params: Dict, where: Optional[str]) -> Dict:
+        return LocalIntents._result("Okay.", [Action(tool, {**params, **({"where": where} if where else {})})])
+
+    def _open_site(self, found) -> Optional[Dict]:
+        if self.computer is None:
+            return None
+        # Only a web address said with its dots, as the speech recogniser wrote it.
+        sites = [site for site in DOMAIN.findall(self._said.lower()) if _tidied(site) == found["site"]]
+        where = found["where"]
+        if not sites or (where and not (self.names_satellite is not None and self.names_satellite(where))):
+            return None
+        site = sites[0]
+        # His app of the same name wins: "go to youtube.com" opens his YouTube app, but "go to google.com"
+        # isn't Google Chrome. Not with a computer named, where the page is opened.
+        name = next((part for part in site.split(".") if part != "www"), site)
+        if not where and self.computer.app_called(name):
+            return self._computer_action("open_on_computer", {"name": name}, None)
+        if not where and not self.computer.opens_somewhere():
+            return None
+        return self._computer_action("open_web_page", {"url": site}, where)
+
+    def _open_app(self, partly: bool):
+        """The handler for opening an app, which says whether the one name with every word said counts."""
+        def handle(found) -> Optional[Dict]:
+            if self.computer is None:
+                return None
+            app, where = self._computer_words(found, "app")
+            return self._computer_action("open_on_computer", {"name": app}, where) \
+                if self.computer.names_app(app, where, partly) else None
+        return handle
+
+    def _close_this(self, found) -> Optional[Dict]:
+        # The window in front: the PC's when said at it, or a computer's when it's named.
+        if self.computer is None:
+            return None
+        where = found["where"]
+        if where:
+            if self.names_satellite is None or not self.names_satellite(where):
+                return None
+        elif not self.computer.at_pc():
+            return None
+        return self._computer_action("close_on_computer", {"name": "this"}, where)
+
+    def _close_app(self, found) -> Optional[Dict]:
+        if self.computer is None:
+            return None
+        app, where = self._computer_words(found, "app")
+        # "Quit it" or "exit the window" isn't a program called that.
+        if re.fullmatch(FRONT_WINDOW, app.strip()):
+            return None
+        return self._computer_action("close_on_computer", {"name": app}, where) \
+            if self.computer.names_window(app, where) else None
+
+    def _search(self, site_said: bool):
+        """The handler for a search, which says whether the search site was said ("search Google for")."""
+        def handle(found) -> Optional[Dict]:
+            if self.computer is None:
+                return None
+            words, where = self._computer_words(found, "words")
+            # "Search for it" is about something said before, which only Claude knows.
+            if words.strip() in PRONOUNS:
+                return None
+            if not where:
+                if not self.computer.opens_somewhere():
+                    return None
+                if not site_said and not self.computer.opens_here():
+                    return None
+            return self._computer_action("search_on_computer", {"words": words}, where)
+        return handle
 
     def _send_to_phone(self, found) -> Optional[Dict]:
         return self._result("Okay.", [Action("send_to_phone")]) if self.ntfy else None

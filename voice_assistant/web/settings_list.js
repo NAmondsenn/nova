@@ -32,7 +32,7 @@
     { id: "football", name: "Football", group: "daily", icon: "i-football", starts: ["football."] },
     { id: "calendars", name: "Calendars and lists", group: "daily", icon: "i-calendar", starts: [] },
     { id: "routines", name: "Routines", group: "daily", icon: "i-routine", starts: [] },
-    { id: "satellites", name: "Satellites", group: "nova", icon: "i-microphone", starts: [] },
+    { id: "satellites", name: "Satellites", group: "nova", icon: "i-microphone", starts: ["computer."] },
     { id: "sound", name: "Sound and voice", group: "nova", icon: "i-sound", starts: ["voice.", "sounds.", "thresholds."] },
     { id: "claude", name: "Claude", group: "nova", icon: "i-reply", starts: ["web_search.", "conversation.", "usage."] },
     { id: "notifications", name: "Notifications", group: "nova", icon: "i-bell", starts: ["ntfy."] },

@@ -27,6 +27,7 @@ import requests
 from voice_assistant import network
 from voice_assistant.batteries import HOME_FAILURES, find, said
 from voice_assistant.clock_ringing import heard_in
+from voice_assistant.computers import safe_url, url_host
 from voice_assistant.devices import AppDevice, ring_call, said_as, where
 from voice_assistant.football import NO_TEAM
 from voice_assistant.football_words import describe as describe_football
@@ -63,6 +64,7 @@ UNAVAILABLE = {
     "listening": "Listening stats need SoulSync.",
     "wrapped": "Wrapped isn't set up.",
     "notes": "I can only save a note at a computer.",
+    "computer": "There's no computer here to open things on.",
 }
 
 # What's said when the new-music playlist isn't there - before Nova's first morning making it,
@@ -70,6 +72,21 @@ UNAVAILABLE = {
 NEW_MUSIC_MISSING = "Your new-music playlist isn't made yet; Nova makes it each morning from what's arrived."
 NO_NEW_MUSIC_PLAYLIST = "No new-music playlist is set. It goes in Settings, under Music."
 NEW_MUSIC_NOT_ON_SPOTIFY = "New music plays from Navidrome, and Spotify is your music player right now."
+
+# Which computer the computer tools act on, when the user says.
+ON_A_COMPUTER = {
+    "type": "string",
+    "description": (
+        "Only when the user names the computer - 'on my PC', 'on the Mac' - as they said it, e.g. 'my PC'. Leave "
+        "this out when they don't: the computer they're at, or the only one there is, is used."
+    ),
+}
+
+
+def _where(where: Any) -> Optional[str]:
+    """The words for which computer the model gave, or None for none - as it may give "" or something else."""
+    return where.strip() if isinstance(where, str) and where.strip() else None
+
 
 # What play_music and play_playlist are told of their "on": only for somewhere other than the
 # satellite the user is talking to, where music plays unless they say otherwise.
@@ -108,7 +125,10 @@ NOT_A_COMMAND = "\u200b"
 # The (tool, parameter) pairs whose value is never logged, only how long it is - see Action.for_log.
 # A note's text is the user's own writing, or notes Claude made for them, and the lines which say
 # what was asked for are kept with the transcripts: without this every note would be in backend.log.
-NOT_LOGGED = {("save_note", "text")}
+# What's searched for on a computer is his own, too.
+NOT_LOGGED = {("save_note", "text"), ("search_on_computer", "words")}
+# Those logged by their host alone: the rest of a web address can hold what's his.
+HOST_ONLY = {("open_web_page", "url")}
 
 
 @dataclass
@@ -130,14 +150,24 @@ class Action:
         """
         Returns:
             This action, or a copy with the value of each parameter in NOT_LOGGED said as its
-            length - "<17 characters>", or "<not logged>" when it isn't text - to put in a log
-            line in place of it. Never what's run, which is this one whole.
+            length - "<17 characters>", or "<not logged>" when it isn't text - and each in
+            HOST_ONLY as its host, "<www.bbc.co.uk>" (or its length, if it isn't a web address),
+            to put in a log line in place of it. Never what's run, which is this one whole.
         """
-        hidden = {name for tool, name in NOT_LOGGED if tool == self.tool} & set(self.params)
+        hidden = {name for tool, name in NOT_LOGGED | HOST_ONLY if tool == self.tool} & set(self.params)
         if not hidden:
             return self
-        return replace(self, params={name: (f"<{len(value)} characters>" if isinstance(value, str) else "<not logged>")
-                                     if name in hidden else value for name, value in self.params.items()})
+        hosts = {name for tool, name in HOST_ONLY if tool == self.tool}
+        return replace(self, params={name: _shown(value, name in hosts) if name in hidden else value
+                                     for name, value in self.params.items()})
+
+
+def _shown(value: Any, host: bool) -> str:
+    """What's logged of a value which isn't - its host, for a web address which is one, else its length."""
+    if not isinstance(value, str):
+        return "<not logged>"
+    checked = safe_url(value.strip()) if host else None
+    return f"<{url_host(checked)}>" if checked else f"<{len(value)} characters>"
 
 
 @dataclass
@@ -165,6 +195,9 @@ class ActionResult:
             so kept from Claude when it was asked for locally (see Conversation.handle).
         ask_first: What to do if the user says yes to the question it asks - shutting
             the PC down, after "Shut down the PC?" - or None (see Conversation.handle).
+        after_said: Something to do once the reply has been said, not before - putting the PC
+            to sleep, so "Putting your PC to sleep." is heard - or None. Gives {"success",
+            "message"} (see Reply.after).
     """
     ok: bool
     say: str = ""
@@ -174,6 +207,7 @@ class ActionResult:
     understood: bool = True
     private: bool = False
     ask_first: Optional[Action] = None
+    after_said: Optional[Callable[[], Dict]] = None
 
     @classmethod
     def from_reply(cls, reply: Dict) -> "ActionResult":
@@ -191,7 +225,8 @@ class ActionResult:
         """
         ok = bool(reply.get("success"))
         say = reply.get("message") or ""
-        kept = {"private": bool(reply.get("private")), "ask_first": reply.get("ask_first")}
+        kept = {"private": bool(reply.get("private")), "ask_first": reply.get("ask_first"),
+                "after_said": reply.get("after_said")}
         if ok and reply.get("later"):
             return cls(ok, say, confirm="later", **kept)
         if ok and reply.get("silent"):
@@ -349,7 +384,10 @@ class ActionExecutor:
                  elsewhere: Optional[Callable[[str], Tuple[Optional["ActionExecutor"], Optional[str]]]] = None,
                  spoken_name: Callable[[str], str] = lambda name: name,
                  settled: Optional[Callable[[], None]] = None,
-                 notes: Optional[Callable[[str, str], Dict]] = None):
+                 notes: Optional[Callable[[str, str], Dict]] = None, computer=None,
+                 device: Optional[Callable[[Optional[str]], Tuple[Optional[Any], Optional[str]]]] = None,
+                 at_pc: Callable[[], bool] = lambda: False,
+                 pc_name: Callable[[], Optional[str]] = lambda: None):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -395,7 +433,7 @@ class ActionExecutor:
                 room is dismissed.
             room_players: Gives the music players of the satellites in the user's room
                 which are connected, this one's first - or None for this one's alone.
-                Pausing, resuming and the music's volume act on the room's music.
+                Pausing and resuming act on the room's music; its volume is this one's own.
             last_change: The LastChange "undo that" takes from, which the brain gives every satellite's
                 executor so there's one for the whole house, or None for one of its own.
             mover: Moves the music to the satellite the words name, e.g. "the PC" - given them,
@@ -412,6 +450,16 @@ class ActionExecutor:
             notes: Saves a note on the computer the user is at - given its title and what it says,
                 gives what the brain says of it - or None if the satellite can't save one, as the
                 Pi can't.
+            computer: ComputerControl, which opens, searches and closes things on a computer
+                satellite, or None if there's none. Its tools are offered only while a computer
+                which opens things has been seen.
+            device: Given the words for a satellite, or None for this one, gives its Session and
+                None - or None and what to say, when they name none, or one which isn't connected -
+                for its volume. None to act on this one's own volumes alone.
+            at_pc: Whether the satellite spoken at is a PC, where the PC's power words wait to
+                be pressed until the reply has been said. Never, by default.
+            pc_name: The name Home Assistant has for the PC spoken at, as chosen for it on the
+                settings page, or None - so a power word said at one of several PCs is that one's.
         """
         self.music = music
         self.clock = clock
@@ -441,6 +489,12 @@ class ActionExecutor:
         self.spoken_name = spoken_name
         self.settled = settled
         self.notes = notes
+        self.computer = computer
+        self.device = device
+        self.at_pc = at_pc
+        self.pc_name = pc_name
+        # The music's level before "mute", for "unmute" to put it back to - see _mute_music.
+        self._level_before_mute: Optional[int] = None
         # What was last asked, and what the assistant said - or the last alert, and
         # all of it - for "send that to my phone". Kept up to date by the Conversation.
         self.last_answer: Optional[Tuple[str, str]] = None
@@ -536,7 +590,14 @@ class ActionExecutor:
         needs = method.tool["needs"]
         if needs is None:
             return True
-        return any(getattr(self, name) is not None for name in ((needs,) if isinstance(needs, str) else needs))
+        return any(self._set_up(name) for name in ((needs,) if isinstance(needs, str) else needs))
+
+    def _set_up(self, name: str) -> bool:
+        """Whether the part of the assistant a tool needs is there - for the computer, one which opens things."""
+        part = getattr(self, name)
+        if name == "computer":
+            return part is not None and part.offered()
+        return part is not None
 
     def execute(self, action: Optional[Action]) -> ActionResult:
         """
@@ -625,10 +686,11 @@ class ActionExecutor:
 
     def _playing_in_room(self) -> List:
         """
-        The music players to pause, or turn up or down: every one in the user's room
-        playing now, this one's first - or, with none playing, this one alone, as
-        before there were rooms. The room's music is held while the user is heard, so
-        what's playing is what was playing as they spoke - see Session._converse.
+        The music players to pause: every one in the user's room playing now, this
+        one's first - or, with none playing, this one alone, as before there were rooms.
+        The room's music is held while the user is heard, so what's playing is what was
+        playing as they spoke - see Session._converse. Not their volume, which is only
+        this one's (0034).
         """
         others = self._others_in_room()
         if not others:
@@ -1385,11 +1447,13 @@ class ActionExecutor:
     # Volume
 
     @tool(
-        "Change how loud something is. For a bare 'turn it up', 'volume up', 'too loud' "
-        "or 'set the volume to 40' that doesn't say what, leave category out - the "
-        "assistant works out from what's playing whether that means the music or its own "
-        "voice. Give either level (to set a specific value) or direction (to move it up "
-        "or down), not both.",
+        "Change how loud something is, or mute or unmute it. For a bare 'turn it up', "
+        "'volume up', 'too loud' or 'set the volume to 40' that doesn't say what, leave "
+        "category out - the assistant works out from what's playing whether that means "
+        "the music or its own voice. It acts on the device the user is talking to unless "
+        "they name another. At a computer with its own volume, such as the PC, the music "
+        "and the voice are its system volume. Give one of level (to set a specific value), "
+        "direction (to move it up or down) or mute.",
         needs="volume",
         category={
             "type": "string",
@@ -1427,9 +1491,41 @@ class ActionExecutor:
                 "down by 30'. Leave out otherwise so the standard step is used."
             ),
         },
+        where={
+            "type": "string",
+            "description": (
+                "The device whose volume it is, as the user said it - 'the PC', 'my Pi' - "
+                "for 'volume up on the PC' or 'turn the Pi down'. Leave out when they "
+                "don't name one: it's then the device they're talking to. Never for a "
+                "Home Assistant device such as the TV, which is control_home's."
+            ),
+        },
+        mute={
+            "type": "boolean",
+            "description": (
+                "True to mute, false to unmute ('mute the PC', 'unmute'). At a computer "
+                "it's the system volume's mute; anywhere else it's that device's music "
+                "only, never alarms, timers or the assistant's voice, and never the "
+                "microphone."
+            ),
+        },
     )
     def set_volume(self, category: Optional[str] = None, level: Optional[int] = None,
-                   direction: Optional[str] = None, amount: Optional[int] = None):
+                   direction: Optional[str] = None, amount: Optional[int] = None,
+                   where: Optional[str] = None, mute: Optional[bool] = None):
+        if self.device is not None:
+            target, problem = self.device(where or None)
+            if target is None:
+                return {"success": False, "message": problem}
+            if target.actions is not self:
+                return self._volume_there(target, category, level, direction, amount, mute)
+            # The alarms are always Nova's own, which Windows' volume doesn't stand in for.
+            if category != "alarm" and getattr(target.satellite, "system_volume", False):
+                return self._system_volume(level, direction, amount, mute)
+
+        if mute is not None:
+            return self._mute_music(bool(mute))
+
         category = category or self._unnamed_volume_category()
 
         if category == "music":
@@ -1462,16 +1558,117 @@ class ActionExecutor:
             result["sound_category"] = category
         return result
 
+    def _volume_there(self, target, category: Optional[str], level: Optional[int], direction: Optional[str],
+                      amount: Optional[int], mute: Optional[bool]) -> Dict:
+        """
+        Changes the volume of another satellite, named by the user, as if it were asked
+        there - and beeps there, at the new level, while what's said is said here.
+
+        Args:
+            target: The satellite's Session.
+            category, level, direction, amount, mute: As set_volume has them.
+
+        Returns:
+            What its own set_volume gave, without the beep, which has played there.
+        """
+        if category is None and mute is None:
+            # Its music if it's playing there now: whether it was when he spoke is only known of
+            # the satellite he spoke to, which paused it for him.
+            category = "music" if self._playing_now(target.actions.music) else "general"
+        result = target.actions.set_volume(category, level, direction, amount, mute=mute)
+        sound = result.pop("sound", None)
+        sound_category = result.pop("sound_category", "general")
+        if sound:
+            target.boop(target.volume.get(sound_category))
+        return result
+
+    @staticmethod
+    def _playing_now(player) -> bool:
+        """
+        Whether a music player is playing now - by its own is_playing, else what it says is
+        playing - False for none, or one which can't say.
+        """
+        if player is None:
+            return False
+        asked = getattr(player, "is_playing", None)
+        if asked is not None:
+            return bool(asked())
+        now = getattr(player, "now_playing", None)
+        try:
+            playing = now() if now is not None else None
+        except Exception as e:
+            logger.warning(f"Couldn't tell whether the music is playing, so it's taken not to be: {e}")
+            return False
+        return bool(playing and playing.get("playing"))
+
+    def _system_volume(self, level: Optional[int], direction: Optional[str], amount: Optional[int],
+                       mute: Optional[bool]) -> Dict:
+        """
+        Changes the computer's own volume, at a computer which has one - Windows' at the PC
+        - for the music and the assistant's voice alike, which it scales.
+
+        Args:
+            level, direction, amount, mute: As set_volume has them.
+
+        Returns:
+            What ComputerControl.volume gave - "Volume 40 percent.", "Muted." - with the
+            volume beep, unless it has just been muted.
+        """
+        if self.computer is None:
+            return {"success": False, "message": UNAVAILABLE["volume"]}
+        if mute is not None:
+            change = {"mute": bool(mute)}
+        elif level is not None:
+            change = {"level": int(level)}
+        elif direction in ("up", "down"):
+            # A step the computer can take: at least 1, at most all of it.
+            step = round(self.volume.step if amount is None else abs(float(amount)))
+            change = {"direction": direction, "step": min(100, max(1, step))}
+        else:
+            # Nothing to change, so the current level is reported instead.
+            return {"success": True, "message": f"The general volume is at {self.volume.percent('general')} percent."}
+        result = self.computer.volume(**change)
+        return result if result.get("muted") else self._with_beep("general", result)
+
+    def _mute_music(self, mute: bool) -> Dict:
+        """
+        Mutes this satellite's music, or puts it back where it was - its music alone, so
+        the assistant's voice, alarms and timers still sound, and the microphone's own
+        mute is left to its switch.
+
+        Args:
+            mute: True to mute, False to unmute.
+
+        Returns:
+            Dict with 'success' and a relevant message, with the volume beep if it changed.
+        """
+        if not self.music:
+            return {"success": False, "message": UNAVAILABLE["music"]}
+        offline = self._music_offline()
+        if offline:
+            return offline
+        if mute:
+            current = self.music.get_volume()
+            # Muted twice, it's still the level before the first which comes back.
+            if current:
+                self._level_before_mute = current
+            return self._with_beep("general", self.music.set_volume(0))
+        if self._level_before_mute is None:
+            return {"success": True, "message": "The music isn't muted."}
+        level, self._level_before_mute = self._level_before_mute, None
+        return self._with_beep("general", self.music.set_volume(level))
+
     def _unnamed_volume_category(self) -> str:
         """
         Which volume a request like "turn it down" means when it doesn't say.
 
-        The music, if any in the user's room was playing when they spoke - that's what
-        they'll have been listening to - and the assistant's own voice otherwise. Before
-        this the model always chose the assistant's voice, so "turn it down" with music
-        on changed nothing the user could actually hear.
+        The music, if this satellite's was playing when they spoke - that's what they'll
+        have been listening to - and the assistant's own voice otherwise. Before this the
+        model always chose the assistant's voice, so "turn it down" with music on changed
+        nothing the user could actually hear. Music on another satellite in the room
+        isn't this one's to change (0034).
         """
-        if self.music and any(player.was_playing() for player in [self.music] + self._others_in_room()):
+        if self.music and self.music.was_playing():
             return "music"
         return "general"
 
@@ -1481,9 +1678,9 @@ class ActionExecutor:
 
         Kept apart from the assistant's volumes because the music player holds this
         level itself - Spotify's applies to every device playing - rather than it
-        being something only this assistant's audio uses. Every player in the user's
-        room which is playing is changed - see _playing_in_room - and what's said is
-        the first's.
+        being something only this assistant's audio uses. Only this satellite's player
+        is changed, not the rest of the room's (0034, which replaced 0026's room-wide
+        volume).
 
         Args:
             level: An exact percentage, or None.
@@ -1498,13 +1695,7 @@ class ActionExecutor:
         offline = self._music_offline()
         if offline:
             return offline
-        results = [self._change_volume_of(player, level, direction, amount) for player in self._playing_in_room()]
-        return results[0]
-
-    def _change_volume_of(self, player, level: Optional[int], direction: Optional[str],
-                          amount: Optional[int]) -> Dict:
-        """Changes one music player's volume, as _change_music_volume asks."""
-        current = player.get_volume()
+        current = self.music.get_volume()
 
         if level is not None:
             target = level
@@ -1520,7 +1711,7 @@ class ActionExecutor:
         # assistant's own level rather than the music's, since it comes out of the
         # assistant and not through the music player - the music itself demonstrates
         # the new level well enough.
-        return self._with_beep("general", player.set_volume(target))
+        return self._with_beep("general", self.music.set_volume(target))
 
     # Weather
 
@@ -2105,6 +2296,66 @@ class ActionExecutor:
             logger.warning(f"Couldn't save a note: {type(e).__name__}")
             return {"success": False, "message": "I couldn't save the note."}
 
+    # Opening, searching and closing on a computer
+
+    @tool(
+        "Open an app, game or program on a computer, for 'open Fortnite', 'fire up Rocket League', 'launch "
+        "Discord on my PC'. Give its name as the user said it; the computer's own list is matched for you, and "
+        "if none fits you're told the closest names to choose from or ask about. Not for web pages: use "
+        "open_web_page. What happened is said for you, so just reply 'Okay.'",
+        needs="computer",
+        required=["name"],
+        name={"type": "string", "description": "The app's name, as the user said it, e.g. 'Fortnite'."},
+        where=ON_A_COMPUTER,
+    )
+    def open_on_computer(self, name: str = "", where: Optional[str] = None):
+        if not isinstance(name, str) or not name.strip():
+            return {"success": False, "message": "I didn't catch what to open."}
+        return self.computer.open(name.strip(), _where(where))
+
+    @tool(
+        "Open a web page in the browser on a computer, for 'open the BBC website', 'go to youtube.com'. Give its "
+        "address, e.g. 'bbc.co.uk' or 'https://www.bbc.co.uk/sport' - only https pages open. What happened is "
+        "said for you, so just reply 'Okay.'",
+        needs="computer",
+        required=["url"],
+        url={"type": "string", "description": "The page's web address, e.g. 'bbc.co.uk'."},
+        where=ON_A_COMPUTER,
+    )
+    def open_web_page(self, url: str = "", where: Optional[str] = None):
+        if not isinstance(url, str) or not url.strip():
+            return {"success": False, "message": "I didn't catch which page to open."}
+        return self.computer.open_url(url.strip(), _where(where))
+
+    @tool(
+        "Search the web in the browser on a computer, for 'search for ...', 'google ...', 'look up ... on Google' "
+        "when the user wants the search open on the computer rather than an answer from you. What happened is said "
+        "for you, so just reply 'Okay.'",
+        needs="computer",
+        required=["words"],
+        words={"type": "string", "description": "What to search for."},
+        where=ON_A_COMPUTER,
+    )
+    def search_on_computer(self, words: str = "", where: Optional[str] = None):
+        if not isinstance(words, str) or not words.strip():
+            return {"success": False, "message": "I didn't catch what to search for."}
+        return self.computer.search(words.strip(), _where(where))
+
+    @tool(
+        "Close a program on a computer, for 'close Discord', 'quit Steam on my PC' - or the window in front, for "
+        "'close this', with name 'this'. It's closed as its own close button does. What happened is said for you, "
+        "so just reply 'Okay.'",
+        needs="computer",
+        required=["name"],
+        name={"type": "string", "description": "The program's name, as the user said it, or 'this' for the window "
+                                               "in front."},
+        where=ON_A_COMPUTER,
+    )
+    def close_on_computer(self, name: str = "", where: Optional[str] = None):
+        if not isinstance(name, str) or not name.strip():
+            return {"success": False, "message": "I didn't catch what to close."}
+        return self.computer.close(name.strip(), _where(where))
+
     # Memory
 
     @tool(
@@ -2301,7 +2552,11 @@ class ActionExecutor:
         name={"type": "string", "description": "Which PC, as the user said it - only when they've been asked which."},
     )
     def pc_power(self, action: Optional[str] = None, name: Optional[str] = None):
-        return self.pc.act(action or "", name or None)
+        at_pc = self.at_pc()
+        # With no PC named, at a PC it's that one.
+        if at_pc and not name:
+            name = self.pc_name()
+        return self.pc.act(action or "", name or None, defer=at_pc)
 
     # Only ever run by the conversation, on the user's yes to pc_power's question - so Claude,
     # which isn't offered it, can't shut the PC down without one.

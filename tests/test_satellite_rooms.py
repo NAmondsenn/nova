@@ -261,3 +261,39 @@ def test_set_called_raises_when_it_cant_be_saved_and_keeps_what_it_had(tmp_path,
         rooms.set_called("new", ["Other"])
     # The page is told it failed, so it mustn't also be doing what it was refused.
     assert rooms.called("pc") == ["Desk"] and rooms.called("new") == []
+
+
+def test_opens_things_default_on_and_saved(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.seen("pc", True, "pc", True)
+    # On until he says otherwise, for one nobody has seen too.
+    assert rooms.opens_things("pc") is True and rooms.opens_things("ghost") is True
+    rooms.set_opens_things("pc", False)
+    for kept in (rooms, _rooms(tmp_path)):
+        assert kept.opens_things("pc") is False
+    # The next hello keeps it.
+    rooms.seen("pc", False, "pc", False)
+    assert _rooms(tmp_path).opens_things("pc") is False
+    rooms.set_opens_things("pc", True)
+    assert _rooms(tmp_path).opens_things("pc") is True
+
+
+def test_app_names_and_the_pc_are_saved_and_default_to_none(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.seen("pc", True, "pc", True)
+    assert rooms.app_names("pc") == {} and rooms.pc_device("pc") is None and rooms.app_names("ghost") == {}
+    rooms.set_app_names("pc", {"gta": "Grand Theft Auto V Enhanced"})
+    rooms.set_pc_device("pc", "desk")
+    for kept in (rooms, _rooms(tmp_path)):
+        assert kept.app_names("pc") == {"gta": "Grand Theft Auto V Enhanced"} and kept.pc_device("pc") == "desk"
+    rooms.set_pc_device("pc", None)
+    assert _rooms(tmp_path).pc_device("pc") is None
+
+
+def test_a_file_from_before_opens_things_and_odd_values_are_read_as_the_defaults(tmp_path):
+    (tmp_path / "satellite_rooms.json").write_text(json.dumps({
+        "pc": {"push_to_talk": True, "area": None, "machine": "pc"},
+        "mac": {"push_to_talk": True, "area": None, "opens_things": "no", "app_names": ["x"], "pc_device": 4}}))
+    rooms = _rooms(tmp_path)
+    assert rooms.opens_things("pc") is True and rooms.app_names("pc") == {} and rooms.pc_device("pc") is None
+    assert rooms.opens_things("mac") is True and rooms.app_names("mac") == {} and rooms.pc_device("mac") is None

@@ -861,3 +861,10 @@ def test_the_repositorys_config_has_the_usage_settings(tmp_path):
         assert limit_problem("usage", name, value) is None, name
     assert limit_problem("usage", "daily_limit", -1) == "should be from 0 to 100"
 
+
+
+def test_a_search_site_which_isnt_google_duckduckgo_or_bing_is_refused(tmp_path):
+    (tmp_path / "config.yaml").write_text("computer:\n  search_site: yahoo\n")
+    with pytest.raises(ConfigError) as caught:
+        Config(path=str(tmp_path / "config.yaml"))
+    assert "'computer.search_site' should be one of google, duckduckgo, bing, not 'yahoo'" in str(caught.value)

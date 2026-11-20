@@ -66,11 +66,14 @@ class Reply:
             chime is switched off and nothing needs saying.
         listen_again: Whether the assistant asked something, and should listen for
             the answer without the wake word.
+        after: Things to do once the reply has been said, each giving {"success",
+            "message"} - the PC's sleep, so it isn't put to sleep mid-sentence.
     """
     say: str = ""
     sounds: List[Tuple[str, str]] = field(default_factory=list)
     shown: str = ""
     listen_again: bool = False
+    after: List[Callable[[], Dict]] = field(default_factory=list)
 
 
 class Conversation:
@@ -314,6 +317,7 @@ class Conversation:
         sounds, messages = confirm(action_results, self.chime_enabled, fallback=response_text)
         if action_results:
             response_text = " ".join(messages)
+        after = [r.after_said for r in action_results if r.ok and r.after_said]
 
         # A reminder is left alone by all of that - it isn't insistent enough to count
         # as heard just because the user happened to speak. One caught in the quiet gap
@@ -338,7 +342,7 @@ class Conversation:
             if result.get("success") and any(r.ok and r.confirm == "later" for r in action_results):
                 self.llm.record_reply(text, "", _tool_answers(actions, action_results))
             logger.info(f"Action confirmed itself: {[r.say for r in action_results]}", extra=TRANSCRIPT)
-            return Reply(sounds=sounds)
+            return Reply(sounds=sounds, after=after)
 
         # Kept for "send that to my phone" - unless this was that, or the next one would
         # send "Sent.".
@@ -372,7 +376,7 @@ class Conversation:
             # would be taken for the answer.
             if not in_routine:
                 self.asked_first = _only_question(response_text, action_results)
-        return Reply(say=response_text, sounds=sounds, listen_again=listen_again)
+        return Reply(say=response_text, sounds=sounds, listen_again=listen_again, after=after)
 
     def _ask_claude(self, text: str, in_routine: bool = False) -> Dict:
         """
@@ -471,15 +475,16 @@ class Conversation:
             The Reply.
         """
         logger.info(f"Running the {routine['name']} routine", extra=TRANSCRIPT)
-        said, shown, sounds = [], [], []
+        said, shown, sounds, after = [], [], [], []
         for step in routine["steps"]:
             reply = self.handle(step, timeline=timeline, in_routine=True)
             self.progress()
             said.append(reply.say)
             shown.append(reply.shown)
             sounds.extend(sound for sound in reply.sounds if sound not in sounds)
+            after.extend(reply.after)
         return Reply(say=" ".join(part for part in said if part), sounds=sounds,
-                     shown=" ".join(part for part in shown if part))
+                     shown=" ".join(part for part in shown if part), after=after)
 
     def _chime(self, message: str) -> Reply:
         """A success confirmed by the chime - or, with it switched off, only shown."""

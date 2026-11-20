@@ -29,13 +29,14 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import numpy as np
 
 from voice_assistant import logging_setup, paths, protocol, satellite_names, storage, watchdog
-from voice_assistant.batteries import BatteryChoices, BatteryWatcher
+from voice_assistant.batteries import HOME_FAILURES, BatteryChoices, BatteryWatcher
 from voice_assistant.choices import ChoiceStore
 from voice_assistant.clean_check import CleanCheck
 from voice_assistant.clean_schedule import CleanSchedule
 from voice_assistant.clean_store import CleanStore
 from voice_assistant.clean_swap import Ears, Swapper, listening_library
 from voice_assistant.clock import Clock, spoken_clock_time
+from voice_assistant.computers import Computers
 from voice_assistant.display_feed import DisplayFeed
 from voice_assistant.display_server import DisplayServer
 from voice_assistant.displays import Displays
@@ -316,6 +317,8 @@ class Brain:
         # Which satellites ignore the wake word while Nova speaks on another - see
         # _quiet_others_forever, which _quiet_nudge wakes.
         self.quiet_others = QuietOthers()
+        # The apps and open windows of each computer satellite - see computers.py.
+        self.computers = Computers()
         self._quiet_nudge = threading.Event()
         # Each satellite's session, by its name, for as long as it's connected.
         self.sessions: Dict[str, Session] = {}
@@ -944,6 +947,106 @@ class Brain:
                      for other in others)
         return name if shared else spoken
 
+    def computer_meant(self, spoken_at: str, where: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Finds which computer a request means, without needing it connected and without
+        asking Home Assistant anything - cheap enough for the local rules to ask while
+        deciding whether a request is a computer's at all (see ComputerHooks). The one
+        named, else the one spoken at if it opens things, else the only one known which does.
+
+        Args:
+            spoken_at: The satellite the user was talking to.
+            where: The words for which computer, e.g. "my PC", or None for none said.
+
+        Returns:
+            The computer's satellite name and None - a PC or Mac named but not heard from since
+            the brain started counts, as computer_for says what's wrong with it; or None and what
+            to say instead, when the words name none or one which can't open things; or None and
+            None when none was named and there's no one computer to choose.
+        """
+        opening = [name for name in self.computers.known() if self.rooms.opens_things(name)]
+        if where:
+            name, problem = self.find_satellite(where, here=spoken_at)
+            if name is None:
+                return None, problem
+            if name in opening or (name not in self.computers.known() and self.rooms.machine(name) in ("pc", "mac")):
+                return name, None
+            spoken = self.spoken_name(name)
+            return None, f"{spoken[:1].upper() + spoken[1:]} can't open things."
+        if spoken_at in opening:
+            return spoken_at, None
+        if len(opening) == 1:
+            return opening[0], None
+        return None, None
+
+    def computer_for(self, spoken_at: str, where: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Finds the computer to open, search or close something on, as computer_meant does,
+        and checks it can be asked now.
+
+        Args:
+            spoken_at: The satellite the user was talking to.
+            where: The words for which computer, e.g. "my PC", or None for none said.
+
+        Returns:
+            The computer's satellite name and None; or None and what to say instead - as
+            computer_meant says, or it isn't connected ("Your PC's off.", even for one not
+            heard from since the brain started), or it's connected but hasn't yet said what
+            it has ("I'm still finding the apps on the PC."); or None and None when none was
+            named and there's no one computer to choose, for a local command to fall through.
+        """
+        name, problem = self.computer_meant(spoken_at, where)
+        if name is None:
+            return None, problem
+        session = self.session_for(name)
+        if session is None:
+            # Asleep, or Nova isn't running there.
+            return None, self.not_connected(name)
+        if name not in self.computers.known():
+            spoken = self.spoken_name(name)
+            if not self.rooms.opens_things(name) or not getattr(session.satellite, "opens", False):
+                return None, f"{spoken[:1].upper() + spoken[1:]} can't open things."
+            # Just connected, and still building its list.
+            return None, f"I'm still finding the apps on {spoken}."
+        return name, None
+
+    def not_connected(self, name: str) -> str:
+        """
+        Args:
+            name: A computer satellite which isn't connected.
+
+        Returns:
+            Why, as far as can be told: "Your PC's off." if it's a PC Home Assistant says is,
+            else "Nova isn't running on the PC.".
+        """
+        if self.pc is not None and self.rooms.machine(name) == "pc":
+            try:
+                status = self.pc.act("status", name=self.pc_called(name))
+            except HOME_FAILURES as e:
+                logger.warning(f"Couldn't ask Home Assistant whether the {name} satellite's PC is on: {e}")
+                status = {}
+            # As PCPower says it of a PC which is off.
+            if status.get("success") and status.get("message") == "Your PC's off.":
+                return "Your PC's off."
+        return f"Nova isn't running on {self.spoken_name(name)}."
+
+    def pc_called(self, name: str) -> Optional[str]:
+        """
+        The name Home Assistant has for the PC a satellite is, as chosen on the settings
+        page - or None if none was, or it has gone, or Home Assistant can't be asked. With
+        one PC, PCPower takes that one whatever it's given. Asked when a power word is said
+        at the PC, so it's that PC which sleeps.
+        """
+        device = self.rooms.pc_device(name)
+        if device is None:
+            return None
+        try:
+            pcs = self.pc.overview()["pcs"]
+        except HOME_FAILURES as e:
+            logger.warning(f"Couldn't read Home Assistant's PCs for the {name} satellite: {e}")
+            return None
+        return next((pc["name"] for pc in pcs if pc["device"] == device), None)
+
     def ring_on(self, name: str) -> str:
         """
         Where a timer or alarm set at a satellite should ring. One which records on a press
@@ -1174,6 +1277,9 @@ class Brain:
             self._tell_restarted(name)
 
         satellite = RemoteSatellite(stream, hello)
+        # Before it's read, so no list it sends is missed.
+        satellite.on_apps = self.computers.set_apps
+        satellite.on_windows = self.computers.set_windows
         # Read from the start, so the satellite's pings are answered while its session is made.
         reading = threading.Thread(target=satellite.serve, daemon=True, name=f"satellite-{name}")
         reading.start()
@@ -1352,6 +1458,8 @@ class Brain:
                 emptied = was_connected and session.satellite.send_alarms([])
             self._let_go(session)
             self._satellites_changed()
+        # Its apps too, connected or not, so it's never "the only computer" things open on.
+        self.computers.forget(name)
         with self._lock:
             self._emptied[name] = emptied
         if not emptied:
@@ -1559,6 +1667,8 @@ class Brain:
                 return
             del self.sessions[name]
             self._caught_up.discard(name)
+        # Only here, where it's the current connection which ended: a newer one has its own lists.
+        self.computers.gone(name)
         self._satellites_changed()
         self._quiet_nudge.set()
 
