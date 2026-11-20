@@ -356,16 +356,17 @@ class NemotronTranscription:
         # How much of the recording Nemotron has been given, in samples, and how much it
         # had been when its words last changed - see quiet_words. Counted in audio rather
         # than clock time, so a Nemotron running behind doesn't look as if the user has
-        # gone quiet. The recording's thread reads them while _hear's changes them, so
-        # they're only touched under the lock.
+        # gone quiet. Whether a real word has been heard, and whether Nemotron has failed
+        # to say its words - after which they aren't asked for again, nor trusted. The
+        # recording's thread reads these while _hear's changes them, so they're only
+        # touched under the lock.
         self._words_lock = threading.Lock()
         self._given = 0
         self._changed_at = 0
         self._word_heard = False
-        # Only _hear's thread touches these: the words as they were last looked at, and
-        # whether Nemotron has failed to say them - after which it isn't asked again.
-        self._last_words = ""
         self._words_failed = False
+        # The words as they were last looked at, which only _hear's thread touches.
+        self._last_words = ""
         self._thread = threading.Thread(target=self._hear, name="nemotron", daemon=True)
         self._thread.start()
 
@@ -387,11 +388,12 @@ class NemotronTranscription:
         Returns:
             None until a real word has been heard in this recording - words imagined in
             noise, such as a lone "Thank you.", aren't one. After that, the seconds of
-            audio Nemotron has been given since its words last changed. Also None if
-            Nemotron can't say what it has heard so far.
+            audio Nemotron has been given since its words last changed. Also None, from
+            then on, if Nemotron can't say what it has heard so far - the words may be
+            changing unseen, so they can't be taken to have stopped.
         """
         with self._words_lock:
-            if not self._word_heard:
+            if self._words_failed or not self._word_heard:
                 return None
             return (self._given - self._changed_at) / RATE
 
@@ -518,28 +520,32 @@ class NemotronTranscription:
         """
         Notes what Nemotron has heard so far, after it's been given more of the recording.
 
+        Whatever goes wrong here only costs the recording ending on its words being
+        still, never the transcript: it's never raised, which would have the whole
+        recording heard again.
+
         Args:
             nemotron: The Nemotron.
             stream: Its stream for this recording.
             samples: How many samples it was just given.
         """
-        words = None
-        if not self._words_failed:
-            try:
-                words = nemotron.words(stream)
-            except Exception as e:
-                # Only the recording ending on its words is lost, not the transcript, so
-                # it's said once rather than after every piece, and it isn't asked again.
+        try:
+            with self._words_lock:
+                self._given += samples
+                if self._words_failed:
+                    return
+            words = nemotron.words(stream)
+            real = bool(words) and not _imagined(words)
+            with self._words_lock:
+                if words != self._last_words:
+                    self._last_words = words
+                    self._changed_at = self._given
+                if real:
+                    self._word_heard = True
+        except Exception as e:
+            # Said once rather than after every piece, since it returns early from now on,
+            # and the words aren't asked for again: they can't be trusted to have stopped.
+            with self._words_lock:
                 self._words_failed = True
-                logger.warning(f"Couldn't read what Nemotron has heard so far, so the recording can't "
-                               f"end on its words being still: {e}")
-        real = bool(words) and not _imagined(words)
-        with self._words_lock:
-            self._given += samples
-            if words is None:
-                return
-            if words != self._last_words:
-                self._last_words = words
-                self._changed_at = self._given
-            if real:
-                self._word_heard = True
+            logger.warning(f"Couldn't read what Nemotron has heard so far, so the recording can't "
+                           f"end on its words being still: {e}")

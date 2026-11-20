@@ -358,6 +358,61 @@ def test_a_nemotron_without_words_leaves_quiet_words_none(caplog):
     assert nemotron.finished == [nemotron.streams[0]]
     # Said once, not after every piece.
     assert len([record for record in caplog.records if "no words so far" in record.getMessage()]) == 1
+    # And not asked again after the first failure.
+    assert nemotron.asked == 1
+
+
+class _WordsThenFail(FakeNemotron):
+    """A Nemotron which says its words for the first pieces, then can't."""
+
+    def __init__(self, working):
+        super().__init__()
+        self.working = working
+        self.script = ["Set"]
+
+    def words(self, stream):
+        if len(stream) > self.working:
+            raise RuntimeError("no words so far")
+        return super().words(stream)
+
+
+def test_quiet_words_goes_back_to_none_once_nemotron_cant_say_its_words(caplog):
+    # A recording can't end on its words being still when they're no longer known:
+    # the audio carries on being given, but that isn't the words standing still.
+    nemotron = _WordsThenFail(working=2)
+    transcription = speech_to_text.NemotronSpeechToText(nemotron).listen()
+    for piece in _tenths(3):
+        transcription.add(piece)
+    assert _wait_for(lambda: len(nemotron.streams[0]) == 3)
+    for piece in _tenths(17):
+        transcription.add(piece)
+    transcription.cancel()
+    assert len(nemotron.streams[0]) == 20
+    assert transcription.quiet_words() is None
+
+
+class _OddWords(FakeNemotron):
+    """A Nemotron whose words aren't text, so reading what they are goes wrong here and not there."""
+
+    def words(self, stream):
+        return 5
+
+
+def test_words_which_cant_be_read_never_send_the_recording_to_be_heard_again(caplog):
+    nemotron = _OddWords()
+    transcription = speech_to_text.NemotronSpeechToText(nemotron).listen()
+    pieces = _tenths(4)
+    for piece in pieces:
+        transcription.add(piece)
+
+    with caplog.at_level("WARNING"):
+        heard = transcription.finish(np.concatenate(pieces))
+
+    assert transcription.quiet_words() is None
+    assert heard["text"] == "Set a timer for ten minutes."
+    # Heard as it was made, through the one stream, rather than again from the start.
+    assert len(nemotron.streams) == 1 and len(nemotron.finished) == 1
+    assert not [record for record in caplog.records if "starting again" in record.getMessage()]
 
 
 # A lone short word - "Pause.", "Wait.", "Play." - which Nemotron so often hears as nothing.
