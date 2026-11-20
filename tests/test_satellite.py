@@ -303,9 +303,10 @@ class FakeSpeaker:
 class FakePress:
     """Stands in for the press listener, which would take a real port of this machine."""
 
-    def __init__(self, port, on_press):
+    def __init__(self, port, on_press, on_open=None):
         self.port = port
         self.on_press = on_press
+        self.on_open = on_open
         self.started = False
         self.closed = False
 
@@ -2077,6 +2078,8 @@ def test_the_listener_is_made_only_for_a_push_to_talk_satellite_and_closed_with_
     assert wait_for(lambda: made.press_listener is not None and made.press_listener.started)
     assert made.press_listener.port == 10401
     assert made.press_listener.on_press == made._pressed
+    # What a second launch of the app asks for: the settings page.
+    assert made.press_listener.on_open == made._open_page
     listener = made.press_listener
     made.stop()
     assert wait_for(lambda: made.exited)
@@ -2118,7 +2121,8 @@ def test_a_satellite_which_cant_have_its_press_port_stops_before_reaching_the_br
 
 def test_a_press_through_the_real_listener_starts_a_recording(brain, make, monkeypatch):
     # Port 0, as the setting can't be, so the test takes whichever port is free.
-    monkeypatch.setattr(satellite, "PressListener", lambda port, on_press: PressListener(0, on_press))
+    monkeypatch.setattr(satellite, "PressListener",
+                        lambda port, on_press, on_open=None: PressListener(0, on_press, on_open))
     made = pressable(brain, make)
     assert wait_for(lambda: made.press_listener is not None and made.press_listener.port)
     port = made.press_listener.port
@@ -4076,12 +4080,249 @@ def test_at_logon_follows_the_mark(brain, make, tmp_path, monkeypatch):
     assert made._app_state().at_logon is True
 
 
-def test_a_menu_choice_is_only_logged_for_now(brain, make, caplog):
+# What each item of the tray's menu does
+
+def media_sent(brain):
+    return [message["action"] for message in brain.messages("media")]
+
+
+def test_listen_is_a_press(brain, make):
     made = tray_pressable(brain, make)
+    made.tray.on_choice("listen")
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    assert brain.messages("wake")[0]["pressed"] is True
+    brain.say("stop_listening")
+
+
+@pytest.mark.parametrize("state,action", [("playing", "pause"), ("paused", "play"), ("stopped", "play")])
+def test_play_pause_sends_pause_while_playing_and_play_otherwise(brain, make, state, action):
+    made = tray_pressable(brain, make)
+    brain.say("now_playing", state=state)
+    assert wait_for(lambda: made._music_playing is (state == "playing"))
+    made.tray.on_choice("play_pause")
+    assert wait_for(lambda: media_sent(brain))
+    assert brain.messages("media") == [{"type": "media", "action": action}]
+
+
+def test_play_pause_sends_play_when_the_brain_never_said(brain, make):
+    made = tray_pressable(brain, make)
+    assert made._music_playing is None
+    made.tray.on_choice("play_pause")
+    assert wait_for(lambda: media_sent(brain))
+    assert media_sent(brain) == ["play"]
+
+
+def test_next_sends_next(brain, make):
+    made = tray_pressable(brain, make)
+    made.tray.on_choice("next")
+    assert wait_for(lambda: media_sent(brain))
+    assert brain.messages("media") == [{"type": "media", "action": "next"}]
+
+
+def test_losing_the_brain_forgets_what_was_playing(brain, make):
+    made = tray_pressable(brain, make)
+    brain.say("now_playing", state="playing")
+    assert wait_for(lambda: made._app_state().playing is True)
+    brain.drop()
+    assert wait_for(lambda: made._app_state().playing is None)
+
+
+def menu_mic_sounds(made):
+    return [os.path.basename(name) for name in made.speaker.files()]
+
+
+def test_mute_from_the_menu_mutes_windows_microphone_for_the_minutes(brain, make, pc):
+    made = tray_pressable(brain, make)
+    brain.say("state", volumes={"general": 0.5}, muted=False, app={"mic_mute_minutes": 30})
+    assert wait_for(lambda: made._mic_minutes == 30 and made.state.volume("general") == 0.5)
+    sent = brain.kinds()
+    told = len(made.tray.changes)
+    made.tray.on_choice("mute")
+    assert made.system_volume.mic_muted is True and made.system_volume.mic_changes == [True]
+    assert abs(made._mic_until - (time.time() + 30 * 60)) < 5
+    assert made.speaker.files() == [os.path.join(made.sounds_folder, "mic_off.wav")]
+    assert made.speaker.playing[0].volume == 0.5
+    assert len(made.tray.changes) > told
+    # Nothing is sent to the brain, which learns of it as it learns of any change by hand.
+    time.sleep(0.1)
+    assert brain.kinds() == sent
+
+
+def test_mute_from_the_menu_works_with_the_brain_away(brain, make, pc):
+    made = tray_pressable(brain, make)
+    brain.drop()
+    assert wait_for(lambda: made._app_state().connected is False)
+    made.tray.on_choice("mute")
+    assert made.system_volume.mic_muted is True
+    assert menu_mic_sounds(made) == ["mic_off.wav"]
+
+
+def test_unmute_from_the_menu_plays_mic_on_and_ends_the_time(brain, make, pc):
+    made = tray_pressable(brain, make)
+    made.tray.on_choice("mute")
+    assert made._mic_until is not None and os.path.exists(satellite.MIC_MUTE_FILE)
+    made.tray.on_choice("mute")
+    assert made.system_volume.mic_muted is False and made.system_volume.mic_changes == [True, False]
+    assert made._mic_until is None and not os.path.exists(satellite.MIC_MUTE_FILE)
+    assert menu_mic_sounds(made) == ["mic_off.wav", "mic_on.wav"]
+
+
+def test_mute_from_the_menu_which_fails_plays_nothing(brain, make, pc, caplog):
+    made = tray_pressable(brain, make)
+
+    def fail(mute):
+        raise OSError("no microphone")
+
+    made.system_volume.mute_microphone = fail
+    with caplog.at_level(logging.INFO):
+        made.tray.on_choice("mute")
+    assert made.speaker.files() == [] and made._mic_until is None
+    assert "Couldn't change Windows' microphone" in caplog.text
+
+
+def test_mute_from_the_menu_does_nothing_with_no_microphone_to_reach(brain, make, pc):
+    made = tray_pressable(brain, make)
+    made.system_volume.mic_fail = True
+    assert made._app_state(True).mic_muted is None
+    made.tray.on_choice("mute")
+    assert made.speaker.files() == [] and made.system_volume.mic_changes == []
+
+
+def test_settings_opens_the_page_at_satellites(brain, make, monkeypatch):
+    made = tray_pressable(brain, make)
+    opened = []
+    monkeypatch.setattr(made, "_open_in_browser", opened.append)
+    brain.say("state", volumes={}, muted=False, app={"page": "https://nova.example"})
+    assert wait_for(lambda: made._page is not None)
+    made.tray.on_choice("settings")
+    assert opened == ["https://nova.example#satellites"]
+    brain.say("state", volumes={}, muted=False, app={"page": "https://nova.example/"})
+    assert wait_for(lambda: made._page == "https://nova.example/")
+    made.tray.on_choice("settings")
+    assert opened[1:] == ["https://nova.example/#satellites"]
+
+
+def test_settings_with_no_address_does_nothing(brain, make, monkeypatch, caplog):
+    made = tray_pressable(brain, make)
+    opened = []
+    monkeypatch.setattr(made, "_open_in_browser", opened.append)
     with caplog.at_level(logging.DEBUG):
-        made.tray.on_choice("quit")
-    assert "quit" in caplog.text
-    assert made.exited == []
+        made.tray.on_choice("settings")
+    assert opened == []
+    assert "no address" in caplog.text
+
+
+def test_the_page_is_opened_in_the_browser_and_brought_to_the_front(brain, make, pc):
+    made = tray_pressable(brain, make)
+    made._open_in_browser("https://nova.example#satellites")
+    assert pc.started == ["https://nova.example#satellites"]
+    assert wait_for(lambda: pc.fronted == [(frozenset({1}), True)])
+
+
+def test_a_page_windows_cant_open_is_logged_and_goes_no_further(brain, make, pc, caplog):
+    made = tray_pressable(brain, make)
+
+    def refuse(target):
+        raise OSError("no browser")
+
+    pc.start = refuse
+    made._open_in_browser("https://nova.example#satellites")
+    assert "Windows couldn't open it" in caplog.text
+    assert pc.fronted == []
+
+
+def test_the_start_menu_ask_opens_the_page(brain, make, monkeypatch):
+    # A second launch of the app posts /open, which the real listener answers.
+    monkeypatch.setattr(satellite, "PressListener",
+                        lambda port, on_press, on_open=None: PressListener(0, on_press, on_open))
+    made = pressable(brain, make)
+    opened = []
+    monkeypatch.setattr(made, "_open_in_browser", opened.append)
+    brain.say("state", volumes={}, muted=False, app={"page": "https://nova.example"})
+    assert wait_for(lambda: made._page is not None)
+    assert wait_for(lambda: made.press_listener is not None and made.press_listener.port)
+    port = made.press_listener.port
+    with socket.socket() as sock:
+        sock.settimeout(5)
+        sock.connect(("127.0.0.1", port))
+        sock.sendall(f"POST /open HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Nova-Press: 1\r\n"
+                     f"Content-Length: 0\r\n\r\n".encode())
+        assert sock.recv(100).startswith(b"HTTP/1.0 204")
+    assert opened == ["https://nova.example#satellites"]
+
+
+def test_start_with_windows_makes_and_removes_the_mark(brain, make, tmp_path, monkeypatch):
+    mark = tmp_path / "no_logon_start"
+    monkeypatch.setattr(satellite, "NO_LOGON_MARK", str(mark))
+    made = tray_pressable(brain, make)
+    assert made._app_state().at_logon is True
+    told = len(made.tray.changes)
+    # Ticked now: choosing it stops Nova starting, which the mark says.
+    made.tray.on_choice("at_logon")
+    assert mark.exists() and made._app_state().at_logon is False
+    assert len(made.tray.changes) > told
+    told = len(made.tray.changes)
+    made.tray.on_choice("at_logon")
+    assert not mark.exists() and made._app_state().at_logon is True
+    assert len(made.tray.changes) > told
+
+
+def test_start_with_windows_which_cant_be_saved_is_logged(brain, make, tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(satellite, "NO_LOGON_MARK", str(tmp_path / "missing folder" / "no_logon_start"))
+    made = tray_pressable(brain, make)
+    with caplog.at_level(logging.WARNING):
+        made.tray.on_choice("at_logon")
+    assert "Couldn't change whether Nova starts with Windows" in caplog.text
+    assert made._app_state().at_logon is True
+
+
+@pytest.mark.parametrize("choice,code", [("restart", 11), ("quit", 10)])
+def test_restart_and_quit_stop_with_their_codes(brain, make, choice, code):
+    made = tray_pressable(brain, make)
+    tray = made.tray
+    made.tray.on_choice(choice)
+    assert wait_for(lambda: made.exited)
+    assert made.exited == [code]
+    # Closed at once by the choice, so the icon goes, and again by the clean up.
+    assert tray.closes == 2 and made.speaker.closed
+
+
+def test_quit_while_recording_cleans_up_and_exits_with_quit_code(brain, make, pc, tmp_path):
+    made = tray_pressable(brain, make)
+    made.system_volume.mic_muted = True
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    assert made.system_volume.mic_muted is False
+    assert os.path.exists(satellite.RUNNING_MARK)
+    made.tray.on_choice("quit")
+    assert wait_for(lambda: made.exited)
+    assert made.exited == [10]
+    # As it was before the press, and nothing left to say the satellite is running.
+    assert made.system_volume.mic_muted is True and made.system_volume.closed
+    assert not os.path.exists(satellite.RUNNING_MARK)
+
+
+def test_a_choice_nova_doesnt_know_is_ignored(brain, make, caplog):
+    made = tray_pressable(brain, make)
+    sent = brain.kinds()
+    with caplog.at_level(logging.DEBUG):
+        made.tray.on_choice("banana")
+    assert len([record for record in caplog.records if "banana" in record.getMessage()]) == 1
+    assert made.exited == [] and made.tray.closes == 0 and made.speaker.files() == []
+    assert brain.kinds() == sent
+
+
+def test_a_choice_which_goes_wrong_is_logged_and_never_reaches_the_tray(brain, make, caplog):
+    made = tray_pressable(brain, make)
+
+    def broken():
+        raise RuntimeError("boom")
+
+    made._pressed = broken
+    with caplog.at_level(logging.ERROR):
+        # Raises nothing into the tray's thread.
+        made.tray.on_choice("listen")
+    assert "Menu item listen failed" in caplog.text and "boom" in caplog.text
 
 
 def test_the_tray_is_closed_as_the_satellite_stops(brain, make):
