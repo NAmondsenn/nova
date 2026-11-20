@@ -701,6 +701,21 @@ def test_where_pc_asleep(named):
     assert named.computer_for("bedroom", None) == (None, "Nova isn't running on the PC.")
 
 
+def test_where_a_named_computer_unheard_since_a_restart_is_asleep_not_unable(named):
+    # The brain restarted with the PC asleep: no list from it yet, but it's still a computer.
+    named.pc = FakePCPower(on=False)
+    assert named.computer_for("bedroom", "the PC") == (None, "Your PC's off.")
+    named.pc.on = True
+    assert named.computer_for("bedroom", "the PC") == (None, "Nova isn't running on the PC.")
+    assert named.computer_for("bedroom", "the Mac") == (None, "Nova isn't running on the Mac.")
+    # Unnamed, with none known, it still falls through.
+    assert named.computer_for("bedroom", None) == (None, None)
+    # Connected without a list, it can't; nor can the Pi, which isn't a computer.
+    put_in_session(named, "pc")
+    assert named.computer_for("bedroom", "the PC") == (None, "The PC can't open things.")
+    assert named.computer_for("pc", "the Pi") == (None, "The Pi can't open things.")
+
+
 def test_where_asks_about_the_pc_chosen_for_it(named):
     named.computers.set_apps("pc", [])
     named.pc = FakePCPower(on=False, pcs=[{"device": "dev-1", "name": "Desk PC", "wake": None},

@@ -948,7 +948,7 @@ class Brain:
         Returns:
             The computer's satellite name and None; or None and what to say instead - the
             words name none, or one which can't open things, or it isn't connected ("Your
-            PC's off."); or None and None when none was named and there's no one computer to
+            PC's off." - for a computer named, even one not heard from since the brain started); or None and None when none was named and there's no one computer to
             choose, for a local command to fall through.
         """
         opening = [name for name in self.computers.known() if self.rooms.opens_things(name)]
@@ -956,6 +956,10 @@ class Brain:
             name, problem = self.find_satellite(where)
             if name is None:
                 return None, problem
+            if (name not in self.computers.known() and self.rooms.machine(name) in ("pc", "mac")
+                    and self.session_for(name) is None):
+                # A computer not heard from since the brain started - asleep, or Nova isn't running there.
+                return None, self.not_connected(name)
             if name not in opening:
                 spoken = self.spoken_name(name)
                 return None, f"{spoken[:1].upper() + spoken[1:]} can't open things."

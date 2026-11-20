@@ -220,8 +220,8 @@ def search_url(site: str, words: str) -> str:
     return SEARCH_SITES.get(site, SEARCH_SITES["google"]) + quote_plus(words)
 
 
-def _host(url: str) -> str:
-    """The host of a web address, which is all of one that's logged."""
+def url_host(url: str) -> str:
+    """The host of a web address, which is all of one that's logged - "?" if it has none."""
     try:
         return urlsplit(url).hostname or "?"
     except ValueError:
@@ -369,7 +369,7 @@ class ComputerControl:
         target, computer, refused = self._target(where)
         if refused:
             return refused
-        host = _host(checked)
+        host = url_host(checked)
         # The host alone: the rest of an address can hold what's his.
         logger.info(f"Opening a page on {host} on the {target} satellite")
         return self._ask(target, computer, self._there(f"Opening {host}.", target), "open_url", url=checked)
@@ -395,7 +395,7 @@ class ComputerControl:
         site = config.section("computer").get("search_site", "google") if config is not None else "google"
         url = search_url(site, words)
         # Never the words, which are in the address.
-        logger.info(f"Searching on {_host(url)} on the {target} satellite")
+        logger.info(f"Searching on {url_host(url)} on the {target} satellite")
         return self._ask(target, computer, self._there(f"Searching for {words}.", target), "open_url", url=url)
 
     def close(self, name: str, where: Optional[str] = None) -> Dict:

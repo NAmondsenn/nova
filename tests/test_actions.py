@@ -2913,6 +2913,18 @@ def test_a_notes_text_is_only_logged_as_its_length():
     assert other.for_log() is other
 
 
+
+def test_a_web_page_is_only_logged_by_its_host():
+    page = Action("open_web_page", {"url": "https://www.bbc.co.uk/news/private?id=7", "where": "my PC"})
+    assert page.for_log().params == {"url": "<www.bbc.co.uk>", "where": "my PC"}
+    assert page.params["url"] == "https://www.bbc.co.uk/news/private?id=7"
+    # Said bare, it's the same host; one which isn't a web address at all is only its length.
+    assert Action("open_web_page", {"url": "bbc.co.uk/secret"}).for_log().params == {"url": "<bbc.co.uk>"}
+    assert Action("open_web_page", {"url": "file:///c/secret"}).for_log().params == {"url": "<16 characters>"}
+    assert Action("open_web_page", {"url": 5}).for_log().params == {"url": "<not logged>"}
+    # What's searched for is never logged.
+    assert Action("search_on_computer", {"words": "secret things"}).for_log().params == {"words": "<13 characters>"}
+
 # Playlists and liked songs - see playlist_changes.py
 
 ENDLESS = {"id": "s1", "title": "Endless", "artist": "Made Up Band"}

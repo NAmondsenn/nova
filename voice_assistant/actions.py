@@ -27,6 +27,7 @@ import requests
 from voice_assistant import network
 from voice_assistant.batteries import HOME_FAILURES, find, said
 from voice_assistant.clock_ringing import heard_in
+from voice_assistant.computers import safe_url, url_host
 from voice_assistant.devices import AppDevice, ring_call, said_as, where
 from voice_assistant.football import NO_TEAM
 from voice_assistant.football_words import describe as describe_football
@@ -124,7 +125,10 @@ NOT_A_COMMAND = "\u200b"
 # The (tool, parameter) pairs whose value is never logged, only how long it is - see Action.for_log.
 # A note's text is the user's own writing, or notes Claude made for them, and the lines which say
 # what was asked for are kept with the transcripts: without this every note would be in backend.log.
-NOT_LOGGED = {("save_note", "text")}
+# What's searched for on a computer is his own, too.
+NOT_LOGGED = {("save_note", "text"), ("search_on_computer", "words")}
+# Those logged by their host alone: the rest of a web address can hold what's his.
+HOST_ONLY = {("open_web_page", "url")}
 
 
 @dataclass
@@ -146,14 +150,24 @@ class Action:
         """
         Returns:
             This action, or a copy with the value of each parameter in NOT_LOGGED said as its
-            length - "<17 characters>", or "<not logged>" when it isn't text - to put in a log
-            line in place of it. Never what's run, which is this one whole.
+            length - "<17 characters>", or "<not logged>" when it isn't text - and each in
+            HOST_ONLY as its host, "<www.bbc.co.uk>" (or its length, if it isn't a web address),
+            to put in a log line in place of it. Never what's run, which is this one whole.
         """
-        hidden = {name for tool, name in NOT_LOGGED if tool == self.tool} & set(self.params)
+        hidden = {name for tool, name in NOT_LOGGED | HOST_ONLY if tool == self.tool} & set(self.params)
         if not hidden:
             return self
-        return replace(self, params={name: (f"<{len(value)} characters>" if isinstance(value, str) else "<not logged>")
-                                     if name in hidden else value for name, value in self.params.items()})
+        hosts = {name for tool, name in HOST_ONLY if tool == self.tool}
+        return replace(self, params={name: _shown(value, name in hosts) if name in hidden else value
+                                     for name, value in self.params.items()})
+
+
+def _shown(value: Any, host: bool) -> str:
+    """What's logged of a value which isn't - its host, for a web address which is one, else its length."""
+    if not isinstance(value, str):
+        return "<not logged>"
+    checked = safe_url(value.strip()) if host else None
+    return f"<{url_host(checked)}>" if checked else f"<{len(value)} characters>"
 
 
 @dataclass
