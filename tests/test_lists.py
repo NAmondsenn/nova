@@ -4,6 +4,8 @@ Checks Home Assistant's to-do lists are found by the user's own words, and added
 read and ticked off, using a fake in place of Home Assistant, so nothing is sent anywhere.
 """
 
+import logging
+
 import pytest
 import requests
 
@@ -38,6 +40,10 @@ class FakeHome:
         self.tick_fails = None
         self.added = []
         self.ticked = []
+        # Things which Home Assistant adds, then answers slowly - and what looking at a list raises, apart from failure.
+        self.add_lands = set()
+        self.look_fails = None
+        self.looks = []
 
     def todo_lists(self):
         if self.failure:
@@ -45,13 +51,18 @@ class FakeHome:
         return [dict(found) for found in self.lists]
 
     def list_items(self, list_id):
+        self.looks.append(list_id)
         if self.failure:
             raise self.failure
+        if self.look_fails:
+            raise self.look_fails
         return [{"summary": summary, "uid": f"{list_id}-{number}"}
                 for number, summary in enumerate(self.items.get(list_id, []))]
 
     def add_item(self, list_id, item):
         if item in self.add_fails:
+            if item in self.add_lands:
+                self.items.setdefault(list_id, []).append(item)
             raise self.add_fails[item]
         self.added.append((list_id, item))
 
@@ -211,6 +222,81 @@ def test_a_connection_that_timed_out_was_never_sent_so_it_isnt_a_cant_tell(make_
     lists.home.tick_fails = requests.ConnectTimeout("no connection")
     assert lists.tick_off("milk", "shopping") == {"success": False, "message": CANT_REACH}
     assert lists.home.ticked == []
+
+
+def test_a_slow_answer_to_an_add_is_looked_at_and_counts_if_the_thing_went_on(make_lists):
+    # Home Assistant often adds a thing and only then answers too slowly, so the list is looked at before saying.
+    lists = make_lists(items={"todo.shopping_list": ["eggs"]})
+    lists.home.add_fails["milk"] = requests.ReadTimeout("slow")
+    lists.home.add_lands.add("milk")
+    assert lists.add(["milk"], "shopping") == {"success": True, "message": "Added milk to your shopping list."}
+    assert lists.home.looks == ["todo.shopping_list"]
+    # Trimmed and in any case, as the list may keep it.
+    lists = make_lists(items={"todo.shopping_list": ["  Milk "]})
+    lists.home.add_fails["milk"] = requests.ReadTimeout("slow")
+    assert lists.add(["milk"], "shopping")["success"] is True
+    # The next thing is then added as usual.
+    lists = make_lists()
+    lists.home.add_fails["eggs"] = requests.ReadTimeout("slow")
+    lists.home.add_lands.add("eggs")
+    assert lists.add(["eggs", "milk"], "shopping") == {"success": True,
+                                                       "message": "Added eggs and milk to your shopping list."}
+    assert lists.home.added == [("todo.shopping_list", "milk")]
+
+
+def test_a_slow_answer_to_an_add_with_the_thing_already_on_the_list_counts_as_added(make_lists):
+    # It's on the list either way, whether or not this add was what put it there.
+    lists = make_lists(items={"todo.shopping_list": ["milk"]})
+    lists.home.add_fails["milk"] = requests.ReadTimeout("slow")
+    assert lists.add(["milk"], "shopping") == {"success": True, "message": "Added milk to your shopping list."}
+
+
+def test_a_slow_answer_to_an_add_with_the_thing_not_on_the_list_is_the_failure_it_was(make_lists):
+    lists = make_lists(items={"todo.shopping_list": ["eggs"]})
+    lists.home.add_fails["milk"] = requests.ReadTimeout("slow")
+    assert lists.add(["milk"], "shopping") == {"success": False, "message": (
+        "Home Assistant didn't answer in time, so I can't tell if milk was added to your shopping list.")}
+    assert lists.home.looks == ["todo.shopping_list"]
+    assert lists.add(["eggs", "milk", "bread"], "shopping") == {"success": False, "message": (
+        "Added eggs to your shopping list, but Home Assistant didn't answer in time, so I can't tell if milk "
+        "was added, and I didn't add bread.")}
+
+
+def test_a_slow_answer_and_a_list_which_cant_be_looked_at_says_nova_is_unsure(make_lists):
+    for error in (requests.ReadTimeout("slow"), requests.ConnectionError("refused"), ValueError("not a list")):
+        lists = make_lists()
+        lists.home.add_fails["milk"] = requests.ReadTimeout("slow")
+        lists.home.look_fails = error
+        assert lists.add(["milk"], "shopping") == {"success": False, "unsure": True, "message": (
+            "Home Assistant was slow, so I'm not sure milk went on your shopping list. Have a look.")}
+    # What was added before it is said, and what wasn't tried after it.
+    lists.home.add_fails["eggs"] = requests.ReadTimeout("slow")
+    assert lists.add(["bread", "eggs", "butter"], "shopping") == {"success": False, "unsure": True, "message": (
+        "Added bread to your shopping list, but Home Assistant was slow, so I'm not sure eggs went on your "
+        "shopping list, and I didn't add butter. Have a look.")}
+
+
+def test_a_failure_which_is_not_a_slow_answer_doesnt_look_at_the_list(make_lists):
+    # Nothing was sent, so it wasn't added and there's nothing to look for.
+    for error in (requests.ConnectTimeout("no connection"), requests.ConnectionError("refused"), _server_error()):
+        lists = make_lists(items={"todo.shopping_list": ["milk"]})
+        lists.home.add_fails["milk"] = error
+        assert lists.add(["milk"], "shopping") == {"success": False,
+                                                   "message": "I couldn't add that to your shopping list."}
+        assert lists.home.looks == []
+
+
+def test_looking_at_a_list_after_a_slow_answer_never_logs_the_thing(make_lists, caplog):
+    caplog.set_level(logging.DEBUG)
+    for look in (None, requests.ReadTimeout("slow")):
+        lists = make_lists(items={"todo.shopping_list": ["secret"]})
+        lists.home.add_fails["secret"] = requests.ReadTimeout("slow")
+        lists.home.look_fails = look
+        lists.add(["secret"], "shopping")
+    assert "secret" not in caplog.text
+    # The list and what was found of it, as the first and second are logged apart.
+    assert "slow adding to todo.shopping_list" in caplog.text
+    assert "has the thing" in caplog.text and "couldn't be looked at" in caplog.text
 
 
 def test_each_says_it_cant_reach_home_assistant_while_its_down(make_lists):

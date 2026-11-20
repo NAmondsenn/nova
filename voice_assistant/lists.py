@@ -338,8 +338,9 @@ class Lists:
             said: The list as it was said, or None for the main one.
 
         Returns:
-            Dict with 'success' and a spoken 'message', and 'not_understood' for words
-            which name no list.
+            Dict with 'success' and a spoken 'message', 'not_understood' for words which
+            name no list, and 'unsure' for a thing Home Assistant may or may not have
+            added, as it was slow and the list couldn't be looked at either.
         """
         try:
             found, sentence = self.find(said)
@@ -357,10 +358,45 @@ class Lists:
             except (requests.RequestException, NotAllowed) as e:
                 # A failure stops there - the next would likely fail too, and what wasn't
                 # added is all said, so the user knows what to add again.
-                logger.warning(f"Could not add a thing to {found['id']}: {e}")
+                if isinstance(e, requests.ReadTimeout):
+                    on_the_list = self._went_on(found["id"], item, e)
+                    if on_the_list:
+                        added.append(item)
+                        continue
+                    if on_the_list is None:
+                        return {"success": False, "unsure": True,
+                                "message": _not_sure(added, items[len(added):], where)}
+                else:
+                    logger.warning(f"Could not add a thing to {found['id']}: {e}")
                 return {"success": False, "message": _not_added(added, items[len(added):], where, e)}
             added.append(item)
         return {"success": True, "message": f"Added {joined(added)} to {where}."}
+
+    def _went_on(self, list_id: str, item: str, error: Exception) -> Optional[bool]:
+        """
+        Whether a thing is on a list after Home Assistant was too slow to say it was added -
+        it often adds it anyway, so "I couldn't add milk" would be wrong.
+
+        Args:
+            list_id: The list, e.g. "todo.shopping_list".
+            item: The thing, e.g. "milk". Never logged.
+            error: The read timeout.
+
+        Returns:
+            True if a thing to do there has the same words, in any case - whether or not it
+            was this add that put it there. False if none has, or None if the list couldn't
+            be looked at either.
+        """
+        try:
+            things = self.home.list_items(list_id)
+        except (requests.RequestException, ValueError) as look_error:
+            logger.warning(f"Home Assistant was slow adding to {list_id} ({error}) and the list couldn't be "
+                           f"looked at: {look_error}")
+            return None
+        on_the_list = any(thing["summary"].strip().casefold() == item.strip().casefold() for thing in things)
+        outcome = "has the thing" if on_the_list else "doesn't have the thing"
+        logger.warning(f"Home Assistant was slow adding to {list_id} ({error}); the list {outcome}")
+        return on_the_list
 
     def read(self, said: Optional[str]) -> Dict:
         """
@@ -466,6 +502,24 @@ def _not_added(added: List[str], left: List[str], where: str, error: Exception) 
             return HomeAssistant.failure_message(error)
         return f"I couldn't add that to {where}."
     return f"Added {joined(added)} to {where}, but I couldn't add {joined(left, 'or')}."
+
+
+def _not_sure(added: List[str], left: List[str], where: str) -> str:
+    """
+    What's said when Home Assistant was slow adding a thing and the list couldn't be looked
+    at either, e.g. "Added eggs to your shopping list, but Home Assistant was slow, so I'm not
+    sure milk went on your shopping list, and I didn't add bread. Have a look.".
+
+    Args:
+        added: The things Home Assistant took before it.
+        left: The one which may or may not have gone on, then those not tried.
+        where: The list as it's said, e.g. "your shopping list".
+    """
+    unsure = f"Home Assistant was slow, so I'm not sure {left[0]} went on {where}"
+    rest = f", and I didn't add {joined(left[1:])}" if left[1:] else ""
+    if not added:
+        return f"{unsure}{rest}. Have a look."
+    return f"Added {joined(added)} to {where}, but {unsure}{rest}. Have a look."
 
 
 def _failed(doing: str, error: Exception) -> Dict:

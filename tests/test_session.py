@@ -28,10 +28,12 @@ from voice_assistant import ha_device, music, network, notes, paths, protocol, s
 from voice_assistant import session as session_module
 from voice_assistant.actions import Action
 from voice_assistant.brain import Brain
+from voice_assistant.choices import ChoiceStore
 from voice_assistant.clock import Clock
 from voice_assistant.config import Config
 from voice_assistant.computers import ComputerControl, Computers
 from voice_assistant.conversation import Reply
+from voice_assistant.lists import Lists
 from voice_assistant.media_watch import MediaWatcher
 from voice_assistant.navidrome import NavidromePlayer
 from voice_assistant.recording import RATE, AudioFeed
@@ -1290,12 +1292,155 @@ def test_a_note_named_for_a_satellite_which_cant_save_notes_says_so(brain, conne
     assert pc_asked == [] and pi_asked == []
 
 
-def test_a_note_for_a_pc_which_is_asleep_says_so(brain, connect, make_session):
+class FakeLists:
+    """Stands in for Lists, saying what it was asked to add and, for each, what Lists says of the list it went on."""
+
+    def __init__(self, reply=None):
+        self.added = []
+        self.reply = reply
+
+    def add(self, items, said):
+        self.added.append((items, said))
+        if self.reply is not None:
+            return self.reply
+        return {"success": True, "message": f"Added {items[0]} to your notepad list."}
+
+
+def _pc_asleep(brain, connect, make_session, lists=None, off=True):
+    """
+    The Pi's session with the PC not connected, and the lists to put notes on.
+
+    Args:
+        lists: The lists, or None for FakeLists.
+        off: Whether Home Assistant says the PC is off ("Your PC's off.") - else only that Nova isn't running on it.
+
+    Returns:
+        The Pi's session, the lists, and the notes the PC was asked to save (none, while it's off).
+    """
     pi, pc, pc_asked, _ = _at_the_pi(brain, connect, make_session, pc_connected=False)
+    if off:
+        brain.not_connected = lambda name: "Your PC's off."
+    brain.lists = FakeLists() if lists is None else lists
+    return pi, brain.lists, pc_asked
+
+
+def test_a_note_for_a_pc_which_is_asleep_goes_on_the_notepad_list(brain, connect, make_session):
+    pi, lists, pc_asked = _pc_asleep(brain, connect, make_session)
+    # Named or not: the PC is the one which would have saved it.
     for params in ({"where": "my PC"}, {}):
         result = _note(pi, "Swimming", "I'm going swimming.", **params)
-        assert (result.ok, result.say) == (False, "Nova isn't running on Nathaniel's PC.")
+        assert (result.ok, result.say, result.confirm) == (
+            True, "Your PC's off, so I've put it on your notepad list instead.", "speak")
+    # The list Nova means by "notes", as manage_list adds to it.
+    assert lists.added == [(["I'm going swimming."], "notes")] * 2
     assert pc_asked == []
+
+
+def test_a_note_for_a_pc_with_no_nova_running_goes_on_the_list_too(brain, connect, make_session):
+    pi, lists, _ = _pc_asleep(brain, connect, make_session, off=False)
+    result = _note(pi, "Swimming", "I'm going swimming.", where="my PC")
+    assert (result.ok, result.say) == (
+        True, "Nova isn't running on Nathaniel's PC, so I've put it on your notepad list instead.")
+    assert lists.added == [(["I'm going swimming."], "notes")]
+
+
+def test_a_note_put_on_the_list_says_the_name_the_list_has(brain, connect, make_session, tmp_path):
+    # As the real Lists words it, for a list Home Assistant calls "Notes".
+    class FakeHome:
+        added = []
+
+        def todo_lists(self):
+            return [{"id": "todo.notes", "name": "Notes", "count": 0, "aliases": []}]
+
+        def add_item(self, list_id, item):
+            self.added.append((list_id, item))
+
+    home = FakeHome()
+    lists = Lists(home, ChoiceStore(str(tmp_path / "lists.json"), {"main": None}))
+    pi, _, _ = _pc_asleep(brain, connect, make_session, lists=lists)
+    # The note's own "to your" isn't taken for where the list's name starts.
+    result = _note(pi, "Gift", "Send it to your mum.", where="my PC")
+    assert (result.ok, result.say) == (True, "Your PC's off, so I've put it on your notes list instead.")
+    assert home.added == [("todo.notes", "Send it to your mum.")]
+
+
+def test_a_note_put_on_the_list_is_one_line(brain, connect, make_session):
+    pi, lists, _ = _pc_asleep(brain, connect, make_session)
+    assert _note(pi, "Shopping", "  Milk\r\n eggs \n\n\nbread\n").ok
+    assert lists.added == [(["Milk eggs bread"], "notes")]
+
+
+def test_a_note_put_on_the_list_is_added_up_to_255_characters(brain, connect, make_session):
+    pi, lists, _ = _pc_asleep(brain, connect, make_session)
+    assert _note(pi, text="x" * 255).ok
+    assert lists.added == [(["x" * 255], "notes")]
+    # Counted as it goes on the list, not as it was said: a last newline is no more.
+    assert _note(pi, text="x" * 255 + "\n").ok
+    assert lists.added[-1] == (["x" * 255], "notes")
+    result = _note(pi, text="x" * 256)
+    assert (result.ok, result.say) == (
+        False, "Your PC's off, and that note's too long for your notepad list, so it wasn't saved.")
+    assert len(lists.added) == 2
+
+
+def test_a_note_which_the_list_wont_take_says_so(brain, connect, make_session):
+    for reply in ({"success": False, "message": "I couldn't add that to your notepad list."},
+                  {"success": False, "message": "I haven't got a list called that."}):
+        pi, lists, _ = _pc_asleep(brain, connect, make_session, lists=FakeLists(reply))
+        result = _note(pi, where="my PC")
+        assert (result.ok, result.say) == (False, "Your PC's off, and I couldn't put it on your notepad list either.")
+        assert len(lists.added) == 1
+    # With no Home Assistant there are no lists at all.
+    pi, lists, _ = _pc_asleep(brain, connect, make_session)
+    brain.lists = None
+    result = _note(pi, where="my PC")
+    assert (result.ok, result.say) == (False, "Your PC's off, and I couldn't put it on your notepad list either.")
+
+
+def test_a_note_which_the_list_was_slow_to_take_says_nova_is_unsure(brain, connect, make_session):
+    # Home Assistant may well have added it, so it isn't said to have failed.
+    reply = {"success": False, "unsure": True, "message": "Home Assistant was slow, so I'm not sure ... Have a look."}
+    pi, lists, _ = _pc_asleep(brain, connect, make_session, lists=FakeLists(reply))
+    result = _note(pi, where="my PC")
+    assert (result.ok, result.say) == (
+        False, "Your PC's off, and Home Assistant was slow, so I'm not sure it went on your notepad list. Have a look.")
+    assert len(lists.added) == 1
+
+
+def test_a_note_put_on_the_list_never_logs_its_text(brain, connect, make_session, caplog):
+    pi, lists, _ = _pc_asleep(brain, connect, make_session)
+    caplog.set_level(logging.DEBUG)
+    assert _note(pi, "Bins", "Green on Tuesday, secret.", where="my PC").ok
+    assert "secret" not in caplog.text
+
+
+def test_a_note_is_not_put_on_the_list_for_any_other_reason(brain, connect, make_session):
+    # Where it could still be, or wasn't asked for, or can't be helped: said as it was before.
+    pi, pc, pc_asked, pi_asked = _at_the_pi(brain, connect, make_session, [None, {"error": "The folder's full."}])
+    brain.lists = lists = FakeLists()
+    # The PC didn't answer in time, so the file may yet land.
+    assert _note(pi, where="my PC").say == "Nathaniel's PC didn't answer, so the note wasn't saved."
+    # The PC answered with an error.
+    assert _note(pi, where="my PC").say == "I couldn't save it on Nathaniel's PC: The folder's full."
+    # The text is over what a note may be, which the brain refuses before it is sent.
+    assert _note(pi, text="x" * (notes.MOST_TEXT + 1)).say == (
+        "I couldn't save it on Nathaniel's PC: That note's too long to save.")
+    # A satellite which can't save notes was named.
+    assert _note(pc, where="the Pi").say == "The Pi can't save notes."
+    assert lists.added == []
+    # Two computers could have saved it: which one is asked.
+    brain.rooms.seen("mac", True, "mac", True)
+    brain.satellites = lambda: ["bedroom", "pc", "mac"]
+    assert _note(pi).say == "Which one: Nathaniel's PC or the Mac?"
+    assert lists.added == []
+
+
+def test_a_note_at_a_computer_which_is_connected_is_not_put_on_the_list(brain, connect, make_session):
+    pi, pc, pc_asked, _ = _at_the_pi(brain, connect, make_session)
+    brain.lists = lists = FakeLists()
+    assert _note(pi, where="my PC").say == "Saved to the Downloads on Nathaniel's PC as Bins."
+    assert _note(pc).say == "Saved to your Downloads as Bins."
+    assert lists.added == [] and len(pc_asked) == 2
 
 
 def test_a_note_which_goes_wrong_on_another_satellite_names_it(brain, connect, make_session):

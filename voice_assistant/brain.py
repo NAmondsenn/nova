@@ -1027,19 +1027,20 @@ class Brain:
 
     def notes_for(self, spoken_at: str, where: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
         """
-        Finds the computer to save a note on, and checks it can be asked now. The one named, else
-        the one spoken at if it saves notes, else the only one known which does - so a note asked
-        for at the Pi, which has no Downloads folder, is saved on the PC.
+        Finds the computer to save a note on. The one named, else the one spoken at if it saves
+        notes, else the only one known which does - so a note asked for at the Pi, which has no
+        Downloads folder, is saved on the PC. Whether it's connected is for the caller to see, as
+        a note for one which isn't goes on the notepad list instead.
 
         Args:
             spoken_at: The satellite the user was talking to.
             where: The words for which computer, e.g. "my PC", or None for none said.
 
         Returns:
-            The computer's satellite name and None; or None and what to say instead: the words name
-            none or one which can't save notes ("The Pi can't save notes."), or none was named and
-            several can ("Which one: the PC or the Mac?") or none can ("None of your computers can
-            save notes."), or the one chosen isn't connected ("Your PC's off.").
+            The computer's satellite name, connected or not, and None; or None and what to say
+            instead: the words name none or one which can't save notes ("The Pi can't save
+            notes."), or none was named and several can ("Which one: the PC or the Mac?") or
+            none can ("None of your computers can save notes.").
         """
         if where:
             name, problem = self.find_satellite(where, here=spoken_at)
@@ -1058,9 +1059,6 @@ class Brain:
                 spoken = [self.spoken_name(each) for each in saving]
                 return None, f"Which one: {satellite_names.listed(spoken, 'or')}?"
             name = saving[0]
-        if self.session_for(name) is None:
-            # Asleep, or Nova isn't running there.
-            return None, self.not_connected(name)
         return name, None
 
     def not_connected(self, name: str) -> str:
