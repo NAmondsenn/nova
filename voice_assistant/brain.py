@@ -1457,8 +1457,9 @@ class Brain:
                 was_connected = session.satellite.connected
                 emptied = was_connected and session.satellite.send_alarms([])
             self._let_go(session)
-            self.computers.gone(name)
             self._satellites_changed()
+        # Its apps too, connected or not, so it's never "the only computer" things open on.
+        self.computers.forget(name)
         with self._lock:
             self._emptied[name] = emptied
         if not emptied:

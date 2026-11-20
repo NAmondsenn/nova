@@ -187,6 +187,12 @@ class Computers:
         with self._lock:
             self._windows.pop(name, None)
 
+    def forget(self, name: str):
+        """Drops all of a satellite's lists, once it has been removed, so it's no longer a computer to open things on."""
+        with self._lock:
+            self._apps.pop(name, None)
+            self._windows.pop(name, None)
+
     def known(self) -> List[str]:
         """Returns the satellites whose apps have been set since the brain started."""
         with self._lock:

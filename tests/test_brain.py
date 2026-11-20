@@ -1466,6 +1466,19 @@ def test_a_routine_isnt_saved_on_a_satellite_gone_from_the_file(brain, passwords
     assert brain.routines.save({**MORNING, "satellite": "bedroom"})["success"]
 
 
+def test_a_removed_computer_is_no_longer_one_to_open_things_on(brain, passwords):
+    # Away when it's removed, its apps kept from before.
+    passwords.add("pc", "the-pcs-password")
+    # Seen by the brain's look at the passwords, as the server's poll has it.
+    brain._shut_out_removed()
+    brain.computers.set_apps("pc", [{"id": "f", "name": "Fortnite", "kind": "epic"}])
+    brain.computers.set_windows("pc", ["Fortnite"])
+    assert brain.computers.known() == ["pc"]
+    assert brain.remove_satellite("pc") is False
+    assert brain.computers.known() == [] and brain.computers.windows("pc") == []
+    assert brain.computer_meant("bedroom", None) == (None, None)
+
+
 def test_a_removed_satellites_volumes_are_kept(brain, passwords):
     volume = VolumeControl(path=session_module._kept_for("volume", "kitchen"))
     volume.set("music", 20)

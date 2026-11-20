@@ -75,6 +75,14 @@ def test_apps_kept_windows_dropped_on_gone():
 
 # Web addresses and searches
 
+def test_forget_drops_both_lists():
+    computers = Computers()
+    computers.set_apps("pc", apps("Fortnite"))
+    computers.set_windows("pc", ["Discord"])
+    computers.forget("pc")
+    assert computers.known() == [] and computers.apps("pc") == [] and computers.windows("pc") == []
+
+
 def test_safe_url():
     assert safe_url("bbc.co.uk") == "https://bbc.co.uk"
     assert safe_url("youtube.com/watch?v=abc") == "https://youtube.com/watch?v=abc"
