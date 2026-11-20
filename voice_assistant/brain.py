@@ -36,6 +36,7 @@ from voice_assistant.clean_schedule import CleanSchedule
 from voice_assistant.clean_store import CleanStore
 from voice_assistant.clean_swap import Ears, Swapper, listening_library
 from voice_assistant.clock import Clock, spoken_clock_time
+from voice_assistant.computers import Computers
 from voice_assistant.display_feed import DisplayFeed
 from voice_assistant.display_server import DisplayServer
 from voice_assistant.displays import Displays
@@ -316,6 +317,8 @@ class Brain:
         # Which satellites ignore the wake word while Nova speaks on another - see
         # _quiet_others_forever, which _quiet_nudge wakes.
         self.quiet_others = QuietOthers()
+        # The apps and open windows of each computer satellite - see computers.py.
+        self.computers = Computers()
         self._quiet_nudge = threading.Event()
         # Each satellite's session, by its name, for as long as it's connected.
         self.sessions: Dict[str, Session] = {}
@@ -1163,6 +1166,9 @@ class Brain:
             self._tell_restarted(name)
 
         satellite = RemoteSatellite(stream, hello)
+        # Before it's read, so no list it sends is missed.
+        satellite.on_apps = self.computers.set_apps
+        satellite.on_windows = self.computers.set_windows
         # Read from the start, so the satellite's pings are answered while its session is made.
         reading = threading.Thread(target=satellite.serve, daemon=True, name=f"satellite-{name}")
         reading.start()
@@ -1340,6 +1346,7 @@ class Brain:
                 was_connected = session.satellite.connected
                 emptied = was_connected and session.satellite.send_alarms([])
             self._let_go(session)
+            self.computers.gone(name)
             self._satellites_changed()
         with self._lock:
             self._emptied[name] = emptied
@@ -1548,6 +1555,8 @@ class Brain:
                 return
             del self.sessions[name]
             self._caught_up.discard(name)
+        # Only here, where it's the current connection which ended: a newer one has its own lists.
+        self.computers.gone(name)
         self._satellites_changed()
         self._quiet_nudge.set()
 

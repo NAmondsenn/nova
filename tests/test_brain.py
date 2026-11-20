@@ -291,7 +291,7 @@ class Satellite:
     """
 
     def __init__(self, brain, name="bedroom", password=BEDROOM, unclean=False, away=NOTHING_AWAY, push_to_talk=False,
-                 machine=None, saves_notes=False, media_controls=False):
+                 machine=None, saves_notes=False, media_controls=False, opens=False):
         self.socket = socket.create_connection(("127.0.0.1", brain.port), timeout=5)
         self.stream = self.socket.makefile("rwb")
         self.lock = threading.Lock()
@@ -300,7 +300,7 @@ class Satellite:
         self.gone = threading.Event()
         try:
             protocol.greet(self.stream, name, f"{name}-pi", password, 48000, unclean, push_to_talk=push_to_talk,
-                           machine=machine, saves_notes=saves_notes, media_controls=media_controls)
+                           machine=machine, saves_notes=saves_notes, media_controls=media_controls, opens=opens)
         except BaseException:
             # As satellite_link does, so the brain sees it hang up.
             self.socket.close()
@@ -454,6 +454,36 @@ def test_connecting_records_machine_and_notes(brain, connect):
     # And kept, so it's known while the satellite is away and after a restart.
     again = SatelliteRooms(os.path.join(paths.DATA_DIR, "satellite_rooms.json"))
     assert again.machine("bedroom") == "pc" and again.saves_notes("bedroom") is True
+
+
+def test_a_computers_apps_and_windows_are_kept_and_its_windows_dropped_as_it_goes(brain, connect):
+    serving(brain)
+    pc = connect(brain, "bedroom", BEDROOM, machine="pc", opens=True)
+    connected(brain)
+    app = {"id": "steam", "name": "Steam", "kind": "app"}
+    pc.say("apps", json.dumps([app]).encode())
+    pc.say("windows", json.dumps(["Steam"]).encode())
+    assert wait_for(lambda: brain.computers.windows("bedroom") == ["Steam"])
+    assert brain.computers.apps("bedroom") == [app]
+
+    pc.go()
+    assert wait_for(lambda: brain.session_for("bedroom") is None)
+    assert wait_for(lambda: brain.computers.windows("bedroom") == [])
+    assert brain.computers.apps("bedroom") == [app]
+
+
+def test_a_computers_lists_survive_the_end_of_the_connection_it_replaced(brain, connect):
+    serving(brain)
+    old = connect(brain, "bedroom", BEDROOM, machine="pc", opens=True)
+    connected(brain)
+    new = connect(brain, "bedroom", BEDROOM, machine="pc", opens=True)
+    assert wait_for(old.gone.is_set)
+    connected(brain)
+    new.say("windows", json.dumps(["Discord"]).encode())
+    assert wait_for(lambda: brain.computers.windows("bedroom") == ["Discord"])
+    # The old one's end, seen by the brain, mustn't wipe the new one's windows.
+    time.sleep(0.3)
+    assert brain.computers.windows("bedroom") == ["Discord"]
 
 
 def test_ring_on(brain, passwords):
