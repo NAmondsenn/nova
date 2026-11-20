@@ -67,7 +67,7 @@ Nova can now do things that cost money, run code or delete his data. He wants re
 
 ### Brain: the approval service (`voice_assistant/approvals.py`)
 
-- `Approvals.ask(description, asked_at) -> Result`. It blocks the calling action's thread until approved, refused, or the timeout (2 min, setting).
+- `Approvals.ask(description, asked_at) -> Result`, called by a big tool after its lookup (see "Settled after the builder check"). It blocks the calling action's thread until approved, refused, or the timeout (2 min, setting).
   - If a trust window is open, it returns approved at once (logged).
   - Otherwise it creates a request with a fresh 32-byte random challenge, the description and an expiry. It stores it in memory only, so a brain restart refuses everything waiting.
   - It sends the phone notification and the PC prompt at once, and waits on an event.
@@ -133,6 +133,29 @@ His words: shut down "should just say okay, or make the beep", and "make the con
 - **Failures still speak** ("Your PC's off.", "There's no shutdown button...").
 - **Opening, closing and searching keep their short spoken reply** ("Opening Fortnite."), because it names what was matched, which is how a wrong match is caught. (My call: it's not the same kind of task.)
 - **Unchanged from 0008/0034**: whole request only; the Pi only with the PC named; the PC only on a press. Decision 0034 records the change.
+
+### Settled after the builder check (my calls, his to overturn)
+
+- **Approval comes after the action has worked out what it will do.**
+  - `remove_from_calendar` and the download path are split into "find" then "approve, then do". The prompt names the real event ("Remove 'Dentist', Tue 25 Nov 10:00", with "and the 4 after it" for a series) or the real albums.
+  - "No match", "which one?" and "you've already got it" are answered as now, before any approval is asked.
+  - So the check is a hook the big tool calls (`self.approvals.ask(description)`) after its lookup, not a flag the executor reads before. Every path that reaches those tools (local intents, Claude, routines, the page) goes through it.
+- **What can only be changed with an approval** (when a way to approve exists):
+  - adding a passkey once one exists;
+  - removing a passkey (the last one can be removed alone);
+  - switching a satellite's "Can approve" on;
+  - raising "Minutes one approval lasts" or "Minutes to wait";
+  - raising the album count.
+  Lowering any of them is free.
+- **"Can approve" defaults**: on only for a satellite whose machine is `pc` or `mac` and which said `approves`. Any other satellite claiming `approves` is ignored until switched on, and switching it on needs an approval.
+- **Tailscale only**: the Approvals section, `/approve/<id>` and every passkey or approval endpoint are refused on the NPM route (proxy_port), whatever its password.
+- **No way to approve yet** (no passkey and no PC that approves): a big action is refused with "That needs your OK, but there's no way to give it yet. Add a passkey on Nova's settings page." Right after the deploy he registers his phone's passkey (part of the deploy's hand checks).
+- **Several big actions at once**: each is its own request, with its own challenge and description.
+  - The PC shows one Hello prompt at a time; the others wait their turn there.
+  - The phone gets one notification each.
+  - Once one is approved, the trust window approves the rest still waiting, logged per request. The window was always meant to cover what he asks in those minutes.
+  - A refusal settles only its own request.
+- **Undo of Nova's own recent change is never big.** Taking back an event or a playlist Nova just made, or putting back a removed event, needs no approval.
 
 ## My calls (his to overturn)
 
