@@ -17,7 +17,7 @@ import logging
 import re
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote_plus, urlsplit
 
 logger = logging.getLogger(__name__)
@@ -238,6 +238,63 @@ def _listed(names: List[str], last: str) -> str:
 def _capital(sentence: str) -> str:
     """A name said mid-sentence as it starts one: "the PC" as "The PC"."""
     return sentence[:1].upper() + sentence[1:]
+
+
+@dataclass
+class ComputerHooks:
+    """
+    What the local rules ask of the computers, for one session - see intents.py. Each says
+    whether a request is a computer's, so one which isn't ("open the garage") falls through
+    to the rules after unchanged.
+    """
+    # Whether the satellite spoken at is a PC, whose bare power words ("go to sleep") are its own.
+    at_pc: Callable[[], bool]
+    # Whether some words, with the words for where or None, name an app on the computer meant.
+    names_app: Callable[[str, Optional[str]], bool]
+    # Whether they name a window open on it.
+    names_window: Callable[[str, Optional[str]], bool]
+    # Whether, with no computer named, there is one to open things on.
+    opens_somewhere: Callable[[], bool]
+
+    @classmethod
+    def for_satellite(cls, brain: Any, satellite: str) -> "ComputerHooks":
+        """
+        Args:
+            brain: The Brain, for which computer is meant (Brain.computer_for), its apps,
+                windows and his names for them, and the satellites' names and machines.
+            satellite: The satellite the user is talking to.
+
+        Returns:
+            The hooks for that satellite's session. With a satellite named, the request is
+            that computer's whatever is said, so ComputerControl says "I can't find X on your
+            PC." or "Your PC's off."; with none, only an app or window the computer meant
+            has, or several it might be, for "Which one" to be asked.
+        """
+        def target(where: Optional[str]) -> Optional[str]:
+            name, _ = brain.computer_for(satellite, where)
+            return name
+
+        def names_app(said: str, where: Optional[str]) -> bool:
+            if where:
+                return brain.names_satellite(where)
+            name = target(None)
+            if name is None:
+                return False
+            found = match_app(said, brain.computers.apps(name), brain.rooms.app_names(name))
+            return found.item is not None or bool(found.choices)
+
+        def names_window(said: str, where: Optional[str]) -> bool:
+            if where:
+                return brain.names_satellite(where)
+            name = target(None)
+            return name is not None and match_window(said, brain.computers.windows(name)) is not None
+
+        def opens_somewhere() -> bool:
+            # Even one which isn't connected, so "Your PC's off." is said rather than Claude asked.
+            return brain.computer_for(satellite, None) != (None, None)
+
+        return cls(at_pc=lambda: brain.rooms.machine(satellite) == "pc", names_app=names_app,
+                   names_window=names_window, opens_somewhere=opens_somewhere)
 
 
 class ComputerControl:

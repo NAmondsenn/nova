@@ -27,7 +27,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from voice_assistant import paths, storage
 from voice_assistant.actions import ActionExecutor
 from voice_assistant.clock_ringing import heard_in
-from voice_assistant.computers import ComputerControl
+from voice_assistant.computers import ComputerControl, ComputerHooks
 from voice_assistant.conversation import NOT_CAUGHT, Conversation
 from voice_assistant.ha_device import DeviceControls, NovaDevice
 from voice_assistant.home_assistant import HomeAssistant
@@ -321,10 +321,12 @@ class Session:
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.
         # The teams followed are given by every name they have, as they are left to Claude, not Assist.
+        # Opening, closing and searching are only a computer's when the brain finds what's said there.
         self.intents = LocalIntents(clock=brain.clock, ntfy=brain.ntfy, home=self.home,
                                     activities=brain.calendar.activity_words if brain.calendar else None,
                                     football=brain.football.known_as if brain.football else None,
-                                    wake_word=self.wake_word, names_satellite=brain.names_satellite)
+                                    wake_word=self.wake_word, names_satellite=brain.names_satellite,
+                                    computer=ComputerHooks.for_satellite(brain, satellite.name))
 
         # The satellite as a device of its own in Home Assistant, over MQTT, or None
         # until mqtt.host is set - see ha_device.py. It's named after the satellite's

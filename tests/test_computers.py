@@ -3,7 +3,7 @@
 import logging
 from types import SimpleNamespace
 
-from voice_assistant.computers import (Computers, ComputerControl, match_app, match_window, plain, safe_url,
+from voice_assistant.computers import (ComputerHooks, Computers, ComputerControl, match_app, match_window, plain, safe_url,
                                        search_url)
 
 
@@ -267,3 +267,36 @@ def test_volume_on_the_computer():
     assert at(brain).volume(None, level=30) == {"success": False,
                                                 "message": "Nathaniel's PC can't change its own volume."}
     assert at(brain, "bedroom").volume(None, level=30) == {"success": False, "message": "Your PC's off."}
+
+
+def hooks(brain, spoken_at="pc", machine="pc"):
+    """ComputerHooks for a session at a satellite, with the brain naming only "the pc" as a satellite."""
+    brain.names_satellite = lambda said: said == "the pc"
+    brain.rooms.machine = lambda name: machine if name == spoken_at else "pc"
+    return ComputerHooks.for_satellite(brain, spoken_at)
+
+
+def test_hooks_name_an_app_or_window_on_the_computer_meant():
+    brain = FakeBrain()
+    brain.computers.set_apps("pc", apps("Fortnite", "Overwatch", "Overwatch 2", "Rocket League", "Rocket Arena"))
+    brain.computers.set_windows("pc", ["Discord"])
+    found = hooks(brain)
+    assert found.names_app("fortnite", None) and found.names_app("overwatch", None)
+    # Several it might be is still the computer's, for it to ask which.
+    assert found.names_app("rocket", None)
+    assert not found.names_app("the garage", None)
+    assert found.names_window("discord", None) and not found.names_window("steam", None)
+    # With the PC named, whatever is said is the PC's; with words which name no satellite, it isn't.
+    assert found.names_app("the garage", "the pc") and found.names_window("steam", "the pc")
+    assert not found.names_app("fortnite", "the left")
+    assert found.opens_somewhere() and found.at_pc()
+
+
+def test_hooks_without_a_computer_fall_through():
+    brain = FakeBrain(target=None)
+    brain.computers.set_apps("pc", apps("Fortnite"))
+    found = hooks(brain, spoken_at="pi", machine="pi")
+    assert not found.names_app("fortnite", None) and not found.names_window("fortnite", None)
+    assert not found.opens_somewhere() and not found.at_pc()
+    # A computer which is off is still somewhere, to say so.
+    assert hooks(FakeBrain(target=None, problem="Your PC's off."), spoken_at="pi", machine="pi").opens_somewhere()

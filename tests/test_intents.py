@@ -12,6 +12,7 @@ import pytest
 
 from voice_assistant import intents as intents_module
 from voice_assistant.actions import Action
+from voice_assistant.computers import ComputerHooks, match_app, match_window
 from voice_assistant.intents import LocalIntents, calendar_days
 
 
@@ -916,3 +917,145 @@ def test_what_a_local_rule_asks_for_is_logged_without_a_notes_text(caplog):
         result = intents.match("Jot.")
     assert result["actions"][0].params["text"] == "The secret of the bins."
     assert "secret" not in caplog.text and "save_note" in caplog.text and "'title': 'Jot'" in caplog.text
+
+
+# Opening, closing and searching on a computer, and the PC's own power words - see computers.py
+
+# The PC's apps and open windows, as the brain last heard them.
+PC_APPS = [{"id": name, "name": name, "kind": "exe"} for name in
+           ("Fortnite", "Discord", "Steam", "YouTube", "Rocket League", "Overwatch", "Overwatch 2")]
+PC_WINDOWS = ["Discord", "Firefox"]
+
+
+def _hooks(at_pc=True, somewhere=True):
+    """Hooks as ComputerHooks.for_satellite gives them, for the PC's apps and windows: at the PC or the Pi."""
+    def target(where):
+        # A satellite named is the computer's whatever is said; with none, the one spoken at or the only one.
+        return where is not None or somewhere
+
+    return ComputerHooks(
+        at_pc=lambda: at_pc,
+        names_app=lambda said, where: where is not None or (
+            somewhere and (lambda found: found.item is not None or bool(found.choices))(match_app(said, PC_APPS, {}))),
+        names_window=lambda said, where: where is not None or (somewhere and match_window(said, PC_WINDOWS) is not None),
+        opens_somewhere=lambda: target(None))
+
+
+def _computer(text, at_pc=True, somewhere=True):
+    """The actions a request gives with a computer to open things on, or None if it falls through."""
+    result = LocalIntents(home=HOME, names_satellite=SATELLITE_WORDS.__contains__,
+                          computer=_hooks(at_pc, somewhere)).match(text)
+    return None if result is None else result["actions"]
+
+
+@pytest.mark.parametrize("text, name", [
+    ("Open Fortnite.", "fortnite"), ("Launch Discord.", "discord"), ("Start Rocket League.", "rocket league"),
+    ("Load up Steam.", "steam"), ("Could you open Overwatch please?", "overwatch"),
+])
+def test_open_app_at_pc(text, name):
+    assert _computer(text) == [Action("open_on_computer", {"name": name})]
+
+
+def test_open_on_pc_from_pi():
+    assert _computer("Open Fortnite on the PC.", at_pc=False) == [
+        Action("open_on_computer", {"name": "fortnite", "where": "the pc"})]
+    # With the PC named, whatever is said is the PC's, for it to say it can't find it.
+    assert _computer("Open the garage on the PC.", at_pc=False, somewhere=False) == [
+        Action("open_on_computer", {"name": "the garage", "where": "the pc"})]
+    # Words after "on" which name no satellite are part of what's opened, so match nothing here.
+    assert all(action.tool != "open_on_computer" for action in _computer("Open Fortnite on the left.", at_pc=False))
+
+
+def test_open_unknown_falls_through():
+    # Not one of the PC's apps: on to Assist, as before.
+    assert [action.tool for action in _computer("Open the garage.")] == ["control_home"]
+    # And with no computer to open things on at all, even a known name falls through.
+    assert all(action.tool != "open_on_computer" for action in _computer("Open Fortnite.", at_pc=False,
+                                                                           somewhere=False))
+    assert _actions("Open Fortnite.") != [Action("open_on_computer", {"name": "fortnite"})]
+
+
+def test_open_domain():
+    assert _computer("Open bbc.co.uk.") == [Action("open_web_page", {"url": "bbc.co.uk"})]
+    assert _computer("Go to bbc.co.uk on the PC.", at_pc=False) == [
+        Action("open_web_page", {"url": "bbc.co.uk", "where": "the pc"})]
+    assert _computer("Go to my-site.com") == [Action("open_web_page", {"url": "my-site.com"})]
+    # Nowhere to open it: Claude's.
+    assert _computer("Go to bbc.co.uk.", at_pc=False, somewhere=False) is None
+
+
+def test_open_youtube_app_beats_site():
+    assert _computer("Open YouTube.") == [Action("open_on_computer", {"name": "youtube"})]
+    assert _computer("Go to youtube.com.") == [Action("open_on_computer", {"name": "youtube"})]
+
+
+@pytest.mark.parametrize("text", ["Close this.", "Close that.", "Quit this window.", "Exit the window.",
+                                  "Close it."])
+def test_close_this_at_pc_only(text):
+    assert _computer(text) == [Action("close_on_computer", {"name": "this"})]
+    # At the Pi, with no computer named, it isn't the PC's front window.
+    actions = _computer(text, at_pc=False)
+    assert actions is None or all(action.tool != "close_on_computer" for action in actions)
+    assert _computer("Close this on the PC.", at_pc=False) == [
+        Action("close_on_computer", {"name": "this", "where": "the pc"})]
+
+
+def test_close_open_window():
+    assert _computer("Close Discord.") == [Action("close_on_computer", {"name": "discord"})]
+    assert _computer("Quit Firefox.") == [Action("close_on_computer", {"name": "firefox"})]
+    assert _computer("Exit Steam on the PC.", at_pc=False) == [
+        Action("close_on_computer", {"name": "steam", "where": "the pc"})]
+    # Not open: on to Assist.
+    assert [action.tool for action in _computer("Close Steam.")] == ["control_home"]
+
+
+@pytest.mark.parametrize("text, words, where", [
+    ("Search for rocket league tips.", "rocket league tips", None),
+    ("Google for cheap flights.", "cheap flights", None),
+    ("Search google for the weather in Paris.", "the weather in paris", None),
+    ("Google how tall is Everest.", "how tall is everest", None),
+    ("Look up train times on Google.", "train times", None),
+    ("Search for pizza on the PC.", "pizza", "the pc"),
+    # "On" what names no satellite is part of the search.
+    ("Search for restaurants on Deliveroo.", "restaurants on deliveroo", None),
+])
+def test_search_forms(text, words, where):
+    params = {"words": words, **({"where": where} if where else {})}
+    assert _computer(text, at_pc=where is None) == [Action("search_on_computer", params)]
+    # With nowhere to search, and none named, Claude's.
+    if where is None:
+        assert _computer(text, at_pc=False, somewhere=False) is None
+
+
+def test_fall_through_untouched():
+    for at_pc in (True, False):
+        assert _computer("Start a timer for 5 minutes.", at_pc) == [Action("set_timer", {"duration_seconds": 300})]
+        for text in ("Open the garage.", "Close the garage door.", "Close the blinds."):
+            assert [action.tool for action in _computer(text, at_pc)] == ["control_home"]
+        assert _computer("Add milk to my shopping list.", at_pc)[0].tool == "add_to_list"
+        assert _computer("Play.", at_pc) == [Action("play_music")]
+
+
+@pytest.mark.parametrize("text, action", [
+    ("Go to sleep.", "sleep"), ("Sleep.", "sleep"), ("Lock.", "lock"), ("Lock it.", "lock"),
+    ("Lock the PC.", "lock"), ("Turn the screen off.", "screen_off"), ("Screen off.", "screen_off"),
+    ("Turn off the screen.", "screen_off"), ("Shut down.", "off"), ("Shut it down.", "off"),
+    ("Power off.", "off"), ("Restart.", "restart"), ("Reboot.", "restart"), ("Restart it.", "restart"),
+])
+def test_power_words_only_whole(text, action):
+    assert _computer(text) == [Action("pc_power", {"action": action})]
+    # At the Pi, without the PC named, these are as they were.
+    actions = _computer(text, at_pc=False)
+    if text != "Lock the PC.":
+        assert actions is None or all(action.tool != "pc_power" for action in actions)
+    for longer in ("I'm going to sleep after this.", "Restart the song.", "Lock the front door.",
+                   "Go to sleep in ten minutes."):
+        for at_pc in (True, False):
+            actions = _computer(longer, at_pc)
+            assert actions is None or all(action.tool != "pc_power" for action in actions)
+
+
+def test_shut_down_bare_asks():
+    # Through pc_power, whose question before shutting down is tested in test_pc - never press_pc_button.
+    assert _computer("Shut down.") == [Action("pc_power", {"action": "off"})]
+    assert _computer("Restart.") == [Action("pc_power", {"action": "restart"})]
