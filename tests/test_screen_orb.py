@@ -455,12 +455,13 @@ class FakeBackend:
 
     def __init__(self, scale=1.0):
         self.scale = scale
+        self.area = WORK_AREA
         self.puts = []
         self.events = []
         self._lock = threading.Lock()
 
     def work_area(self):
-        return WORK_AREA
+        return self.area
 
     def dpi_scale(self):
         return self.scale
@@ -558,6 +559,25 @@ def test_the_frame_follows_the_screens_scaling(orbs):
     # The medium orb's 64 px body is 96 px at 150%, and the margin 18 px.
     side = window_side(96)
     assert set(window.puts) == {((side, side, 4), (1920 - side) // 2, 1040 - 18 - side)}
+
+
+def test_a_new_work_area_and_scaling_are_picked_up_by_the_next_showing(orbs):
+    window = FakeBackend()
+    orb = orbs(window)
+    orb.show("listening")
+    assert _until(lambda: window.puts, 1)
+    orb.show("hidden")
+    assert _until(lambda: window.after_last_hide() is not None, LINGER + FADE + 0.5)
+    # While it is hidden the taskbar moves to the top and the scaling goes to 150%, with
+    # no restart and nothing told to the orb.
+    window.area = (0, 60, 1920, 1080)
+    window.scale = 1.5
+    before = len(window.puts)
+    orb.show("speaking")
+    assert _until(lambda: len(window.puts) >= before + 3, 1)
+    # The medium orb's 64 px body is 96 px at 150%, and the margin 18 px.
+    side = window_side(96)
+    assert set(window.puts[before:]) == {((side, side, 4), (1920 - side) // 2, 1080 - 18 - side)}
 
 
 def test_configure_moves_resizes_and_switches_off(orbs):
