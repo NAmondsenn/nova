@@ -18,6 +18,15 @@ def test_exact_beats_partial():
     assert found.item["name"] == "Overwatch" and found.choices == []
 
 
+def test_filler_words_do_not_defeat_an_exact_match():
+    found = match_app("the overwatch game", apps("Overwatch 2", "Overwatch"), {})
+    assert found.item["name"] == "Overwatch" and found.choices == []
+    assert match_window("the steam app", ["Steam VR", "Steam"]) == "Steam"
+    # A name with a filler word in it still matches as said in full.
+    found = match_app("the game room", apps("The Game Room", "Game Room Deluxe"), {})
+    assert found.item["name"] == "The Game Room"
+
+
 def test_every_word_one_match():
     found = match_app("rocket league", apps("Rocket League®", "Steam"), {})
     assert found.item["name"] == "Rocket League®"

@@ -58,11 +58,12 @@ def _find(said: str, names: List[str]) -> Match:
     Returns:
         A Match whose item holds the index, as {"index": n}, or choices.
     """
-    wanted = plain(said)
-    for index, name in enumerate(names):
-        if plain(name) == wanted:
-            return Match(item={"index": index})
     words = _words_in(said)
+    # Both ways, so a name with "the" or "game" in it still matches as said in full.
+    wanted = {plain(said), " ".join(words)}
+    for index, name in enumerate(names):
+        if plain(name) in wanted:
+            return Match(item={"index": index})
     if not words:
         return Match()
     fits = [index for index, name in enumerate(names) if set(words) <= set(plain(name).split())]
