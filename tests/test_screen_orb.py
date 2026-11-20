@@ -2,13 +2,26 @@
 Screen Orb Test
 Checks what the PC's orb shows from what the satellite is doing - listening while a
 recording is sent, thinking until Nova's words start or its turn ends, speaking while
-they play, and hidden otherwise - without any Windows: the states are plain Python.
+they play, and hidden otherwise - where it sits on the screen, and how it fades and
+grows in and out over time, without any Windows: it is all plain Python.
 """
 
 import threading
 import time
 
-from voice_assistant.screen_orb import OrbStates
+import pytest
+
+from voice_assistant.screen_orb import (
+    FADE,
+    GROW,
+    LINGER,
+    PLACES,
+    THINKING_MOST,
+    THINKING_SCALE,
+    Fade,
+    OrbStates,
+    place,
+)
 
 
 def _driven():
@@ -212,3 +225,217 @@ def test_two_threads_changing_it_are_told_one_at_a_time_and_end_on_the_final_sta
     assert max(at_once) == 1
     assert told == ["listening", "thinking"]
     assert told[-1] == states.state
+
+
+# The work area of a 1920 x 1080 screen with a 40 px taskbar along the bottom, and the
+# window's side for the medium orb at 100% scaling.
+WORK_AREA = (0, 0, 1920, 1040)
+SIDE = 111
+
+
+def test_place_bottom_centre_sits_just_above_the_taskbar():
+    assert place(WORK_AREA, SIDE, "bottom centre", 12) == (904, 917)
+
+
+def test_place_each_corner():
+    assert place(WORK_AREA, SIDE, "top left", 12) == (12, 12)
+    assert place(WORK_AREA, SIDE, "top right", 12) == (1797, 12)
+    assert place(WORK_AREA, SIDE, "bottom right", 12) == (1797, 917)
+    assert place(WORK_AREA, SIDE, "bottom left", 12) == (12, 917)
+    assert place(WORK_AREA, SIDE, "top centre", 12) == (904, 12)
+
+
+def test_place_keeps_inside_a_work_area_with_the_taskbar_on_the_left():
+    assert place((62, 0, 1920, 1080), SIDE, "bottom left", 12) == (74, 957)
+
+
+def test_place_on_a_second_screen_left_of_the_main_one():
+    assert place((-1920, 0, 0, 1040), SIDE, "bottom centre", 12) == (-1016, 917)
+
+
+def test_an_unknown_place_is_bottom_centre():
+    expected = place(WORK_AREA, SIDE, "bottom centre", 12)
+    assert place(WORK_AREA, SIDE, "middle of nowhere", 12) == expected
+    assert place(WORK_AREA, SIDE, "", 12) == expected
+
+
+def test_every_place_on_the_settings_page_has_a_window_inside_the_work_area():
+    left, top, right, bottom = WORK_AREA
+    for where in PLACES:
+        x, y = place(WORK_AREA, SIDE, where, 12)
+        assert left <= x and x + SIDE <= right
+        assert top <= y and y + SIDE <= bottom
+
+
+def test_it_fades_in():
+    fade = Fade()
+    fade.want("listening", 0)
+    look, opacity, scale = fade.step(0)
+    assert look == "listening"
+    assert opacity == pytest.approx(0, abs=0.01)
+    assert scale == pytest.approx(0.6, abs=0.01)
+    look, opacity, scale = fade.step(FADE)
+    assert look == "listening"
+    assert opacity == 1
+
+
+def test_it_grows_in_with_a_little_overshoot_and_settles_at_one():
+    fade = Fade()
+    fade.want("speaking", 0)
+    scales = [fade.step(i * 0.01)[2] for i in range(int(GROW * 100) + 1)]
+    assert max(scales) > 1
+    assert scales[-1] == 1
+    # It is well on its way part way through, not just at the end.
+    assert fade.step(GROW / 2)[2] > 0.9
+
+
+def test_nothing_is_drawn_before_anything_is_wanted():
+    fade = Fade()
+    assert fade.step(0) is None
+    fade.want("hidden", 1)
+    assert fade.step(2) is None
+
+
+def test_hidden_lingers_then_fades_then_is_gone():
+    fade = Fade()
+    fade.want("listening", 0)
+    fade.want("hidden", 1)
+    assert fade.step(1 + LINGER - 0.01)[1] == 1
+    assert 0 < fade.step(1 + LINGER + FADE / 2)[1] < 1
+    assert fade.step(1 + LINGER + FADE + 0.01) is None
+
+
+def test_hidden_keeps_the_last_look_and_size_while_it_goes():
+    fade = Fade()
+    fade.want("speaking", 0)
+    fade.want("hidden", 1)
+    look, _, scale = fade.step(1 + LINGER + FADE / 2)
+    assert look == "speaking"
+    assert scale == 1
+
+
+def test_it_can_appear_again_once_gone():
+    fade = Fade()
+    fade.want("listening", 0)
+    fade.want("hidden", 1)
+    assert fade.step(5) is None
+    fade.want("speaking", 6)
+    look, opacity, scale = fade.step(6)
+    assert (look, opacity) == ("speaking", 0)
+    assert scale == pytest.approx(0.6, abs=0.01)
+    assert fade.step(6 + GROW)[1:] == (1, 1)
+
+
+def test_coming_back_during_the_linger_doesnt_blink():
+    fade = Fade()
+    fade.want("listening", 0)
+    fade.want("hidden", 1)
+    fade.want("listening", 1.3)
+    for i in range(21):
+        look, opacity, scale = fade.step(1 + i * 0.05)
+        assert look == "listening"
+        assert opacity == 1
+        assert scale == 1
+
+
+def test_coming_back_during_the_fade_takes_over_from_where_it_is():
+    fade = Fade()
+    fade.want("listening", 0)
+    fade.want("hidden", 1)
+    midway = 1 + LINGER + FADE / 2
+    before = fade.step(midway)[1]
+    assert 0 < before < 1
+    fade.want("speaking", midway)
+    after = fade.step(midway)
+    # The look changes at once, the opacity carries on from where it was, and the size,
+    # which has long since grown, does not start growing again.
+    assert after[0] == "speaking"
+    assert after[1] == pytest.approx(before)
+    assert after[2] == 1
+    later = [fade.step(midway + i * 0.02)[1] for i in range(1, 30)]
+    assert later == sorted(later)
+    assert later[-1] == 1
+
+
+def test_coming_back_during_the_grow_in_doesnt_restart_it():
+    fade = Fade()
+    fade.want("listening", 0)
+    grown = fade.step(0.3)[2]
+    fade.want("speaking", 0.3)
+    assert fade.step(0.3)[2] == pytest.approx(grown)
+
+
+def test_a_different_state_while_shown_switches_the_look_at_once():
+    fade = Fade()
+    fade.want("listening", 0)
+    fade.want("thinking", 2)
+    assert fade.step(2)[0] == "thinking"
+    fade.want("speaking", 3)
+    assert fade.step(3)[0] == "speaking"
+    assert fade.step(3)[1] == 1
+
+
+def test_thinking_shrinks():
+    fade = Fade()
+    fade.want("listening", 0)
+    fade.want("thinking", 2)
+    assert fade.step(2)[2] == 1
+    assert fade.step(2 + GROW)[2] == pytest.approx(THINKING_SCALE, abs=0.01)
+
+
+def test_thinking_from_nothing_grows_in_to_the_smaller_size():
+    fade = Fade()
+    fade.want("thinking", 0)
+    assert fade.step(GROW)[2] == pytest.approx(THINKING_SCALE, abs=0.01)
+
+
+def test_leaving_thinking_grows_back_to_full_size_from_wherever_it_is():
+    fade = Fade()
+    fade.want("thinking", 0)
+    halfway = fade.step(GROW / 2)[2]
+    fade.want("speaking", GROW / 2)
+    assert fade.step(GROW / 2)[2] == pytest.approx(halfway)
+    assert fade.step(GROW / 2 + GROW)[2] == 1
+
+
+def test_thinking_gives_up_after_thinking_most():
+    fade = Fade()
+    fade.want("thinking", 0)
+    assert fade.step(THINKING_MOST - 1)[1] == 1
+    assert fade.step(THINKING_MOST + LINGER + FADE + 0.1) is None
+
+
+def test_thinking_gives_up_when_stepped_only_once_it_is_long_over():
+    fade = Fade()
+    fade.want("thinking", 100)
+    assert fade.step(100 + THINKING_MOST + LINGER + FADE + 0.1) is None
+
+
+def test_thinking_most_counts_from_when_thinking_began():
+    fade = Fade()
+    fade.want("listening", 0)
+    fade.want("thinking", 20)
+    assert fade.step(20 + THINKING_MOST - 1)[1] == 1
+    assert fade.step(20 + THINKING_MOST + LINGER + FADE + 0.1) is None
+
+
+def test_the_thinking_limit_does_not_hide_what_follows_thinking():
+    fade = Fade()
+    fade.want("thinking", 0)
+    fade.want("speaking", 10)
+    assert fade.step(THINKING_MOST + LINGER + FADE + 5) == ("speaking", 1, 1)
+
+
+def test_hidden_while_it_is_fading_from_the_thinking_limit_changes_nothing():
+    fade = Fade()
+    fade.want("thinking", 0)
+    fade.step(THINKING_MOST + LINGER + FADE / 2)
+    fade.want("hidden", THINKING_MOST + LINGER + FADE / 2)
+    assert fade.step(THINKING_MOST + LINGER + FADE + 0.01) is None
+
+
+def test_wanting_the_same_state_again_changes_nothing():
+    fade = Fade()
+    fade.want("thinking", 0)
+    fade.want("thinking", THINKING_MOST - 1)
+    assert fade.step(THINKING_MOST + LINGER + FADE + 0.1) is None
