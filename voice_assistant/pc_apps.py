@@ -6,7 +6,9 @@ docs/superpowers/specs/2026-11-19-pc-open-close-and-commands-design.md. Three pl
 are looked in, in this order: the Start menu, Epic's installed games and Steam's. Each
 thing found is {"id", "name", "kind", "target"}: the id is the satellite's own, a short
 hash, which is all the brain asks for it by, and the target is how it's launched, which
-never leaves the PC - so nothing the brain sends is ever run, only looked up.
+never leaves the PC - so nothing the brain sends is ever run, only looked up. An Epic or
+Steam game also has its "folder", where it's installed, so its windows can be listed under
+its name (see pc_windows.set_installed) - which never leaves the PC either.
 
 Only the standard library is used, and Windows itself only in start_apps and
 steam_dirs, so this imports anywhere and the tests run on the Pi.
@@ -64,27 +66,30 @@ def build(start_apps: Callable[[], List[Dict]], epic_dir: str, steam_dirs: Calla
         steam_dirs: Gives the folders Steam is installed in - steam_dirs, or a fake.
 
     Returns:
-        Each thing, as {"id", "name", "kind", "target"}: never an Uninstall one, and only
-        the first of those with the same name - the Start menu's, as it launches
-        directly, then Epic's, then Steam's. A place which can't be read adds nothing,
-        and is logged.
+        Each thing, as {"id", "name", "kind", "target"}, with "folder" for an Epic or
+        Steam game whose install folder is known: never an Uninstall one, and only the
+        first of those with the same name - the Start menu's, as it launches directly,
+        then Epic's, then Steam's. A place which can't be read adds nothing, and is logged.
     """
     found = []
     for kind, find in (("app", start_apps), ("epic", lambda: epic(epic_dir)), ("steam", lambda: steam(steam_dirs()))):
         try:
-            found.extend((kind, item["name"], item["target"]) for item in find())
+            found.extend((kind, item["name"], item["target"], item.get("folder")) for item in find())
         except Exception as e:
             # Only what kind of failure: it may carry a path with his name in it.
             logger.warning(f"Couldn't list the {kind} things on this PC ({type(e).__name__})")
     items, seen = [], set()
-    for kind, name, target in found:
+    for kind, name, target, folder in found:
         name = name.strip() if isinstance(name, str) else ""
         key = plain(name)
         if not key or key.startswith(UNINSTALL) or key in seen or not isinstance(target, str) or not target:
             continue
         seen.add(key)
-        items.append({"id": hashlib.sha1((kind + target).encode("utf-8")).hexdigest()[:12], "name": name,
-                      "kind": kind, "target": target})
+        item = {"id": hashlib.sha1((kind + target).encode("utf-8")).hexdigest()[:12], "name": name,
+                "kind": kind, "target": target}
+        if isinstance(folder, str) and folder.strip():
+            item["folder"] = folder
+        items.append(item)
     return items
 
 
@@ -154,7 +159,8 @@ def epic(folder: str) -> List[Dict]:
         folder: Where the manifests are - EPIC_MANIFESTS.
 
     Returns:
-        Each as {"name", "target"}: only applications in the games or applications
+        Each as {"name", "target", "folder"}, the folder being where it's installed, or None
+        if the manifest doesn't say: only applications in the games or applications
         category, never content added to a game. A manifest which can't be read is
         skipped, with a warning.
     """
@@ -168,7 +174,9 @@ def epic(folder: str) -> List[Dict]:
             if (item.get("bIsApplication") is not True or not isinstance(name, str) or name.endswith(EPIC_CONTENT)
                     or not any(category in categories for category in EPIC_CATEGORIES)):
                 continue
-            found.append({"name": name, "target": epic_target(item)})
+            folder = item.get("InstallLocation")
+            found.append({"name": name, "target": epic_target(item),
+                          "folder": folder if isinstance(folder, str) else None})
         except Exception as e:
             logger.warning(f"Skipped an Epic manifest which couldn't be read ({type(e).__name__})")
     return found
@@ -199,8 +207,9 @@ def steam(installs: List[str]) -> List[Dict]:
         installs: The folders Steam is installed in - steam_dirs.
 
     Returns:
-        Each as {"name", "target"}, never one of Steam's own tools. A manifest which
-        can't be read is skipped.
+        Each as {"name", "target", "folder"}, the folder being where it's installed (its
+        library's steamapps\\common and its installdir), or None if the manifest doesn't say;
+        never one of Steam's own tools. A manifest which can't be read is skipped.
     """
     libraries, seen = [], set()
     for install in installs:
@@ -221,7 +230,9 @@ def steam(installs: List[str]) -> List[Dict]:
             name, appid = _vdf_value(text, "name"), _vdf_value(text, "appid")
             if not name or not appid or not appid.isdigit() or name.startswith(STEAM_TOOLS):
                 continue
-            found.append({"name": name, "target": steam_target(appid)})
+            installed = _vdf_value(text, "installdir")
+            found.append({"name": name, "target": steam_target(appid),
+                          "folder": os.path.join(library, "steamapps", "common", installed) if installed else None})
     return found
 
 

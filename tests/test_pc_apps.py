@@ -8,6 +8,7 @@ asked.
 import hashlib
 import json
 import logging
+import os
 
 from voice_assistant import pc_apps
 
@@ -66,7 +67,8 @@ def test_epic_lenient_parse_and_content_dropped(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         items = pc_apps.build(start(), str(tmp_path), no_steam)
     assert items == [{"id": items[0]["id"], "name": "Fortnite", "kind": "epic",
-                      "target": "com.epicgames.launcher://apps/fn%3A4fe75bbc%3AFortnite?action=launch&silent=true"}]
+                      "target": "com.epicgames.launcher://apps/fn%3A4fe75bbc%3AFortnite?action=launch&silent=true",
+                      "folder": "D:\\Gaming\\unreal\\Fortnite"}]
     assert caplog.text.count("Skipped an Epic manifest") == 1
 
 
@@ -78,8 +80,9 @@ def test_well_formed_epic_json_reads_as_it_is(tmp_path):
     assert names(pc_apps.epic(str(tmp_path))) == ["Rocket League"]
 
 
-def acf(appid, name):
-    return f'"AppState"\n{{\n\t"appid"\t\t"{appid}"\n\t"universe"\t\t"1"\n\t"name"\t\t"{name}"\n}}\n'
+def acf(appid, name, installdir=None):
+    folder = f'\t"installdir"\t\t"{installdir}"\n' if installdir else ""
+    return f'"AppState"\n{{\n\t"appid"\t\t"{appid}"\n\t"universe"\t\t"1"\n\t"name"\t\t"{name}"\n{folder}}}\n'
 
 
 def test_steam_manifests_read(tmp_path):
@@ -107,6 +110,15 @@ def test_steam_without_its_library_list_still_reads_its_own_folder(tmp_path):
     (tmp_path / "steamapps").mkdir()
     (tmp_path / "steamapps" / "appmanifest_252950.acf").write_text(acf(252950, "Rocket League"))
     assert names(pc_apps.steam([str(tmp_path)])) == ["Rocket League"]
+
+
+def test_steam_games_know_their_install_folder(tmp_path):
+    (tmp_path / "steamapps").mkdir()
+    (tmp_path / "steamapps" / "appmanifest_252950.acf").write_text(acf(252950, "Rocket League", "rocketleague"))
+    (tmp_path / "steamapps" / "appmanifest_9.acf").write_text(acf(9, "Overwatch"))
+    found = pc_apps.build(start(), str(tmp_path / "no epic"), lambda: [str(tmp_path)])
+    assert [item.get("folder") for item in found] == [
+        os.path.join(str(tmp_path), "steamapps", "common", "rocketleague"), None]
 
 
 def test_start_menu_order_beats_epic_then_steam(tmp_path):

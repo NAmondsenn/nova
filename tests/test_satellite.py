@@ -2578,9 +2578,13 @@ class FakePcWindows:
         self.started = []
         self.fronted = []
         self.closed = []
+        self.installed = None
 
     def load(self):
         return self.loads
+
+    def set_installed(self, items):
+        self.installed = [dict(item) for item in items]
 
     def open_windows(self):
         return list(self.open)
@@ -2626,7 +2630,8 @@ class NoSystemVolume(FakeSystemVolume):
 
 
 PC_APPS = [{"id": "aaaaaaaaaaaa", "name": "Fortnite", "kind": "epic",
-            "target": "com.epicgames.launcher://apps/fn%3Ax%3AFortnite?action=launch&silent=true"},
+            "target": "com.epicgames.launcher://apps/fn%3Ax%3AFortnite?action=launch&silent=true",
+            "folder": "D:\\Gaming\\Fortnite"},
            {"id": "bbbbbbbbbbbb", "name": "Notepad", "kind": "app", "target": "shell:AppsFolder\\notepad"}]
 
 
@@ -2687,6 +2692,10 @@ def test_targets_never_sent(brain, make, pc):
     assert sent_lists(brain, "apps")[0] == [{"id": "aaaaaaaaaaaa", "name": "Fortnite", "kind": "epic"},
                                             {"id": "bbbbbbbbbbbb", "name": "Notepad", "kind": "app"}]
     assert not [payload for message, payload in brain.received if b"target" in payload or b"launcher" in payload]
+    # Nor where a game is installed, which is kept here, for its windows to be named by.
+    assert not [payload for message, payload in brain.received if b"folder" in payload or b"Gaming" in payload]
+    assert wait_for(lambda: pc.installed is not None)
+    assert pc.installed[0]["folder"] == "D:\\Gaming\\Fortnite"
 
 
 def test_the_open_windows_are_sent_when_they_change(brain, make, pc, monkeypatch):

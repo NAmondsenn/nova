@@ -20,7 +20,7 @@ import os
 import re
 import sys
 import time
-from typing import Dict, FrozenSet, List, Optional
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 from voice_assistant.computers import plain
 
@@ -50,6 +50,11 @@ _api = None
 # window list is checked would be wasted work.
 _names: Dict[str, str] = {}
 
+# The install folders of the Epic and Steam games in the list of things to open, each with
+# its name there, longest first - so a game's window, whose exe is often named nothing like
+# it ("FortniteClient-Win64-Shipping"), is listed and closed by that name. See set_installed.
+_installed: List[Tuple[str, str]] = []
+
 
 def load() -> bool:
     """
@@ -71,6 +76,31 @@ def load() -> bool:
     return True
 
 
+def _folder(path: str) -> str:
+    """A Windows path as compared: lower-case, with backslashes and one at the end."""
+    return ntpath.join(ntpath.normcase(ntpath.normpath(path)), "")
+
+
+def set_installed(items: List[Dict]):
+    """
+    Keeps where the games in the list of things to open are installed, so a window whose
+    exe lies in one of those folders is named as the list names it.
+
+    Args:
+        items: The list, from pc_apps - those with a "folder" count.
+    """
+    global _installed
+    _installed = sorted(((_folder(item["folder"]), item["name"]) for item in items
+                         if isinstance(item.get("folder"), str) and item["folder"].strip()),
+                        key=lambda each: len(each[0]), reverse=True)
+
+
+def _installed_name(path: str) -> Optional[str]:
+    """The name in the list of things to open of the game whose folder an exe lies in, or None."""
+    exe = ntpath.normcase(ntpath.normpath(path))
+    return next((name for folder, name in _installed if exe.startswith(folder)), None)
+
+
 def _name(path: str) -> str:
     """A program's name: its exe's description, as Task Manager shows it, else the exe's name without .exe."""
     if path not in _names:
@@ -87,9 +117,10 @@ def _program(hwnd: int) -> Optional[Dict[str, str]]:
     Whose a window is, if it's one which may be listed and closed.
 
     Returns:
-        {"name", "exe"}: the program's name and the exe's own, lower-case - or None for
-        the desktop, the taskbar, Nova itself, Windows' shell, or a program which can't
-        be told.
+        {"name", "own", "exe"}: the program's name - its name in the list of things to
+        open, if it's a game installed in a folder there, else its own - its own name (see
+        _name) and the exe's, lower-case; or None for the desktop, the taskbar, Nova
+        itself, Windows' shell, or a program which can't be told.
     """
     if _api.window_class(hwnd) in SHELL_CLASSES:
         return None
@@ -102,7 +133,8 @@ def _program(hwnd: int) -> Optional[Dict[str, str]]:
     exe = ntpath.basename(path).lower()
     if exe in SHELL:
         return None
-    return {"name": _name(path), "exe": exe}
+    own = _name(path)
+    return {"name": _installed_name(path) or own, "own": own, "exe": exe}
 
 
 def open_windows() -> List[str]:
@@ -120,7 +152,7 @@ def close(name: str) -> Optional[str]:
     Closes every window of a program, as its X would.
 
     Args:
-        name: The program, as open_windows names it - or its exe's name.
+        name: The program, as open_windows names it - or its own name, or its exe's.
 
     Returns:
         The program's name, or None if none of its windows is open.
@@ -128,7 +160,8 @@ def close(name: str) -> Optional[str]:
     wanted, closed = plain(name), None
     for hwnd in _api.windows():
         program = _program(hwnd)
-        if program is None or wanted not in (plain(program["name"]), plain(ntpath.splitext(program["exe"])[0])):
+        if program is None or wanted not in (plain(program["name"]), plain(program["own"]),
+                                             plain(ntpath.splitext(program["exe"])[0])):
             continue
         if _api.post_close(hwnd):
             closed = program["name"]

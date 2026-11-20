@@ -104,6 +104,7 @@ def windows(monkeypatch):
         fake = FakeWindows(entries, front)
         monkeypatch.setattr(pc_windows, "_api", fake)
         monkeypatch.setattr(pc_windows, "_names", {})
+        monkeypatch.setattr(pc_windows, "_installed", [])
         monkeypatch.setattr(pc_windows, "FRONT_EVERY", 0)
         monkeypatch.setattr(pc_windows, "BROWSER_SETTLE", 0)
         return fake
@@ -145,6 +146,25 @@ def test_close_matches_the_exe_name_as_well_as_the_description(windows):
     fake.descriptions[r"C:\Windows\notepad.exe"] = "Notepad Editor"
     assert pc_windows.close("notepad") == "Notepad Editor"
     assert fake.closed == [30]
+
+
+FORTNITE = (50, ("UnrealWindow", 8000, r"D:\Gaming\Fortnite\FortniteGame\Binaries\Win64"
+                                          r"\FortniteClient-Win64-Shipping.exe"))
+
+
+def test_a_games_window_is_named_and_closed_by_its_name_in_the_list(windows):
+    fake = windows(dict([FORTNITE, NOTEPAD]))
+    fake.descriptions[FORTNITE[1][2]] = "FortniteClient-Win64-Shipping"
+    pc_windows.set_installed([{"id": "a", "name": "Fortnite", "kind": "epic", "folder": "d:/gaming/fortnite"},
+                              {"id": "b", "name": "Notepad", "kind": "app"},
+                              # A folder only starting the same isn't the game's.
+                              {"id": "c", "name": "Fort", "kind": "steam", "folder": r"D:\Gaming\Fort"}])
+    assert pc_windows.open_windows() == ["Fortnite", "notepad"]
+    assert pc_windows.close("fortnite") == "Fortnite"
+    assert fake.closed == [50]
+    # Its own name still closes it too.
+    assert pc_windows.close("FortniteClient-Win64-Shipping") == "Fortnite"
+    assert fake.closed == [50, 50]
 
 
 def test_close_of_something_not_open_closes_nothing(windows):

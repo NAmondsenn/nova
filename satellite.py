@@ -1083,6 +1083,8 @@ class Satellite:
                 else:
                     with self._apps_lock:
                         self._apps = {item["id"]: item for item in items}
+                    # So a game's window is known by its name here, as "close Fortnite" says it.
+                    pc_windows.set_installed(items)
                     logger.info(f"Found {len(items)} things this computer can open")
                 build_at = time.monotonic() + APPS_EVERY
             with self._apps_lock:
