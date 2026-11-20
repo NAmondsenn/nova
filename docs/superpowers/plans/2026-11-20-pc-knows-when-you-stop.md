@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** At a push-to-talk satellite (the PC), end a recording when his voice has dropped well below his own loudness, or when no new word has come for 1.5 s - so background sound can't keep it listening - and note for a week, as numbers only, any that still run long.
+**Goal:** At a push-to-talk satellite (the PC), end a recording when his voice has dropped well below his own loudness, or when no new word has come for 1.5 s - so background sound can't keep it listening - and note the last 50 that still run long (numbers and the words heard, never audio).
 
 **Architecture:** `record_until_silence` (recording.py) gains two optional end rules, off unless the caller gives them, and fills a report of what ended it. Nemotron's live transcript (speech_to_text.py, nemotron.py) tells it how much audio has passed since its words last changed. The session (session.py) switches both on only for push-to-talk satellites, from two new settings, notes `ended_by` on the timeline, and hands long recordings to a small notes keeper (long_recordings.py).
 
@@ -17,7 +17,7 @@
 - Voice drop: windows of 0.15 s (5 frames of `FRAME` = 480 samples); his loudness is the highest window level (RMS of int16/32768) among windows whose newest frame Silero calls speech (`probability >= detector.threshold`) after speech started; a frame also counts towards the 0.6 s quiet when its window level is below loudness times `voice_drop`. `voice_drop` = 10 ** (-dB / 20).
 - No new words: ends when `words_quiet()` returns a number >= `no_words_after` (seconds of audio since the words last changed); `words_quiet()` returns None until a real word has been heard.
 - Settings: `thresholds.press_voice_drop_db` default 18, limits 6 to 40; `thresholds.press_no_words_seconds` default 1.5, limits 0.8 to 5; both read as each recording starts ("now" on the page, section Sound and voice, Listening).
-- Notes: one JSON line per push-to-talk recording whose speech (speech_started to speech_ended) lasts over 5 s, at `paths.LOGS_DIR/long-recordings.jsonl`; numbers only - never audio, never words; at most 50 lines; lines over 7 days old dropped at each write; nothing written after `NOTE_UNTIL = datetime.date(2026, 11, 28)`.
+- Notes: one JSON line per push-to-talk recording whose speech (speech_started to speech_ended) lasts over 5 s, at `paths.LOGS_DIR/long-recordings.jsonl`; numbers plus the words heard (the transcript, only while `logging.log_transcripts` is on); never audio; the newest 50 lines kept; no end date (his call, 20 Nov).
 - `ended_by` values: "silence", "voice drop", "no new words", "limit", "feed ended", "no speech".
 - Code style (memory note working-style): full-sentence why-comments, British spelling, spaced " - " dashes (never em dashes), Google-style docstrings; one commit per task; the repo is public.
 - Tests: `NOVA_TREE=/home/nathaniel/work/Home-Assistant-ends NOVA_CHECK=ends nice -n 19 timeout 600 bash ~/work/Home-Assistant/.superpowers/tools/pi_test.sh <args>`; check `cat /proc/loadavg` first; one run at a time, never in the background, no repeat runs; check no other run is going on the Pi with `ssh pi 'pgrep -fa "m [p]ytest"'` (the brackets stop it matching itself). Never `ps` on the Pi. No `git stash`.
@@ -104,7 +104,7 @@
 
 ---
 
-### Task 4: Note the long ones for a week, as numbers
+### Task 4: Note the long ones, the last 50
 
 **Files:**
 - Create: `voice_assistant/long_recordings.py`
@@ -112,14 +112,14 @@
 - Test: `tests/test_long_recordings.py`, `tests/test_session.py`
 
 **Interfaces:**
-- Produces: `LONGEST_SPEECH = 5.0`, `NOTE_UNTIL = datetime.date(2026, 11, 28)`, `MOST = 50`, `KEEP_DAYS = 7`; `note_long_recording(path: str, at: datetime.datetime, speech_seconds: float, report: Dict, until: datetime.date = NOTE_UNTIL) -> bool` - appends one line `{"at": ISO, "speech_seconds": ..., **report}` when `speech_seconds > LONGEST_SPEECH` and `at.date() <= until`; rewrites the file keeping only lines within `KEEP_DAYS` of `at` and the newest `MOST`; returns whether it wrote. Never raises (logs a warning once). Path: `os.path.join(paths.LOGS_DIR, "long-recordings.jsonl")`.
-- The session calls it only for push-to-talk satellites, with the Task 3 report, off its own thread's critical path (it's a small file; writing inline after the recording is fine, before speech-to-text finishes is not required).
+- Produces: `LONGEST_SPEECH = 5.0`, `MOST = 50`; `note_long_recording(path: str, at: datetime.datetime, speech_seconds: float, report: Dict, words: Optional[str] = None) -> bool` - appends one line `{"at": ISO, "speech_seconds": ..., **report, "words": words}` (words left out when None) when `speech_seconds > LONGEST_SPEECH`; rewrites the file keeping the newest `MOST`; returns whether it wrote. Never raises (logs a warning once). Path: `os.path.join(paths.LOGS_DIR, "long-recordings.jsonl")`.
+- The session calls it only for push-to-talk satellites, once the words are known (after speech-to-text), with the Task 3 report and `words` = the transcript only when `logging.log_transcripts` is on (else None). Inline is fine: it's a small file.
 
-- [ ] **Step 1: Write the failing tests**: writes only over 5 s; never after NOTE_UNTIL; keeps at most 50; drops lines over 7 days; the line has no audio and no text (only the report's keys plus at and speech_seconds); a file it can't write logs once and returns False; session: a push-to-talk recording over 5 s is noted, a Pi one isn't.
+- [ ] **Step 1: Write the failing tests**: writes only over 5 s; keeps the newest 50 (the 51st drops the oldest); the line has the report's keys, at, speech_seconds and words, no audio; words None leaves `words` out; a file it can't write logs once and returns False; session: a push-to-talk recording over 5 s is noted with its words while log_transcripts is on and without them while it's off; a Pi one isn't noted.
 - [ ] **Step 2: Run them to see them fail**
 - [ ] **Step 3: Implement**
 - [ ] **Step 4: Run them to see them pass**
-- [ ] **Step 5: Commit**: "Note a week of long recordings at the computer, as numbers only"
+- [ ] **Step 5: Commit**: "Note the last 50 long recordings at the computer"
 
 ---
 
@@ -129,7 +129,7 @@
 - Create: `docs/decisions/<next free>-the-pc-knows-when-you-stop.md` (check `ls docs/decisions` and `git ls-tree --name-only origin/main docs/decisions/` after a fetch; 0036 if free)
 - Modify: `docs/release-checklist.md` (a short section after the orb's: his check of normal use at the PC, with a game or video playing; how to read long-recordings.jsonl; the two settings)
 
-- [ ] **Step 1: Write the decision record** (why, the evidence, the two rules and why both, the first-word wait, numbers-only notes and why - the weekly backup keeps up to 3 months - the defaults and their settings, what isn't done: the Pi, echo cancelling, telling voices apart)
+- [ ] **Step 1: Write the decision record** (why, the evidence, the two rules and why both, the first-word wait, the notes: never audio because the weekly backup keeps up to 3 months, the words only under logging.log_transcripts, the last 50 kept with no end date (his calls) - the defaults and their settings, what isn't done: the Pi, echo cancelling, telling voices apart)
 - [ ] **Step 2: The whole suite, twice, one after the other**: plain, then `TZ_OVERRIDE=UTC`. Expected: all pass.
 - [ ] **Step 3: Ruff**: `ssh -o BatchMode=yes pi 'cd /tmp/nova-check/ends && /tmp/nova-check-pytest/bin/ruff check .'`
 - [ ] **Step 4: Commit**: "Decision NNNN: the PC knows when you stop speaking"

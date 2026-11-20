@@ -16,7 +16,7 @@ At the PC, Nova stops listening about as soon as he stops talking, whatever else
   1. **His voice has dropped away**: the sound reaching the mic stays well below how loud he was while speaking, for the usual 0.6 s. He is close to the mic; a game, a video or a voice across the room is far quieter there. This is how push-to-talk headsets tell someone has stopped.
   2. **No new words**: speech-to-text, which follows the recording as it's made, has found no new word in the last 1.5 s of audio (a backstop for loud sound that isn't speech).
 - Either one is enough; Silero's own rule still ends it as before.
-- For a week from deploy, any PC recording whose speech runs on for more than 5 s is noted on the brain - numbers only, no audio (his call, 20 Nov: the brain is in the weekly backup, kept up to 3 months) - so we can see it's fixed, or what's left.
+- Any PC recording whose speech runs on for more than 5 s is noted on the brain - numbers and the words heard, never audio - keeping the last 50, so we can see it's fixed, or what's left, now or months later (his calls, 20 Nov: no audio, as the brain is in the weekly backup; then keep the last 50 with no end date, and the words, under the same switch as the rest of Nova's logs).
 - The two new limits are on the settings page, under Sound and voice, Listening.
 
 ## Non-goals
@@ -29,7 +29,7 @@ At the PC, Nova stops listening about as soon as he stops talking, whatever else
 
 - Cutting him off mid-sentence: a short pause or a quiet word must not end a request. Both new rules wait at least as long as today's (0.6 s of quiet; 1.5 s without a word), and the voice-drop rule compares against his own loudness in this recording, not a fixed level.
 - Changing anything at the Pi.
-- Keeping any audio or words for this: the notes are numbers only.
+- Keeping any audio for this, or the words while "Keep what's said in the logs" (logging.log_transcripts) is off.
 
 ## Approaches
 
@@ -53,9 +53,9 @@ Nemotron already hears the recording as it's made. It now also reads its words-s
 
 The session passes both only when its satellite is push-to-talk (`self.satellite.push_to_talk`), for a press and for a follow-up answer at the PC alike. The Pi's recordings are unchanged.
 
-### Noting the long ones for a week (a small new module)
+### Noting the long ones (a small new module)
 
-When a push-to-talk recording's speech (speech_started to speech_ended) lasts over 5 s, the brain appends one JSON line to `~/.local/share/nova/logs/long-recordings.jsonl` (the only place the service may write that survives a restart): when, what ended it ("silence", "voice drop", "no new words", "limit", "pressed"), his loudness, each 0.15 s level and Silero's probability for each, and when the words last changed - numbers only, never audio or words. At most 50 lines; lines older than 7 days are dropped at each write; it switches itself off 7 days after the deploy date written in the code (a constant). Each request's timeline line notes `ended_by` too, so latency.jsonl shows how often each rule fires.
+When a push-to-talk recording's speech (speech_started to speech_ended) lasts over 5 s, the brain appends one JSON line to `~/.local/share/nova/logs/long-recordings.jsonl` (the only place the service may write that survives a restart): when, what ended it ("silence", "voice drop", "no new words", "limit", "pressed"), his loudness, each 0.15 s level and Silero's probability for each, when the words last changed, and the words heard (the transcript, only while logging.log_transcripts is on) - never audio. The newest 50 lines are kept; there is no end date. It is written once the words are known, after speech-to-text. Each request's timeline line notes `ended_by` too, so latency.jsonl shows how often each rule fires.
 
 ### Settings (Sound and voice, Listening)
 
@@ -71,7 +71,7 @@ Read as each recording starts, so a save is used straight away.
 - recording.py: neither rule ends a recording before the first real word (background called speech from the press, then he speaks late); speech then a steady quieter background (above Silero's line in the fake detector) ends after 0.6 s with `voice_drop` on, runs to the limit with it off; a quiet word mid-sentence (short dip) doesn't end it; a pause under 0.6 s doesn't; loudness that builds slowly isn't cut off by an early quiet start; words still for 1.5 s end it, words still changing keep it going, a Nemotron behind real time doesn't end it early.
 - speech_to_text.py: `quiet_words()` from a fake Nemotron whose partial text changes at given points.
 - session.py: a push-to-talk satellite's recording gets both rules with the settings' values; a wake-word satellite's gets neither.
-- The notes: only push-to-talk recordings over 5 s, numbers only (no audio, no words), at most 50 lines, none over 7 days, none after its end date.
+- The notes: only push-to-talk recordings over 5 s; the newest 50 kept; words only while log_transcripts is on; never audio.
 - Settings: config limits, the page's rows.
 - Live: after deploy, his normal use; the kept recordings show whether any still run long and which rule ended them.
 
