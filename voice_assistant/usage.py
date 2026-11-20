@@ -77,7 +77,7 @@ KINDS: Dict[str, str] = {
         MUSIC),
     **dict.fromkeys(
         ("set_lights", "run_home_script", "home_status", "get_batteries", "find_device", "pc_power",
-         "set_volume"), DEVICES),
+         "set_volume", "mute_microphone"), DEVICES),
     **dict.fromkeys(
         ("set_timer", "name_reminder", "list_timers", "dismiss_timer", "check_missed", "cancel_timer",
          "set_alarm", "list_alarms", "next_alarm", "cancel_alarm"), TIMERS),

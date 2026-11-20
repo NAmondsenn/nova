@@ -352,6 +352,30 @@ def test_claude_set_volume_at_pc_goes_to_windows(pc_and_pi):
     properties = schema["input_schema"]["properties"]
     assert properties["where"]["type"] == "string" and "PC" in properties["where"]["description"]
     assert properties["mute"]["type"] == "boolean" and "unmute" in properties["mute"]["description"]
+    # Its mute is the sound's only when he says sound or audio; the microphone is another tool's.
+    assert "sound or audio" in properties["mute"]["description"]
+    assert "mute_microphone" in properties["mute"]["description"]
+
+
+def test_mute_microphone_is_the_sessions_and_offered_to_claude():
+    asked = []
+
+    def microphone(muted, where):
+        asked.append((muted, where))
+        return {"success": True, "message": "Microphone off."}
+
+    executor = ActionExecutor(microphone=microphone)
+    result = executor.execute(Action("mute_microphone", {"muted": True}))
+    assert (result.ok, result.say) == (True, "Microphone off.")
+    executor.execute(Action("mute_microphone", {"muted": False, "where": "the Pi"}, from_model=True))
+    assert asked == [(True, None), (False, "the Pi")]
+    schema = next(tool for tool in executor.tool_schemas() if tool["name"] == "mute_microphone")
+    assert schema["input_schema"]["required"] == ["muted"]
+    assert "set_volume" in schema["description"] and "where" in schema["input_schema"]["properties"]
+    # Not offered, and refused, without a session to mute.
+    bare = ActionExecutor()
+    assert all(tool["name"] != "mute_microphone" for tool in bare.tool_schemas())
+    assert not bare.execute(Action("mute_microphone", {"muted": True})).ok
 
 
 def test_mute_at_pc(pc_and_pi):

@@ -66,6 +66,7 @@ UNAVAILABLE = {
     "wrapped": "Wrapped isn't set up.",
     "notes": NO_NOTES,
     "computer": "There's no computer here to open things on.",
+    "microphone": "The microphone can't be muted from here.",
 }
 
 # What's said when the new-music playlist isn't there - before Nova's first morning making it,
@@ -389,7 +390,8 @@ class ActionExecutor:
                  notes_offered: Callable[[], bool] = lambda: True, computer=None,
                  device: Optional[Callable[[Optional[str]], Tuple[Optional[Any], Optional[str]]]] = None,
                  at_pc: Callable[[], bool] = lambda: False,
-                 pc_name: Callable[[], Optional[str]] = lambda: None):
+                 pc_name: Callable[[], Optional[str]] = lambda: None,
+                 microphone: Optional[Callable[[bool, Optional[str]], Dict]] = None):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -464,6 +466,9 @@ class ActionExecutor:
                 be pressed until the reply has been said. Never, by default.
             pc_name: The name Home Assistant has for the PC spoken at, as chosen for it on the
                 settings page, or None - so a power word said at one of several PCs is that one's.
+            microphone: Turns a satellite's listening off or on - given True to mute, and the words
+                for which satellite as the user said them, or None - and gives what to say: see
+                Session._mute_microphone. None if there's no satellite to mute.
         """
         self.music = music
         self.clock = clock
@@ -498,6 +503,7 @@ class ActionExecutor:
         self.device = device
         self.at_pc = at_pc
         self.pc_name = pc_name
+        self.microphone = microphone
         # The music's level before "mute", for "unmute" to put it back to - see _mute_music.
         self._level_before_mute: Optional[int] = None
         # What was last asked, and what the assistant said - or the last alert, and
@@ -1513,10 +1519,11 @@ class ActionExecutor:
         mute={
             "type": "boolean",
             "description": (
-                "True to mute, false to unmute ('mute the PC', 'unmute'). At a computer "
-                "it's the system volume's mute; anywhere else it's that device's music "
-                "only, never alarms, timers or the assistant's voice, and never the "
-                "microphone."
+                "True to mute the sound, false to unmute it - only when the user says sound "
+                "or audio ('mute the sound', 'turn the audio off on the PC', 'unmute the "
+                "sound'). At a computer it's the system volume's mute; anywhere else it's "
+                "that device's music only, never alarms, timers or the assistant's voice. "
+                "A plain 'mute' or 'unmute' is the microphone: use mute_microphone."
             ),
         },
     )
@@ -1550,6 +1557,29 @@ class ActionExecutor:
 
         # Nothing to change, so the current level is reported instead.
         return {"success": True, "message": f"The {category} volume is at {self.volume.percent(category)} percent."}
+
+    # The microphone
+
+    @tool(
+        "Turn the assistant's listening off or on: its microphone, so it stops or starts hearing "
+        "its wake word. For 'mute', 'unmute', 'mute the mic', 'stop listening' and 'start "
+        "listening', here or on a device named ('unmute the Pi'). Never for sound: muting the "
+        "sound or audio is set_volume's. 'Stop listening to' a song or the music is never "
+        "this: it's the music's.",
+        needs="microphone",
+        required=["muted"],
+        muted={"type": "boolean", "description": "True to stop listening, false to listen again."},
+        where={
+            "type": "string",
+            "description": (
+                "The device whose microphone it is, as the user said it - 'the Pi' - only when they "
+                "name one. Leave out otherwise: the device they're talking to, or, at one which only "
+                "listens while a key is held, the always-listening one in its room."
+            ),
+        },
+    )
+    def mute_microphone(self, muted: bool, where: Optional[str] = None):
+        return self.microphone(bool(muted), where or None)
 
     @staticmethod
     def _with_beep(category: str, result: Dict) -> Dict:

@@ -78,6 +78,7 @@ class FakeSession:
         self.activity = "idle"
         self.heard = ""
         self.muted = False
+        self.mutes = []
         self.watchers = []
 
     def watch(self, watcher):
@@ -102,6 +103,10 @@ class FakeSession:
 
     def boop(self, level):
         self.boops.append(level)
+
+    def set_muted(self, muted):
+        self.mutes.append(muted)
+        self.muted = muted
 
 
 class FakeHome:
@@ -307,6 +312,7 @@ def test_unknown_paths_are_not_found(served, clocks):
 @pytest.mark.parametrize("path, body", [("/display/api/state?since=7", None),
                                         ("/display/api/hold", {"action": "start"}),
                                         ("/display/api/volume", {"direction": "up"}),
+                                        ("/display/api/mute", {"muted": True}),
                                         ("/display/api/cover?kind=nova&id=al-1", None),
                                         ("/display/api/background", None)])
 def test_api_needs_the_key(served, parts, clocks, path, body):
@@ -321,7 +327,8 @@ def test_api_needs_the_key(served, parts, clocks, path, body):
         assert key.encode() not in answer
     # The key only counts as a bearer token, not as anything else the header could say.
     assert _ask(served, path, body=body, Authorization=f"Basic {key}")[0] == 401
-    assert (session.listens, session.volume.levels, feed.waits) == (0, {"general": 60, "alarm": 80, "music": 40}, [])
+    assert (session.listens, session.volume.levels, session.mutes, feed.waits) == (
+        0, {"general": 60, "alarm": 80, "music": 40}, [], [])
     assert _ask(served, path, key, body)[0] == 200
 
 
@@ -475,6 +482,25 @@ def test_hold_on_a_satellite_not_connected(served, clocks):
     assert _json(_ask(served, "/display/api/hold", key, {"action": "end"})) == {"listening": False}
 
 
+def test_mute_mutes_and_unmutes_the_clocks_satellite(served, parts, clocks, caplog):
+    brain, _, _ = parts
+    session = brain.sessions["pi"]
+    _, key = clocks.add("Desk", "pi")
+    with caplog.at_level(logging.INFO):
+        assert _json(_ask(served, "/display/api/mute", key, {"muted": True})) == {"muted": True}
+    assert session.mutes == [True]
+    assert "Clock display: Desk muted the pi satellite's microphone" in caplog.text
+    # Said again, it's the same - a second tap racing the first can't flip it back.
+    assert _json(_ask(served, "/display/api/mute", key, {"muted": True})) == {"muted": True}
+    assert _json(_ask(served, "/display/api/mute", key, {"muted": False})) == {"muted": False}
+    assert session.mutes == [True, True, False] and session.muted is False
+
+
+def test_mute_on_a_satellite_not_connected(served, clocks):
+    _, key = clocks.add("Desk", "bedroom")
+    assert _ask(served, "/display/api/mute", key, {"muted": True})[0] == 409
+
+
 def test_volume_steps_music_while_playing_else_voice(served, parts, clocks):
     brain, _, feed = parts
     session = brain.sessions["pi"]
@@ -552,9 +578,9 @@ def test_bad_bodies_are_refused(served, parts, clocks, raw):
     brain, _, _ = parts
     session = brain.sessions["pi"]
     _, key = clocks.add("Desk", "pi")
-    for path in ("/display/api/hold", "/display/api/volume"):
+    for path in ("/display/api/hold", "/display/api/volume", "/display/api/mute"):
         assert _ask(served, path, key, raw=raw)[0] == 400
-    assert (session.listens, session.boops) == (0, [])
+    assert (session.listens, session.boops, session.mutes) == (0, [], [])
 
 
 @pytest.mark.parametrize("path, body", [("/display/api/hold", {"action": "listen"}),
@@ -562,7 +588,10 @@ def test_bad_bodies_are_refused(served, parts, clocks, raw):
                                         ("/display/api/hold", {"action": ["start"]}),
                                         ("/display/api/volume", {"direction": "sideways"}),
                                         ("/display/api/volume", {}),
-                                        ("/display/api/volume", {"direction": "up", "category": "alarm"})])
+                                        ("/display/api/volume", {"direction": "up", "category": "alarm"}),
+                                        ("/display/api/mute", {}),
+                                        ("/display/api/mute", {"muted": "true"}),
+                                        ("/display/api/mute", {"muted": 1})])
 def test_unknown_actions_and_directions_are_refused(served, parts, clocks, path, body):
     session = parts[0].sessions["pi"]
     _, key = clocks.add("Desk", "pi")
@@ -571,7 +600,7 @@ def test_unknown_actions_and_directions_are_refused(served, parts, clocks, path,
         # Whatever else is sent, the buttons never reach the alarm's volume.
         assert status == 200 and session.volume.levels["alarm"] == 80
     else:
-        assert status == 400 and (session.listens, session.boops) == (0, [])
+        assert status == 400 and (session.listens, session.boops, session.mutes) == (0, [], [])
 
 
 def _handlers():

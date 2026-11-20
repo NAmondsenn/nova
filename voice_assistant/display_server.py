@@ -16,7 +16,7 @@ too many is turned away unchecked for a minute.
 
 With its key, a clock can wait for its satellite's state to change (see
 display_feed.py), make Nova listen while a finger is held on it, step Nova's volume -
-never the alarm's - and fetch the cover of what's playing, and the user's dashboard
+never the alarm's - mute or unmute its satellite's microphone, and fetch the cover of what's playing, and the user's dashboard
 background. Nothing it sends says what the brain fetches: a cover is only ever the one
 playing now, and the background the one Home Assistant's dashboards have, held by the feed.
 """
@@ -317,6 +317,29 @@ class DisplayServer:
             self.note_failure(satellite, e)
         return {"category": category, "percent": int(volume_levels(session.volume, music)[category])}
 
+    def set_muted(self, display: Dict, muted: bool) -> Optional[Dict]:
+        """
+        The microphone button tapped on a clock: its satellite's microphone muted or
+        unmuted, as the settings page and Home Assistant do - see Session.set_muted.
+
+        Args:
+            display: The clock.
+            muted: True to stop the satellite hearing the wake word.
+
+        Returns:
+            {"muted": bool} - whether it's muted now - or None if the satellite isn't
+            connected.
+        """
+        satellite = self.satellite_of(display)
+        session = self.brain.session_for(satellite) if satellite else None
+        if session is None:
+            return None
+        # The session tells the feed itself, so every clock's mark changes at once.
+        session.set_muted(muted)
+        logger.info(f"Clock display: {display['name']} {'muted' if muted else 'unmuted'} "
+                    f"the {satellite} satellite's microphone")
+        return {"muted": bool(session.muted)}
+
     def cover(self, display: Dict, kind: Optional[str], cover_id: Optional[str]) -> Optional[Tuple[bytes, str]]:
         """
         The cover a clock's state names, as a picture and its type.
@@ -446,11 +469,21 @@ class _Handler(BaseHTTPRequestHandler):
             return
         _, display = let_in
         server = self.server.display_server
-        if url.path not in (API + "hold", API + "volume"):
+        if url.path not in (API + "hold", API + "volume", API + "mute"):
             self._not_found()
             return
         body = self._body()
         if body is None:
+            return
+        if url.path == API + "mute":
+            if not isinstance(body.get("muted"), bool):
+                self._send_json({"message": "muted is true or false."}, 400)
+                return
+            answer = server.set_muted(display, body["muted"])
+            if answer is None:
+                self._send_json({"message": "The clock's satellite isn't connected."}, 409)
+            else:
+                self._send_json(answer)
             return
         if url.path == API + "hold":
             if body.get("action") not in ("start", "end"):

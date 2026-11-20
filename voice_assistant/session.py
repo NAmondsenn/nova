@@ -322,7 +322,8 @@ class Session:
                                       notes=self._save_note, notes_offered=lambda: bool(brain.notes_saved_on()),
                                       computer=ComputerControl(brain, satellite.name), device=self._device,
                                       at_pc=lambda: brain.rooms.machine(satellite.name) == "pc",
-                                      pc_name=lambda: brain.pc_called(satellite.name))
+                                      pc_name=lambda: brain.pc_called(satellite.name),
+                                      microphone=self._mute_microphone)
 
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.
@@ -974,6 +975,53 @@ class Session:
         if session is None:
             return None, self.brain.not_connected(name)
         return session, None
+
+    def _mute_microphone(self, muted: bool, where: Optional[str] = None) -> Dict:
+        """
+        Turns a satellite's listening off or on by voice - the mute the settings page and Home
+        Assistant's switch have, see set_muted.
+
+        Args:
+            muted: True to stop it hearing the wake word, False to hear it again.
+            where: The words for the satellite, e.g. "the Pi", or None for none said: this one if it
+                listens for a wake word, else its room's always-on one, as a timer set here rings on
+                (see Brain.ring_on) - the PC only listens while its key is held.
+
+        Returns:
+            Dict with 'success' and what to say: "Microphone off." for this one, "The Pi's
+            microphone is off." for another, after "Stopped, and" if what rang there was
+            stopped first; or why not, when the words name none, or one which isn't
+            connected or which only listens on a press of its key.
+        """
+        here = self.satellite.name
+        if where:
+            name, problem = self.brain.find_satellite(where, here=here)
+            if name is None:
+                return {"success": False, "message": problem}
+        else:
+            name = self.brain.ring_on(here)
+        # As said mid-sentence ("the Pi"), and to start one ("The Pi").
+        spoken = self.brain.spoken_name(name)
+        starting = spoken[:1].upper() + spoken[1:]
+        if self.brain.rooms.push_to_talk(name):
+            # A press works whatever the mute (0026), so muting it would change nothing.
+            return {"success": False, "message": f"{starting} only listens while you hold the key, so there's "
+                                                 f"nothing to {'mute' if muted else 'unmute'}."}
+        session = self.brain.session_for(name)
+        if session is None:
+            return {"success": False, "message": self.brain.not_connected(name)}
+        # Muted while something rings there, it couldn't hear "stop", and a timer would climb
+        # to full volume - so what rings is stopped first.
+        stopped = muted and self.brain.clock.is_ringing(satellite=name)
+        if stopped:
+            self.brain.clock.dismiss(satellite=name)
+        session.set_muted(muted)
+        state = "off" if muted else "on"
+        if name == here:
+            said = f"microphone {state}." if stopped else f"Microphone {state}."
+        else:
+            said = f"{spoken if stopped else starting}'s microphone is {state}."
+        return {"success": True, "message": f"Stopped, and {said}" if stopped else said}
 
     def _save_note(self, title: str, text: str, where: Optional[str] = None) -> Dict:
         """

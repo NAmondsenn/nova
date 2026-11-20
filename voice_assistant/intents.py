@@ -96,6 +96,10 @@ MOVE_WHERE = r"(?P<where>[a-z0-9']+(?: [a-z0-9']+){0,3})"
 DOMAIN = re.compile(r"[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}")
 # Where a computer is, said after "on": "open Fortnite on the PC".
 ON_WHERE = rf"(?: on {MOVE_WHERE})?"
+# What's muted when he says the sound is - Windows' at the PC, the music at the Pi (0034) - and the
+# microphone, Nova's listening, which plain "mute" is.
+SOUND = r"(?:sound|audio|volume|music)"
+MIC = r"(?:the |my )?(?:mic|microphone)"
 # Words which stand for something said before, so are never searched for, or closed, as they are.
 PRONOUNS = {"it", "that", "this"}
 # The window in front, as "close this" says it.
@@ -314,6 +318,17 @@ def _plain(text: str) -> str:
     return "".join(char for char in decomposed if not unicodedata.combining(char)).translate(_UNACCENTED)
 
 
+def _turned_off(found) -> bool:
+    """
+    Whether a mute rule's words turn something off - "mute", "turn the sound off", "stop
+    listening" - rather than back on: "unmute", "turn it on", "start listening".
+    """
+    state = found.groupdict().get("state")
+    if state:
+        return state in ("off", "stop")
+    return not found.groupdict().get("un")
+
+
 def _ordinal(day: int) -> str:
     """A day of the month as it's said, e.g. 4 -> "4th"."""
     suffix = "th" if 11 <= day % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
@@ -405,11 +420,20 @@ class LocalIntents:
             (rf"(?:set )?(?:the )?{MOVE_WHERE} volume (?:to )?(?P<level>\d{{1,3}})(?: percent)?",
              self._volume_on),
             (rf"set {MOVE_WHERE} to (?P<level>\d{{1,3}})(?: percent)?", self._volume_on),
-            # Mute and unmute, on the satellite spoken to or one named. Said over something
-            # ringing, or Nova talking, a bare "mute" never gets here: it stops them, as "stop"
-            # does - see Conversation.handle.
-            (r"(?P<un>un)?mute(?: (?:the )?(?:sound|volume|music))?", self._mute),
-            (rf"(?P<un>un)?mute {MOVE_WHERE}", self._mute),
+            # Muting the sound needs the word - "mute the sound", "turn the audio off" - on the
+            # satellite spoken to or one named (0034).
+            (rf"(?P<un>un)?mute (?:the )?{SOUND}{ON_WHERE}", self._mute),
+            # Only the sound or audio is turned off so: "turn the music off" isn't a mute.
+            (rf"turn (?:the )?(?:sound|audio) (?P<state>off|on){ON_WHERE}", self._mute),
+            (rf"turn (?P<state>off|on) the (?:sound|audio){ON_WHERE}", self._mute),
+            # Plain "mute" is the microphone, Nova's listening: here, or on the device named. Said
+            # over something ringing, or Nova talking, a bare "mute" never gets here: it stops
+            # them, as "stop" does - see Conversation.handle.
+            (rf"(?P<un>un)?mute(?: {MIC})?{ON_WHERE}", self._microphone),
+            (rf"(?P<un>un)?mute {MOVE_WHERE}", self._microphone),
+            (rf"(?P<state>stop|start) listening{ON_WHERE}", self._microphone),
+            (rf"turn {MIC} (?P<state>off|on){ON_WHERE}", self._microphone),
+            (rf"turn (?P<state>off|on) {MIC}{ON_WHERE}", self._microphone),
             (r"what(?:'s| is) the time|what time is it(?: now)?|tell me the time", self._time),
             (r"what(?:'s| is) (?:the date|today's date)(?: today)?|what day is it(?: today)?", self._date),
             (r"(?:cancel|stop|delete) (?:the|my) timer", self._cancel_only_timer),
@@ -676,7 +700,15 @@ class LocalIntents:
         where = found.groupdict().get("where")
         if where and not self._names_a_satellite(where):
             return None
-        return self._volume({"mute": not found["un"], **({"where": where} if where else {})})
+        return self._volume({"mute": _turned_off(found), **({"where": where} if where else {})})
+
+    def _microphone(self, found) -> Optional[Dict]:
+        # Only a satellite's: "mute the TV" falls through to the rules after.
+        where = found.groupdict().get("where")
+        if where and not self._names_a_satellite(where):
+            return None
+        return self._result("Okay.", [Action("mute_microphone", {"muted": _turned_off(found),
+                                                                 **({"where": where} if where else {})})])
 
     def _time(self, found) -> Dict:
         now = datetime.now()
