@@ -2887,6 +2887,17 @@ def test_save_note_description_keeps_the_list_apart():
         assert words in description
 
 
+def test_save_note_description_says_a_note_isnt_also_a_memory():
+    # "Make a note that my bins go out on Tuesday" once had Claude save the note and remember it, so
+    # Nova kept it in its memory as well and he had to say "don't remember that".
+    schemas = {tool["name"]: tool for tool in ActionExecutor(notes=lambda title, text: {}).tool_schemas()}
+    description = schemas["save_note"]["description"]
+    assert ("A note is only saved as a file: don't also use remember for it, unless the user asks you to "
+            "remember it too.") in description
+    # Still the end of what's said, as the tool says what happened itself.
+    assert description.endswith("What happened is said for you, so just reply 'Okay.'")
+
+
 def test_save_note_asked_for_without_a_way_to_save_one_says_so():
     # It can be asked for by name, offered or not, as at the Pi.
     result = ActionExecutor().execute(Action("save_note", {"title": "Bins", "text": "Green on Tuesday."}))

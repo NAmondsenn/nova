@@ -1076,9 +1076,25 @@ class NavidromePlayer(NavidromeLibrary):
 
     def _find_artist(self, query: str) -> Tuple[List[Dict], str]:
         """Everything by an artist, shuffled."""
-        artist = best(self._search(query, artists=5).get("artist") or [], "name", query, None)
-        if not artist:
+        found = self._search(query, artists=5).get("artist") or []
+        most = max((likeness(each.get("name", ""), query) for each in found), default=0)
+        if not most:
             return [], ""
+        # Only the artists as like what was asked for as the best are chosen among, and of them only one with
+        # albums can be played. A multi-artist tag such as "Drake/Birdman" makes track artists with none, and
+        # "Drake/" reads as "drake" to likeness just as "Drake" does, so the first of equals could be the one
+        # with nothing. A worse match is never the one played instead: "Future", only on features, has none, and
+        # "Future Islands" sharing a word with it isn't who was asked for. One which doesn't say how many
+        # albums it has is kept, so a server which leaves albumCount out is no worse off.
+        tied = [each for each in found if likeness(each.get("name", ""), query) == most
+                and each.get("albumCount") != 0]
+        if not tied:
+            return [], ""
+        # The one named exactly - with the slashes and the rest which likeness ignores - is the one meant,
+        # even when another of the same likeness has albums too; else the first, as Navidrome lists its best
+        # guesses first.
+        artist = next((each for each in tied if each.get("name", "").strip().lower() == query.strip().lower()),
+                      tied[0])
         albums = self._call("getArtist", id=artist["id"]).get("artist", {}).get("album") or []
         songs = [song for album in albums[:MOST_ALBUMS] for song in self._album_songs(album["id"])]
         random.shuffle(songs)

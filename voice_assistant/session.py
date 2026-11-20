@@ -925,14 +925,14 @@ class Session:
         Finds the actions of the satellite some words name, for playing something there.
 
         Args:
-            said: The words for it, e.g. "the PC".
+            said: The words for it, e.g. "the PC" - or "here", for this session's own satellite.
 
         Returns:
             Its session's actions and None - this session's own, if it's the one named; or
             None and what to say, if the words name none or more than one, or the one named
             isn't connected.
         """
-        name, problem = self.brain.find_satellite(said)
+        name, problem = self.brain.find_satellite(said, here=self.satellite.name)
         if name is None:
             return None, problem
         session = self.brain.session_for(name)
