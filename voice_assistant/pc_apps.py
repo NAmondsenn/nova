@@ -69,7 +69,7 @@ def build(start_apps: Callable[[], List[Dict]], epic_dir: str, steam_dirs: Calla
         Each thing, as {"id", "name", "kind", "target"}, with "folder" for an Epic or
         Steam game whose install folder is known: never an Uninstall one, and only the
         first of those with the same name - the Start menu's, as it launches directly,
-        then Epic's, then Steam's. A place which can't be read adds nothing, and is logged.
+        then Epic's, then Steam's, which gives it a duplicate's folder if it has none. A place which can't be read adds nothing, and is logged.
     """
     found = []
     for kind, find in (("app", start_apps), ("epic", lambda: epic(epic_dir)), ("steam", lambda: steam(steam_dirs()))):
@@ -78,17 +78,24 @@ def build(start_apps: Callable[[], List[Dict]], epic_dir: str, steam_dirs: Calla
         except Exception as e:
             # Only what kind of failure: it may carry a path with his name in it.
             logger.warning(f"Couldn't list the {kind} things on this PC ({type(e).__name__})")
-    items, seen = [], set()
+    items, seen = [], {}
     for kind, name, target, folder in found:
         name = name.strip() if isinstance(name, str) else ""
         key = plain(name)
-        if not key or key.startswith(UNINSTALL) or key in seen or not isinstance(target, str) or not target:
+        if not key or key.startswith(UNINSTALL) or not isinstance(target, str) or not target:
             continue
-        seen.add(key)
+        if key in seen:
+            # The one kept (the Start menu's) may have no folder: take the dropped game's,
+            # so its window is still listed under this name.
+            kept = seen[key]
+            if "folder" not in kept and isinstance(folder, str) and folder.strip():
+                kept["folder"] = folder
+            continue
         item = {"id": hashlib.sha1((kind + target).encode("utf-8")).hexdigest()[:12], "name": name,
                 "kind": kind, "target": target}
         if isinstance(folder, str) and folder.strip():
             item["folder"] = folder
+        seen[key] = item
         items.append(item)
     return items
 

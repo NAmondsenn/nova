@@ -130,6 +130,26 @@ def test_start_menu_order_beats_epic_then_steam(tmp_path):
     assert [(item["name"], item["kind"]) for item in items] == [("Fortnite", "epic")]
 
 
+def test_a_start_menu_game_keeps_the_install_folder_of_its_duplicate(tmp_path, monkeypatch):
+    from voice_assistant import pc_windows
+    listed = [{"Name": "Fortnite", "AppID": "com.epicgames.launcher://apps/fn%3Ax%3AFortnite?action=launch"},
+              {"Name": "Notepad", "AppID": "Notepad.exe"}]
+    monkeypatch.setattr(pc_apps, "start_apps", lambda: [
+        {"name": app["Name"], "target": pc_apps.start_target(app["AppID"])} for app in listed])
+    (tmp_path / "1.item").write_text(epic_item("Fortnite"))
+    items = pc_apps.build(pc_apps.start_apps, str(tmp_path), no_steam)
+    # The Start menu's wins, and carries the Epic folder.
+    assert [(item["name"], item["kind"]) for item in items] == [("Fortnite", "app"), ("Notepad", "app")]
+    assert items[0]["folder"] == "D:\\Gaming\\unreal\\Fortnite"
+    assert "folder" not in items[1]
+    # So a window whose exe lies under it is listed by the catalogue name.
+    monkeypatch.setattr(pc_windows, "_installed", [])
+    monkeypatch.setattr(pc_windows, "_names", {})
+    pc_windows.set_installed(items)
+    exe = "D:\\Gaming\\unreal\\Fortnite\\FortniteGame\\FortniteClient-Win64-Shipping.exe"
+    assert pc_windows._installed_name(exe) == "Fortnite"
+
+
 def test_a_start_menu_shortcut_to_a_link_is_launched_as_the_link(monkeypatch):
     listed = [{"Name": "Rocket League", "AppID": "steam://rungameid/252950"},
               {"Name": "Fortnite", "AppID": "com.epicgames.launcher://apps/fn%3Ax%3AFortnite?action=launch"},
