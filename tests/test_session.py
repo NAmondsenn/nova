@@ -1801,7 +1801,71 @@ def test_plain_mute_at_the_pc_asks_and_the_audio_answer_mutes_windows_sound(wind
     pc, windows = windows_pc.pc, windows_pc.windows
     pc.conversation.handle("Mute.")
     reply = pc.conversation.handle(answer, follow_up=True)
-    assert reply.say == "Muted." and windows.asked == [("volume", {"mute": True})]
+    # The satellite sounds it before Windows mutes, so the brain adds neither words nor a sound.
+    assert (reply.say, reply.sounds) == ("", []) and windows.asked == [("volume", {"mute": True})]
+
+
+def test_mute_the_sound_at_the_pc_leaves_the_sound_to_the_satellite_and_unmute_plays_mic_on(windows_pc):
+    pc, windows = windows_pc.pc, windows_pc.windows
+    reply = pc.conversation.handle("Mute the sound.")
+    assert (reply.say, reply.sounds) == ("", []) and windows.asked == [("volume", {"mute": True})]
+    reply = pc.conversation.handle("Unmute the audio.")
+    assert (reply.say, reply.sounds) == ("", [("mic_on.wav", "general")])
+    assert windows.asked[-1] == ("volume", {"mute": False})
+
+
+def test_mute_the_sound_at_the_pi_sounds_as_the_microphone_does(windows_pc):
+    pi = windows_pc.pi
+    level = []
+    pi.actions.music = SimpleNamespace(get_volume=lambda: 60, is_playing=lambda: False,
+                                       set_volume=lambda value: level.append(value) or {"success": True, "message": "ok"})
+    reply = pi.conversation.handle("Mute the sound.")
+    assert reply.sounds == [("mic_off.wav", "general")] and reply.say == ""
+    reply = pi.conversation.handle("Unmute the sound.")
+    assert reply.sounds == [("mic_on.wav", "general")] and reply.say == ""
+
+
+@pytest.mark.parametrize("said", ["Unmute everything.", "Unmute all.", "Unmute both."])
+def test_unmute_everything_at_the_pc_unmutes_the_mic_and_the_sound_with_one_sound(windows_pc, said):
+    pc, windows = windows_pc.pc, windows_pc.windows
+    reply = pc.conversation.handle(said)
+    assert windows.asked == [("mic", {"mute": False}), ("volume", {"mute": False})]
+    assert (reply.say, reply.sounds) == ("", [("mic_on.wav", "general")])
+
+
+def test_everything_answers_the_question_of_a_plain_unmute_but_not_a_mute(windows_pc):
+    pc, windows = windows_pc.pc, windows_pc.windows
+    assert pc.conversation.handle("Unmute.").say == "The mic or the audio?"
+    reply = pc.conversation.handle("both", follow_up=True)
+    assert windows.asked == [("mic", {"mute": False}), ("volume", {"mute": False})]
+    assert (reply.say, reply.sounds) == ("", [("mic_on.wav", "general")])
+    # No "mute everything": it isn't an answer to "Mute.".
+    windows.asked.clear()
+    assert pc.conversation.handle("Mute.").say == "The mic or the audio?"
+    pc.conversation.handle("everything", follow_up=True)
+    assert ("mic", {"mute": True, "minutes": 60}) not in windows.asked
+
+
+def test_unmute_everything_says_which_half_failed(windows_pc, monkeypatch):
+    pc = windows_pc.pc
+    real = pc.satellite.ask_computer
+    broken = {"mic"}
+    monkeypatch.setattr(pc.satellite, "ask_computer",
+                        lambda action, **fields: {"error": "No."} if action in broken else real(action, **fields))
+    reply = pc.conversation.handle("Unmute everything.")
+    assert reply.sounds == [] and "couldn't unmute the mic" in reply.say and "audio is on" in reply.say
+    broken.clear()
+    broken.add("volume")
+    reply = pc.conversation.handle("Unmute everything.")
+    assert reply.sounds == [] and "couldn't unmute the audio" in reply.say and "mic is on" in reply.say
+    broken.add("mic")
+    assert "mic or the audio" in pc.conversation.handle("Unmute everything.").say
+
+
+def test_unmute_everything_is_not_a_phrase_away_from_the_pc(windows_pc):
+    # At the Pi there's no Windows to unmute: it isn't taken for the local rule.
+    actions = windows_pc.pi.intents.match("Unmute everything.")
+    assert actions is None or all(action.tool != "unmute_everything" for action in actions["actions"])
 
 
 def test_plain_unmute_at_the_pc_asks_too(windows_pc):
@@ -1810,8 +1874,9 @@ def test_plain_unmute_at_the_pc_asks_too(windows_pc):
     reply = pc.conversation.handle("the mic", follow_up=True)
     assert reply.sounds == [("mic_on.wav", "general")] and windows.asked == [("mic", {"mute": False})]
     assert pc.conversation.handle("Unmute.").say == "The mic or the audio?"
-    pc.conversation.handle("audio", follow_up=True)
+    reply = pc.conversation.handle("audio", follow_up=True)
     assert windows.asked[-1] == ("volume", {"mute": False})
+    assert (reply.say, reply.sounds) == ("", [("mic_on.wav", "general")])
 
 
 def test_anything_else_said_back_to_which_is_a_fresh_request(windows_pc):
