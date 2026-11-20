@@ -8,7 +8,7 @@ import threading
 
 import pytest
 
-from voice_assistant import pc_volume
+from voice_assistant import pc_volume, remote
 from voice_assistant.pc_volume import SystemVolume
 
 
@@ -125,3 +125,8 @@ def test_off_windows_there_is_no_volume(monkeypatch):
     made = SystemVolume()
     assert made.available is False
     assert made._owner is None
+
+
+def test_a_change_gives_up_before_the_brain_stops_waiting():
+    # So the satellite's own "couldn't" reaches the brain, rather than the brain's.
+    assert pc_volume.JOB_WAIT < remote.COMPUTER_WAIT

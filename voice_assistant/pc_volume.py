@@ -20,9 +20,10 @@ from typing import Callable, Dict, Optional
 logger = logging.getLogger(__name__)
 
 # The most seconds the satellite waits for Windows' volume to be reached when it starts,
-# and for each change to it after.
+# and for each change to it after - shorter than the brain waits for its answer
+# (remote.COMPUTER_WAIT), so the satellite's own sentence for a change which failed is said.
 SET_UP_WAIT = 10
-JOB_WAIT = 5
+JOB_WAIT = 3
 
 # How far "up" or "down" moves it, in percent, when the brain doesn't say.
 STEP = 10
