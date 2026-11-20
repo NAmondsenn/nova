@@ -45,7 +45,7 @@ MARKS = {("batteries", "mobile_marks"): 1, ("batteries", "other_marks"): 2}
 POSITIVE = {("batteries", "check_every"), ("batteries", "stale_after"),
             ("football", "check_every"), ("football", "stale_after"), ("football", "kickoff_minutes"),
             ("journeys", "check_every_minutes"), ("journeys", "watch_minutes"), ("journeys", "change_minutes"),
-            ("journeys", "heavy_minutes")}
+            ("journeys", "heavy_minutes"), ("computer", "mic_mute_minutes")}
 
 
 class Limit(NamedTuple):
@@ -94,6 +94,9 @@ LIMITS: Dict[Tuple[str, str], Limit] = {
     # Under 2 minutes a look every minute could miss the time before kick-off altogether, and over 2 hours
     # is long before a match is near.
     ("football", "kickoff_minutes"): Limit("number", 2, 120, True),
+    # The PC's own microphone, muted by Nova, comes back on by itself after this - at least a
+    # minute, and at most a day, past which it's a microphone forgotten about.
+    ("computer", "mic_mute_minutes"): Limit("number", 1, 1440, True),
     # Journeys. A buffer of over an hour, or a reminder over half an hour ahead, is a slip. A look every minute
     # would spend the month's requests in days, and one over half an hour would miss the traffic changing. A
     # watch under 10 minutes would hardly look before the time to leave, and over 2 hours would ask Google about

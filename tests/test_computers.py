@@ -282,6 +282,36 @@ def test_volume_on_the_computer():
     assert at(brain, "bedroom").volume(level=30) == {"success": False, "message": "Your PC's off."}
 
 
+def test_the_computers_own_microphone():
+    brain = FakeBrain()
+    brain.computer.system_volume = True
+    brain.not_connected = lambda name: "Your PC's off."
+    brain.computer.answer = {"said": "Microphone off.", "muted": True}
+    # Confirmed by its sound; the words are only logged.
+    assert at(brain).microphone(True) == {"success": True, "message": "Microphone off.", "sound": "mic_off.wav",
+                                          "sound_category": "general"}
+    # A mute carries how long it lasts, from the settings page - an hour unless it says.
+    assert brain.computer.asked == [("mic", {"mute": True, "minutes": 60})]
+    brain.config = SimpleNamespace(section=lambda name: {"mic_mute_minutes": 15} if name == "computer" else {})
+    at(brain).microphone(True)
+    assert brain.computer.asked[-1] == ("mic", {"mute": True, "minutes": 15})
+    brain.computer.answer = {"said": "Microphone on.", "muted": False}
+    assert at(brain).microphone(False)["sound"] == "mic_on.wav"
+    assert brain.computer.asked[-1] == ("mic", {"mute": False})
+    # An older satellite, which doesn't know "mic", says it can't - which is said.
+    brain.computer.answer = {"error": "I can't do that on this computer."}
+    assert at(brain).microphone(True) == {"success": False, "message": "I can't do that on this computer."}
+    brain.computer.answer = None
+    assert at(brain).microphone(True) == {"success": False, "message": "I couldn't do that on Nathaniel's PC."}
+    # Never sent to one which didn't say it has Windows' volume, nor one not there.
+    brain.computer.system_volume = False
+    asked = len(brain.computer.asked)
+    assert at(brain).microphone(True) == {"success": False,
+                                          "message": "Nathaniel's PC can't change its own microphone."}
+    assert len(brain.computer.asked) == asked
+    assert at(brain, "bedroom").microphone(True) == {"success": False, "message": "Your PC's off."}
+
+
 def hooks(brain, spoken_at="pc", machine="pc"):
     """ComputerHooks for a session at a satellite, with the brain naming only "the pc" as a satellite."""
     brain.names_satellite = lambda said: said == "the pc"

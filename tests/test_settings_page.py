@@ -2711,6 +2711,16 @@ def test_the_search_site_is_on_the_page_as_a_choice_used_straight_away(files):
     assert page.save_settings({"computer.search_site": "yahoo"}, LOGIN)["success"] is False
 
 
+def test_the_pcs_microphone_minutes_are_on_the_page_used_straight_away(files):
+    page, _ = _running(files)
+    shown = {setting["key"]: setting for setting in page.state()["settings"]}
+    minutes = shown["computer.mic_mute_minutes"]
+    assert minutes["label"] == "Minutes the PC's microphone stays muted" and minutes["value"] == 60
+    assert page.save_settings({"computer.mic_mute_minutes": 30}, LOGIN)["message"] == "Saved. It's used straight away."
+    for refused in (0, -1, 2.5, 5000):
+        assert page.save_settings({"computer.mic_mute_minutes": refused}, LOGIN)["success"] is False
+
+
 def test_set_called_saves_trimmed_names(files, tmp_path, caplog):
     rooms = _rooms(tmp_path, ("bedroom", "pi", False))
     page = _page(rooms=rooms)

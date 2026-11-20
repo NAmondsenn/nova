@@ -44,6 +44,8 @@ MOST_CLOSEST = 3
 NOT_A_WEB_ADDRESS = "That isn't a web address I can open."
 # Said when there's no computer to do something on.
 NO_COMPUTER = "There's no computer here to open things on."
+# How long the PC's own microphone stays muted, in minutes, unless computer.mic_mute_minutes says.
+MIC_MUTE_MINUTES = 60
 
 
 def plain(name: str) -> str:
@@ -283,6 +285,9 @@ class ComputerHooks:
     # Whether some words, with no computer named, are an app's whole name or his own name for one -
     # so "go to google.com" isn't taken for Google Chrome.
     app_called: Callable[[str], bool]
+    # Whether the satellite spoken at is a PC whose own microphone and sound Nova can mute - one
+    # which said system_volume - so "mute the mic" there is its own, and a plain "mute" asks which.
+    mic_here: Callable[[], bool] = lambda: False
 
     @classmethod
     def for_satellite(cls, brain: Any, satellite: str) -> "ComputerHooks":
@@ -342,9 +347,13 @@ class ComputerHooks:
             return name is not None and named_exactly(
                 said, [item["name"] for item in brain.computers.apps(name)], brain.rooms.app_names(name))
 
+        def mic_here() -> bool:
+            session = brain.session_for(satellite) if brain.rooms.machine(satellite) == "pc" else None
+            return session is not None and bool(getattr(session.satellite, "system_volume", False))
+
         return cls(at_pc=lambda: brain.rooms.machine(satellite) == "pc", names_app=names_app,
                    names_window=names_window, opens_somewhere=opens_somewhere, opens_here=opens_here,
-                   app_called=app_called)
+                   app_called=app_called, mic_here=mic_here)
 
 
 class ComputerControl:
@@ -555,3 +564,49 @@ class ComputerControl:
                                 else "Unmuted." if change.get("mute") is False
                                 else f"Volume {reply['level']} percent." if "level" in reply else reply["message"])
         return reply
+
+    def has_microphone(self) -> bool:
+        """
+        Whether the satellite the user is talking to is a computer whose own microphone Nova can
+        mute - one which said system_volume.
+        """
+        session = self.brain.session_for(self.satellite)
+        return session is not None and bool(getattr(session.satellite, "system_volume", False))
+
+    def microphone(self, muted: bool) -> Dict:
+        """
+        Mutes or unmutes the microphone of the computer the user is talking to, in Windows, for
+        everything which listens to it - "mute the mic" at the PC (his ruling, 20 Nov).
+
+        Args:
+            muted: True to mute it, False to unmute it.
+
+        Returns:
+            {"success", "message"} - "Microphone off." or "Microphone on.", only logged, as it's
+            confirmed by mic_off.wav or mic_on.wav - or why not, which is said. A mute lasts
+            computer.mic_mute_minutes, after which the satellite turns it back on itself.
+        """
+        target = self.satellite
+        session = self.brain.session_for(target)
+        if session is None:
+            return {"success": False, "message": self.brain.not_connected(target)}
+        computer = session.satellite
+        # Only one which said it can reach Windows' volume, whose microphone goes the same way.
+        if not getattr(computer, "system_volume", False):
+            return {"success": False,
+                    "message": f"{_capital(self.brain.spoken_name(target))} can't change its own microphone."}
+        fields = {"mute": bool(muted)}
+        if muted:
+            # How long until the satellite turns it back on by itself - the settings page's, read
+            # each time, so a change is used straight away.
+            config = getattr(self.brain, "config", None)
+            minutes = config.section("computer").get("mic_mute_minutes", MIC_MUTE_MINUTES) \
+                if config is not None else MIC_MUTE_MINUTES
+            fields["minutes"] = minutes
+        reply = self._ask(target, computer, None, "mic", **fields)
+        if not reply["success"]:
+            return reply
+        state = "off" if reply.get("muted", muted) else "on"
+        logger.info(f"Windows' microphone on the {target} satellite is {state}")
+        return {"success": True, "message": f"Microphone {state}.", "sound": f"mic_{state}.wav",
+                "sound_category": "general"}

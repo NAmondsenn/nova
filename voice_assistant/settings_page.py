@@ -133,6 +133,8 @@ EDITABLE = [
     ("journeys", "distance_unit", "Distances said in", "now"),
     # Read at each "search for" on a computer.
     ("computer", "search_site", "Search site for 'search for' on a computer", "now"),
+    # Sent with each "mute the mic" at the PC.
+    ("computer", "mic_mute_minutes", "Minutes the PC's microphone stays muted", "now"),
     ("home_assistant", "url", "Home Assistant's address", "restart"),
     ("ntfy", "url", "Your ntfy server", "restart"),
     ("ntfy", "alerts", "Topics read out as they arrive, separated by commas", "restart"),

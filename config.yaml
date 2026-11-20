@@ -154,6 +154,9 @@ conversation:
 # One of google, duckduckgo or bing. Used straight away.
 computer:
   search_site: google
+  # Minutes the PC's own microphone stays muted after "mute the mic", before the PC turns it
+  # back on by itself with a sound. A whole number above 0. Used straight away.
+  mic_mute_minutes: 60
 
 # Web search is only used when the query explicitly asks for it
 # (e.g. "search for..."), so normal replies stay fast and free.
