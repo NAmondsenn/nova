@@ -315,7 +315,7 @@ class Session:
                                       elsewhere=self._elsewhere,
                                       spoken_name=lambda name: brain.spoken_name(name),
                                       settled=lambda: self.music.wait(),
-                                      notes=self._save_note if satellite.saves_notes else None,
+                                      notes=self._save_note, notes_offered=lambda: bool(brain.notes_saved_on()),
                                       computer=ComputerControl(brain, satellite.name), device=self._device,
                                       at_pc=lambda: brain.rooms.machine(satellite.name) == "pc",
                                       pc_name=lambda: brain.pc_called(satellite.name))
@@ -971,43 +971,60 @@ class Session:
             return None, self.brain.not_connected(name)
         return session, None
 
-    def _save_note(self, title: str, text: str) -> Dict:
+    def _save_note(self, title: str, text: str, where: Optional[str] = None) -> Dict:
         """
-        Has the satellite save a note in its Downloads folder, for the user at it.
+        Has a satellite save a note in its Downloads folder - the one the user is at if it saves
+        notes, else the one named or the one which does, as the brain chooses.
 
         Args:
             title: What to call the note.
             text: What it says. Never logged.
+            where: The words for which computer, as the user said them, or None for none said.
 
         Returns:
-            Dict with 'success' and the 'message' to say - "Saved to your Downloads as Bins.",
-            or why it wasn't saved.
+            Dict with 'success' and the 'message' to say - "Saved to your Downloads as Bins." or, on
+            another satellite, "Saved to the Downloads on the PC as Bins.", or why it wasn't saved.
         """
+        name, problem = self.brain.notes_for(self.satellite.name, where)
+        if name is None:
+            return {"success": False, "message": problem}
+        if name == self.satellite.name:
+            satellite = self.satellite
+        else:
+            session = self.brain.session_for(name)
+            if session is None:
+                # Gone since it was chosen.
+                return {"success": False, "message": self.brain.not_connected(name)}
+            satellite = session.satellite
         # The satellite refuses it too, but a runaway reply shouldn't have to cross the link first.
         if len(text) > MOST_TEXT:
-            return self._note_not_saved(TOO_LONG)
-        saved = self.satellite.save_note(title, text)
+            return self._note_not_saved(TOO_LONG, name)
+        saved = satellite.save_note(title, text)
         if saved is None:
-            there = self.brain.spoken_name(self.satellite.name)
+            there = self.brain.spoken_name(name)
             return {"success": False, "message": f"{there[:1].upper() + there[1:]} didn't answer, so the note "
                                                   f"wasn't saved."}
         if "error" in saved:
-            return self._note_not_saved(saved["error"])
+            return self._note_not_saved(saved["error"], name)
         file = saved["file"]
-        logger.info(f"Saved the note {title!r} on the {self.satellite.name} satellite as {file}")
+        logger.info(f"Saved the note {title!r} on the {name} satellite as {file}")
         # As a browser says a download: the name it's known by, which has no ".txt" to say.
-        return {"success": True, "message": f"Saved to your Downloads as {file.removesuffix('.txt')}."}
+        saved_as = file.removesuffix(".txt")
+        if name == self.satellite.name:
+            return {"success": True, "message": f"Saved to your Downloads as {saved_as}."}
+        # Said where it went, as it isn't where the user is to see it.
+        return {"success": True, "message": f"Saved to the Downloads on {self.brain.spoken_name(name)} as {saved_as}."}
 
-    def _note_not_saved(self, why: str) -> Dict:
+    def _note_not_saved(self, why: str, name: str) -> Dict:
         """
         Args:
             why: The sentence to say for it, e.g. "There's no Downloads folder to save it in."
+            name: The satellite the note was to be saved on.
 
         Returns:
             Dict with 'success' False and the 'message' to say, with where it was to be saved.
         """
-        return {"success": False,
-                "message": f"I couldn't save it on {self.brain.spoken_name(self.satellite.name)}: {why}"}
+        return {"success": False, "message": f"I couldn't save it on {self.brain.spoken_name(name)}: {why}"}
 
     def _room_players(self) -> List:
         """

@@ -58,6 +58,7 @@ from voice_assistant.memory import Memory
 from voice_assistant.music_device import MusicDevice
 from voice_assistant.music_folder import MusicFolder
 from voice_assistant.new_music import NewMusicPlaylist
+from voice_assistant.notes import NO_NOTES
 from voice_assistant.ntfy import RETOPIC, Ntfy
 from voice_assistant.pc import PCPower
 from voice_assistant.playlist_changes import PlaylistChanges
@@ -1008,6 +1009,58 @@ class Brain:
                 return None, f"{spoken[:1].upper() + spoken[1:]} can't open things."
             # Just connected, and still building its list.
             return None, f"I'm still finding the apps on {spoken}."
+        return name, None
+
+    def notes_saved_on(self) -> List[str]:
+        """
+        Returns:
+            The satellites let in which said, as they last connected, that they save notes in a
+            Downloads folder - the default first, connected or not, so a note can be said to be
+            for a PC which is off. None if the satellites can't be read.
+        """
+        try:
+            names = self.satellites()
+        except (OSError, ValueError) as e:
+            logger.warning(f"Couldn't read the satellites to find which save notes: {e}")
+            return []
+        return [name for name in names if self.rooms.saves_notes(name)]
+
+    def notes_for(self, spoken_at: str, where: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Finds the computer to save a note on, and checks it can be asked now. The one named, else
+        the one spoken at if it saves notes, else the only one known which does - so a note asked
+        for at the Pi, which has no Downloads folder, is saved on the PC.
+
+        Args:
+            spoken_at: The satellite the user was talking to.
+            where: The words for which computer, e.g. "my PC", or None for none said.
+
+        Returns:
+            The computer's satellite name and None; or None and what to say instead: the words name
+            none or one which can't save notes ("The Pi can't save notes."), or none was named and
+            several can ("Which one: the PC or the Mac?") or none can ("None of your computers can
+            save notes."), or the one chosen isn't connected ("Your PC's off.").
+        """
+        if where:
+            name, problem = self.find_satellite(where, here=spoken_at)
+            if name is None:
+                return None, problem
+            if not self.rooms.saves_notes(name):
+                spoken = self.spoken_name(name)
+                return None, f"{spoken[:1].upper() + spoken[1:]} can't save notes."
+        elif self.rooms.saves_notes(spoken_at):
+            name = spoken_at
+        else:
+            saving = self.notes_saved_on()
+            if not saving:
+                return None, NO_NOTES
+            if len(saving) > 1:
+                spoken = [self.spoken_name(each) for each in saving]
+                return None, f"Which one: {satellite_names.listed(spoken, 'or')}?"
+            name = saving[0]
+        if self.session_for(name) is None:
+            # Asleep, or Nova isn't running there.
+            return None, self.not_connected(name)
         return name, None
 
     def not_connected(self, name: str) -> str:

@@ -22,6 +22,10 @@ MOST_TEXT = 50_000
 # which won't send it - so it's the same wherever it's refused.
 TOO_LONG = "That note's too long to save."
 
+# What's said of a note when no satellite saves them - by the brain choosing where one goes, and by
+# the tool if Claude asks for it anyway.
+NO_NOTES = "None of your computers can save notes."
+
 # The longest title kept, before ".txt" - well inside every file system's limit.
 MOST_TITLE = 80
 

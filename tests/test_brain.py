@@ -813,6 +813,91 @@ def test_where_a_mac_asleep_isnt_the_pc(named):
     assert named.pc.asked == []
 
 
+# Which computer a note is saved on
+
+@pytest.fixture
+def noting(named):
+    """The named brain with only the PC saving notes, as it is with the Mac not yet a satellite."""
+    named.rooms.seen("mac", True, "mac", False)
+    return named
+
+
+def test_a_note_is_saved_where_it_was_said_when_that_saves_notes(noting):
+    put_in_session(noting, "pc")
+    assert noting.notes_for("pc", None) == ("pc", None)
+
+
+def test_a_note_said_at_the_pi_goes_to_the_only_computer_which_saves_notes(noting):
+    put_in_session(noting, "pc")
+    assert noting.notes_for("bedroom", None) == ("pc", None)
+
+
+def test_a_note_named_goes_to_the_computer_named(noting):
+    put_in_session(noting, "pc")
+    assert noting.notes_for("bedroom", "my PC") == ("pc", None)
+    # "Here" is the one spoken at, which at the PC saves notes.
+    assert noting.notes_for("pc", "this device") == ("pc", None)
+    # A name he gave it on the page does as well.
+    noting.rooms.set_called("pc", ["Desk"])
+    assert noting.notes_for("bedroom", "the desk") == ("pc", None)
+
+
+def test_a_note_named_for_a_satellite_which_cant_save_one_says_so(noting):
+    put_in_session(noting, "pc")
+    assert noting.notes_for("pc", "the Pi") == (None, "The Pi can't save notes.")
+    assert noting.notes_for("bedroom", "this device") == (None, "The Pi can't save notes.")
+    # One he gave a name to is called by it.
+    noting.rooms.set_called("mac", ["Work Mac"])
+    assert noting.notes_for("bedroom", "work mac") == (None, "Work Mac can't save notes.")
+    # Words naming none say so, as find_satellite does.
+    assert noting.notes_for("bedroom", "the phone")[1].startswith("There's no satellite called the phone.")
+
+
+def test_a_note_with_two_computers_saving_notes_asks_which_from_the_pi_only(named):
+    put_in_session(named, "pc")
+    put_in_session(named, "mac")
+    assert named.notes_for("bedroom", None) == (None, "Which one: the PC or the Mac?")
+    # Spoken at one which saves them, it's that one's; or named.
+    assert named.notes_for("mac", None) == ("mac", None)
+    assert named.notes_for("bedroom", "the Mac") == ("mac", None)
+
+
+def test_a_note_with_no_computer_saving_notes_says_so(brain, passwords):
+    brain.rooms.seen("bedroom", False, "pi")
+    assert brain.notes_for("bedroom", None) == (None, "None of your computers can save notes.")
+
+
+def test_a_note_for_a_computer_which_isnt_connected_says_why(noting):
+    # Asleep or its Nova not running, as for the other things said to a computer.
+    assert noting.notes_for("bedroom", "the PC") == (None, "Nova isn't running on the PC.")
+    assert noting.notes_for("bedroom", None) == (None, "Nova isn't running on the PC.")
+    noting.pc = FakePCPower(on=False)
+    assert noting.notes_for("bedroom", None) == (None, "Your PC's off.")
+
+
+def test_the_satellites_saving_notes_are_those_let_in_which_say_so(noting, passwords):
+    assert noting.notes_saved_on() == ["pc"]
+    noting.rooms.seen("mac", True, "mac", True)
+    assert noting.notes_saved_on() == ["pc", "mac"]
+    # One removed isn't one to save a note on, though it's still remembered as saving them.
+    passwords.remove("mac")
+    assert noting.notes_saved_on() == ["pc"]
+    assert noting.rooms.saves_notes("mac") is True
+
+
+def test_the_satellites_saving_notes_are_none_when_they_cant_be_read(noting, monkeypatch, caplog):
+    def unreadable():
+        raise OSError("gone")
+
+    monkeypatch.setattr(noting, "satellites", unreadable)
+    with caplog.at_level(logging.WARNING, logger="voice_assistant.brain"):
+        assert noting.notes_saved_on() == []
+    assert "gone" in caplog.text
+    # What can be told without the list still can be: the one spoken at which saves them.
+    put_in_session(noting, "pc")
+    assert noting.notes_for("pc", None) == ("pc", None)
+
+
 @pytest.fixture
 def two_pis(brain, passwords):
     """A brain with two Pis (the bedroom, the default, and the kitchen) and a PC, none of them connected."""

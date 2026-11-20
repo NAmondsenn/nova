@@ -37,6 +37,7 @@ from voice_assistant.google_calendar import named_by_address
 from voice_assistant.home_assistant import CANT_REACH, HomeAssistant, NotAllowed
 from voice_assistant.lists import NO_ANSWER, names_list
 from voice_assistant.navidrome import NavidromeError, NavidromeLibrary
+from voice_assistant.notes import NO_NOTES
 from voice_assistant.undo import LastChange
 
 # Logger setup
@@ -63,7 +64,7 @@ UNAVAILABLE = {
     "journeys": "Journeys need Home Assistant.",
     "listening": "Listening stats need SoulSync.",
     "wrapped": "Wrapped isn't set up.",
-    "notes": "I can only save a note at a computer.",
+    "notes": NO_NOTES,
     "computer": "There's no computer here to open things on.",
 }
 
@@ -384,7 +385,8 @@ class ActionExecutor:
                  elsewhere: Optional[Callable[[str], Tuple[Optional["ActionExecutor"], Optional[str]]]] = None,
                  spoken_name: Callable[[str], str] = lambda name: name,
                  settled: Optional[Callable[[], None]] = None,
-                 notes: Optional[Callable[[str, str], Dict]] = None, computer=None,
+                 notes: Optional[Callable[[str, str, Optional[str]], Dict]] = None,
+                 notes_offered: Callable[[], bool] = lambda: True, computer=None,
                  device: Optional[Callable[[Optional[str]], Tuple[Optional[Any], Optional[str]]]] = None,
                  at_pc: Callable[[], bool] = lambda: False,
                  pc_name: Callable[[], Optional[str]] = lambda: None):
@@ -447,9 +449,11 @@ class ActionExecutor:
             settled: Waits for any pause or resume still on its way to this satellite's music, so
                 something asked for on it from another satellite's conversation can't be undone by
                 one landing late - see MusicHold.wait. None if there's nothing to wait for.
-            notes: Saves a note on the computer the user is at - given its title and what it says,
-                gives what the brain says of it - or None if the satellite can't save one, as the
-                Pi can't.
+            notes: Saves a note on a computer - given its title, what it says and the words for
+                which computer, as the user said them, or None - gives what the brain says of it.
+                None if there's no way to.
+            notes_offered: Whether any satellite saves notes, so the tool is offered - at the Pi
+                too, which has no Downloads folder, as its notes go to the PC's.
             computer: ComputerControl, which opens, searches and closes things on a computer
                 satellite, or None if there's none. Its tools are offered only while a computer
                 which opens things has been seen.
@@ -489,6 +493,7 @@ class ActionExecutor:
         self.spoken_name = spoken_name
         self.settled = settled
         self.notes = notes
+        self.notes_offered = notes_offered
         self.computer = computer
         self.device = device
         self.at_pc = at_pc
@@ -593,10 +598,15 @@ class ActionExecutor:
         return any(self._set_up(name) for name in ((needs,) if isinstance(needs, str) else needs))
 
     def _set_up(self, name: str) -> bool:
-        """Whether the part of the assistant a tool needs is there - for the computer, one which opens things."""
+        """
+        Whether the part of the assistant a tool needs is there - for the computer, one which opens things,
+        and for notes, a satellite which saves them, whichever one the user is talking to.
+        """
         part = getattr(self, name)
         if name == "computer":
             return part is not None and part.offered()
+        if name == "notes":
+            return part is not None and self.notes_offered()
         return part is not None
 
     def execute(self, action: Optional[Action]) -> ActionResult:
@@ -2275,22 +2285,25 @@ class ActionExecutor:
     # Notes
 
     @tool(
-        "Save a note as a text file in the Downloads folder of the computer the user is talking to, for 'make a "
-        "note', 'take a note', 'write this down' and 'write me notes on ...'. When they dictate it, text is their "
-        "own words; when they ask for notes on something, text is plain-text notes of at most about 400 words. Give "
-        "the note a title of a few words. 'Add X to my notes' is the notes list, not this: use manage_list for "
-        "that. A note is only saved as a file: don't also use remember for it, unless the user asks you to "
-        "remember it too. What happened is said for you, so just reply 'Okay.'",
+        "Save a note as a text file in the Downloads folder of a computer, for 'make a note', 'take a note', "
+        "'write this down' and 'write me notes on ...'. When they dictate it, text is their own words; when they "
+        "ask for notes on something, text is plain-text notes of at most about 400 words. Give the note a title "
+        "of a few words. Give where only when the user names the computer ('make a note on my PC'): without it "
+        "the computer they're talking to is used, or the only one which saves notes. 'Add X to my notes' is the "
+        "notes list, not this: use manage_list for that. A note is only saved as a file: don't also use remember "
+        "for it, unless the user asks you to remember it too. What happened is said for you, so just reply "
+        "'Okay.'",
         needs="notes",
         required=["title", "text"],
         title={"type": "string", "description": "What to call the note, in a few words, e.g. 'Bins'."},
         text={"type": "string", "description": "What the note says."},
+        where=ON_A_COMPUTER,
     )
-    def save_note(self, title: str = "", text: str = ""):
+    def save_note(self, title: str = "", text: str = "", where: Optional[str] = None):
         if not isinstance(text, str) or not text.strip():
             return {"success": False, "message": "I didn't catch what to write."}
         try:
-            return self.notes(title if isinstance(title, str) else "", text)
+            return self.notes(title if isinstance(title, str) else "", text, _where(where))
         except Exception as e:
             # The kind of error only: its message could quote the note, whose text is never logged.
             logger.warning(f"Couldn't save a note: {type(e).__name__}")
