@@ -1114,6 +1114,16 @@ def test_a_search_for_a_word_standing_for_something_else_is_claudes(text):
     assert _not_computers(_computer(text, at_pc=False))
 
 
+def test_start_needs_a_whole_name_even_at_the_computer():
+    # Music Maker is the one app with "music" in its name, but "start the music" is still the music's.
+    assert _not_computers(_computer("Start the music."))
+    assert _not_computers(_computer("Start rocket."))
+    assert _computer("Open rocket.") == [Action("open_on_computer", {"name": "rocket"})]
+    assert _computer("Load up rocket.") == [Action("open_on_computer", {"name": "rocket"})]
+    assert _computer("Start Music Maker.") == [Action("open_on_computer", {"name": "music maker"})]
+    assert _computer("Start GTA.", aliases={"gta": "Fortnite"}) == [Action("open_on_computer", {"name": "gta"})]
+
+
 def test_fall_through_untouched():
     for at_pc in (True, False):
         assert _computer("Start a timer for 5 minutes.", at_pc) == [Action("set_timer", {"duration_seconds": 300})]

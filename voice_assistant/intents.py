@@ -511,7 +511,10 @@ class LocalIntents:
             # Assist, below, and "start a timer" was a timer above. A web address first, so an app
             # of its name wins over it, then "close this" before any program called "this".
             (rf"(?:open|go to) (?P<site>[a-z0-9]+(?: [a-z0-9]+)+?){ON_WHERE}", self._open_site),
-            (rf"(?:open|launch|start|load up) (?P<app>.+?){ON_WHERE}", self._open_app),
+            # "Start" needs an app's whole name, or his own for one, so "start the music" at the PC
+            # never opens the one app with "music" in its name.
+            (rf"(?:open|launch|load up) (?P<app>.+?){ON_WHERE}", self._open_app(partly=True)),
+            (rf"start (?P<app>.+?){ON_WHERE}", self._open_app(partly=False)),
             (rf"(?:close|quit|exit) (?:this|that|this window|the window|it){ON_WHERE}", self._close_this),
             (rf"(?:close|quit|exit) (?P<app>.+?){ON_WHERE}", self._close_app),
             # A plain "search for" is the computer's only at one, or with one named: at the Pi it's
@@ -915,12 +918,15 @@ class LocalIntents:
             return None
         return self._computer_action("open_web_page", {"url": site}, where)
 
-    def _open_app(self, found) -> Optional[Dict]:
-        if self.computer is None:
-            return None
-        app, where = self._computer_words(found, "app")
-        return self._computer_action("open_on_computer", {"name": app}, where) \
-            if self.computer.names_app(app, where) else None
+    def _open_app(self, partly: bool):
+        """The handler for opening an app, which says whether the one name with every word said counts."""
+        def handle(found) -> Optional[Dict]:
+            if self.computer is None:
+                return None
+            app, where = self._computer_words(found, "app")
+            return self._computer_action("open_on_computer", {"name": app}, where) \
+                if self.computer.names_app(app, where, partly) else None
+        return handle
 
     def _close_this(self, found) -> Optional[Dict]:
         # The window in front: the PC's when said at it, or a computer's when it's named.

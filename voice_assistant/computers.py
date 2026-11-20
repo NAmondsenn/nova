@@ -265,8 +265,9 @@ class ComputerHooks:
     """
     # Whether the satellite spoken at is a PC, whose bare power words ("go to sleep") are its own.
     at_pc: Callable[[], bool]
-    # Whether some words, with the words for where or None, name an app on the computer meant.
-    names_app: Callable[[str, Optional[str]], bool]
+    # Whether some words, with the words for where or None, name an app on the computer meant - and
+    # whether the one name with every word said counts, at the computer itself (not after "start").
+    names_app: Callable[[str, Optional[str], bool], bool]
     # Whether they name a window open on it.
     names_window: Callable[[str, Optional[str]], bool]
     # Whether, with no computer named, there is one to open things on.
@@ -301,7 +302,7 @@ class ComputerHooks:
             name, _ = brain.computer_meant(satellite, where)
             return name
 
-        def names_app(said: str, where: Optional[str]) -> bool:
+        def names_app(said: str, where: Optional[str], partly: bool = True) -> bool:
             if where:
                 return brain.names_satellite(where)
             name = target(None)
@@ -310,7 +311,7 @@ class ComputerHooks:
             items, aliases = brain.computers.apps(name), brain.rooms.app_names(name)
             if named_exactly(said, [item["name"] for item in items], aliases):
                 return True
-            return name == satellite and match_app(said, items, aliases).item is not None
+            return partly and name == satellite and match_app(said, items, aliases).item is not None
 
         def names_window(said: str, where: Optional[str]) -> bool:
             if where:

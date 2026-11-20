@@ -290,7 +290,7 @@ def test_hooks_name_an_app_or_window_on_the_computer_meant():
     # Several it might be is left to Claude, whose tool asks which; one with every word said is
     # the computer's when said at it, but not from the Pi.
     assert not found.names_app("rocket", None)
-    assert found.names_app("league", None)
+    assert found.names_app("league", None) and not found.names_app("league", None, False)
     assert not hooks(brain, spoken_at="pi", machine="pi").names_app("league", None)
     assert hooks(brain, spoken_at="pi", machine="pi").names_app("rocket league", None)
     # The app called exactly that, or his own name for one, for a web address's name.
