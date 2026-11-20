@@ -3876,6 +3876,21 @@ def test_opening_the_menu_looks_at_the_microphone_afresh(brain, make, pc, monkey
     assert len(made.tray.changes) > told
 
 
+def test_the_state_never_waits_on_the_microphone_lock(brain, make, pc, monkeypatch):
+    # The lock is held across Windows calls, which can take seconds when its thread is stuck;
+    # the tray's thread reads the state, and must stay free to act on a press or a click.
+    monkeypatch.setattr(satellite, "SystemVolume", MutedMicVolume)
+    made = tray_pressable(brain, make)
+    answers = []
+    reader = threading.Thread(target=lambda: answers.append(made._app_state().mic_muted), daemon=True)
+    with made._mic_lock:
+        reader.start()
+        reader.join(1)
+        answered = bool(answers)
+    reader.join(5)
+    assert answered and answers == [True]
+
+
 def test_a_microphone_that_cant_be_read_is_none(brain, make, pc, caplog):
     made = tray_pressable(brain, make)
     made.system_volume.mic_fail = True

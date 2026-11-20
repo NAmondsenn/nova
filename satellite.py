@@ -409,7 +409,8 @@ class Satellite:
         self._mic_look_failed = False
         # Whether Windows' microphone was muted when last looked at - None if it couldn't be -
         # so the tray's state never has to wait on Windows, and what the tray was last told
-        # of it. Both under _mic_lock.
+        # of it. Both written under _mic_lock; the tray's thread reads _mic_seen and
+        # _mic_held_open without it, as the lock is held while Windows is asked.
         self._mic_seen: Optional[bool] = None
         self._mic_told: Optional[bool] = None
         # Nova's orb on the PC's screen, while it listens, thinks and speaks there - only
@@ -1297,11 +1298,15 @@ class Satellite:
         """Whether the tray shows the microphone as muted (see _mic_shown), looking first if the menu is opening."""
         if self.system_volume is None:
             return None
+        if not opening:
+            # Without _mic_lock, which is held across Windows calls that can take seconds if
+            # its thread is stuck, and the tray's thread must stay free for a press or a click.
+            # Two plain reads: a pair caught half way through a change is put right by the
+            # tray_changed which _note_mic's caller makes once it lets the lock go.
+            return self._mic_shown()
+        # Only as the menu opens does the tray wait for Windows, as it means to.
         with self._mic_lock:
-            if opening:
-                changed = self._note_mic(self._look_at_microphone())
-            else:
-                changed = False
+            changed = self._note_mic(self._look_at_microphone())
             shown = self._mic_shown()
         if changed:
             self._tray_changed()
@@ -1310,8 +1315,8 @@ class Satellite:
     def _mic_shown(self) -> Optional[bool]:
         """
         Whether the tray shows Windows' microphone as muted: when it is, or a press is holding
-        it open, as it's muted again when the turn ends. None if it can't be told. Call with
-        _mic_lock held.
+        it open, as it's muted again when the turn ends. None if it can't be told. The tray's
+        state calls this without _mic_lock; anything which changes the answer holds it.
         """
         return True if self._mic_held_open else self._mic_seen
 
