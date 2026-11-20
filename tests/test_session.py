@@ -1297,7 +1297,15 @@ def test_mute_is_kept_per_satellite_and_sent_to_it(brain, connect, make_session)
 def test_volume_named_at_another_satellite_is_changed_and_beeped_there(brain, connect, make_session):
     pi, pc = make_session(connect("bedroom")[0]), make_session(connect("pc")[0])
     named = {"the PC": "pc", "the Mac": "mac"}
-    brain.find_satellite = lambda said: (named[said], None) if said in named else (None, "Which one: the phone?")
+    asked_here = []
+
+    def find_satellite(said, here=None):
+        asked_here.append(here)
+        if said == "this device":
+            return here, None
+        return (named[said], None) if said in named else (None, "Which one: the phone?")
+
+    brain.find_satellite = find_satellite
     brain.session_for = {"bedroom": pi, "pc": pc}.get
     brain.not_connected = lambda name: "Your Mac's off."
     # Itself with none named; else the one named, or what to say.
@@ -1305,6 +1313,9 @@ def test_volume_named_at_another_satellite_is_changed_and_beeped_there(brain, co
     assert pi.actions.device("the PC") == (pc, None)
     assert pi.actions.device("the Mac") == (None, "Your Mac's off.")
     assert pi.actions.device("the phone") == (None, "Which one: the phone?")
+    # "This device" is the one spoken at, as the brain is told.
+    assert pi.actions.device("this device") == (pi, None) and pc.actions.device("this device") == (pc, None)
+    assert set(asked_here) == {"bedroom", "pc"}
 
     beeps = []
     pc.speaker = SimpleNamespace(play_file=lambda path, volume: beeps.append((Path(path).name, volume)),

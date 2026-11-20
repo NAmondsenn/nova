@@ -961,7 +961,8 @@ class Session:
         """
         if not said:
             return self, None
-        name, problem = self.brain.find_satellite(said)
+        # "Here" and "this device" are this one.
+        name, problem = self.brain.find_satellite(said, here=self.satellite.name)
         if name is None:
             return None, problem
         session = self.brain.session_for(name)

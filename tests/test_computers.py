@@ -260,20 +260,18 @@ def test_volume_on_the_computer():
     brain = FakeBrain()
     brain.computer.system_volume = True
     brain.computer.answer = {"level": 40, "muted": False}
-    brain.find_satellite = lambda said: ("pc", None)
     brain.not_connected = lambda name: "Your PC's off."
-    assert at(brain).volume(None, direction="up", step=10) == {"success": True, "message": "Volume 40 percent.",
-                                                               "level": 40, "muted": False}
+    assert at(brain).volume(direction="up", step=10) == {"success": True, "message": "Volume 40 percent.",
+                                                         "level": 40, "muted": False}
     assert brain.computer.asked == [("volume", {"direction": "up", "step": 10})]
     brain.computer.answer = {"level": 40, "muted": True}
-    assert at(brain, "bedroom").volume("the PC", mute=True)["message"] == "Muted."
+    assert at(brain).volume(mute=True)["message"] == "Muted."
     brain.computer.answer = {"level": 40, "muted": False}
-    assert at(brain).volume(None, mute=False)["message"] == "Unmuted."
+    assert at(brain).volume(mute=False)["message"] == "Unmuted."
     # One which can't, or isn't there.
     brain.computer.system_volume = False
-    assert at(brain).volume(None, level=30) == {"success": False,
-                                                "message": "Nathaniel's PC can't change its own volume."}
-    assert at(brain, "bedroom").volume(None, level=30) == {"success": False, "message": "Your PC's off."}
+    assert at(brain).volume(level=30) == {"success": False, "message": "Nathaniel's PC can't change its own volume."}
+    assert at(brain, "bedroom").volume(level=30) == {"success": False, "message": "Your PC's off."}
 
 
 def hooks(brain, spoken_at="pc", machine="pc"):

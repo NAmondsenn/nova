@@ -1582,7 +1582,7 @@ class ActionExecutor:
         else:
             # Nothing to change, so the current level is reported instead.
             return {"success": True, "message": f"The general volume is at {self.volume.percent('general')} percent."}
-        result = self.computer.volume(None, **change)
+        result = self.computer.volume(**change)
         return result if result.get("muted") else self._with_beep("general", result)
 
     def _mute_music(self, mute: bool) -> Dict:

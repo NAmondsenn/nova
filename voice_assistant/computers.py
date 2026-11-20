@@ -516,24 +516,19 @@ class ComputerControl:
         logger.info(f"Closing {window} on the {target} satellite")
         return self._ask(target, computer, self._there(f"Closing {window}.", target), "close", name=window)
 
-    def volume(self, where: Optional[str], **change) -> Dict:
+    def volume(self, **change) -> Dict:
         """
-        Changes the computer's own volume, as Windows' volume keys do.
+        Changes the computer the user is talking to's own volume, as Windows' volume keys do.
+        Another satellite named is changed by its own session's (see ActionExecutor.set_volume).
 
         Args:
-            where: The words for which computer, or None for the one the user is talking to.
             **change: direction and step, level, or mute - as protocol's computer has them.
 
         Returns:
             {"success", "message"} with "level" and "muted" as the computer has them now -
             "Volume 40 percent.", "Muted." or "Unmuted." - or why not.
         """
-        if where:
-            target, problem = self.brain.find_satellite(where)
-            if target is None:
-                return {"success": False, "message": problem}
-        else:
-            target = self.satellite
+        target = self.satellite
         session = self.brain.session_for(target)
         if session is None:
             return {"success": False, "message": self.brain.not_connected(target)}
