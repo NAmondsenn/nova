@@ -127,7 +127,7 @@ These are told to the orb as they happen ("listening", "thinking", "speaking",
 
 - Each frame is made in numpy as premultiplied BGRA: the two auras, the five lobes and
   the core, each a soft elliptical radial gradient, combined the way the clock's CSS
-  does (lobes and core in screen blend over the auras), then the whole faded and scaled
+  really draws them (each lobe laid over the others plainly - every turning orbit is a layer of its own in the browser, so a lobe's screen blend never reaches the others - and the core in screen blend over the lot), then the whole faded and scaled
   for the grow-in and fade-out.
 - The motion follows display.css: each lobe on its own orbit and wobble, with the same
   colours, relative sizes and the per-state speeds (listening, thinking, speaking). It
