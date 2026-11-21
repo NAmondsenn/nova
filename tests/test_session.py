@@ -6168,6 +6168,25 @@ def test_a_failure_hearing_over_a_reply_lets_it_finish_at_full_volume(brain, con
     _ended(session)
 
 
+def test_a_detector_which_cant_be_loaded_lets_the_reply_finish(brain, connect, make_session, monkeypatch):
+    # The second detector, for hearing over a reply, loaded as the first reply in a conversation is said: one
+    # which fails is gone wrong as anything else there is, rather than the reply playing on under an apology.
+    def unloadable(session):
+        def broken(config):
+            raise RuntimeError("no model")
+        monkeypatch.setattr(session_module, "make_detector", broken)
+
+    session, pi = _over_a_reply(brain, connect, make_session, setup=unloadable)
+    reply = pi.messages("play_stream")[1]["id"]
+    time.sleep(0.3)
+    assert not _stopped(pi, reply) and brain.tts.said == ["Okay.", TODAY]
+    pi.say("played", id=reply)
+    # The conversation goes on, with a listen of its own for the next turn.
+    assert wait_for(lambda: len(pi.messages("listen")) >= 3, seconds=TURNS)
+    assert brain.tts.said == ["Okay.", TODAY] and brain.open_conversation.on_at(session.satellite.name)
+    _ended(session)
+
+
 class _NotingCancel(FakeTranscription):
     """Speech-to-text which notes, in order, when it's let go of."""
 

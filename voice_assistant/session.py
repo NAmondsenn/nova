@@ -2512,11 +2512,6 @@ class Session:
         # What the reply comes back up to, read before anything dips it.
         full = playback.volume
         dip_level = _number(self.brain.config.section("conversation").get("dip_level"), DEFAULT_DIP_LEVEL)
-        if self._cut_in_detector is None:
-            self._cut_in_detector = make_detector(self.config)
-        voice = CutIn(self._cut_in_detector, saying)
-        # From the feed's start, which is where CutIn counts frames from.
-        reader = feed.listen(start=0)
         # While a voice has the reply dipped: speech-to-text of it, and where in the feed a turn
         # it starts would start - CUT_IN_PRE_ROLL before it began. Kept here, as CutIn forgets
         # the voice as it says "undip".
@@ -2526,6 +2521,12 @@ class Session:
         cut = None
         try:
             try:
+                # In here, so a detector which fails to load is gone wrong as anything else here is.
+                if self._cut_in_detector is None:
+                    self._cut_in_detector = make_detector(self.config)
+                voice = CutIn(self._cut_in_detector, saying)
+                # From the feed's start, which is where CutIn counts frames from.
+                reader = feed.listen(start=0)
                 while cut is None and not playback.done:
                     # A reply can rightly play for minutes, so this is getting on - see _heard_over.
                     self._moved()
