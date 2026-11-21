@@ -148,13 +148,17 @@ display:
   port: 0
 
 conversation:
+  # The exchanges Nova remembers, outside an open conversation (the settings below), and the
+  # last of an open one's which it keeps when that ends.
   history_length: 5
   # Seconds an exchange is remembered for, once a new conversation starts.
   history_max_age: 300
   # Whether a conversation can be started at all ("let's talk"): Nova then keeps listening
-  # after each reply, so you can answer without the wake word or a press. Off, the start and
-  # end phrases and the tools for it are gone and Nova answers as it always has. Used straight
-  # away.
+  # after each reply, so you can answer without the wake word or a press. Off, the start
+  # phrases, Claude's tool for starting one and the Conversation switch in Home Assistant are
+  # gone, and Nova answers as it always has. One already going is not cut off: it carries on
+  # until it ends in the ordinary ways ("that's all", the switch, a quiet spell), so the
+  # microphone is never left open for good. Used straight away.
   enabled: true
   # The seconds of quiet which end your turn in a conversation, in place of
   # thresholds.silence_duration, as people pause longer between thoughts when they're talking
@@ -167,16 +171,20 @@ conversation:
   # Used straight away.
   longest_turn: 90
   # The minutes of quiet since the last turn Nova answered which end a conversation by
-  # itself, with "I'll leave it there." and the falling sound, so the microphone is never
-  # left open for good. Raise it if Nova gives up while you're still thinking something over;
+  # itself, with "I'll leave it there." and the falling sound (which follows
+  # sounds.listening_enabled), so the microphone is never left open for good. A turn Claude
+  # judges was not meant for Nova, or one heard as nothing, doesn't count as a turn here.
+  # Raise it if Nova gives up while you're still thinking something over;
   # lower it if it stays listening long after you've left the room. From 1 to 30. Used
   # straight away.
   idle_minutes: 5
   # What can cut in on a reply while Nova speaks: voice (your voice) or wake_word_or_press
-  # (only the wake word, or a press at a computer, as at any other time). Your voice is the
-  # quickest, but a television or music nearby can cut Nova off by mistake; the other is
-  # steadier in a noisy room, but needs the wake word or a press to interrupt. Used straight
-  # away.
+  # (only the wake word, or a press at a computer, as at any other time). With voice the
+  # reply turns down at once when you talk and stops once Nova has heard real words from you
+  # (a cough carries on, as does "yeah"; "stop" always stops it). Your voice is the quickest,
+  # but anyone talking nearby counts as you; the other is steadier in a noisy room, but needs
+  # the wake word or a press to interrupt. Voice is only used while nothing else is playing in
+  # the room, and once the satellite's echo canceller is ready. Used straight away.
   talk_over: voice
   # How far a reply turns down when your voice is heard over it, as a share of its volume: 0.3
   # is 30%. Raise it to hear more of the reply while you talk; lower it to hear less. From 0.1
@@ -184,16 +192,20 @@ conversation:
   dip_level: 0.3
   # The model which answers when Nova moves up from the quick one for harder thinking:
   # claude-sonnet-5-5 or claude-opus-5-5. Opus thinks harder, and costs more and is slower.
-  # Used straight away.
+  # Its requests use medium effort and up to 4096 tokens, where the usual model's use low and
+  # 1024. Its prices are usage.bigger_input_price and usage.bigger_output_price: change those
+  # with this. Used straight away.
   bigger_model: claude-sonnet-5-5
   # Whether Nova may move up to the bigger model by itself, saying "Let me think about that."
   # first, when the talk turns to planning or needs real working-out. Off, it moves up only
-  # when you ask it to ("think harder"), which costs less. Used straight away.
+  # when you say so ("think harder", "use the bigger model"), which costs less. Either way it
+  # stays up until you say "quick answers" or the conversation ends. Used straight away.
   switch_itself: true
   # The most exchanges (something you said and Nova's reply) one conversation remembers, in
-  # place of history_length and history_max_age while it lasts; past it the oldest go. Raise it
-  # for a longer memory, at a higher cost for each reply; lower it to spend less. From 20 to
-  # 300. Used straight away.
+  # place of history_length and history_max_age while it lasts; past it the oldest go. When
+  # the conversation ends the last history_length are kept as ordinary history and the rest
+  # let go. Raise it for a longer memory, at a higher cost for each reply; lower it to spend
+  # less. From 20 to 300. Used straight away.
   history_exchanges: 100
 
 # What a computer satellite does with "search for ..." (open a search page on it).
@@ -238,9 +250,11 @@ usage:
   input_price: 0.10
   output_price: 0.50
   # The same for conversation.bigger_model, which prices any call not answered by llm.model.
-  # From the claude-api skill on 21 Nov 2026: Sonnet 5.5, its default, is $2.00 a million input
-  # tokens and $10.00 a million output tokens (Opus 5.5 is $4.00 and $20.00). Change them with
-  # conversation.bigger_model, or when Anthropic does.
+  # Anthropic's published list prices, taken from the claude-api skill on 21 Nov 2026 and
+  # worth a check against its pricing page: Sonnet 5.5, the default, is $2.00 a million input
+  # tokens and $10.00 a million output tokens (Opus 5.5 is $4.00 and $20.00). They don't
+  # follow conversation.bigger_model by themselves, so change them with it, or when Anthropic
+  # does.
   bigger_input_price: 2.00
   bigger_output_price: 10.00
   search_price: 10.0

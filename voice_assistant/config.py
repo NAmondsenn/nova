@@ -98,7 +98,7 @@ LIMITS: Dict[Tuple[str, str], Limit] = {
     # Under a minute Nova would give up between one thought and the next, and over half an hour the microphone
     # would be left open long after he has gone.
     ("conversation", "idle_minutes"): Limit("number", 1, 30),
-    # Under 0.1 a reply would hardly be heard turning down, and over 0.8 the dip wouldn't be noticed.
+    # Under 0.1 a reply would all but go silent while he talks, and over 0.8 the dip wouldn't be noticed.
     ("conversation", "dip_level"): Limit("number", 0.1, 0.8),
     # Under 20 exchanges a long talk would forget its start within minutes, and over 300 each reply would carry
     # more than it is worth paying for.
