@@ -752,14 +752,19 @@ class Satellite:
         with self._mic_lock:
             if not self._mic_held_open:
                 return
-            self._mic_held_open = False
+            # Still held open while Windows is asked, so the tray's state, read without the
+            # lock meanwhile, goes on saying muted; let go only once Windows has answered.
             try:
                 self.system_volume.mute_microphone(True)
+                muted = True
             except Exception as e:
                 logger.warning(f"Couldn't mute Windows' microphone again after the recording ({type(e).__name__})")
-                return
-            changed = self._note_mic(True)
-        logger.info("Windows' microphone is muted again, as it was before the press")
+                muted = False
+            self._mic_held_open = False
+            # One which failed is left on, as last seen, and the tray is told it isn't muted.
+            changed = self._note_mic(True if muted else self._mic_seen)
+        if muted:
+            logger.info("Windows' microphone is muted again, as it was before the press")
         if changed:
             self._tray_changed()
 
@@ -1365,10 +1370,11 @@ class Satellite:
         """Looks at Windows' microphone each MIC_WATCH seconds, so a mute by hand reaches the tray, until stopped."""
         while not self._finished.wait(MIC_WATCH):
             with self._mic_lock:
-                changed = self._note_mic(self._look_at_microphone())
-            # Only once the lock is let go: the tray never waits, but it may call back.
-            if changed:
-                self._tray_changed()
+                self._note_mic(self._look_at_microphone())
+            # Told on every look, not only on a change: the tray skips a look it already shows,
+            # and so a change it missed - read half way through one - is put right within
+            # MIC_WATCH. Only once the lock is let go: the tray never waits, but it may call back.
+            self._tray_changed()
 
     def _shortcut_is_taken(self, taken: bool):
         """

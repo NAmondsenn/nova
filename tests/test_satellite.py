@@ -3832,6 +3832,44 @@ def test_a_press_holding_the_microphone_open_still_counts_as_muted(brain, make, 
     assert made.system_volume.mic_muted is True
 
 
+def test_the_state_stays_muted_while_the_microphone_is_being_muted_again(brain, make, pc, monkeypatch):
+    # A tray refresh while Windows is asked to mute it again must not draw "ready": nothing
+    # after would put it right, as the icon was last told muted all along.
+    monkeypatch.setattr(satellite, "SystemVolume", MutedMicVolume)
+    made = tray_pressable(brain, make)
+    made._pressed()
+    assert wait_for(lambda: made._mic_held_open)
+    volume = made.system_volume
+    inside, release = threading.Event(), threading.Event()
+    mute = volume.mute_microphone
+
+    def slow_mute(muted):
+        inside.set()
+        release.wait(5)
+        return mute(muted)
+
+    volume.mute_microphone = slow_mute
+    again = threading.Thread(target=made._mute_mic_again, daemon=True)
+    again.start()
+    try:
+        assert inside.wait(5)
+        assert made._app_state().mic_muted is True
+    finally:
+        release.set()
+        again.join(5)
+    assert made._app_state().mic_muted is True and not made._mic_held_open
+
+
+def test_the_watch_tells_the_tray_on_every_look(brain, make, pc, monkeypatch):
+    # The tray skips a look it already shows, so telling it each time heals any change missed.
+    monkeypatch.setattr(satellite, "MIC_WATCH", 0.02)
+    made = tray_pressable(brain, make)
+    assert wait_for(lambda: made.tray.changes)
+    told = len(made.tray.changes)
+    assert wait_for(lambda: len(made.tray.changes) >= told + 3)
+    assert made._app_state().mic_muted is False
+
+
 def test_a_mute_by_hand_reaches_the_tray_within_the_watch(brain, make, pc, monkeypatch):
     monkeypatch.setattr(satellite, "MIC_WATCH", 0.02)
     made = tray_pressable(brain, make)
