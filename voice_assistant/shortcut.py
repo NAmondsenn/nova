@@ -51,6 +51,18 @@ def _is_function_key(key: str) -> bool:
     return key.startswith("f") and key[1:].isdigit()
 
 
+def _count(number: int) -> str:
+    """A number of keys as a word, as a sentence says it: "two", "three" - or in figures past nine."""
+    words = ("two", "three", "four", "five", "six", "seven", "eight", "nine")
+    return words[number - 2] if 2 <= number <= 9 else str(number)
+
+
+def _listed(keys) -> str:
+    """Keys named in a sentence: "'a' and 'b'", or "'a', 'b' and 'c'"."""
+    quoted = [f"'{key}'" for key in keys]
+    return ", ".join(quoted[:-1]) + " and " + quoted[-1]
+
+
 def read(text: str) -> Optional[Shortcut]:
     """
     Reads a shortcut from what was typed.
@@ -81,10 +93,14 @@ def read(text: str) -> Optional[Shortcut]:
         if key not in KEYS:
             raise ShortcutError(f"Nova doesn't know the key '{key}'.")
     if len(keys) > 1:
-        raise ShortcutError(f"A shortcut has one key, and that had two: '{keys[0]}' and '{keys[1]}'.")
+        raise ShortcutError(f"A shortcut has one key, and that had {_count(len(keys))}: {_listed(keys)}.")
     # A bare letter would fire whenever he typed it; a function key is rare enough to stand alone.
     if not held and not _is_function_key(keys[0]):
         raise ShortcutError("A shortcut needs Ctrl, Alt, Shift or Win with the key, unless it's a function key.")
+    # Registered, Shift with a letter, digit or the space bar would swallow that capital or
+    # symbol in every program; with Ctrl, Alt or Win as well it's no longer typing.
+    if held == {"shift"} and not _is_function_key(keys[0]):
+        raise ShortcutError("Shift alone with that key would stop you typing it. Add Ctrl, Alt or Win.")
     return Shortcut(tuple(name for name in MODIFIERS if name in held), keys[0])
 
 
@@ -111,7 +127,7 @@ def shown(shortcut: Shortcut) -> str:
         shortcut: The shortcut.
 
     Returns:
-        The text, e.g. "Ctrl+Alt+N", "Ctrl+F5" or "Shift+Space".
+        The text, e.g. "Ctrl+Alt+N", "Ctrl+F5" or "Win+Space".
     """
     key = "Space" if shortcut.key == "space" else shortcut.key.upper()
     return "+".join([name.capitalize() for name in shortcut.modifiers] + [key])

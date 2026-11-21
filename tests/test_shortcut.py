@@ -55,6 +55,28 @@ def test_an_unknown_key_is_named():
     with pytest.raises(ShortcutError) as refused:
         read("ctrl+a+b")
     assert str(refused.value) == "A shortcut has one key, and that had two: 'a' and 'b'."
+    with pytest.raises(ShortcutError) as refused:
+        read("ctrl+a+b+c")
+    assert str(refused.value) == "A shortcut has one key, and that had three: 'a', 'b' and 'c'."
+    with pytest.raises(ShortcutError) as refused:
+        read("ctrl+a+b+c+d")
+    assert str(refused.value) == "A shortcut has one key, and that had four: 'a', 'b', 'c' and 'd'."
+
+
+@pytest.mark.parametrize("typed", ["shift+a", "shift+1", "shift+space", "Shift + Shift + A"])
+def test_shift_alone_with_a_key_that_types_is_refused(typed):
+    # Registered, it would swallow that capital or symbol everywhere.
+    with pytest.raises(ShortcutError) as refused:
+        read(typed)
+    assert str(refused.value) == "Shift alone with that key would stop you typing it. Add Ctrl, Alt or Win."
+
+
+def test_shift_with_a_function_key_or_another_modifier_is_allowed():
+    assert read("shift+f5") == Shortcut(("shift",), "f5")
+    assert read("ctrl+shift+a") == Shortcut(("ctrl", "shift"), "a")
+    assert read("alt+shift+1") == Shortcut(("alt", "shift"), "1")
+    assert read("win+shift+space") == Shortcut(("shift", "win"), "space")
+    assert read("ctrl+alt+a") == Shortcut(("ctrl", "alt"), "a")
 
 
 @pytest.mark.parametrize("not_text", [None, 5])
@@ -68,5 +90,6 @@ def test_shown():
     assert shown(read("ctrl+alt+n")) == "Ctrl+Alt+N"
     assert shown(read("ctrl+f5")) == "Ctrl+F5"
     assert shown(read("f5")) == "F5"
-    assert shown(read("shift+space")) == "Shift+Space"
+    assert shown(read("shift+f5")) == "Shift+F5"
+    assert shown(read("ctrl+shift+space")) == "Ctrl+Shift+Space"
     assert shown(read("win+space")) == "Win+Space"
