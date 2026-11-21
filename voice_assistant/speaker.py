@@ -77,7 +77,15 @@ class Playback:
             sample_rate: The speaker's rate, for working out how long it lasts.
             streaming: True if more of it is still to come - see Speaker.play_stream.
         """
-        self.volume = volume
+        # Guards the volume and any fade in progress, which the speaker's thread moves
+        # on a sample at a time while another thread may be changing them - see _gain.
+        self._volume_lock = threading.Lock()
+        self._volume = volume
+        # A fade in progress: where it is going, the samples still to play of it, and
+        # how much each one changes the volume by.
+        self._fade_target = volume
+        self._fade_left = 0
+        self._fade_step = 0.0
         self.kind = kind
         self.sample_rate = sample_rate
         self.streaming = streaming
@@ -97,6 +105,63 @@ class Playback:
         self._finished = threading.Event()
         # When the last of it will have actually left the speaker - see _finish.
         self._heard_by = 0.0
+
+    @property
+    def volume(self) -> float:
+        """How loud it is now, from 0 to 1 - part way along, while it is fading."""
+        with self._volume_lock:
+            return self._volume
+
+    @volume.setter
+    def volume(self, volume: float):
+        """Jumps to the volume, which ends any fade."""
+        with self._volume_lock:
+            self._volume = volume
+            self._fade_target = volume
+            self._fade_left = 0
+
+    def fade_to(self, volume: float, seconds: float):
+        """
+        Moves the volume to a new level in a straight line, a sample at a time, so
+        it doesn't click as a jump would. Starts from the volume it has now, which is
+        part way along if an earlier fade hasn't finished, and ends exactly on the
+        target. It is played, not waited for, so a paused one doesn't move on.
+
+        Args:
+            volume: The level to end on, from 0 to 1.
+            seconds: How long it takes. Nothing or less is a jump.
+        """
+        volume = max(0.0, min(1.0, float(volume)))
+        samples = int(round(seconds * self.sample_rate)) if seconds > 0 else 0
+        if samples < 1:
+            self.volume = volume
+            return
+        with self._volume_lock:
+            self._fade_target = volume
+            self._fade_left = samples
+            self._fade_step = (volume - self._volume) / samples
+
+    def _gain(self, count: int):
+        """
+        What the next so many samples are multiplied by, moving a fade on. Only ever
+        called from the speaker's own thread.
+
+        Args:
+            count: How many samples are about to be played.
+
+        Returns:
+            The volume, or for samples taken during a fade one for each of them.
+        """
+        with self._volume_lock:
+            if not self._fade_left:
+                return self._volume
+            fading = min(count, self._fade_left)
+            gain = np.full(count, self._fade_target, dtype=np.float32)
+            gain[:fading] = self._volume + self._fade_step * np.arange(fading)
+            self._fade_left -= fading
+            # Set rather than added up, so a fade ends exactly on its target.
+            self._volume = self._volume + self._fade_step * fading if self._fade_left else self._fade_target
+            return gain
 
     @property
     def paused(self) -> bool:
@@ -344,7 +409,10 @@ class Speaker:
                 filled = 0
                 for part in playback._take(frames):
                     # Mono goes to both sides.
-                    mix[filled:filled + len(part)] += (part[:, None] if part.ndim == 1 else part) * playback.volume
+                    gain = playback._gain(len(part))
+                    if not np.isscalar(gain):
+                        gain = gain[:, None]
+                    mix[filled:filled + len(part)] += (part[:, None] if part.ndim == 1 else part) * gain
                     filled += len(part)
                 sounded = sounded or filled > 0
                 # One still streaming in which has caught up with what's arrived

@@ -70,6 +70,115 @@ def test_a_sound_is_played_at_its_volume(streams):
     assert not np.any(streams[0].pull())
 
 
+def pulled(stream, total, frames=480):
+    """Everything the speaker is given for so many samples, in buffers of its own size."""
+    return np.concatenate([stream.pull(frames) for _ in range(total // frames)])
+
+
+def test_a_fade_ramps_without_a_jump(streams):
+    # A volume which jumps clicks, so the dip when the user talks over a reply is a ramp.
+    # 0.05 s is 2400 samples, five buffers, so this also crosses the callback's boundaries.
+    speaker = Speaker(sample_rate=RATE)
+    playback = speaker.play(np.ones(RATE))
+    playback.fade_to(0.3, 0.05)
+    fade = round(0.05 * RATE)
+
+    # In buffers which don't divide the fade, so it ends part way through one.
+    out = pulled(streams[0], 4500, frames=500)
+
+    assert out[0] == pytest.approx(1.0)
+    assert np.all(np.diff(out[:fade + 1]) <= 1e-6)
+    assert np.max(np.abs(np.diff(out))) <= 0.7 / fade + 1e-5
+    # It is on the target after exactly the fade's samples, and stays there.
+    assert out[fade] == pytest.approx(0.3, abs=1e-6)
+    assert out[fade - 1] > 0.3 + 0.5 / fade
+    assert np.allclose(out[fade:], 0.3, atol=1e-6)
+    assert playback.volume == 0.3
+
+
+def test_a_fade_back_up_returns_to_the_first_volume(streams):
+    speaker = Speaker(sample_rate=RATE)
+    playback = speaker.play(np.ones(RATE))
+    playback.fade_to(0.3, 0.05)
+    pulled(streams[0], 4800)
+
+    playback.fade_to(1.0, 0.05)
+    out = pulled(streams[0], 4800)
+
+    assert out[0] == pytest.approx(0.3, abs=1e-6)
+    assert np.all(np.diff(out) >= -1e-6)
+    assert np.max(np.abs(np.diff(out))) <= 0.7 / 2400 + 1e-5
+    assert np.all(out[2400:] == 1.0)
+    assert playback.volume == 1.0
+
+
+def test_a_fade_which_is_changed_part_way_starts_from_where_it_has_got_to(streams):
+    speaker = Speaker(sample_rate=RATE)
+    playback = speaker.play(np.ones(RATE))
+    playback.fade_to(0.0, 0.1)
+    first = pulled(streams[0], 2400)
+    assert first[-1] == pytest.approx(0.5, abs=1e-3)
+
+    playback.fade_to(1.0, 0.05)
+    second = pulled(streams[0], 4800)
+
+    # The next sample carries on, a step on from the last one, rather than going back to the start.
+    assert second[0] == pytest.approx(0.5, abs=1e-6)
+    assert abs(second[0] - first[-1]) <= 1 / 4800 + 1e-6
+    assert np.all(np.diff(second) >= -1e-6)
+    assert np.all(second[2400:] == 1.0)
+
+
+def test_setting_the_volume_during_a_fade_jumps_and_ends_it(streams):
+    speaker = Speaker(sample_rate=RATE)
+    playback = speaker.play(np.ones(RATE))
+    playback.fade_to(0.0, 0.1)
+    pulled(streams[0], 960)
+
+    playback.volume = 0.8
+
+    assert np.allclose(pulled(streams[0], 4800), 0.8)
+    assert playback.volume == 0.8
+
+
+def test_a_fade_of_no_time_is_a_jump(streams):
+    speaker = Speaker(sample_rate=RATE)
+    playback = speaker.play(np.ones(RATE))
+    playback.fade_to(0.4, 0)
+    assert np.allclose(streams[0].pull(480), 0.4)
+    playback.fade_to(0.9, -1)
+    assert np.allclose(streams[0].pull(480), 0.9)
+
+
+def test_a_fade_is_heard_by_the_echo_canceller_as_it_is_played(streams):
+    # What the microphone hears is the faded sound, so that is what it has to take out.
+    class Reference:
+        def __init__(self):
+            self.heard = []
+
+        def played(self, samples, when):
+            self.heard.append(samples.copy())
+
+    reference = Reference()
+    speaker = Speaker(sample_rate=RATE, echo_reference=reference)
+    playback = speaker.play(np.ones(RATE))
+    playback.fade_to(0.3, 0.05)
+
+    out = pulled(streams[0], 4800)
+
+    assert np.allclose(np.concatenate(reference.heard), out)
+    assert reference.heard[-1][-1] == pytest.approx(0.3, abs=1e-6)
+
+
+def test_a_fade_reaches_stereo_music_too(streams):
+    speaker = Speaker(sample_rate=RATE)
+    playback = speaker.play(np.ones((RATE, 2), dtype=np.float32))
+    playback.fade_to(0.5, 0.01)
+    out = np.concatenate([streams[0].pull(480, both=True) for _ in range(2)])
+    assert out.shape == (960, 2) and np.array_equal(out[:, 0], out[:, 1])
+    assert out[0, 0] == pytest.approx(1.0) and np.allclose(out[480:], 0.5, atol=1e-6)
+
+
 def test_sounds_playing_together_are_mixed(streams):
     speaker = Speaker(sample_rate=RATE)
     speaker.play(np.full(480, 0.25))

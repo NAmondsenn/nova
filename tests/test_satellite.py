@@ -220,8 +220,13 @@ class FakePlayback:
         self.position = 0
         self.pieces = []
         self.filename = None
+        # The fades it was asked for, as (volume, seconds).
+        self.fades = []
         self.__dict__.update(details)
         self._finished = threading.Event()
+
+    def fade_to(self, volume, seconds):
+        self.fades.append((volume, seconds))
 
     @property
     def done(self):
@@ -1203,6 +1208,31 @@ def test_a_stream_from_the_brain_plays_and_is_reported_done(brain, make):
     brain.say("set_playback", id="music-1", paused=False)
     time.sleep(0.05)
     assert music.paused
+
+
+def test_set_playback_without_a_fade_jumps_as_before(brain, make):
+    made = make()
+    assert wait_for(lambda: brain.hellos)
+    brain.say("play_stream", id="reply-1", rate=22050, channels=1, volume=1.0, kind="reply", paused=False)
+    assert wait_for(lambda: made.speaker.streams())
+    (reply,) = made.speaker.streams()
+
+    brain.say("set_playback", id="reply-1", volume=0.3)
+    assert wait_for(lambda: reply.volume == 0.3)
+    assert reply.fades == []
+
+    # A fade which isn't a number is as good as none, and a fade is only to a volume.
+    for fade in ("slow", True, None, float("inf")):
+        brain.say("set_playback", id="reply-1", volume=0.6, fade=fade)
+        assert wait_for(lambda: reply.volume == 0.6)
+        brain.say("set_playback", id="reply-1", volume=0.2)
+        assert wait_for(lambda: reply.volume == 0.2)
+    assert reply.fades == []
+
+    brain.say("set_playback", id="reply-1", volume=0.9, fade=0.05)
+    assert wait_for(lambda: reply.fades)
+    assert reply.fades == [(0.9, 0.05)]
+    assert reply.volume == 0.2
 
 
 def test_the_brain_can_stop_one_playback_and_leave_the_rest_of_its_kind(brain, make):

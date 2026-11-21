@@ -754,6 +754,21 @@ def test_stopping_a_recording_the_satellite_ended_itself_leaves_its_next_one_goi
     assert ends_at_once(later)
 
 
+def test_the_brain_sends_the_fade(pair):
+    satellite, fake, serving = pair
+    song = np.zeros((100, 2), dtype=np.float32)
+    playback = satellite.speaker.play_stream(iter([song]), kind="reply")
+    assert wait_for(lambda: fake.messages("play_stream"))
+
+    playback.fade_to(0.3, 0.05)
+
+    assert wait_for(lambda: fake.messages("set_playback"))
+    assert fake.messages("set_playback") == [{"type": "set_playback", "id": playback.id, "volume": 0.3,
+                                              "fade": 0.05}]
+    # The brain's own record is where it is going.
+    assert playback.volume == 0.3
+
+
 def test_pausing_music_tells_the_satellite(pair):
     satellite, fake, serving = pair
     song = np.zeros((100, 2), dtype=np.float32)

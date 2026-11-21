@@ -1210,7 +1210,14 @@ class Satellite:
         if "paused" in message:
             playing.playback.paused = bool(message["paused"])
         if "volume" in message:
-            playing.playback.volume = max(0.0, min(1.0, float(message["volume"])))
+            volume = max(0.0, min(1.0, float(message["volume"])))
+            fade = message.get("fade")
+            # A fade which makes no sense, or from an older brain none at all, is a jump -
+            # as it always was.
+            if isinstance(fade, (int, float)) and not isinstance(fade, bool) and math.isfinite(fade):
+                playing.playback.fade_to(volume, fade)
+            else:
+                playing.playback.volume = volume
 
     def _stop(self, message: Dict, payload: bytes):
         # One of the brain's playbacks by its id - a volume beep, say, without the reply

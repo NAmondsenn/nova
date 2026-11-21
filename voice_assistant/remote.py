@@ -171,6 +171,23 @@ class RemotePlayback:
             if not self.done:
                 self._speaker._send("set_playback", id=self.id, volume=self._volume)
 
+    def fade_to(self, volume: float, seconds: float):
+        """
+        Has the satellite move the volume to a new level in a straight line rather than
+        jump to it, which would click. An older satellite doesn't know of fades and
+        jumps, as the setter does.
+
+        Args:
+            volume: The level to end on, from 0 to 1.
+            seconds: How long it takes. Nothing or less is a jump.
+        """
+        with self._setting:
+            # What it will be once the fade is done, as the setter records, so reading it
+            # straight after gives the target.
+            self._volume = max(0.0, min(1.0, float(volume)))
+            if not self.done:
+                self._speaker._send("set_playback", id=self.id, volume=self._volume, fade=float(seconds))
+
     @property
     def duration(self) -> float:
         """
