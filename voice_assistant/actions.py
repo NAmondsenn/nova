@@ -428,7 +428,7 @@ class ActionExecutor:
                  device: Optional[Callable[[Optional[str]], Tuple[Optional[Any], Optional[str]]]] = None,
                  at_pc: Callable[[], bool] = lambda: False,
                  pc_name: Callable[[], Optional[str]] = lambda: None,
-                 microphone: Optional[Callable[[bool, Optional[str]], Dict]] = None):
+                 microphone: Optional[Callable[[bool, Optional[str]], Dict]] = None, approvals=None):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -506,6 +506,8 @@ class ActionExecutor:
             microphone: Turns a satellite's listening off or on - given True to mute, and the words
                 for which satellite as the user said them, or None - and gives what to say: see
                 Session._mute_microphone. None if there's no satellite to mute.
+            approvals: The brain's Approvals, which a big action asks before it's done - see
+                approvals.py. None if there's no way to ask, so a big action is never done.
         """
         self.music = music
         self.clock = clock
@@ -541,6 +543,7 @@ class ActionExecutor:
         self.at_pc = at_pc
         self.pc_name = pc_name
         self.microphone = microphone
+        self.approvals = approvals
         # The music's level before "mute", for "unmute" to put it back to - see _mute_music.
         self._level_before_mute: Optional[int] = None
         # What was last asked, and what the assistant said - or the last alert, and

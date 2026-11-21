@@ -339,6 +339,7 @@ class Session:
                                       mover=lambda said: brain.move_music(self.satellite.name, said),
                                       elsewhere=self._elsewhere,
                                       spoken_name=lambda name: brain.spoken_name(name),
+                                      approvals=brain.approvals,
                                       settled=lambda: self.music.wait(),
                                       notes=self._save_note, notes_offered=lambda: bool(brain.notes_saved_on()),
                                       computer=ComputerControl(brain, satellite.name), device=self._device,
