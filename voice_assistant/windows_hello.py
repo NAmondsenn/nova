@@ -13,8 +13,10 @@ the approvals plan) hasn't been run. So this tries, in turn, what should work: f
 interop which asks for a window of the satellite's own, a hidden one made here
 (IUserConsentVerifierInterop::RequestVerificationForWindowAsync), and if that can't be
 had or fails, the plain RequestVerificationAsync, which a desktop program with no window
-may show behind other windows. Which of them brings the prompt to the front, and whether
-cancelling one closes it, is for the deploy's hand check. If neither works, the PC's
+may show behind other windows. Which of them brings the prompt to the front is for the
+deploy's hand check. Cancelling the prompt's operation was seen on 21 November to leave
+the prompt on the screen, so a withdrawn prompt's own window - one of the credential UI's
+that came with it - is closed too, as its X would. If neither works, the PC's
 "Can approve" is switched off on the settings page and the phone approves alone.
 
 It goes through winrt, the Python projection of Windows' own API, which is only on the
@@ -25,12 +27,13 @@ approve.
 
 import collections
 import logging
+import ntpath
 import queue
 import sys
 import threading
 import time
 import uuid
-from typing import Dict, Optional
+from typing import Dict, FrozenSet, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -97,14 +100,40 @@ class _Winrt:
         self.UserConsentVerifierAvailability = UserConsentVerifierAvailability
         self.UserConsentVerificationResult = UserConsentVerificationResult
         self._window: Optional["_OwnerWindow"] = None
+        self._broker: Optional["_BrokerWindows"] = None
 
     def set_up(self):
-        """Makes the hidden window the prompts are asked for - or, if it can't be, leaves the plain call to be used."""
+        """
+        Makes the hidden window the prompts are asked for - or, if it can't be, leaves the
+        plain call to be used - and what finds the prompt's own windows, to close them.
+        """
         try:
             self._window = _OwnerWindow(self.UserConsentVerifier)
         except Exception as e:
             logger.info(f"Windows Hello is asked without a window of the satellite's own ({type(e).__name__})")
             self._window = None
+        try:
+            self._broker = _BrokerWindows()
+        except Exception as e:
+            logger.info(f"Windows Hello's prompts can't be closed by their window ({type(e).__name__})")
+            self._broker = None
+
+    def prompt_windows(self) -> FrozenSet[int]:
+        """
+        The visible top-level windows of Windows' credential UI, which shows Hello's prompt.
+
+        Raises:
+            OSError: They can't be found here.
+        """
+        if self._broker is None:
+            raise OSError("no way to find Windows Hello's prompt")
+        return self._broker.windows()
+
+    def close_window(self, hwnd: int) -> bool:
+        """Asks one of prompt_windows' windows to close, as its own X would. Returns whether it was asked."""
+        if self._broker is None:
+            return False
+        return self._broker.close(hwnd)
 
     def availability(self) -> str:
         """Hello's availability's name, e.g. "AVAILABLE"."""
@@ -330,6 +359,84 @@ class _OwnerWindow:
         self._factory = None
 
 
+class _BrokerWindows:
+    """
+    The windows of CredentialUIBroker.exe, the Windows process which shows Hello's prompt:
+    found, and closed with WM_CLOSE, as cancelling the prompt's operation leaves it on the
+    screen (seen on the PC on 21 November). Nothing of any other process is ever touched.
+    """
+
+    EXE = "credentialuibroker.exe"
+    WM_CLOSE = 0x0010
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+    def __init__(self):
+        import ctypes
+        from ctypes import wintypes
+
+        self._ctypes = ctypes
+        self._wintypes = wintypes
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        HWND, DWORD, BOOL = wintypes.HWND, wintypes.DWORD, wintypes.BOOL
+        self._each = ctypes.WINFUNCTYPE(BOOL, HWND, wintypes.LPARAM)
+        for function, arguments, result in (
+                (user32.EnumWindows, [self._each, wintypes.LPARAM], BOOL),
+                (user32.IsWindowVisible, [HWND], BOOL),
+                (user32.GetWindowThreadProcessId, [HWND, ctypes.POINTER(DWORD)], DWORD),
+                (user32.PostMessageW, [HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM], BOOL),
+                (kernel32.OpenProcess, [DWORD, BOOL, DWORD], wintypes.HANDLE),
+                (kernel32.QueryFullProcessImageNameW, [wintypes.HANDLE, DWORD, wintypes.LPWSTR,
+                                                       ctypes.POINTER(DWORD)], BOOL),
+                (kernel32.CloseHandle, [wintypes.HANDLE], BOOL)):
+            function.argtypes = arguments
+            function.restype = result
+        self._user32, self._kernel32 = user32, kernel32
+
+    def _pid(self, hwnd) -> int:
+        pid = self._wintypes.DWORD()
+        self._user32.GetWindowThreadProcessId(hwnd, self._ctypes.byref(pid))
+        return pid.value
+
+    def _is_broker(self, pid: int) -> bool:
+        handle = self._kernel32.OpenProcess(self.PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            size = self._wintypes.DWORD(32768)
+            buffer = self._ctypes.create_unicode_buffer(size.value)
+            if not self._kernel32.QueryFullProcessImageNameW(handle, 0, buffer, self._ctypes.byref(size)):
+                return False
+            return ntpath.basename(buffer.value).lower() == self.EXE
+        finally:
+            self._kernel32.CloseHandle(handle)
+
+    def windows(self) -> FrozenSet[int]:
+        found = []
+        brokers: Dict[int, bool] = {}
+
+        def each(hwnd, _):
+            try:
+                if hwnd and self._user32.IsWindowVisible(hwnd):
+                    pid = self._pid(hwnd)
+                    if pid not in brokers:
+                        brokers[pid] = self._is_broker(pid)
+                    if brokers[pid]:
+                        found.append(hwnd)
+            except Exception:
+                pass
+            return True
+
+        self._user32.EnumWindows(self._each(each), 0)
+        return frozenset(found)
+
+    def close(self, hwnd) -> bool:
+        # Looked at again just before, so a window gone and its handle reused is never closed.
+        if not self._user32.IsWindowVisible(hwnd) or not self._is_broker(self._pid(hwnd)):
+            return False
+        return bool(self._user32.PostMessageW(hwnd, self.WM_CLOSE, 0, 0))
+
+
 def _short(id: str) -> str:
     """Enough of an approval's id ("approval-" and the request's) to tell it apart in the log."""
     return id.removeprefix("approval-")[:8]
@@ -486,8 +593,16 @@ class WindowsHello:
         try:
             if ask.done.is_set():
                 return
+            # The credential UI's windows before the prompt, so only one which came with it
+            # is ever closed; None if they can't be found, when none is.
+            try:
+                before: Optional[FrozenSet[int]] = self._backend.prompt_windows()
+            except Exception:
+                before = None
             operation = self._backend.request(ask.message)
             cancelled_at = None
+            # The windows asked to close; 0, never a window, once a failure to is logged.
+            closed: Set[int] = set()
             while True:
                 with self._lock:
                     cancel = ask.cancelled or self._closing
@@ -497,10 +612,13 @@ class WindowsHello:
                         operation.cancel()
                     except Exception as e:
                         logger.info(f"Windows Hello's prompt couldn't be cancelled ({type(e).__name__})")
+                if cancelled_at is not None and before is not None:
+                    self._close_prompt(before, closed)
                 result = self._backend.wait(operation, POLL)
                 if result is not None:
                     break
                 if cancelled_at is not None and time.monotonic() - cancelled_at > CANCEL_WAIT:
+                    # Given up on, so the next prompt isn't held behind it.
                     logger.warning("Windows Hello's prompt didn't go when cancelled, so it's left")
                     return
             logger.info(f"Windows Hello's answer to approval {_short(ask.id)}: {result}")
@@ -517,6 +635,30 @@ class WindowsHello:
             with self._lock:
                 self._asks.pop(ask.id, None)
             ask.done.set()
+
+    def _close_prompt(self, before: FrozenSet[int], closed: Set[int]):
+        """
+        Closes the credential UI's windows which came with the prompt being withdrawn, as
+        cancelling its operation leaves it on the screen. Best effort, on the owning
+        thread: looked for at each poll until the prompt goes, each window asked once.
+
+        Args:
+            before: The credential UI's windows before the prompt was asked.
+            closed: Those already asked to close, added to here.
+        """
+        try:
+            new = self._backend.prompt_windows() - before - closed
+            for hwnd in new:
+                closed.add(hwnd)
+                if self._backend.close_window(hwnd):
+                    logger.info("Windows Hello's prompt was withdrawn, so its window was closed")
+                else:
+                    logger.info("Windows Hello's prompt was withdrawn, but its window wouldn't close")
+        except Exception as e:
+            # Once for the prompt, not at every look.
+            if 0 not in closed:
+                logger.info(f"Windows Hello's withdrawn prompt couldn't be closed ({type(e).__name__})")
+            closed.add(0)
 
     def close(self):
         """Ends every approval waiting with no answer, cancels the one showing, and lets the owning thread go."""

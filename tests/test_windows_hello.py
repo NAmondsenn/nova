@@ -47,6 +47,11 @@ class FakeBackend:
         self.operations = []
         self.threads = set()
         self.closed = False
+        # The credential UI's windows on the screen: one of something else's already, and
+        # each prompt adds its own. And those asked to close.
+        self.broker = {3}
+        self.next_window = 7
+        self.closed_windows = []
 
     def _called(self):
         self.threads.add(threading.current_thread().name)
@@ -64,7 +69,19 @@ class FakeBackend:
             raise self.error
         operation = FakeOperation(message, self.result)
         self.operations.append(operation)
+        self.broker.add(self.next_window)
+        self.next_window += 1
         return operation
+
+    def prompt_windows(self):
+        self._called()
+        return frozenset(self.broker)
+
+    def close_window(self, hwnd):
+        self._called()
+        self.closed_windows.append(hwnd)
+        self.broker.discard(hwnd)
+        return True
 
     def wait(self, operation, seconds):
         self._called()
@@ -186,6 +203,60 @@ def test_cancel_drops_a_queued_one_and_cancels_the_one_showing():
     backend.go.set()
     time.sleep(0.3)
     assert len(backend.operations) == 1
+    hello.close()
+
+
+def test_a_withdrawn_prompt_has_its_own_window_closed():
+    # Cancelling the operation left the prompt on the screen (21 November), so its window
+    # is closed too - only the one which came with it, never another of the credential UI's.
+    backend = FakeBackend(held=True)
+    hello = WindowsHello(backend)
+    answers = []
+    showing = asked_in_thread(hello, "approval-1", "First", answers)
+    assert wait_for(lambda: len(backend.operations) == 1)
+    time.sleep(0.2)
+    assert backend.closed_windows == []
+    hello.cancel("approval-1")
+    showing.join(5)
+    assert wait_for(lambda: backend.closed_windows == [7])
+    assert 3 in backend.broker
+    # One answered as asked is never closed by Nova.
+    backend.go.set()
+    assert hello.ask("approval-2", "Second") is True
+    hello.close()
+    assert backend.closed_windows == [7] and backend.threads == {"windows-hello"}
+
+
+def test_a_prompt_which_wont_go_doesnt_hold_up_the_next(monkeypatch):
+    monkeypatch.setattr(windows_hello, "CANCEL_WAIT", 0.3)
+
+    class Stuck(FakeBackend):
+        """Neither cancelling the operation nor closing its window takes the prompt down."""
+
+        def wait(self, operation, seconds):
+            if operation.message == "First":
+                time.sleep(seconds)
+                return None
+            return super().wait(operation, seconds)
+
+        def close_window(self, hwnd):
+            self.closed_windows.append(hwnd)
+            return False
+
+    backend = Stuck(held=True)
+    hello = WindowsHello(backend)
+    answers = []
+    first = asked_in_thread(hello, "approval-1", "First", answers)
+    assert wait_for(lambda: len(backend.operations) == 1)
+    second = asked_in_thread(hello, "approval-2", "Second", answers)
+    hello.cancel("approval-1")
+    first.join(5)
+    # Given up on after the short wait, and the next shows.
+    assert wait_for(lambda: len(backend.operations) == 2)
+    assert backend.closed_windows == [7]
+    backend.go.set()
+    second.join(5)
+    assert ("approval-2", True) in answers
     hello.close()
 
 
