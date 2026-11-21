@@ -245,6 +245,15 @@ class FakeSpeaker:
         self.playing = []
         self.silenced = set()
         self.closed = False
+        # How many are holding the PC's speaker open - see Speaker.hold.
+        self.holds = 0
+
+    def hold(self):
+        self.holds += 1
+
+    def release(self):
+        assert self.holds > 0
+        self.holds -= 1
 
     def _start(self, playback):
         if playback.kind in self.silenced:
@@ -344,7 +353,7 @@ def make(tmp_path, monkeypatch, make_config):
     monkeypatch.setattr(satellite, "Speaker", FakeSpeaker)
     monkeypatch.setattr(satellite, "WakeWordDetector", FakeWake)
     monkeypatch.setattr(satellite, "PressListener", FakePress)
-    monkeypatch.setattr(satellite, "make_echo_canceller", lambda config, rate: None)
+    monkeypatch.setattr(satellite, "make_echo_canceller", lambda config, rate, engaged=True: None)
     # A Pi, as most of these tests are of one, and never the real machine's Downloads folder.
     monkeypatch.setattr(satellite, "machine_kind", lambda: "pi")
     monkeypatch.setattr(satellite, "downloads_folder", lambda: None)
@@ -1332,7 +1341,8 @@ def test_the_away_report_is_sent_on_connecting(brain, make, tmp_path):
     assert brain.hellos == [{"name": "bedroom", "hostname": socket.gethostname(), "sample_rate": 48000,
                              "unclean": True, "speaker": None,
                              "push_to_talk": False, "machine": "pi", "saves_notes": False,
-                             "media_controls": False, "opens": False, "system_volume": False}]
+                             "media_controls": False, "opens": False, "system_volume": False,
+                             "conversations": True}]
 
 
 def test_the_satellite_tells_the_brain_its_spotify_speaker(brain, make):
@@ -4483,3 +4493,437 @@ def test_the_tray_is_closed_after_the_link_and_before_the_speaker(brain, make):
     made.stop()
     assert wait_for(lambda: made.exited)
     assert order == ["link", "tray", "speaker"]
+
+
+# Conversations - see docs/superpowers/specs/2026-11-21-conversation-mode-design.md
+
+class FakeEcho:
+    """
+    Stands in for the echo canceller: engaged or not, and lined up when the test says. As the
+    real one, engaging it starts it from nothing, and it is only ready while it is engaged.
+    """
+
+    def __init__(self, engaged=True):
+        self._engaged = engaged
+        # Each time it was switched, in order - starting as it was made.
+        self.switched = []
+        # Whether the gap between the speaker and the microphone has been found, which its
+        # own thread does some seconds after it starts.
+        self.lined_up = False
+        self.played = types.SimpleNamespace()
+
+    @property
+    def engaged(self):
+        return self._engaged
+
+    @engaged.setter
+    def engaged(self, on):
+        self._engaged = on
+        self.switched.append(on)
+        self.lined_up = False
+
+    @property
+    def ready(self):
+        return self._engaged and self.lined_up
+
+
+@pytest.fixture
+def echoes(make, monkeypatch):
+    """Has satellites make a FakeEcho, and gives the list of those made."""
+    made = []
+
+    def make_one(config, rate, engaged=True):
+        made.append(FakeEcho(engaged))
+        return made[-1]
+
+    monkeypatch.setattr(satellite, "make_echo_canceller", make_one)
+    return made
+
+
+def audio_sent(brain, since=0):
+    """How many samples of audio the brain has had, from the piece after `since` pieces."""
+    return sum(len(piece) for piece in brain.recordings()[since:])
+
+
+def conversation(brain, on=True):
+    brain.say("conversation", on=on)
+
+
+def start_conversation(brain, made):
+    """The brain says a conversation has started, and the satellite has its devices open for it."""
+    conversation(brain)
+    assert wait_for(lambda: made.microphone.holds == 1 and made.speaker.holds == 1)
+
+
+def open_listen(brain, made, recording="listen-1"):
+    """The brain asks for an open recording, and the satellite is sending it."""
+    brain.say("listen", recording=recording, open=True)
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+
+
+def test_an_open_recording_runs_past_the_cap(brain, make):
+    made = make()
+    assert wait_for(lambda: connected(made) and made.wake.listening)
+    # An ordinary answer ends at the cap.
+    brain.say("listen", recording="listen-1")
+    assert wait_for(lambda: brain.messages("audio_end"))
+    assert brain.messages("audio_end") == [{"type": "audio_end", "reason": "limit"}]
+    assert audio_sent(brain) == satellite.LIMIT_SECONDS * RATE
+    sent = len(brain.recordings())
+    assert wait_for(lambda: made._recording is None)
+
+    # An open one goes on past that, and past the most one may ever be told to last.
+    brain.say("listen", recording="listen-2", open=True)
+    assert wait_for(lambda: audio_sent(brain, sent) >= 45 * RATE, seconds=15)
+    assert len(brain.messages("audio_end")) == 1
+    assert made._recording is not None and not made._recording.is_set()
+    brain.say("stop_listening", recording="listen-2")
+    assert wait_for(lambda: made._recording is None)
+    # Ended by the brain, which is told nothing of it: it said so.
+    assert len(brain.messages("audio_end")) == 1
+
+
+def test_an_open_listen_stops_nothing_and_plays_nothing(brain, make):
+    made = pressable(brain, make)
+    brain.say("play_stream", id="music-1", rate=44100, channels=2, volume=0.5, kind="music", paused=False)
+    say_a_reply(brain)
+    assert wait_for(lambda: len(made.speaker.streams()) == 2 and made.speaker.streams()[1].pieces)
+    music, reply = made.speaker.streams()
+
+    brain.say("listen", recording="listen-1", open=True)
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    # Not what a wake word or a press does: the reply carries on, the music isn't paused,
+    # nothing is played for it, and the brain isn't told of any of it.
+    assert not reply.done and not music.paused and not music.done
+    assert made.speaker.files() == []
+    assert brain.messages("played") == [] and brain.messages("wake") == []
+    brain.say("stop_listening", recording="listen-1")
+
+
+def test_a_computer_holds_its_devices_for_a_conversation(brain, make, echoes):
+    made = pressable(brain, make)
+    (echo,) = echoes
+    assert echo.engaged is False and echo.switched == []
+    assert made.microphone.holds == 0 and made.speaker.holds == 0
+
+    conversation(brain)
+    assert wait_for(lambda: made.microphone.holds == 1 and made.speaker.holds == 1)
+    # Engaged once they were open, as it's their being opened afresh which has it start again.
+    assert echo.engaged is True and echo.switched == [True]
+
+    # Between recordings they stay open: a press's own recording holds the microphone as it
+    # always did, and when it ends, the conversation's hold remains.
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    assert made.microphone.holds == 2
+    brain.say("stop_listening")
+    assert wait_for(lambda: made._recording is None)
+    assert made.microphone.holds == 1 and made.speaker.holds == 1 and echo.engaged is True
+
+    # Said again, it isn't held twice - nor reset, which would drop what the canceller had found.
+    conversation(brain)
+    time.sleep(0.05)
+    assert made.microphone.holds == 1 and echo.switched == [True]
+
+    conversation(brain, on=False)
+    assert wait_for(lambda: made.microphone.holds == 0 and made.speaker.holds == 0)
+    assert echo.engaged is False and echo.switched == [True, False]
+    assert made.microphone.unheld_reads == 0
+
+
+def test_a_wake_word_satellite_only_notes_a_conversation(brain, make, echoes):
+    made = make()
+    assert wait_for(lambda: connected(made) and made.wake.listening)
+    (echo,) = echoes
+    # Always engaged, as it has always been: the speaker and microphone are open throughout.
+    assert echo.engaged is True
+    conversation(brain)
+    assert wait_for(lambda: made._conversing)
+    assert made.microphone.holds == 0 and made.speaker.holds == 0 and echo.switched == []
+    conversation(brain, on=False)
+    assert wait_for(lambda: not made._conversing)
+    assert echo.engaged is True and echo.switched == []
+    # And it hears the wake word as ever.
+    made.wake.say()
+    assert wait_for(lambda: brain.messages("wake"))
+    brain.say("stop_listening")
+
+
+def test_losing_the_brain_ends_the_open_devices(brain, make, echoes):
+    made = pressable(brain, make)
+    (echo,) = echoes
+    start_conversation(brain, made)
+    assert echo.engaged is True
+
+    brain.drop()
+    assert wait_for(lambda: made.microphone.holds == 0 and made.speaker.holds == 0)
+    assert echo.engaged is False and made._conversing is False
+    # And a conversation which the brain starts on its next connection starts from nothing.
+    brain.up = True
+    assert wait_for(lambda: len(brain.hellos) == 2 and connected(made))
+    conversation(brain)
+    assert wait_for(lambda: made.microphone.holds == 1 and made.speaker.holds == 1)
+    assert echo.switched == [True, False, True]
+
+
+def test_starting_a_conversation_unmutes_windows(brain, make, pc, caplog):
+    caplog.set_level("INFO")
+    made = pressable(brain, make)
+    volume = made.system_volume
+    volume.muted = volume.mic_muted = True
+    conversation(brain)
+    assert wait_for(lambda: volume.mic_muted is False and volume.muted is False)
+    assert volume.mic_unmutes == 1 and volume.unmutes == 1
+    assert "Windows' microphone was muted, so it's unmuted for this turn" in caplog.text
+
+    # A turn's end doesn't mute it again, as it would after a press: it stays on for the
+    # whole conversation...
+    end_turn(brain)
+    time.sleep(0.2)
+    assert volume.mic_muted is False and volume.mic_changes == []
+    # ...and is as a press leaves it once the conversation is over.
+    conversation(brain, on=False)
+    assert wait_for(lambda: volume.mic_muted is True)
+    assert volume.mic_changes == [True]
+
+
+def test_a_conversation_which_ends_with_the_brain_lost_mutes_the_microphone_again(brain, make, pc):
+    made = pressable(brain, make)
+    made.system_volume.mic_muted = True
+    conversation(brain)
+    assert wait_for(lambda: made.system_volume.mic_muted is False)
+    brain.drop()
+    assert wait_for(lambda: made.system_volume.mic_muted is True)
+    assert made.system_volume.mic_changes == [True]
+
+
+def test_a_conversation_which_isnt_on_or_off_is_ignored(brain, make, caplog):
+    made = pressable(brain, make)
+    with caplog.at_level("WARNING"):
+        brain.say("conversation", on="yes")
+        brain.say("conversation")
+        brain.say("conversation", on=1)
+        # Ahead of the next message, which the link handles after these.
+        brain.say("state", volumes={"general": 0.25}, muted=False)
+        assert wait_for(lambda: made.state.volume("general") == 0.25)
+    assert made.microphone.holds == 0 and made.speaker.holds == 0 and made._conversing is False
+    assert caplog.text.count("isn't on or off") == 3
+
+
+def test_a_brain_which_knows_nothing_of_conversations_leaves_the_satellite_as_it_was(brain, make, echoes):
+    made = pressable(brain, make)
+    (echo,) = echoes
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    # Only the recording's own hold, and nothing engaged or asked of the canceller.
+    assert made.microphone.holds == 1 and made.speaker.holds == 0
+    assert echo.engaged is False and echo.switched == []
+    brain.say("stop_listening")
+    assert wait_for(lambda: made.microphone.holds == 0)
+    # An ordinary listen is capped at its limit, as ever.
+    brain.say("listen", recording="listen-1")
+    assert wait_for(lambda: brain.messages("audio_end"))
+    assert brain.messages("audio_end") == [{"type": "audio_end", "reason": "limit"}]
+    assert brain.messages("cut_in") == []
+
+
+def test_the_satellite_says_it_knows_conversations(brain, make):
+    pressable(brain, make)
+    assert brain.hellos[0]["conversations"] is True
+    make("kitchen")
+    assert wait_for(lambda: len(brain.hellos) == 2)
+    assert brain.hellos[1]["conversations"] is True
+
+
+def test_a_press_over_a_reply_in_an_open_recording_cuts_in(brain, make):
+    made = pressable(brain, make)
+    start_conversation(brain, made)
+    open_listen(brain, made)
+    brain.say("play_stream", id="music-1", rate=44100, channels=2, volume=0.5, kind="music", paused=False)
+    say_a_reply(brain)
+    assert wait_for(lambda: len(made.speaker.streams()) == 2 and made.speaker.streams()[1].pieces)
+    music, reply = made.speaker.streams()
+    made._pressed()
+
+    assert wait_for(lambda: brain.messages("cut_in"))
+    assert brain.messages("cut_in") == [{"type": "cut_in", "recording": "listen-1"}]
+    # The reply stopped here at once, and nothing else with it.
+    assert reply.stopped and not music.paused and not music.done
+    # Told to the brain before the end of the reply it stopped, as for the wake word.
+    assert wait_for(lambda: brain.messages("played"))
+    assert brain.kinds().index("cut_in") < brain.kinds().index("played")
+    # The press's own sound, which is heard, though the reply was stopped.
+    assert made.speaker.files() == [os.path.join(made.sounds_folder, "listening.wav")]
+    assert not made.speaker.playing[-1].stopped
+
+    # And the recording goes on: it isn't ended, nor is another made of the press.
+    sent = len(brain.recordings())
+    assert wait_for(lambda: len(brain.recordings()) > sent + 1)
+    assert brain.messages("audio_end") == [] and brain.messages("wake") == []
+    assert made._recording is not None and not made._recording.is_set()
+    # A second press with nothing playing now ends it.
+    made._pressed()
+    assert wait_for(lambda: brain.messages("audio_end"))
+    brain.say("stop_listening", recording="listen-1")
+
+
+def test_a_press_with_nothing_playing_ends_the_turn(brain, make):
+    made = pressable(brain, make)
+    start_conversation(brain, made)
+    open_listen(brain, made)
+    made._pressed()
+
+    assert wait_for(lambda: brain.messages("audio_end"))
+    assert brain.messages("audio_end") == [{"type": "audio_end", "reason": "pressed"}]
+    assert brain.messages("cut_in") == [] and brain.messages("wake") == []
+    # A reply which has finished playing isn't one to cut in on either.
+    assert wait_for(lambda: made._recording is None)
+
+
+def test_a_press_over_a_reply_which_has_finished_ends_the_open_recording(brain, make):
+    made = pressable(brain, make)
+    start_conversation(brain, made)
+    open_listen(brain, made)
+    say_a_reply(brain)
+    assert wait_for(lambda: made.speaker.streams() and made.speaker.streams()[0].pieces)
+    made.speaker.streams()[0].finish()
+    made._pressed()
+    assert wait_for(lambda: brain.messages("audio_end"))
+    assert brain.messages("cut_in") == []
+
+
+def test_a_press_over_a_reply_in_an_ordinary_recording_ends_it_as_before(brain, make):
+    made = pressable(brain, make)
+    brain.say("listen", recording="listen-1")
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    say_a_reply(brain)
+    assert wait_for(lambda: made.speaker.streams() and made.speaker.streams()[0].pieces)
+    (reply,) = made.speaker.streams()
+    made._pressed()
+    assert wait_for(lambda: brain.messages("audio_end"))
+    assert brain.messages("audio_end") == [{"type": "audio_end", "reason": "pressed"}]
+    assert brain.messages("cut_in") == [] and not reply.stopped
+
+
+def test_a_press_recording_which_the_brain_makes_open_isnt_cut_short_by_replies(brain, make):
+    # Pressed to start a turn in a conversation, which the brain then asks to be open: its reply
+    # plays over it, as one does over any open recording, rather than being stopped as it starts.
+    made = pressable(brain, make)
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 1)
+    brain.say("listen", recording="listen-1", open=True)
+    assert wait_for(lambda: made._recording is not None and made._recording.open)
+    say_a_reply(brain)
+    assert wait_for(lambda: made.speaker.streams() and made.speaker.streams()[0].pieces)
+    (reply,) = made.speaker.streams()
+    assert not reply.stopped
+
+    # A press cuts in on it, and the brain knows the recording by the number it gave.
+    made._pressed()
+    assert wait_for(lambda: brain.messages("cut_in"))
+    assert brain.messages("cut_in") == [{"type": "cut_in", "recording": "listen-1"}]
+    assert reply.stopped
+
+
+def test_a_listen_which_is_open_lifts_the_cap_of_the_recording_it_is_the_answer_to(brain, make):
+    made = make()
+    assert wait_for(lambda: connected(made) and made.wake.listening)
+    made.wake.say()
+    assert wait_for(lambda: len(brain.recordings()) >= 2)
+    brain.say("listen", recording="listen-1", open=True)
+    assert wait_for(lambda: audio_sent(brain) >= 15 * RATE, seconds=10)
+    assert brain.messages("audio_end") == []
+    brain.say("stop_listening", recording="listen-1")
+    assert wait_for(lambda: made._recording is None)
+
+
+def test_the_satellite_says_when_its_echo_canceller_is_ready(brain, make, echoes):
+    made = pressable(brain, make)
+    (echo,) = echoes
+    # Once, as it connects, and not ready: nothing is engaged between conversations.
+    assert wait_for(lambda: brain.messages("echo_ready"))
+    assert brain.messages("echo_ready") == [{"type": "echo_ready", "ready": False}]
+
+    start_conversation(brain, made)
+    # Not ready yet: it has a gap to find, which takes some seconds of sound.
+    time.sleep(0.1)
+    assert brain.messages("echo_ready") == [{"type": "echo_ready", "ready": False}]
+    echo.lined_up = True
+    assert wait_for(lambda: len(brain.messages("echo_ready")) == 2)
+    assert brain.messages("echo_ready")[1] == {"type": "echo_ready", "ready": True}
+    # Said when it changes, not on every look.
+    time.sleep(0.15)
+    assert len(brain.messages("echo_ready")) == 2
+
+    # The conversation ends: not ready, said at once.
+    conversation(brain, on=False)
+    assert wait_for(lambda: len(brain.messages("echo_ready")) == 3)
+    assert brain.messages("echo_ready")[2] == {"type": "echo_ready", "ready": False}
+
+
+def test_a_wake_word_satellites_canceller_is_ready_once_it_has_found_the_gap(brain, make, echoes):
+    make()
+    (echo,) = echoes
+    assert wait_for(lambda: brain.messages("echo_ready"))
+    assert brain.messages("echo_ready") == [{"type": "echo_ready", "ready": False}]
+    echo.lined_up = True
+    assert wait_for(lambda: len(brain.messages("echo_ready")) == 2)
+    assert brain.messages("echo_ready")[1]["ready"] is True
+
+
+def test_a_satellite_with_no_canceller_says_so_each_time_it_connects(brain, make):
+    made = pressable(brain, make)
+    assert wait_for(lambda: brain.messages("echo_ready"))
+    conversation(brain)
+    assert wait_for(lambda: made.microphone.holds == 1)
+    time.sleep(0.1)
+    assert brain.messages("echo_ready") == [{"type": "echo_ready", "ready": False}]
+
+    # A brain which has just started hears it again.
+    brain.sockets[-1].shutdown(socket.SHUT_RDWR)
+    assert wait_for(lambda: len(brain.messages("echo_ready")) == 2)
+    assert brain.messages("echo_ready")[1] == {"type": "echo_ready", "ready": False}
+
+
+def test_the_end_of_a_conversation_ends_an_open_recording_and_leaves_the_orb_hidden(brain, make, pc, orbs):
+    made = pressable(brain, make)
+    orb = made.orb
+    start_conversation(brain, made)
+    open_listen(brain, made)
+    assert wait_for(lambda: orb.shown == ["listening"])
+
+    conversation(brain, on=False)
+    assert wait_for(lambda: made._recording is None)
+    # Hidden, not thinking: there is nothing for Nova to answer.
+    assert wait_for(lambda: orb.shown == ["listening", "hidden"])
+    time.sleep(0.1)
+    assert orb.shown == ["listening", "hidden"]
+    assert made.microphone.holds == 0
+
+
+def test_an_open_recording_shows_listening_through_a_reply_and_a_press_ends_it(brain, make, pc, orbs):
+    made = pressable(brain, make)
+    orb = made.orb
+    start_conversation(brain, made)
+    open_listen(brain, made)
+    say_a_reply(brain)
+    assert wait_for(lambda: made.speaker.streams() and made.speaker.streams()[0].pieces)
+    # Listening outranks speaking, as it does for any recording.
+    assert orb.shown == ["listening"]
+    made._pressed()
+    assert wait_for(lambda: brain.messages("cut_in"))
+    assert orb.shown == ["listening"]
+    made._pressed()
+    assert wait_for(lambda: orb.shown[-1] == "thinking")
+    brain.say("stop_listening", recording="listen-1")
+
+
+def test_losing_the_brain_during_an_open_recording_leaves_the_orb_hidden(brain, make, pc, orbs):
+    made = pressable(brain, make)
+    orb = made.orb
+    start_conversation(brain, made)
+    open_listen(brain, made)
+    assert wait_for(lambda: orb.shown == ["listening"])
+    brain.drop()
+    assert wait_for(lambda: orb.shown[-1] == "hidden")
+    assert wait_for(lambda: made._recording is None and made.microphone.holds == 0)

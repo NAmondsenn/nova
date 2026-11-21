@@ -251,6 +251,9 @@ class Speaker:
         self._quiet_since = time.monotonic()
         self._opening = threading.Lock()
         self._generation = 0
+        # How many are holding a stream which isn't always open, so it isn't closed for
+        # being quiet - see hold.
+        self._holds = 0
         if always_open:
             self._open()
 
@@ -380,7 +383,7 @@ class Speaker:
             busy: Whether anything unpaused was still to play just now.
         """
         now = time.monotonic()
-        if busy:
+        if busy or self._holds:
             self._quiet_since = now
             return
         if now - self._quiet_since < IDLE_CLOSE_SECONDS:
@@ -393,7 +396,7 @@ class Speaker:
             # Looked at again under the lock, in case a sound arrived since.
             with self._lock:
                 waiting = any(not playback.paused and not playback.done for playback in self._playing)
-            if waiting or self._stream is None:
+            if waiting or self._holds or self._stream is None:
                 return
             # So it takes nothing more from what's playing as it closes.
             self._generation += 1
@@ -422,6 +425,35 @@ class Speaker:
         with self._opening:
             self._quiet_since = time.monotonic()
             self._open_if_closed()
+
+    def hold(self):
+        """
+        Keeps a stream which isn't always open open while it's held, whether or not
+        there's anything to play, so a conversation's microphone has a speaker alongside
+        it which isn't opened and closed under it - opening it, if it's closed. Nothing
+        for one which is always open. Each hold is ended with release().
+        """
+        if self.always_open:
+            return
+        with self._opening:
+            self._holds += 1
+            self._quiet_since = time.monotonic()
+            self._open_if_closed()
+
+    def release(self):
+        """
+        Ends a hold. The stream closes as it does when nothing has been left to play for
+        IDLE_CLOSE_SECONDS, counted from now - not at once, so the last words of a
+        conversation, said as it ended, aren't cut off.
+        """
+        if self.always_open:
+            return
+        with self._opening:
+            if not self._holds:
+                logger.warning("The speaker was released more times than it was held")
+                return
+            self._holds -= 1
+            self._quiet_since = time.monotonic()
 
     def sounded_within(self, seconds: float) -> bool:
         """

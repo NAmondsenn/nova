@@ -31,11 +31,21 @@ After the handshake, what a satellite sends the brain:
         for "mic", whether the microphone is muted now)
     shortcut_taken  {"taken": true|false}  (whether another program has the shortcut the satellite's
         app listens on, said each time that changes and as it connects)
+    echo_ready  {"ready": true|false}  (whether its echo canceller has lined its speaker up with its
+        microphone and is taking Nova's own sound out - said as it connects, and each time that
+        changes; false where it has none, or while a conversation isn't holding its devices open)
+    cut_in  {"recording": ...}  (a press over a reply while an open recording was being sent, which
+        stopped the reply at once and left the recording going - see listen's open)
 
 and what the brain sends a satellite:
 
     pong
-    listen  {"recording": ...}  (what the brain calls the answer, e.g. "listen-3" - optional)
+    listen  {"recording": ..., "open"?: true}  (what the brain calls the answer, e.g. "listen-3" -
+        optional; open: a conversation's recording, which has no limit on its length and ends only on
+        stop_listening - sent only to a satellite which said conversations)
+    conversation  {"on": true|false}  (a conversation has started or ended on this satellite: a
+        push-to-talk one holds its microphone and speaker open and takes its own sound out of what it
+        hears for as long as it lasts - sent only to a satellite which said conversations)
     stop_listening  {"recording": ...}  (which recording to stop - optional, for whichever
         is being sent)
     play_sound  {"id": ..., "name": ..., "volume": ..., "kind": ..., "start": ..., "length": ...}
@@ -75,7 +85,7 @@ The handshake comes first, and proves the satellite's password to the brain and 
 brain's to the satellite, without the password itself ever being sent:
 
     hello  {name, hostname, sample_rate, unclean, nonce, speaker?, push_to_talk?, machine?,
-            saves_notes?, media_controls?, opens?, system_volume?}    (satellite)
+            saves_notes?, media_controls?, opens?, system_volume?, conversations?}    (satellite)
     challenge  {nonce, proof}    (brain; or refused, and the connection is closed)
     proof  {proof}    (satellite, once the brain's proof is right)
     ready, or refused    (brain)
@@ -208,7 +218,7 @@ def _expect(stream: BinaryIO, kind: str, *fields: str) -> Dict:
 def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate: int, unclean: bool,
           speaker: Optional[str] = None, push_to_talk: bool = False, machine: Optional[str] = None,
           saves_notes: bool = False, media_controls: bool = False, opens: bool = False,
-          system_volume: bool = False):
+          system_volume: bool = False, conversations: bool = False):
     """
     The satellite's side of the handshake.
 
@@ -233,6 +243,8 @@ def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate
             hello if False.
         system_volume: Whether it can set its computer's own volume - left out of the
             hello if False.
+        conversations: Whether it knows a conversation's messages - open recordings, the
+            conversation on and off, and cut_in and echo_ready - left out of the hello if False.
 
     Raises:
         Refused: The brain refused it, or couldn't prove it knows the password - in
@@ -245,7 +257,7 @@ def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate
     # Likewise, so the hello of a satellite which listens for a wake word is unchanged.
     if push_to_talk:
         extra["push_to_talk"] = True
-    # And these five, so a brain from before them is sent the hello it always was.
+    # And these six, so a brain from before them is sent the hello it always was.
     if machine is not None:
         extra["machine"] = machine
     if saves_notes:
@@ -256,6 +268,8 @@ def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate
         extra["opens"] = True
     if system_volume:
         extra["system_volume"] = True
+    if conversations:
+        extra["conversations"] = True
     send(stream, "hello", name=name, hostname=hostname, sample_rate=sample_rate,
          unclean=unclean, nonce=nonce, **extra)
     challenge = _expect(stream, "challenge", "nonce", "proof")
@@ -281,7 +295,8 @@ def admit(stream: BinaryIO, password_for: Callable[[str], Optional[str]]) -> Dic
         if it doesn't say, its machine, one of machine.MACHINES, and whether it saves
         notes. The last two are None and False if the hello leaves them out or says what
         makes no sense, which never keeps a satellite out: they are extras. So are whether
-        it opens things and whether it has system volume, each False in the same cases.
+        it opens things, whether it has system volume and whether it knows conversations,
+        each False in the same cases.
 
     Raises:
         Refused: The satellite is unknown or got the password wrong. It has been told so.
@@ -329,9 +344,11 @@ def admit(stream: BinaryIO, password_for: Callable[[str], Optional[str]]) -> Dic
         saves_notes = False
     opens = _flag(name, hello, "opens", "opens things")
     system_volume = _flag(name, hello, "system_volume", "has system volume")
+    conversations = _flag(name, hello, "conversations", "knows conversations")
     return {"name": name, "hostname": hostname, "sample_rate": sample_rate, "unclean": unclean,
             "speaker": speaker, "push_to_talk": push_to_talk, "machine": machine, "saves_notes": saves_notes,
-            "media_controls": media_controls, "opens": opens, "system_volume": system_volume}
+            "media_controls": media_controls, "opens": opens, "system_volume": system_volume,
+            "conversations": conversations}
 
 
 def _flag(name: str, hello: Dict, key: str, meaning: str) -> bool:

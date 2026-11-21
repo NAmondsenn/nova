@@ -329,6 +329,47 @@ def test_an_on_demand_speaker_closes_when_quiet(streams):
     assert np.allclose(streams[1].pull(), 0.25)
 
 
+def test_a_held_speaker_stays_open_when_quiet_until_released(streams):
+    # For a conversation at the PC, which needs the speaker open beside its microphone.
+    speaker = Speaker(sample_rate=RATE, always_open=False)
+    speaker.hold()
+    assert len(streams) == 1
+
+    speaker._quiet_since -= speaker_module.IDLE_CLOSE_SECONDS
+    streams[0].pull()
+    assert speaker._stream is streams[0] and not streams[0].closed
+
+    # Not closed at once, so the last words of the conversation, said as it ends, aren't cut off...
+    speaker.release()
+    streams[0].pull()
+    assert not streams[0].closed
+    # ...but once it has been quiet as long as it is for any sound.
+    speaker._quiet_since -= speaker_module.IDLE_CLOSE_SECONDS
+    streams[0].pull()
+    wait_for(lambda: streams[0].closed)
+
+
+def test_two_holds_need_two_releases(streams):
+    speaker = Speaker(sample_rate=RATE, always_open=False)
+    speaker.hold()
+    speaker.hold()
+    speaker.release()
+    speaker._quiet_since -= speaker_module.IDLE_CLOSE_SECONDS
+    streams[0].pull()
+    assert not streams[0].closed
+    speaker.release()
+    speaker._quiet_since -= speaker_module.IDLE_CLOSE_SECONDS
+    streams[0].pull()
+    wait_for(lambda: streams[0].closed)
+
+
+def test_holding_the_pis_speaker_does_nothing(streams):
+    speaker = Speaker(sample_rate=RATE)
+    speaker.hold()
+    speaker.release()
+    assert len(streams) == 1 and speaker._holds == 0
+
+
 def test_the_pis_speaker_stays_open_when_quiet(streams):
     speaker = Speaker(sample_rate=RATE)
     speaker._quiet_since -= 3600

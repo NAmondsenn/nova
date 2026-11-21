@@ -187,6 +187,15 @@ def test_the_link_says_it_opens_things_and_has_system_volume_each_time_it_connec
     assert [(hello["opens"], hello["system_volume"]) for hello in brain.hellos] == [(True, True)] * 2
 
 
+def test_the_link_says_it_knows_conversations_each_time_it_connects(brain, make):
+    link, events, messages = make(brain.address, conversations=True)
+    link.start()
+    assert wait_for(lambda: len(brain.hellos) == 1)
+    brain.drop_everyone()
+    assert wait_for(lambda: len(brain.hellos) == 2)
+    assert [hello["conversations"] for hello in brain.hellos] == [True, True]
+
+
 def test_the_link_connects_and_reports_it(brain, make):
     link, events, messages = make(brain.address)
     link.start()
@@ -195,7 +204,7 @@ def test_the_link_connects_and_reports_it(brain, make):
     assert brain.hellos == [{"name": "bedroom", "hostname": "pi", "sample_rate": 48000, "unclean": True,
                              "speaker": None, "push_to_talk": False, "machine": None,
                              "saves_notes": False, "media_controls": False, "opens": False,
-                             "system_volume": False}]
+                             "system_volume": False, "conversations": False}]
 
     brain.say("listen")
     brain.say("phrase", rate=22050)

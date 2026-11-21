@@ -12,7 +12,9 @@ Linux voice software has long used, with that copy lined up against it. setup.sh
 installs speexdsp (libspeexdsp1) rather than counting on the Pi having it; without
 it, the microphone is simply left as it was. Windows has no such package, so the PC's
 install (scripts/windows/install.ps1) puts speexdsp.dll in the lib folder of the
-assistant's data, and that is the one loaded there.
+assistant's data, and that is the one loaded there. The PC's only takes anything out
+while a conversation holds its speaker and microphone open (see EchoCanceller.engaged):
+between presses they're closed, and an ordinary press hears the microphone as it is.
 
 Lining them up is the hard part, for two reasons found on the Pi:
 
@@ -132,6 +134,10 @@ class Samples:
         self._anchors: deque = deque()
         # (reference time, samples a second, position at the reference time).
         self.clock: Optional[Tuple[float, float, float]] = None
+        # Nothing before this position is read back - see forget().
+        self._floor = 0
+        # Bumped by forget(), so a fit of the clock which began before it isn't kept.
+        self._generation = 0
         self._lock = threading.Lock()
 
     def add(self, samples: np.ndarray, start_time: Optional[float]):
@@ -161,15 +167,30 @@ class Samples:
             self._buffer[:len(samples) - first] = samples[first:]
             self.total += len(samples)
 
+    def forget(self):
+        """
+        Lets go of everything kept so far, and the clock fitted to it, for when the stream
+        is opened afresh. Positions carry on, so whatever counts along with them stays right.
+        """
+        with self._lock:
+            self._anchors.clear()
+            self.clock = None
+            self._floor = self.total
+            self._generation += 1
+
     def fit_clock(self):
         """Fits the stream's clock to its recent timestamps - see the top of this module."""
         with self._lock:
             anchors = np.array(self._anchors, dtype=np.float64)
+            generation = self._generation
         if len(anchors) < 4 or anchors[-1, 0] - anchors[0, 0] < LEAST_CLOCK_SECONDS:
             return
         reference = anchors[-1, 0]
         rate, position = np.polyfit(anchors[:, 0] - reference, anchors[:, 1], 1)
-        self.clock = (reference, rate, position)
+        with self._lock:
+            # Not if the stream was forgotten meanwhile: that fit is of the old one.
+            if generation == self._generation:
+                self.clock = (reference, rate, position)
 
     @staticmethod
     def _position_at(clock, when):
@@ -193,7 +214,7 @@ class Samples:
         """Samples from a position on - silence for any not kept, or not there yet."""
         out = np.zeros(count, dtype=np.int16)
         with self._lock:
-            oldest = max(0, self.total - len(self._buffer))
+            oldest = max(0, self.total - len(self._buffer), self._floor)
             begin, end = max(position, oldest), min(position + count, self.total)
             for index in range(begin, end, len(self._buffer)):
                 stop = min(end, index + len(self._buffer))
@@ -220,6 +241,9 @@ class PlayedAudio(Samples):
     def __init__(self, speaker_rate: int = 48000):
         super().__init__()
         self._resampler = soxr.ResampleStream(speaker_rate, RATE, 1, dtype="float32")
+        # Whether what's played is kept. The echo canceller switches it off while it
+        # isn't taking anything out, so a speaker which plays all day costs nothing.
+        self.keeping = True
 
     def played(self, audio: np.ndarray, dac_time: Optional[float]):
         """
@@ -229,6 +253,8 @@ class PlayedAudio(Samples):
             audio: float32 mono samples at the speaker's rate.
             dac_time: When its first sample leaves the speaker, by PortAudio's clock.
         """
+        if not self.keeping:
+            return
         resampled = self._resampler.resample_chunk(np.asarray(audio, dtype=np.float32))
         self.add((np.clip(resampled, -1.0, 1.0) * 32767).astype(np.int16), dac_time)
 
@@ -315,11 +341,12 @@ def measure_delay(heard: np.ndarray, played: np.ndarray, most: int) -> Optional[
 class EchoCanceller:
     """Takes what was played back out of what's heard - see the top of this module."""
 
-    def __init__(self, played: PlayedAudio, speex: Optional[Speex] = None):
+    def __init__(self, played: PlayedAudio, speex: Optional[Speex] = None, engaged: bool = True):
         """
         Args:
             played: What the speaker has played, which it keeps for this.
             speex: The canceller - made here unless given, as the tests do.
+            engaged: Whether it takes anything out from the start - see `engaged`.
 
         Raises:
             OSError: If speexdsp isn't installed.
@@ -333,25 +360,60 @@ class EchoCanceller:
         self._measured: deque = deque(maxlen=MEASUREMENTS_KEPT)
         self._pending = np.zeros(0, dtype=np.int16)
         self._done = 0
+        # Bumped by every reset, so a measurement which began before one isn't kept.
+        self._generation = 0
+        self._engaged = engaged
+        self.played.keeping = engaged
         self._lock = threading.Lock()
         self._stopping = threading.Event()
         threading.Thread(target=self._keep_measuring, daemon=True, name="echo-delay").start()
 
     @property
+    def engaged(self) -> bool:
+        """
+        Whether it is taking anything out. A wake word satellite's always is. A push-to-talk
+        satellite's is only while its speaker and microphone are held open for a
+        conversation: engaging it resets it, as they were opened afresh, and until then
+        what's heard is passed on exactly as it came and nothing played is kept.
+        """
+        return self._engaged
+
+    @engaged.setter
+    def engaged(self, on: bool):
+        with self._lock:
+            if on == self._engaged:
+                return
+            self._engaged = on
+            self.played.keeping = on
+            self._forget()
+
+    @property
     def ready(self) -> bool:
-        """Whether the speaker is lined up with the microphone and being taken out - the gap measured and agreed."""
-        return self.delay is not None
+        """Whether the speaker is lined up with the microphone and being taken out - engaged, and the gap measured and agreed."""
+        return self._engaged and self.delay is not None
 
     def reset(self):
         """
         Forgets what was lined up, for when the speaker and microphone are opened afresh
         and the gap between them, which differs each time, has to be found again. What
-        was measured before is dropped too, or it would be agreed with at once.
+        was measured before is dropped too, or it would be agreed with at once, and so is
+        what was heard and played, or the old gap would be found again in it.
         """
         with self._lock:
-            self.delay = None
-            self._measured.clear()
-            self.speex.reset()
+            self._forget()
+
+    def _forget(self):
+        """Does reset's work, with the lock held."""
+        self._generation += 1
+        self.delay = None
+        self._measured.clear()
+        self.heard.forget()
+        self.played.forget()
+        # What was waiting for a whole frame is of the old stream too, and what's heard next
+        # is the first to be taken out.
+        self._pending = np.zeros(0, dtype=np.int16)
+        self._done = self.heard.total
+        self.speex.reset()
 
     def process(self, samples: np.ndarray, adc_time: Optional[float]) -> np.ndarray:
         """
@@ -364,10 +426,12 @@ class EchoCanceller:
             adc_time: When the first of them was heard, by PortAudio's clock.
 
         Returns:
-            The cleaned samples.
+            The cleaned samples - or the same ones, if it isn't engaged.
         """
-        self.heard.add(samples, adc_time)
         with self._lock:
+            if not self._engaged:
+                return samples
+            self.heard.add(samples, adc_time)
             self._pending = np.concatenate((self._pending, samples))
             delay, frames = self.delay, len(self._pending) // self.frame
             out = np.empty(frames * self.frame, dtype=np.int16)
@@ -399,6 +463,8 @@ class EchoCanceller:
 
     def _keep_measuring(self):
         while not self._stopping.wait(MEASURE_EVERY_SECONDS):
+            if not self._engaged:
+                continue
             try:
                 self.played.fit_clock()
                 self.heard.fit_clock()
@@ -408,6 +474,7 @@ class EchoCanceller:
 
     def measure(self):
         """Measures the gap between playing and hearing again, adopting it once it's seen twice."""
+        generation = self._generation
         most = int(MOST_DELAY_SECONDS * RATE)
         count = int(MEASURE_OVER_SECONDS * RATE)
         end = self.heard.total
@@ -420,14 +487,19 @@ class EchoCanceller:
         found = measure_delay(heard, self.played.read_at(played_positions), most)
         if found is None:
             return
-        self._measured.append(found)
-        middle = int(np.median(self._measured))
-        if sum(abs(measured - middle) <= AGREEMENT for measured in self._measured) < MEASUREMENTS_AGREEING:
-            return
-        delay = max(0, middle - MARGIN)
-        if self.delay is not None and abs(delay - self.delay) <= AGREEMENT:
-            return
+        # From the first note of it to the last, under the lock which reset() takes, so a
+        # reset can't come between them, and a measurement made of what was there before
+        # one isn't kept after it.
         with self._lock:
+            if generation != self._generation:
+                return
+            self._measured.append(found)
+            middle = int(np.median(self._measured))
+            if sum(abs(measured - middle) <= AGREEMENT for measured in self._measured) < MEASUREMENTS_AGREEING:
+                return
+            delay = max(0, middle - MARGIN)
+            if self.delay is not None and abs(delay - self.delay) <= AGREEMENT:
+                return
             self.delay = delay
             self.speex.reset()
         logger.info(f"Echo cancelling: what's played is heard {1000 * middle / RATE:.0f}ms later")
@@ -436,15 +508,20 @@ class EchoCanceller:
         self._stopping.set()
 
 
-def make_echo_canceller(config, speaker_rate: int) -> Optional[EchoCanceller]:
+def make_echo_canceller(config, speaker_rate: int, engaged: bool = True) -> Optional[EchoCanceller]:
     """
     The echo canceller audio.echo_cancellation in config.yaml asks for, or None if
     it's switched off or speexdsp isn't installed.
+
+    Args:
+        config: The settings.
+        speaker_rate: What the speaker plays at.
+        engaged: Whether it takes anything out from the start - see EchoCanceller.engaged.
     """
     if not config.section("audio").get("echo_cancellation", True):
         return None
     try:
-        canceller = EchoCanceller(PlayedAudio(speaker_rate))
+        canceller = EchoCanceller(PlayedAudio(speaker_rate), engaged=engaged)
     except OSError as e:
         logger.warning(f"No echo cancelling - speexdsp isn't installed ({e}). "
                        f"Music the assistant plays will be harder to talk over.")

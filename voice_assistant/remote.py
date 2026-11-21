@@ -561,6 +561,12 @@ class RemoteSatellite:
         # False from a satellite which doesn't say.
         self.opens: bool = bool(hello.get("opens", False))
         self.system_volume: bool = bool(hello.get("system_volume", False))
+        # Whether it knows a conversation's messages (open recordings, conversation on and
+        # off) - False from a satellite which doesn't say, which is never sent them.
+        self.can_converse: bool = bool(hello.get("conversations", False))
+        # Whether its echo canceller is taking Nova's own sound out, as it last said - False
+        # until it does, so each connection starts as if nothing had been said.
+        self.echo_ready: bool = False
         # Set by the brain: called with (this satellite's name, its apps as [{"id", "name",
         # "kind"}]) and (its name, its open windows' names) each time the satellite sends them.
         self.on_apps: Optional[Callable[[str, List[Dict]], None]] = None
@@ -608,6 +614,8 @@ class RemoteSatellite:
             "note_saved": self._note_saved,
             "media": self._media,
             "shortcut_taken": self._shortcut_taken,
+            "echo_ready": self._echo_ready,
+            "cut_in": self._cut_in,
             "apps": self._apps,
             "windows": self._windows,
             "computer_done": self._computer_done,
@@ -681,19 +689,43 @@ class RemoteSatellite:
         self._lost()
         return False
 
-    def listen(self) -> AudioFeed:
+    def listen(self, open: bool = False) -> AudioFeed:
         """
         Has the satellite send what the user says from now - their answer to Nova's
         question - until stop_listening(feed), or the longest a request may be.
+
+        Args:
+            open: Whether it is a conversation's: no limit on its length, on the satellite
+                or in the feed, which keeps only the last of it - see AudioFeed. A satellite
+                which doesn't know conversations is asked for an ordinary listen instead.
 
         Returns:
             A feed of it. Already ended if the satellite isn't connected.
         """
         recording = f"listen-{next(_listen_ids)}"
+        open = open and self.can_converse
         # Before the satellite is asked, so the first of it has somewhere to go.
-        feed = self._new_feed(recording)
-        self.send("listen", recording=recording)
+        feed = self._new_feed(recording, open=open)
+        # Only when it is, so what an older satellite is sent is what it always was.
+        self.send("listen", recording=recording, **({"open": True} if open else {}))
         return feed
+
+    def set_conversation(self, on: bool) -> bool:
+        """
+        Tells the satellite a conversation has started or ended on it: a push-to-talk
+        satellite holds its microphone and speaker open, and takes its own sound out of
+        what it hears, for as long as it lasts.
+
+        Args:
+            on: True as it starts, False as it ends.
+
+        Returns:
+            Whether it was sent - False if the satellite doesn't know conversations, which
+            is never sent one, or isn't connected.
+        """
+        if not self.can_converse:
+            return False
+        return self.send("conversation", on=on)
 
     def stop_listening(self, feed: AudioFeed):
         """
@@ -1054,18 +1086,19 @@ class RemoteSatellite:
         else:
             logger.warning(f"The {self.name} satellite sent shortcut_taken without true or false: {ascii(taken)[:40]}")
 
-    def _new_feed(self, recording: Optional[str]) -> AudioFeed:
+    def _new_feed(self, recording: Optional[str], open: bool = False) -> AudioFeed:
         """
         Starts a feed for the recording the satellite is about to send, ending any before it.
 
         Args:
             recording: What the satellite knows it by, e.g. "wake-3" - or None, from one
                 which doesn't say.
+            open: Whether it is a conversation's - see listen.
 
         Returns:
             The feed. Already ended if the satellite isn't connected.
         """
-        feed = AudioFeed()
+        feed = AudioFeed(open=open)
         with self._feed_lock:
             # Checked under the lock, which _lost takes once it's no longer connected,
             # so a feed is never left waiting on a satellite which has gone.
@@ -1076,6 +1109,26 @@ class RemoteSatellite:
         if old is not None:
             old.end()
         return feed
+
+    def _echo_ready(self, message: Dict, payload: bytes):
+        """Whether the satellite's echo canceller is taking Nova's own sound out, as it says each time that changes."""
+        ready = message.get("ready")
+        if isinstance(ready, bool):
+            self.echo_ready = ready
+        else:
+            logger.warning(f"The {self.name} satellite sent echo_ready without true or false: {ascii(ready)[:40]}")
+
+    def _cut_in(self, message: Dict, payload: bytes):
+        """The user pressed over a reply while the recording being sent was open: sets the feed's cut_in."""
+        recording = message.get("recording")
+        with self._feed_lock:
+            feed = self._feed
+            # Only for the recording being sent now - one which has been replaced is no
+            # longer listened to. Without a number it's whichever is being sent, as a stop is.
+            if recording is not None and recording != self._feed_recording:
+                feed = None
+        if feed is not None:
+            feed.cut_in.set()
 
     def _end_feed(self, pressed: bool = False):
         """

@@ -138,9 +138,9 @@ catch {
 if (Test-Path -LiteralPath $speexTemp) { Remove-Item -LiteralPath $speexTemp -Recurse -Force -ErrorAction SilentlyContinue }
 
 # This install's own settings, only if there are none: what differs from config.yaml,
-# which is the brain's address and name for this satellite, a key press instead of a
-# wake word, and the echo canceller off (its alignment across the speaker stream's
-# gaps, which close when nothing is playing, is untested).
+# which is the brain's address and name for this satellite, and a key press instead of a
+# wake word. (The echo canceller is left on, as config.yaml has it: it does nothing until a
+# conversation holds the speaker and microphone open.)
 $settings = Join-Path $config 'config.yaml'
 if (-not (Test-Path $settings)) {
     Write-Host "Writing $settings"
@@ -150,13 +150,24 @@ backend:
   satellite: "pc"
 satellite:
   trigger: "push_to_talk"
-audio:
-  echo_cancellation: false
 '@
     [System.IO.File]::WriteAllText($settings, $text + "`n", (New-Object System.Text.UTF8Encoding($false)))
 }
 else {
-    Write-Host "Leaving $settings as it is"
+    # An install from before conversations wrote the echo canceller off, which a conversation
+    # needs. Only those two lines as it wrote them are taken out, which leaves config.yaml's
+    # setting, on; a file with anything else under audio is left alone, as every file is.
+    # (The last part of the pattern is that nothing indented follows, which would then be
+    # under the section before.)
+    $oldEcho = '(?m)^audio:\r?\n  echo_cancellation: false[ \t]*(?:\r?\n(?![ \t]+\S)|(?![\s\S]))'
+    $text = [System.IO.File]::ReadAllText($settings)
+    if ([regex]::IsMatch($text, $oldEcho)) {
+        Write-Host "Turning the echo canceller on in $settings"
+        [System.IO.File]::WriteAllText($settings, [regex]::Replace($text, $oldEcho, ''), (New-Object System.Text.UTF8Encoding($false)))
+    }
+    else {
+        Write-Host "Leaving $settings as it is"
+    }
 }
 
 # A program's machine, subsystem (2 windowed, 3 console) and stack reserve, from its PE headers.

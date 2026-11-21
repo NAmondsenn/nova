@@ -181,7 +181,8 @@ class SatelliteLink:
                  unclean: bool, on_message: Callable[[Dict, bytes], None],
                  on_connected: Callable[[bool], None], speaker: Optional[str] = None,
                  push_to_talk: bool = False, machine: Optional[str] = None, saves_notes: bool = False,
-                 media_controls: bool = False, opens: bool = False, system_volume: bool = False):
+                 media_controls: bool = False, opens: bool = False, system_volume: bool = False,
+                 conversations: bool = False):
         """
         Args:
             address: The brain's "name:port" on the tailnet, or "[address]:port" for an
@@ -205,6 +206,7 @@ class SatelliteLink:
                 controls, said in every hello.
             opens: Whether it opens and closes things on its computer, said in every hello.
             system_volume: Whether it can set its computer's own volume, said in every hello.
+            conversations: Whether it knows a conversation's messages, said in every hello.
 
         Raises:
             ConfigError: The address can't be one.
@@ -221,6 +223,7 @@ class SatelliteLink:
         self.media_controls = media_controls
         self.opens = opens
         self.system_volume = system_volume
+        self.conversations = conversations
         self._unclean = unclean
         self._on_message = on_message
         self._on_connected = on_connected
@@ -355,7 +358,7 @@ class SatelliteLink:
         try:
             greet(stream, self.name, self.hostname, self.password, self.sample_rate, self._unclean,
                   self.speaker, self.push_to_talk, self.machine, self.saves_notes, self.media_controls,
-                  opens=self.opens, system_volume=self.system_volume)
+                  opens=self.opens, system_volume=self.system_volume, conversations=self.conversations)
         except BaseException:
             sock.close()
             raise

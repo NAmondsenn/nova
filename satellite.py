@@ -219,17 +219,22 @@ class _FromBrain:
 class _Recording(threading.Event):
     """One recording being sent to the brain - set once the brain says the user has stopped."""
 
-    def __init__(self, recording_id: Optional[str]):
+    def __init__(self, recording_id: Optional[str], open: bool = False):
         """
         Args:
             recording_id: What the brain knows it by: "wake-3", say, for one the wake word
                 started, or the number the brain gave an answer it asked for, e.g.
                 "listen-3" - None for an answer to a brain which doesn't number them.
+            open: Whether it is a conversation's, which has no limit on its length and
+                ends only when the brain stops it, the brain is lost or the satellite exits.
         """
         super().__init__()
+        self.open = open
         # Every number the brain may stop it by. A listen which comes while it's being
         # sent adds its own, as this recording is that answer - see Satellite._begin.
         self.ids = set() if recording_id is None else {recording_id}
+        # The one the brain last asked for it by, which is what it's told a cut-in by.
+        self.latest = recording_id
         # Whether it was a press, rather than the brain, which said the user has stopped.
         self.pressed = False
         # Whether a press started it, rather than the wake word or the brain's listen.
@@ -353,8 +358,11 @@ class Satellite:
 
         # The one speaker and the one microphone, with what's played taken back out of
         # what's heard - see echo.py. Push-to-talk, each is open only when needed, so
-        # the PC can go to sleep and its microphone light is off between presses.
-        self.echo = make_echo_canceller(config, self.sample_rate)
+        # the PC can go to sleep and its microphone light is off between presses - or held
+        # open, for as long as a conversation lasts.
+        # At the PC it takes nothing out until a conversation holds both open - see
+        # echo.EchoCanceller.engaged - so between presses the microphone is as it always was.
+        self.echo = make_echo_canceller(config, self.sample_rate, engaged=not self.push_to_talk)
         self.speaker = Speaker(sample_rate=self.sample_rate, echo_reference=self.echo.played if self.echo else None,
                                always_open=not self.push_to_talk)
         self.microphone = Microphone(sample_rate=self.sample_rate, echo=self.echo,
@@ -461,9 +469,10 @@ class Satellite:
         self._playing: Dict[str, _FromBrain] = {}
         # Where the follow-up the brain asked to hear starts, until the main loop sends it.
         self._listen_from: Optional[int] = None
-        # The number the brain gave that follow-up, if it gave one. Set with _listen_from,
-        # and only read with it.
+        # The number the brain gave that follow-up, if it gave one, and whether it asked for
+        # an open one. Set with _listen_from, and only read with it.
         self._listen_recording: Optional[str] = None
+        self._listen_open = False
         # Set by the brain's stop_listening - one for each recording, while it's sent.
         self._recording: Optional[_Recording] = None
         # Numbers for the recordings the wake word starts, said with each wake so the
@@ -488,6 +497,16 @@ class Satellite:
         # Set to wake the main loop from waiting for a press: by a press, by the brain
         # asking to hear a follow-up, and by stop().
         self._nudged = threading.Event()
+
+        # Whether the brain says a conversation is on here - under _conversation_lock, held
+        # while a push-to-talk satellite opens and closes its microphone and speaker for it,
+        # and never with _lock or _mic_lock. A wake word satellite only notes it.
+        self._conversation_lock = threading.Lock()
+        self._conversing = False
+        # What the brain was last told of the echo canceller - see _tell_echo_ready - under a lock
+        # of its own, held across the tell, so two threads' tells reach the brain in order.
+        self._echo_lock = threading.Lock()
+        self._echo_told: Optional[bool] = None
 
         # What to exit with, once the main loop has been asked to stop - see stop().
         self._exit_code: Optional[int] = None
@@ -515,6 +534,7 @@ class Satellite:
             "save_note": self._save_note,
             "computer": self._computer,
             "restart": self._restart,
+            "conversation": self._take_conversation,
         }
 
         # What the app's tray shows and its menu works from, besides the microphone above and
@@ -574,7 +594,7 @@ class Satellite:
                                       speaker=self.spotify_speaker, push_to_talk=self.push_to_talk,
                                       machine=self.machine, saves_notes=self.saves_notes,
                                       media_controls=self.media is not None, opens=self.opens,
-                                      system_volume=self.system_volume is not None)
+                                      system_volume=self.system_volume is not None, conversations=True)
             self.link.start()
             threading.Thread(target=self._ring_when_due, daemon=True, name="fallback").start()
             if self.system_volume is not None:
@@ -690,25 +710,58 @@ class Satellite:
         """
         Acts on a press of the key, from the press listener's thread. While a recording is
         being sent it ends it, as the brain's saying the user has stopped does, and the
-        recording loop tells the brain. Otherwise it hands the press to the main loop,
-        which owns the microphone and starts the recording - see _begin. Mute makes no
-        difference: a press is deliberate.
+        recording loop tells the brain - except an open recording with a reply playing over
+        it, which the press cuts in on instead (see _cut_in). Otherwise it hands the press
+        to the main loop, which owns the microphone and starts the recording - see _begin.
+        Mute makes no difference: a press is deliberate.
         """
+        cutting_in = None
         with self._lock:
             recording = self._recording
             if recording is not None and not recording.is_set():
-                recording.pressed = True
-                # Before it is set, so the orb is thinking before the main loop sends the
-                # recording's end, and so before the brain can answer it.
-                self._orb_states.listening_ended(True)
-                recording.set()
-                # As _stop_listening does, so losing the brain now says it can't be reached.
-                self._turn_open = True
-                logger.info("Pressed: the recording ends")
-                return
-            self._press_pending = True
+                if not (recording.open and self._replying(list(self._playing.values()))):
+                    recording.pressed = True
+                    # Before it is set, so the orb is thinking before the main loop sends the
+                    # recording's end, and so before the brain can answer it.
+                    self._orb_states.listening_ended(True)
+                    recording.set()
+                    # As _stop_listening does, so losing the brain now says it can't be reached.
+                    self._turn_open = True
+                    logger.info("Pressed: the recording ends")
+                    return
+                cutting_in = recording
+            else:
+                self._press_pending = True
+        if cutting_in is not None:
+            self._cut_in(cutting_in)
+            return
         logger.info("Pressed: listening")
         self._nudged.set()
+
+    @staticmethod
+    def _replying(playing: List[_FromBrain]) -> bool:
+        """Whether any of the brain's playbacks is a reply which hasn't finished - what a wake word or a press talks over."""
+        return any(each.kind == "reply" and not each.playback.done for each in playing)
+
+    def _cut_in(self, recording: _Recording):
+        """
+        A press over a reply while an open recording is being sent: stops the reply at once,
+        as a press over one always does, tells the brain, and leaves the recording going - it
+        is his next turn, and what he says now is its start. In a conversation a press over a
+        reply cuts in, where otherwise it would end the recording.
+
+        Args:
+            recording: The open recording, which carries on.
+        """
+        # Held from stopping the reply until the brain has been told, as _begin does for a
+        # wake, so the brain hears of the cut-in before the end of the reply it stopped.
+        with self._waking:
+            self.speaker.stop(["reply"])
+            logger.info("Pressed over a reply: it's cut in on")
+            self.link.send("cut_in", recording=recording.latest)
+        # After the reply was stopped, which would have stopped this with it, as it's the
+        # same kind of sound.
+        self.speaker.play_file(os.path.join(self.sounds_folder, PRESS_SOUND), volume=self.state.volume("general"))
 
     def _unmute_windows(self):
         """
@@ -842,7 +895,7 @@ class Satellite:
             # going on all that while. What the brain is playing is copied in one go, so
             # the link's thread starting or ending one meanwhile can't upset it.
             playing = list(self._playing.values())
-            talked_over = any(each.kind == "reply" and not each.playback.done for each in playing)
+            talked_over = self._replying(playing)
             self.speaker.stop(["reply"])
             self.speaker.silence("announcement")
             for each in playing:
@@ -902,7 +955,7 @@ class Satellite:
             start, self._listen_from = self._listen_from, None
             if start is None:
                 return
-            recording = self._recording = _Recording(self._listen_recording)
+            recording = self._recording = _Recording(self._listen_recording, open=self._listen_open)
             self._turn_open = False
         if self._send_recording(start, 0, recording) == "dropped":
             self._say_cant_reach()
@@ -919,7 +972,7 @@ class Satellite:
 
         Returns:
             Why it ended: "stopped" by the brain, "pressed" by the key, at the "limit", or
-            "dropped" with the connection.
+            "dropped" with the connection. An open recording has no limit.
         """
         # Opened for the recording, push-to-talk, and closed again once it's over.
         self.microphone.hold()
@@ -934,7 +987,9 @@ class Satellite:
                 start = max(start, self.microphone.position)
             reader = self.microphone.listen(start=start)
             for size in sizes:
-                audio = reader.read(min(size, limit - sent))
+                # An open recording has no limit, which the brain may lift part way through
+                # - see _listen - so it's looked at each time.
+                audio = reader.read(size if stopped.open else min(size, limit - sent))
                 self._exit_if_asked()
                 if stopped.is_set():
                     if not stopped.pressed:
@@ -946,7 +1001,7 @@ class Satellite:
                     logger.warning("Lost the brain part way through a recording")
                     return "dropped"
                 sent += len(audio)
-                if sent >= limit:
+                if sent >= limit and not stopped.open:
                     with self._lock:
                         # Unless the brain said the user had stopped while this last
                         # piece was being sent - when it opened the turn itself, and
@@ -1010,16 +1065,24 @@ class Satellite:
     def _listen(self, message: Dict, payload: bytes):
         recording = message.get("recording")
         recording = recording if isinstance(recording, str) else None
+        # Asked for open only by a brain which knows conversations - and nothing else is
+        # done differently: it stops nothing which is playing, and plays nothing.
+        opened = message.get("open") is True
         # From the moment it's asked for - before the brain's listening sound - so an
         # answer started over the sound isn't lost.
         with self._lock:
             self._listen_from = self.microphone.position
             self._listen_recording = recording
+            self._listen_open = opened
             self._nudged.set()
             # A recording being sent now is the answer, rather than one after it - see
-            # _begin - so the brain may stop it as that.
+            # _begin - so the brain may stop it as that, and it has no limit if the
+            # brain asked for one which hasn't.
             if self._recording is not None and recording is not None:
                 self._recording.ids.add(recording)
+                self._recording.latest = recording
+                if opened:
+                    self._recording.open = True
 
     def _stop_listening(self, message: Dict, payload: bytes):
         # Only ever the recording being sent now. One which has already ended by itself,
@@ -1056,7 +1119,9 @@ class Satellite:
         # A turn which said nothing is over, so the orb isn't left waiting for its words.
         self._orb_states.turn_ended()
         self.speaker.allow(message["kind"])
-        if not stale:
+        # Not in a conversation, where the microphone stays on from turn to turn and is
+        # muted again when the conversation ends - see _set_conversation.
+        if not stale and not self._conversing:
             self._mute_mic_again()
 
     def _play_sound(self, message: Dict, payload: bytes):
@@ -1088,8 +1153,9 @@ class Satellite:
         microphone, which has no echo cancelling here, and come back as the user's next
         request. So it goes as one a press over it would have, and the brain is told it was
         stopped. Only a press's recording: the brain's own listen, for the answer to a
-        question, keeps the chime it plays. The Pi cancels its own echo, so its replies
-        play as they always have.
+        question, keeps the chime it plays. So does an open recording, which a
+        conversation plays its replies over, with the echo cancelled. The Pi cancels its
+        own echo, so its replies play as they always have.
 
         Args:
             playback: The reply, just started.
@@ -1101,7 +1167,10 @@ class Satellite:
         # missed - in the same order _begin takes them.
         with self._waking, self._lock:
             recording = self._recording
-            listening = recording is not None and recording.from_press and not recording.is_set()
+            # Not an open one, which a conversation's replies are meant to play over: the
+            # brain made it so after the press, and a press over the reply cuts in on it.
+            listening = (recording is not None and recording.from_press and not recording.open
+                         and not recording.is_set())
         if listening:
             logger.info("A reply came while listening after a press, so it isn't played")
             playback.stop()
@@ -2025,6 +2094,79 @@ class Satellite:
             if self.link.send("away", **report):
                 self._handing_over = report
                 self.link.expect("away_settled", SETTLE_WAIT)
+        # Whether or not the canceller is ready, so a brain which has just started knows.
+        self._tell_echo_ready(connecting=True)
+
+    def _take_conversation(self, message: Dict, payload: bytes):
+        """The brain says a conversation has started or ended here - see _set_conversation."""
+        on = message.get("on")
+        if not isinstance(on, bool):
+            logger.warning(f"The brain sent a conversation which isn't on or off: {ascii(on)[:40]}")
+            return
+        self._set_conversation(on)
+
+    def _set_conversation(self, on: bool):
+        """
+        Starts or ends a conversation. A push-to-talk satellite holds its microphone and
+        speaker open for as long as it lasts, with the echo canceller taking its own sound
+        out of what it hears - they were opened afresh, so it starts again - and unmutes
+        Windows' microphone as a press does, which a turn's end no longer mutes again.
+        Ending it lets all of that go, and the microphone is as an ordinary press leaves it,
+        muted again if the press had unmuted it. A wake word satellite only notes it: it
+        has both open already, and its canceller is always on. Either way an open recording
+        which is still going ends with it, so the orb isn't left listening.
+
+        Args:
+            on: True as it starts, False as it ends - or as the brain is lost.
+        """
+        with self._conversation_lock:
+            if on == self._conversing:
+                return
+            self._conversing = on
+            if self.push_to_talk:
+                if on:
+                    self.microphone.hold()
+                    self.speaker.hold()
+                    # After both are open, as it's their opening which makes it start again.
+                    if self.echo is not None:
+                        self.echo.engaged = True
+                else:
+                    if self.echo is not None:
+                        self.echo.engaged = False
+                    self.microphone.release()
+                    self.speaker.release()
+        if on:
+            self._unmute_windows()
+        else:
+            with self._lock:
+                recording = self._recording
+                if recording is not None and recording.open and not recording.is_set():
+                    # As _stop_listening does, but with nothing to answer, so the orb is
+                    # let go of rather than left thinking.
+                    self._orb_states.listening_ended(False)
+                    recording.set()
+            self._mute_mic_again()
+        # So the brain hears it now, not at the next look.
+        self._tell_echo_ready()
+        logger.info(f"A conversation has {'started' if on else 'ended'} here")
+
+    def _tell_echo_ready(self, connecting: bool = False):
+        """
+        Tells the brain whether the echo canceller has lined the speaker up with the
+        microphone and is taking Nova's own sound out - when the brain is reached, and each
+        time that changes. False where there's none, or while it isn't engaged.
+
+        Args:
+            connecting: Whether the brain has just been reached, and is told whatever it is.
+        """
+        with self._echo_lock:
+            ready = self.echo is not None and self.echo.ready
+            if ready == self._echo_told and not connecting:
+                return
+            link = self.link
+            # Not noted as told if it wasn't sent, so the next look tries again.
+            if link is not None and link.send("echo_ready", ready=ready):
+                self._echo_told = ready
 
     def _take_quiet(self, message: Dict, payload: bytes):
         """
@@ -2095,6 +2237,9 @@ class Satellite:
         for each in playing:
             each.playback.stop()
             each.let_go()
+        # Nobody is left to end a conversation, or to hear it: the devices it held open
+        # are let go, and an open recording ends.
+        self._set_conversation(False)
         # Nobody is left to end the turn which a press opened the microphone for.
         self._mute_mic_again()
         if waiting:
@@ -2114,6 +2259,9 @@ class Satellite:
                 with self._lock:
                     if not self.link.connected:
                         self.ringer.check(time.time())
+                # Looked at here, on a thread which is already waking every second, rather than
+                # on one of its own: the canceller is ready some seconds after it's engaged.
+                self._tell_echo_ready()
             except Exception:
                 logger.exception("Couldn't check the alarm copy")
 

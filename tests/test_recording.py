@@ -132,6 +132,58 @@ def test_the_cap_leaves_room_for_the_longest_request_and_its_pre_roll():
     assert recording.MAX_FEED_SECONDS >= longest + protocol.MAX_AUDIO // 2 / RATE
 
 
+def _counting(start, end):
+    """Samples which are each their own position (kept off 0, which is what silence reads as)."""
+    return (np.arange(start, end) % 30000 + 1).astype(np.int16)
+
+
+def test_an_open_feed_has_no_cap_and_keeps_a_bounded_amount():
+    feed = AudioFeed(open=True)
+    seconds = 3 * recording.MAX_FEED_SECONDS
+    for start in range(0, int(seconds * RATE), RATE // 10):
+        feed.feed(_counting(start, start + RATE // 10))
+    # None of it dropped as past a cap, and positions go on counting from the first sample fed.
+    assert feed.position == int(seconds * RATE)
+    # Only so much is held, however long it goes on.
+    assert len(feed._samples) <= 2 * recording.OPEN_KEEP_SECONDS * RATE
+    assert len(feed._arrivals) <= 2 * recording.OPEN_KEEP_SECONDS * 10 + 1
+
+
+def test_an_open_feed_keeps_at_least_the_last_ten_seconds_and_reads_older_audio_as_silence():
+    assert recording.OPEN_KEEP_SECONDS >= 10
+    feed = AudioFeed(open=True)
+    total = 100 * RATE
+    for start in range(0, total, RATE // 10):
+        feed.feed(_counting(start, start + RATE // 10))
+    # What's kept reads back by its position - from a second back, or from the first of the last ten.
+    assert np.array_equal(feed.listen(start=total - RATE).read(RATE), _counting(total - RATE, total))
+    assert np.array_equal(feed.listen(start=total - 10 * RATE).read(10 * RATE), _counting(total - 10 * RATE, total))
+    # What was let go of is as many samples of silence, so a position still means what it did.
+    old = feed.listen(start=0)
+    assert not np.any(old.read(RATE)) and old.position == RATE
+    edge = feed._dropped
+    assert edge > 0
+    across = feed.listen(start=edge - 5).read(10)
+    assert list(across[:5]) == [0] * 5 and np.array_equal(across[5:], _counting(edge, edge + 5))
+    # And it is still when its audio arrived which is asked for, not a position that isn't there.
+    assert feed.time_at(total) >= feed.time_at(0)
+
+
+def test_an_open_feed_still_ends_when_the_satellite_stops_sending():
+    feed = AudioFeed(stall_seconds=0.05, open=True)
+    feed.feed(_counting(0, 1600))
+    assert len(feed.listen(start=0).read(1600)) == 1600
+    assert len(feed.listen(start=1600).read(1600)) == 0
+    assert feed.ended
+
+
+def test_a_feed_has_an_event_for_a_cut_in():
+    feed = AudioFeed()
+    assert not feed.cut_in.is_set()
+    feed.cut_in.set()
+    assert feed.cut_in.is_set()
+
+
 def test_audio_fed_after_the_feed_ended_is_ignored():
     feed = AudioFeed()
     feed.feed(np.full(1600, 1, dtype=np.int16))

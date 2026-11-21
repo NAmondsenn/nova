@@ -370,6 +370,11 @@ STALL_SECONDS = 2.0
 # ever. In practice the satellite stops at the request's own limit, pre-roll included.
 MAX_FEED_SECONDS = 40.0
 
+# How much an open feed keeps, in seconds - far more than a turn's few seconds of
+# pre-roll, which the brain asks for from just behind the present, and a bounded amount
+# however long a conversation lasts. More is let go of in one go, so up to twice this is held.
+OPEN_KEEP_SECONDS = 30.0
+
 
 class AudioFeed:
     """
@@ -378,23 +383,35 @@ class AudioFeed:
 
     Positions are counted in samples at 16kHz since the first one was fed. Everything
     fed is kept, since one feed is only ever one query's worth of audio - up to a cap.
+    An open feed, for a conversation, has no cap and keeps only the last OPEN_KEEP_SECONDS:
+    positions go on counting from the first sample fed, and audio from before what's kept
+    reads back as silence, as the echo canceller's history does.
     """
 
-    def __init__(self, stall_seconds: float = STALL_SECONDS, max_seconds: float = MAX_FEED_SECONDS):
+    def __init__(self, stall_seconds: float = STALL_SECONDS, max_seconds: float = MAX_FEED_SECONDS,
+                 open: bool = False):
         """
         Args:
             stall_seconds: How long a reader waits with no new audio before the feed
                 is taken to have ended.
             max_seconds: The most audio it keeps - anything fed after that is dropped.
+            open: Whether it is one of a conversation's, which goes on for minutes: no
+                cap on what's fed, and only the last OPEN_KEEP_SECONDS of it kept.
         """
         self.stall_seconds = stall_seconds
+        self.open = open
         self._max_samples = round(max_seconds * RATE)
         self._over_cap = False
         self._samples = np.zeros(0, dtype=np.int16)
+        # How many samples have been let go of before the first one kept, so a position
+        # in what's kept is its own less this.
+        self._dropped = 0
         # The position each piece fed ends at, and when it arrived, for time_at.
         self._arrivals: List[Tuple[int, float]] = []
         self._ended = False
         self._pressed = False
+        # Set when the satellite says the user pressed over a reply during this recording.
+        self.cut_in = threading.Event()
         self._condition = threading.Condition()
 
     def feed(self, samples: np.ndarray):
@@ -410,17 +427,25 @@ class AudioFeed:
         with self._condition:
             if self._ended:
                 return
-            room = self._max_samples - len(self._samples)
-            if len(samples) > room:
-                if not self._over_cap:
-                    self._over_cap = True
-                    logger.warning(f"More than {self._max_samples / RATE:.0f}s of audio fed into one recording, "
-                                   f"dropping the rest")
-                samples = samples[:room]
-                if len(samples) == 0:
-                    return
+            if not self.open:
+                room = self._max_samples - len(self._samples)
+                if len(samples) > room:
+                    if not self._over_cap:
+                        self._over_cap = True
+                        logger.warning(f"More than {self._max_samples / RATE:.0f}s of audio fed into one recording, "
+                                       f"dropping the rest")
+                    samples = samples[:room]
+                    if len(samples) == 0:
+                        return
             self._samples = np.concatenate([self._samples, samples.astype(np.int16)])
-            self._arrivals.append((len(self._samples), time.monotonic()))
+            self._arrivals.append((self._dropped + len(self._samples), time.monotonic()))
+            if self.open and len(self._samples) > 2 * OPEN_KEEP_SECONDS * RATE:
+                # Let go of the oldest in one go, down to what's kept, rather than a
+                # little with every piece, which would copy the whole of it each time.
+                extra = len(self._samples) - round(OPEN_KEEP_SECONDS * RATE)
+                self._samples = self._samples[extra:]
+                self._dropped += extra
+                self._arrivals = [(end, arrived) for end, arrived in self._arrivals if end > self._dropped]
             self._condition.notify_all()
 
     def end(self, pressed: bool = False):
@@ -453,14 +478,15 @@ class AudioFeed:
     def position(self) -> int:
         """How many samples have been fed so far - the position of "now"."""
         with self._condition:
-            return len(self._samples)
+            return self._dropped + len(self._samples)
 
     def listen(self, start: Optional[int] = None) -> "AudioFeedReader":
         """
         Starts reading the audio from a position onwards.
 
         Args:
-            start: Where to start - now if None.
+            start: Where to start - now if None. Any earlier position will do, though
+                an open feed keeps only so much of what came before - see __init__.
 
         Returns:
             A reader which keeps its own place.
@@ -489,18 +515,24 @@ class AudioFeed:
 
         Returns:
             The samples - fewer than asked for, or none, only if the feed ended or
-            stalled.
+            stalled. Any from before what an open feed keeps are silence.
         """
         with self._condition:
-            while not self._ended and len(self._samples) < start + count:
-                heard = len(self._samples)
+            while not self._ended and self._dropped + len(self._samples) < start + count:
+                heard = self._dropped + len(self._samples)
                 if not self._condition.wait_for(
-                        lambda: self._ended or len(self._samples) != heard,
+                        lambda: self._ended or self._dropped + len(self._samples) != heard,
                         timeout=self.stall_seconds):
                     logger.warning(f"No audio for {self.stall_seconds:.1f}s, "
                                    f"taking the feed to have ended")
                     self._ended = True
-            return self._samples[start:start + count].copy()
+            end = min(start + count, self._dropped + len(self._samples))
+            if end <= start:
+                return np.zeros(0, dtype=np.int16)
+            # What's gone is silence, so the samples are as many as were asked for and where they were.
+            gone = np.zeros(max(0, min(end, self._dropped) - start), dtype=np.int16)
+            kept = self._samples[max(start, self._dropped) - self._dropped:end - self._dropped]
+            return np.concatenate([gone, kept])
 
 
 class AudioFeedReader:

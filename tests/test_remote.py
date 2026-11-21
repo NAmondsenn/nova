@@ -17,7 +17,7 @@ import pytest
 
 np = pytest.importorskip("numpy")
 
-from voice_assistant import protocol, remote, satellite_link
+from voice_assistant import protocol, recording, remote, satellite_link
 from voice_assistant.remote import RemoteSatellite
 
 HELLO = {"name": "bedroom", "hostname": "pi", "sample_rate": 48000, "unclean": False}
@@ -561,6 +561,129 @@ def test_a_follow_up_is_heard_until_the_brain_stops_listening(pair):
     assert wait_for(lambda: fake.messages("pong"))
     assert feed.position == 1600
     assert ends_at_once(feed)
+
+
+@pytest.fixture
+def talker():
+    """A satellite which said it knows conversations."""
+    made = connect(conversations=True)
+    yield made
+    disconnect(*made)
+
+
+def test_an_open_listen_is_asked_for_open_and_its_feed_has_no_limit(talker):
+    satellite, fake, serving = talker
+    assert satellite.can_converse
+    feed = satellite.listen(open=True)
+    assert wait_for(lambda: fake.messages("listen"))
+    (listen,) = fake.messages("listen")
+    assert listen["open"] is True and listen["recording"].startswith("listen-")
+
+    # More than the 40 seconds an ordinary feed keeps, and then some, in the biggest messages there are.
+    piece = np.full(protocol.MAX_AUDIO // 2, 7, dtype=np.int16)
+    for _ in range(9):
+        fake.say("audio", piece.tobytes())
+    assert wait_for(lambda: feed.position == 9 * len(piece))
+    assert 9 * len(piece) > recording.MAX_FEED_SECONDS * 16000
+    assert not feed.ended and feed.open
+    # What it holds doesn't go on growing with it - see AudioFeed.
+    assert len(feed._samples) <= 2 * recording.OPEN_KEEP_SECONDS * 16000
+
+    satellite.stop_listening(feed)
+    assert wait_for(lambda: fake.messages("stop_listening"))
+    assert fake.messages("stop_listening") == [{"type": "stop_listening", "recording": listen["recording"]}]
+
+
+def test_an_ordinary_listen_is_still_asked_for_as_it_always_was(talker):
+    satellite, fake, serving = talker
+    feed = satellite.listen()
+    assert wait_for(lambda: fake.messages("listen"))
+    assert "open" not in fake.messages("listen")[0] and not feed.open
+    piece = np.full(protocol.MAX_AUDIO // 2, 7, dtype=np.int16)
+    for _ in range(5):
+        fake.say("audio", piece.tobytes())
+    fake.say("ping")
+    assert wait_for(lambda: fake.messages("pong"))
+    # Dropped past its cap, as it always was.
+    assert feed.position == round(recording.MAX_FEED_SECONDS * 16000)
+
+
+def test_a_satellite_which_doesnt_know_conversations_is_never_sent_them(pair):
+    satellite, fake, serving = pair
+    assert not satellite.can_converse
+    feed = satellite.listen(open=True)
+    assert wait_for(lambda: fake.messages("listen"))
+    # An ordinary listen, in the feed and as it is asked for.
+    assert fake.messages("listen")[0].keys() == {"type", "recording"} and not feed.open
+    assert satellite.set_conversation(True) is False
+    fake.say("ping")
+    assert wait_for(lambda: fake.messages("pong"))
+    assert fake.messages("conversation") == []
+    assert satellite.connected
+
+
+def test_the_brain_tells_a_satellite_a_conversation_has_started_and_ended(talker):
+    satellite, fake, serving = talker
+    assert satellite.set_conversation(True) is True
+    assert satellite.set_conversation(False) is True
+    assert wait_for(lambda: len(fake.messages("conversation")) == 2)
+    assert fake.messages("conversation") == [{"type": "conversation", "on": True},
+                                             {"type": "conversation", "on": False}]
+    fake.go()
+    assert wait_for(lambda: not satellite.connected)
+    assert satellite.set_conversation(True) is False
+
+
+def test_cut_in_sets_the_feeds_event(talker):
+    satellite, fake, serving = talker
+    feed = satellite.listen(open=True)
+    assert wait_for(lambda: fake.messages("listen"))
+    recording = fake.messages("listen")[0]["recording"]
+    assert not feed.cut_in.is_set()
+    # One for a recording which has been replaced isn't this one's.
+    fake.say("cut_in", recording="listen-0")
+    fake.say("ping")
+    assert wait_for(lambda: len(fake.messages("pong")) == 1)
+    assert not feed.cut_in.is_set()
+
+    fake.say("cut_in", recording=recording)
+    assert feed.cut_in.wait(2)
+
+
+def test_a_cut_in_which_names_no_recording_is_for_the_one_being_sent(talker):
+    satellite, fake, serving = talker
+    feed = satellite.listen(open=True)
+    fake.say("cut_in")
+    assert feed.cut_in.wait(2)
+
+
+def test_a_cut_in_with_nothing_listening_is_ignored(talker):
+    satellite, fake, serving = talker
+    fake.say("cut_in", recording="listen-1")
+    fake.say("ping")
+    assert wait_for(lambda: fake.messages("pong"))
+    assert satellite.connected
+
+
+def test_echo_ready_is_false_until_said(talker):
+    satellite, fake, serving = talker
+    assert satellite.echo_ready is False
+    fake.say("echo_ready", ready=True)
+    assert wait_for(lambda: satellite.echo_ready is True)
+    fake.say("echo_ready", ready=False)
+    assert wait_for(lambda: satellite.echo_ready is False)
+
+
+def test_an_echo_ready_which_isnt_true_or_false_is_left_alone(talker, caplog):
+    satellite, fake, serving = talker
+    fake.say("echo_ready", ready=True)
+    assert wait_for(lambda: satellite.echo_ready is True)
+    with caplog.at_level(logging.WARNING):
+        fake.say("echo_ready", ready="yes")
+        fake.say("echo_ready")
+        fake.say("ping")
+        assert wait_for(lambda: fake.messages("pong"))
+    assert satellite.echo_ready is True and caplog.text.count("echo_ready without true or false") == 2
 
 
 def test_a_follow_up_is_numbered_and_stopping_it_says_which(pair):

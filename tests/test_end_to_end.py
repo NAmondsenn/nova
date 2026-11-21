@@ -347,7 +347,7 @@ def world(tmp_path, monkeypatch, make_config):
     monkeypatch.setattr(satellite_module, "Microphone", Microphone)
     monkeypatch.setattr(satellite_module, "Speaker", Speaker)
     monkeypatch.setattr(satellite_module, "WakeWordDetector", Wake)
-    monkeypatch.setattr(satellite_module, "make_echo_canceller", lambda config, rate: None)
+    monkeypatch.setattr(satellite_module, "make_echo_canceller", lambda config, rate, engaged=True: None)
     monkeypatch.setattr(satellite_module, "AlarmCopy", partial(AlarmCopy, str(tmp_path / "alarm_copy.json")))
     monkeypatch.setattr(satellite_module, "StateCopy", partial(StateCopy, str(tmp_path / "state.json")))
     monkeypatch.setattr(satellite_module, "Phrase", partial(Phrase, str(tmp_path / "phrase.wav")))

@@ -201,7 +201,36 @@ def test_the_settings_install_writes_are_ones_nova_accepts(tmp_path):
     assert section("backend")["address"] == "nova:10400"
     assert section("backend")["satellite"] == "pc"
     assert section("satellite")["trigger"] == "push_to_talk"
-    assert section("audio")["echo_cancellation"] is False
+    # Left on, as config.yaml has it: it does nothing until a conversation holds the devices open.
+    assert section("audio")["echo_cancellation"] is True
+
+
+def _install_script():
+    with open(os.path.join(SCRIPTS, "install.ps1"), encoding="ascii") as file:
+        return file.read()
+
+
+def _old_echo_pattern():
+    """The pattern install.ps1 looks for in a settings file it finds, as PowerShell's single quotes have it."""
+    return re.search(r"\$oldEcho = '(.*)'", _install_script()).group(1)
+
+
+def test_an_install_from_before_conversations_has_its_echo_canceller_turned_on(tmp_path):
+    # Exactly what the install used to write, with Windows' line ends or without.
+    for ends in ("\n", "\r\n"):
+        old = ends.join(['backend:', '  address: "nova:10400"', '  satellite: "pc"', 'satellite:',
+                         '  trigger: "push_to_talk"', 'audio:', '  echo_cancellation: false', ''])
+        fixed = re.sub(_old_echo_pattern(), "", old)
+        assert fixed == ends.join(['backend:', '  address: "nova:10400"', '  satellite: "pc"', 'satellite:',
+                                   '  trigger: "push_to_talk"', ''])
+        (tmp_path / "config.yaml").write_text(fixed)
+        assert Config(path=str(tmp_path / "config.yaml")).section("audio")["echo_cancellation"] is True
+
+
+def test_a_settings_file_with_anything_else_under_audio_is_left_as_it_is():
+    for text in ('audio:\n  echo_cancellation: false\n  pre_roll: 0.5\n', 'audio:\n  pre_roll: 0.5\n  echo_cancellation: false\n',
+                 'audio:\n  echo_cancellation: true\n', 'backend:\n  satellite: "pc"\n'):
+        assert re.search(_old_echo_pattern(), text) is None
 
 
 class FakeKernel32:

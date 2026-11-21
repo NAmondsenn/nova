@@ -113,7 +113,8 @@ def test_the_handshake_admits_a_satellite_which_knows_its_password():
     assert outcome["brain"] == {"name": "bedroom", "hostname": "home-assistant",
                                 "sample_rate": 48000, "unclean": False, "speaker": None,
                                 "push_to_talk": False, "machine": None, "saves_notes": False,
-                                "media_controls": False, "opens": False, "system_volume": False}
+                                "media_controls": False, "opens": False, "system_volume": False,
+                                "conversations": False}
     assert outcome["satellite"] is None
     assert sent == ["challenge", "ready"]
 
@@ -309,6 +310,19 @@ def test_admit_bad_opens_is_false_not_refused():
         assert admitted["opens"] is False and admitted["system_volume"] is False
 
 
+def test_hello_conversations_sent_only_when_true():
+    assert _hello_sent(conversations=True)["conversations"] is True
+    for hello in (_hello_sent(), _hello_sent(conversations=False)):
+        assert "conversations" not in hello
+
+
+def test_admit_reads_conversations_and_a_bad_one_is_false_not_refused():
+    assert _admitted(conversations=True)["conversations"] is True
+    assert _admitted()["conversations"] is False
+    for said in ("yes", 1, 0, None, ["x"]):
+        assert _admitted(conversations=said)["conversations"] is False
+
+
 def test_a_hello_without_a_speaker_still_connects():
     # As an older satellite's has none - and one which doesn't make sense is only
     # left out, never the reason a satellite can't connect.
@@ -318,7 +332,7 @@ def test_a_hello_without_a_speaker_still_connects():
                                               "unclean": False, "speaker": None, "push_to_talk": False,
                                               "machine": None, "saves_notes": False,
                                               "media_controls": False, "opens": False,
-                                              "system_volume": False}
+                                              "system_volume": False, "conversations": False}
     # Up to 64 characters, of any language.
     assert _admitted(speaker="x" * 64)["speaker"] == "x" * 64
     assert _admitted(speaker="Cuisine de Zoë")["speaker"] == "Cuisine de Zoë"
