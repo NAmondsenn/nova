@@ -441,7 +441,7 @@ class Downloads:
             wall: The wall clock a swap is saved by, to tell how long ago one carried on
                 after a restart was asked for.
             approvals: The brain's Approvals, which a large download - albums enough, in
-                the trust minutes - asks before it starts. None if there's no way to ask,
+                the album minutes - asks before it starts. None if there's no way to ask,
                 so a large download is never started.
         """
         self.config = config
@@ -628,6 +628,14 @@ class Downloads:
         except (TypeError, ValueError):
             return TRUST_MINUTES
 
+    def _album_minutes(self) -> int:
+        """
+        The minutes albums are counted over: the trust minutes, but never fewer than their
+        default, so a trust window turned down - to 0, say - can't make every album the
+        first, and no download ever large.
+        """
+        return max(self._trust_minutes(), TRUST_MINUTES)
+
     def _album_count(self) -> int:
         """The albums which make a download large, from the settings as they are now."""
         try:
@@ -637,17 +645,17 @@ class Downloads:
 
     def _albums_lately(self) -> int:
         """
-        How many albums were started in the last trust minutes, dropping the older ones.
+        How many albums were started in the last album minutes, dropping the older ones.
         Songs never count. The caller holds the lock.
         """
-        since = self._now() - self._trust_minutes() * 60
+        since = self._now() - self._album_minutes() * 60
         self._album_starts = [started for started in self._album_starts if started > since]
         return len(self._album_starts)
 
     def _ask_for_albums(self, wanted: Wanted, satellite: Optional[str]) -> Dict:
         """
         Asks approval to start an album which makes a large download, with the albums
-        before it in the trust minutes.
+        before it in the album minutes.
 
         Args:
             wanted: The album.
@@ -666,7 +674,7 @@ class Downloads:
                 return {"success": True, "message": f"I'm already getting {wanted.name}."}
             return {"success": True, "message": f"Downloading {wanted.name}.", "later": True}
 
-        return self._approvals.gate(f"Download the album {wanted.name} ({count} albums in {self._trust_minutes()} "
+        return self._approvals.gate(f"Download the album {wanted.name} ({count} albums in {self._album_minutes()} "
                                     f"minutes)", do, satellite)
 
     def _is_waiting(self, wanted: Wanted) -> bool:

@@ -1681,6 +1681,37 @@ def test_the_album_count_is_the_setting(approving, clock, make_config, monkeypat
     assert fake.asked == [("Download the album Rumours by Fleetwood Mac (5 albums in 5 minutes)", "kitchen")]
 
 
+def _with_trust_minutes(make_config, monkeypatch, minutes):
+    monkeypatch.setenv("SOULSYNC_API_KEY", "made-up-key")
+    monkeypatch.setenv("NAVIDROME_PASSWORD", "made-up-password")
+    return make_config(approvals={"trust_minutes": minutes}, soulsync={"url": "http://soulsync.local:8008"},
+                       navidrome={"url": "http://navidrome.local:4533", "username": "nova"},
+                       music={"song_download_minutes": 10, "album_download_minutes": 30})
+
+
+def test_a_trust_window_turned_down_never_makes_albums_free(approving, clock, make_config, monkeypatch):
+    # No trust window at all still counts albums over the default five minutes, so the third still asks.
+    downloads, fake = approving(FakeSoulSync(), FakeLibrary(clock), settings=_with_trust_minutes(
+        make_config, monkeypatch, 0))
+    _two_albums_before(downloads)
+    clock.time += 60
+
+    downloads.download("Rumours by Fleetwood Mac", "album", "kitchen")
+
+    assert fake.asked == [(BIG_ALBUM, "kitchen")]
+
+
+def test_a_longer_trust_window_counts_albums_over_it(approving, clock, make_config, monkeypatch):
+    downloads, fake = approving(FakeSoulSync(), FakeLibrary(clock), settings=_with_trust_minutes(
+        make_config, monkeypatch, 20))
+    _two_albums_before(downloads)
+    clock.time += 15 * 60
+
+    downloads.download("Rumours by Fleetwood Mac", "album", "kitchen")
+
+    assert fake.asked == [("Download the album Rumours by Fleetwood Mac (3 albums in 20 minutes)", "kitchen")]
+
+
 def test_an_approved_album_starts_and_says_downloading(approving, clock, set_up):
     downloads, fake = approving(FakeSoulSync(), FakeLibrary(clock), settings=set_up)
     _two_albums_before(downloads)
