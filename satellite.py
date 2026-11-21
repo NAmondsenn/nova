@@ -12,6 +12,7 @@ told. While the brain can't be reached, the satellite rings the alarms from its 
 and answers the wake word with the recorded "I can't reach the server".
 """
 
+import collections
 import itertools
 import json
 import logging
@@ -45,6 +46,7 @@ from voice_assistant.speaker import BLOCK_SECONDS, Playback, Speaker
 from voice_assistant.timeline import Timeline
 from voice_assistant.wake_clips import WakeClips, clip_start
 from voice_assistant.wake_word import WakeWordDetector
+from voice_assistant.windows_hello import WindowsHello
 from voice_assistant.windows_media import UNCHANGED, WindowsMedia
 
 logger = logging.getLogger(__name__)
@@ -153,6 +155,9 @@ WINDOWS_EVERY = 3
 # MOST_WINDOWS): more than a person has, so only a guard.
 MOST_APPS = 3000
 MOST_WINDOWS = 200
+
+# How many approval ids are remembered, so one the brain sends again is never asked twice.
+APPROVALS_KEPT = 50
 
 # Said back when something asked of the computer can't be done.
 NOT_HERE = "That's not on this PC any more."
@@ -379,6 +384,19 @@ class Satellite:
             self.opens = pc_windows.load()
             volume = SystemVolume()
             self.system_volume = volume if volume.available else None
+        # Windows Hello, for the user's OK to a big action - only on Windows, and only where
+        # winrt's Hello can be had and is set up, else None and the hello says it doesn't
+        # approve. The ids of the approvals asked, so one the brain sends twice is never
+        # asked or answered twice.
+        self.hello: Optional[WindowsHello] = None
+        if _on_windows():
+            hello = WindowsHello()
+            if hello.available:
+                self.hello = hello
+            else:
+                hello.close()
+        self._approvals_asked: "collections.deque[str]" = collections.deque(maxlen=APPROVALS_KEPT)
+        self._approvals_lock = threading.Lock()
         # Windows' microphone, muted by Nova until a time, when it comes back on by itself - or
         # None. Held open says a press has unmuted it for its recording, to be muted again when
         # the recording ends. Both under _mic_lock, held while Windows is asked, so the press,
@@ -482,6 +500,8 @@ class Satellite:
             "away_settled": self._away_settled,
             "save_note": self._save_note,
             "computer": self._computer,
+            "approval": self._approval,
+            "approval_withdraw": self._approval_withdraw,
             "restart": self._restart,
         }
 
@@ -508,7 +528,8 @@ class Satellite:
                                       speaker=self.spotify_speaker, push_to_talk=self.push_to_talk,
                                       machine=self.machine, saves_notes=self.saves_notes,
                                       media_controls=self.media is not None, opens=self.opens,
-                                      system_volume=self.system_volume is not None)
+                                      system_volume=self.system_volume is not None,
+                                      approves=self.hello is not None)
             self.link.start()
             threading.Thread(target=self._ring_when_due, daemon=True, name="fallback").start()
             if self.system_volume is not None:
@@ -1286,6 +1307,37 @@ class Satellite:
         # or bringing it to the front, never holds up hearing the brain.
         threading.Thread(target=self._do_on_computer, args=(id, message), daemon=True, name="computer").start()
 
+    def _approval(self, message: Dict, payload: bytes):
+        """
+        The brain asking for the user's OK to a big action: asked of Windows Hello on a
+        thread of its own, as this is the link's reader and the prompt waits for the user.
+        Each id is asked once, however often it's sent.
+        """
+        id, description = message.get("id"), message.get("description")
+        if self.hello is None or not isinstance(id, str) or not isinstance(description, str):
+            # Nothing is answered: the brain's wait for this satellite simply runs out.
+            logger.warning("The brain asked for an approval which this satellite can't ask, so it wasn't answered")
+            return
+        with self._approvals_lock:
+            if id in self._approvals_asked:
+                logger.warning("The brain asked for an approval already asked, so it wasn't asked again")
+                return
+            self._approvals_asked.append(id)
+        threading.Thread(target=self._approve, args=(id, description), daemon=True, name="approval").start()
+
+    def _approve(self, id: str, description: str):
+        """Asks Hello, and sends the answer - unless the brain withdrew the approval meanwhile, and so wants none."""
+        approved = self.hello.ask(id, description)
+        if self.hello.withdrawn(id):
+            return
+        self.link.send("approval_answer", id=id, approved=approved)
+
+    def _approval_withdraw(self, message: Dict, payload: bytes):
+        """The brain giving up on an approval: its prompt is cancelled, or never shown if it's still to come."""
+        id = message.get("id")
+        if self.hello is not None and isinstance(id, str):
+            self.hello.cancel(id)
+
     def _do_on_computer(self, id: str, message: Dict):
         """
         Does what the brain asked on this computer and tells it how it went - then, for
@@ -1743,6 +1795,8 @@ class Satellite:
             self.link.stop()
         if self.media is not None:
             self.media.close()
+        if self.hello is not None:
+            self.hello.close()
         if self.system_volume is not None:
             # Never left open by a press past the satellite's own end.
             self._mute_mic_again()
