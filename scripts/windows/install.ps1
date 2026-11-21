@@ -209,7 +209,13 @@ try {
         else {
             Write-Warning "There's no base pythonw.exe to take the stack size from, so Nova.exe keeps the compiler's"
         }
-        Copy-WithStack $built $novaExe $reserve
+        # Written beside it and then moved into place, so a failure part way leaves the old
+        # Nova.exe whole rather than a broken one every start would then run. A .new left by
+        # such a failure goes first.
+        $staged = $novaExe + '.new'
+        if (Test-Path -LiteralPath $staged) { Remove-Item -LiteralPath $staged -Force }
+        Copy-WithStack $built $staged $reserve
+        Move-Item -LiteralPath $staged -Destination $novaExe -Force
         Set-Content -LiteralPath $exeMark -Value $exeHash -Encoding ASCII
         Write-Host "Built $novaExe with $compiler (stack reserve $reserve)"
         Remove-Item -LiteralPath $build -Recurse -Force -ErrorAction SilentlyContinue

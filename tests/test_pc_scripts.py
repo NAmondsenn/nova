@@ -74,6 +74,22 @@ def test_install_builds_nova_exe_into_the_venv():
     assert "csc.exe" in script
 
 
+def test_install_never_leaves_a_half_written_nova_exe():
+    # Written beside it and moved into place, so a failure part way leaves the old one whole.
+    code = "\n".join(statements(read(INSTALL)))
+    staged = re.search(r"^\s*(\$\w+) = \$novaExe \+ '\.new'$", code, re.MULTILINE)
+    assert staged
+    name = re.escape(staged.group(1))
+    removed = re.search(r"Remove-Item -LiteralPath " + name, code)
+    copied = re.search(r"Copy-WithStack \$built " + name + r" \$reserve", code)
+    moved = re.search(r"Move-Item -LiteralPath " + name + r" -Destination \$novaExe -Force", code)
+    assert removed and copied and moved
+    assert removed.start() < copied.start() < moved.start()
+    assert "Copy-WithStack $built $novaExe" not in code
+    # The mark which says it's built is written only once it's in place.
+    assert moved.start() < code.index("Set-Content -LiteralPath $exeMark")
+
+
 def test_install_registers_both_tasks():
     logon = registration("Nova satellite")
     start = registration("Nova start")
@@ -120,6 +136,9 @@ def test_deploy_starts_only_what_was_running():
     assert "'Nova satellite', 'Nova start'" in script
     started = script.index("Start-ScheduledTask -TaskName 'Nova start'")
     assert "($wasRunning -or $firstInstall)" in script[:started]
+    # And only once the password for the brain is there, which a first install has yet to be given.
+    env_check = script.index("Test-Path (Join-Path $base 'config\\.env')")
+    assert script.index("$wasRunning -or $firstInstall") < env_check < started
     assert script.count("Start-ScheduledTask") == 1
     assert "Nova wasn't running, so it is left stopped" in script
 
