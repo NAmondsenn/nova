@@ -4324,6 +4324,34 @@ def test_the_brain_has_one_open_conversation_which_reads_the_settings_as_they_ar
     assert brain.open_conversation.start("bedroom") == "off"
 
 
+def test_the_satellite_going_ends_the_conversation(brain, connect):
+    serving(brain)
+    bedroom, kitchen = connect(brain), connect(brain, "kitchen", KITCHEN)
+    connected(brain)
+    connected(brain, "kitchen")
+    assert brain.open_conversation.start("kitchen") == "started"
+
+    # Another satellite going leaves it be.
+    bedroom.go()
+    assert wait_for(lambda: brain.session_for("bedroom") is None)
+    assert brain.open_conversation.on_at("kitchen")
+    # Its own going ends it, with nobody there to be told.
+    kitchen.go()
+    assert wait_for(lambda: brain.open_conversation.satellite is None)
+    assert kitchen.messages("play_sound") == [] and kitchen.messages("play_stream") == []
+
+
+def test_a_satellite_connecting_again_ends_its_conversation(brain, connect):
+    # Its last connection is let go as the new one comes, with the conversation that was on it.
+    serving(brain)
+    connect(brain)
+    old = connected(brain)
+    assert brain.open_conversation.start("bedroom") == "started"
+    connect(brain)
+    assert wait_for(lambda: brain.session_for("bedroom") not in (None, old))
+    assert brain.open_conversation.satellite is None
+
+
 def test_passing_the_daily_limit_tells_the_phone_once(make_brain):
     brain = make_brain(usage=USAGE)
     brain.ntfy = FakeNtfy()

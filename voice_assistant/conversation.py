@@ -53,6 +53,10 @@ DECLINED = {"no", "nope", "nah", "no thanks", "no thank you", "don't", "dont", "
             "stop", "cancel", "cancel that", "cancel it", "leave it", "no leave it", "never mind", "nevermind",
             "not now", "no not now"}
 
+# The tools of an open conversation's own phrases, whose local rules are matched even in the
+# answer to a question while one is on - as at any other turn of it, where "that's all" ends it.
+CONVERSATION_TOOLS = ["end_conversation"]
+
 
 @dataclass
 class Reply:
@@ -68,12 +72,18 @@ class Reply:
             the answer without the wake word.
         after: Things to do once the reply has been said, each giving {"success",
             "message"} - the PC's sleep, so it isn't put to sleep mid-sentence.
+        claude_answered: Whether Claude answered it, rather than Nova's own rules -
+            for which model an open conversation notes answered it.
+        not_for_me: Whether Claude took what was heard for speech from what's playing, so
+            nobody answered it - which an open conversation counts towards its end.
     """
     say: str = ""
     sounds: List[Tuple[str, str]] = field(default_factory=list)
     shown: str = ""
     listen_again: bool = False
     after: List[Callable[[], Dict]] = field(default_factory=list)
+    claude_answered: bool = False
+    not_for_me: bool = False
 
 
 class Conversation:
@@ -82,7 +92,8 @@ class Conversation:
     def __init__(self, clock, intents, llm, actions, music, chime_enabled: Union[bool, Callable[[], bool]] = True,
                  max_follow_ups: int = 3, routines=None, satellite: Optional[str] = None,
                  playing: Optional[Callable[[], List[str]]] = None, progress: Optional[Callable[[], None]] = None,
-                 room: Optional[Callable[[], List[str]]] = None, here: Optional[Callable[[], str]] = None):
+                 room: Optional[Callable[[], List[str]]] = None, here: Optional[Callable[[], str]] = None,
+                 conversing: Optional[Callable[[], bool]] = None):
         """
         Args:
             clock: The Clock, for what's ringing and for dismissing it.
@@ -112,6 +123,10 @@ class Conversation:
                 them is heard, and stopped, from here.
             here: Says which satellite the user is speaking through, for Claude - see
                 Session._here - or None to say nothing of it.
+            conversing: Says whether an open conversation is on at the user's satellite -
+                see OpenConversation - in which every reply is listened after: so a question
+                is listened for however many came before it, and the conversation's own
+                phrases are heard even in its answer. None for never.
         """
         self.clock = clock
         self.intents = intents
@@ -126,6 +141,7 @@ class Conversation:
         self.progress = progress or (lambda: None)
         self.room = room
         self.here = here
+        self.conversing = conversing or (lambda: False)
         self.start()
 
     def _heard_here(self) -> Where:
@@ -268,9 +284,15 @@ class Conversation:
         # a question the assistant asked, though, which needs the conversation so far
         # to make sense of. See intents.py.
         # Bar one whose tool's answer is the user's alone - "where's my phone?" - which can't be
-        # the answer to anything Nova asks, and which Claude, once asked, would hear.
-        result = self.intents.match(text, only=ActionExecutor.private_tools()) if follow_up else self.intents.match(text)
+        # the answer to anything Nova asks, and which Claude, once asked, would hear. And in an
+        # open conversation, its own phrases, as he may end it in answer to anything.
+        if follow_up:
+            only = ActionExecutor.private_tools() + (CONVERSATION_TOOLS if self.conversing() else [])
+            result = self.intents.match(text, only=only)
+        else:
+            result = self.intents.match(text)
         local = result is not None
+        claude_answered = not local
         if local:
             timeline.note(local_intent=True)
         else:
@@ -297,6 +319,7 @@ class Conversation:
         elif local:
             logger.info("Home Assistant didn't understand that, so asking Claude")
             timeline.note(local_intent=False)
+            claude_answered = True
             result = self._ask_claude(text, in_routine=in_routine)
             timeline.mark("llm_done")
             if result.get("not_for_me"):
@@ -348,7 +371,7 @@ class Conversation:
             if result.get("success") and any(r.ok and r.confirm == "later" for r in action_results):
                 self.llm.record_reply(text, "", _tool_answers(actions, action_results))
             logger.info(f"Action confirmed itself: {[r.say for r in action_results]}", extra=TRANSCRIPT)
-            return Reply(sounds=sounds, after=after)
+            return Reply(sounds=sounds, after=after, claude_answered=claude_answered)
 
         # Kept for "send that to my phone" - unless this was that, or the next one would
         # send "Sent.".
@@ -373,8 +396,10 @@ class Conversation:
             self.llm.record_reply(text, recorded, _tool_answers(actions, action_results))
 
         # If the assistant asked something, it listens straight away for the answer -
-        # but only so many times in a row.
-        listen_again = response_text.rstrip().endswith("?") and self.follow_ups < self.max_follow_ups
+        # but only so many times in a row, unless in an open conversation, which listens
+        # after every reply anyway.
+        listen_again = response_text.rstrip().endswith("?") and (self.follow_ups < self.max_follow_ups
+                                                                 or self.conversing())
         if listen_again:
             self.follow_ups += 1
             # A question one of the actions asks first, answered by what's said next. Not one
@@ -382,7 +407,8 @@ class Conversation:
             # would be taken for the answer.
             if not in_routine:
                 self.asked_first = _only_question(response_text, action_results)
-        return Reply(say=response_text, sounds=sounds, listen_again=listen_again, after=after)
+        return Reply(say=response_text, sounds=sounds, listen_again=listen_again, after=after,
+                     claude_answered=claude_answered)
 
     def _ask_claude(self, text: str, in_routine: bool = False) -> Dict:
         """
@@ -445,10 +471,10 @@ class Conversation:
                 timeline.note(outcome="not_for_me_unfounded")
             logger.info("Claude took that for speech from what's playing, with nothing playing, "
                         "so it wasn't caught")
-            return Reply(say=NOT_CAUGHT)
+            return Reply(say=NOT_CAUGHT, not_for_me=True)
         timeline.note(outcome="not_for_me")
         logger.info("Taken as speech from what's playing, so ignored")
-        return Reply()
+        return Reply(not_for_me=True)
 
     def _run(self, actions: List[Action]) -> List[ActionResult]:
         """

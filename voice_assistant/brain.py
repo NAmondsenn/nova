@@ -1539,7 +1539,7 @@ class Brain:
     def _let_go(self, session: Session):
         """
         Ends a satellite's session and lets the satellite go - the connection even if
-        ending the session fails, which is logged.
+        ending the session fails, which is logged - and any conversation on there with it.
         """
         name = session.satellite.name
         try:
@@ -1548,6 +1548,15 @@ class Brain:
             logger.exception(f"Couldn't let go of the {name} satellite's session properly")
         finally:
             session.satellite.close()
+            self._conversation_gone(name)
+
+    def _conversation_gone(self, name: str):
+        """
+        Ends a conversation on at a satellite which has gone, or is being let go - saying nothing,
+        as there's nobody there to hear it. One on at any other satellite is left be.
+        """
+        if self.open_conversation.end("gone", satellite=name):
+            logger.info(f"The {name} satellite went, so its conversation has ended")
 
     def _turned_away(self, name: str, why: str):
         """Logs why a satellite was turned away - once, however often it tries again, until it's let in."""
@@ -1725,7 +1734,9 @@ class Brain:
                 return
             del self.sessions[name]
             self._caught_up.discard(name)
-        # Only here, where it's the current connection which ended: a newer one has its own lists.
+        # Only here, where it's the current connection which ended: a newer one has its own lists,
+        # and may have a conversation of its own.
+        self._conversation_gone(name)
         self.computers.gone(name)
         self._satellites_changed()
         self._quiet_nudge.set()

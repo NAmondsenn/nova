@@ -198,3 +198,14 @@ def test_a_late_turn_from_another_satellite_isnt_noted_in_this_conversation():
     assert conversation.idle_in() == 300
     conversation.end("said")
     assert [e["user"] for e in given[0]] == ["new"]
+
+
+def test_an_end_for_another_satellite_ends_nothing():
+    # The Pi going, say, just as a conversation starts at the PC.
+    given = []
+    conversation, _, _ = make(ended=given.append)
+    conversation.start("pc")
+    assert conversation.end("gone", satellite="pi") is False
+    assert conversation.on_at("pc") and given == []
+    assert conversation.end("gone", satellite="pc") is True
+    assert conversation.satellite is None and given == [[]]

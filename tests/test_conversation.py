@@ -19,6 +19,7 @@ from voice_assistant.downloads import NOT_SET_UP, ON_ITS_WAY, Downloads
 from voice_assistant.ha_registry import Entry, Snapshot
 from voice_assistant.intents import LocalIntents
 from voice_assistant.llm import LLMHandler
+from voice_assistant.open_conversation import OpenConversation
 from voice_assistant.pc import PCPower
 from voice_assistant.playlist_changes import PlaylistChanges
 from voice_assistant.timeline import Timeline
@@ -319,6 +320,48 @@ def test_a_question_is_listened_for_but_only_so_many_times_in_a_row():
     llm = FakeLLM(*[_answer("Which one?")] * 3)
     conversation = _conversation(llm=llm, max_follow_ups=2)
     assert [conversation.handle("cancel it").listen_again for _ in range(3)] == [True, True, False]
+
+
+def test_in_an_open_conversation_every_question_is_listened_for():
+    # Every reply is listened after in one, so each question's answer is its answer, however many in a row.
+    llm = FakeLLM(*[_answer("Which one?")] * 3)
+    conversation = _conversation(llm=llm, max_follow_ups=2, conversing=lambda: True)
+    assert [conversation.handle("cancel it").listen_again for _ in range(3)] == [True, True, True]
+
+
+def test_in_an_open_conversation_its_end_is_heard_in_the_answer_to_a_question():
+    # "That's all" said back to "Anything else?" is Nova's own to hear, as it is at any other turn.
+    talk = OpenConversation(lambda: {"enabled": True})
+    talk.start("pc")
+    intents = LocalIntents(conversation=talk, satellite="pc")
+    actions = ActionExecutor(conversation=talk, satellite="pc")
+    llm = FakeLLM(_answer("Sorry?"))
+    # Told it isn't in one, the answer to a question is Claude's, as it always was.
+    _conversation(intents=intents, llm=llm, actions=actions, conversing=lambda: False).handle(
+        "That's all.", follow_up=True)
+    assert llm.asked == ["That's all."] and talk.on_at("pc")
+
+    reply = _conversation(intents=intents, llm=llm, actions=actions, conversing=lambda: talk.on_at("pc")).handle(
+        "That's all.", follow_up=True)
+    assert reply.say == "Okay." and llm.asked == ["That's all."]
+    assert not talk.on_at("pc")
+
+
+def test_a_reply_says_whether_claude_answered_it():
+    intents = FakeIntents({"pause": _answer("Okay.", Action("control_playback", {"action": "pause"}))})
+    conversation = _conversation(intents=intents, llm=FakeLLM(_answer("Paris.")))
+    assert not conversation.handle("pause").claude_answered
+    assert conversation.handle("what's the capital of France").claude_answered
+    # As is one Home Assistant didn't understand, which Claude then answered.
+    conversation, _, _ = _lights_assist_didnt_understand()
+    assert conversation.handle("dim the lights").claude_answered
+
+
+@pytest.mark.parametrize("playing", [["Bedroom TV"], []])
+def test_a_reply_says_claude_took_it_for_speech_from_whats_playing(playing):
+    reply = _conversation(llm=FakeLLM(NOT_FOR_ME), playing=FakePlaying(playing)).handle("turn the lights off")
+    assert reply.not_for_me and not reply.claude_answered
+    assert not _conversation(llm=FakeLLM(_answer("Paris."))).handle("what's the capital of France").not_for_me
 
 
 # What Home Assistant doesn't understand
@@ -634,7 +677,7 @@ def test_whats_playing_is_read_once_as_the_request_is_built():
     # for a request - or one started, a request taken for the film.
     playing = FakePlaying(["Bedroom TV"], [])
     reply = _conversation(llm=FakeLLM(NOT_FOR_ME), playing=playing).handle("I'll never let go, Jack.")
-    assert playing.asked == 1 and reply == Reply()
+    assert playing.asked == 1 and reply == Reply(not_for_me=True)
 
 
 def test_ignoring_speech_is_logged_without_the_words(caplog):
@@ -650,7 +693,7 @@ def test_something_ringing_carries_on_when_speech_from_whats_playing_is_ignored(
     ringing = {"insistent": True, "insistent_entries": ["timer 1"], "reminder": None, "reminder_sounding": False}
     conversation = _conversation(clock=clock, llm=FakeLLM(NOT_FOR_ME), playing=FakePlaying(["Bedroom TV"]),
                                  ringing=ringing)
-    assert conversation.handle("Fire!") == Reply()
+    assert conversation.handle("Fire!") == Reply(not_for_me=True)
     assert clock.silenced == [] and clock.dismissed == 0
 
 
@@ -667,7 +710,7 @@ def test_a_pressed_conversation_is_never_taken_for_speech_from_whats_playing():
 
     # The next conversation, begun by the wake word, is as before.
     conversation.start()
-    assert conversation.handle("I'll never let go, Jack.") == Reply()
+    assert conversation.handle("I'll never let go, Jack.") == Reply(not_for_me=True)
     assert llm.playing[-1] == ["Bedroom TV"]
 
 
@@ -705,7 +748,7 @@ def test_not_for_me_runs_nothing_even_with_actions_beside_it(playing):
 def test_not_for_me_after_a_fall_through_runs_nothing_even_with_actions_beside_it():
     conversation, llm, actions = _lights_assist_didnt_understand(llm=FakeLLM(NOT_FOR_ME_WITH_ACTIONS),
                                                                  playing=FakePlaying(["Bedroom TV"]))
-    assert conversation.handle("dim the lights") == Reply()
+    assert conversation.handle("dim the lights") == Reply(not_for_me=True)
     assert actions.run == ["control_home"]
 
 
@@ -714,7 +757,7 @@ def test_a_follow_up_gets_the_same_check():
     llm = FakeLLM(_answer("Which room?"), NOT_FOR_ME)
     conversation = _conversation(llm=llm, playing=FakePlaying(["Bedroom TV"]))
     assert conversation.handle("turn the lights on").listen_again is True
-    assert conversation.handle("Get out of the house!", follow_up=True) == Reply()
+    assert conversation.handle("Get out of the house!", follow_up=True) == Reply(not_for_me=True)
     assert llm.playing == [["Bedroom TV"], ["Bedroom TV"]]
     assert llm.recorded == [("turn the lights on", "Which room?")]
 
@@ -722,7 +765,7 @@ def test_a_follow_up_gets_the_same_check():
 def test_a_fall_through_from_assist_gets_the_same_check():
     playing = FakePlaying(["Bedroom TV"])
     conversation, llm, actions = _lights_assist_didnt_understand(llm=FakeLLM(NOT_FOR_ME), playing=playing)
-    assert conversation.handle("dim the lights") == Reply()
+    assert conversation.handle("dim the lights") == Reply(not_for_me=True)
     assert actions.run == ["control_home"] and llm.remembered == [] and llm.recorded == []
 
 

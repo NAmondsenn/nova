@@ -106,19 +106,23 @@ class OpenConversation:
                 return "started"
             return "already here" if self._satellite == satellite else "elsewhere"
 
-    def end(self, reason: str) -> bool:
+    def end(self, reason: str, satellite: Optional[str] = None) -> bool:
         """
         Ends the conversation, handing what was said in it to the `ended` step.
 
         Args:
-            reason: Why: "said", "switch", "idle", "not for nova", "muted" or "gone".
+            reason: Why: "said", "switch", "idle", "not for nova", "muted", "gone" or
+                "failed" (a turn went wrong).
+            satellite: Where it is to be ended. If given and the conversation is on
+                elsewhere, it is left be - a satellite going just as one starts at another
+                can't end that one.
 
         Returns:
-            False if none was on, when nothing is called.
+            False if none was on (there, if given), when nothing is called.
         """
         cap = self._cap()
         with self._lock:
-            if self._satellite is None:
+            if self._satellite is None or satellite not in (None, self._satellite):
                 return False
             exchanges = self._exchanges[-cap:]
             self._reset(None)

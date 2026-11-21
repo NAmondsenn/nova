@@ -63,6 +63,20 @@ DEFAULT_SCREEN_ORB = {"on": True, "place": "bottom centre", "size": "medium"}
 DEFAULT_PRESS_VOICE_DROP_DB = 18
 DEFAULT_PRESS_NO_WORDS_SECONDS = 1.5
 
+# How a turn of an open conversation ends if config.yaml has been left without these two
+# settings, the same as config.yaml starts them: after this many seconds of quiet, or once it
+# has gone on this many.
+DEFAULT_PAUSE_SECONDS = 1.5
+DEFAULT_LONGEST_TURN = 90
+
+# What's said as an open conversation ends without his asking - its quiet spell, turns Claude
+# took for speech from what's playing, or a turn which went wrong - so the open microphone never
+# closes silently. One he asked to end has its "Okay." said by what ended it (see actions.py);
+# one ended from Home Assistant's switch or by a mute was his own doing, and has only the
+# falling sound.
+CONVERSATION_LEFT = "I'll leave it there."
+UNASKED_ENDS = ("idle", "not for nova", "failed")
+
 # How long a session waits for a wake word before checking its satellite is still
 # there, in seconds - the satellite's wakes never say it has gone.
 WAKE_CHECK = 0.5
@@ -187,6 +201,36 @@ def _orb_choice(computer: Dict, name: str) -> str:
     return value if value in CHOICES[("computer", f"screen_orb_{name}")] else DEFAULT_SCREEN_ORB[name]
 
 
+class _Moving:
+    """
+    A speech detector which notes the session getting on with each frame it decides on - for a
+    turn of an open conversation, which can wait as long as its quiet spell for the user to start
+    (conversation.idle_minutes, up to 30) and then last conversation.longest_turn: far past the
+    watchdog's allowance for a session which is still (see Brain.last_moved), though it's moving
+    for as long as the satellite's audio keeps coming.
+    """
+
+    def __init__(self, detector, moved: Callable[[], None]):
+        """
+        Args:
+            detector: The session's own detector, which does the deciding - see vad.py.
+            moved: Called with nothing for each frame - Session._moved.
+        """
+        self._detector = detector
+        self._moved = moved
+
+    @property
+    def threshold(self) -> float:
+        return self._detector.threshold
+
+    def reset(self):
+        self._detector.reset()
+
+    def speech_probability(self, frame) -> float:
+        self._moved()
+        return self._detector.speech_probability(frame)
+
+
 class Session:
     """One satellite's Nova, for as long as the satellite stays connected."""
 
@@ -269,6 +313,19 @@ class Session:
         # between the two is its answer. None without one. Under the same lock. See
         # _await_typed_answer.
         self._typed_question: Optional[Tuple[float, float]] = None
+        # Whether the satellite has been told an open conversation is on here, and so is to be
+        # told when it ends - only ever read and changed on the session's own thread, which
+        # tells it both. See _conversation_begun and _conversation_goes_on.
+        self._conversing = False
+        # Whether the last reply asked something, so the next turn of a conversation is its answer.
+        self._asked = False
+        # The listen of a conversation's turn, while it waits for the user or hears them, and why
+        # the conversation was ended by end_conversation, for the session's own thread to say so.
+        # Both under the one lock, with ending it, so an end can't fall between a turn's listen
+        # starting and being noted, and leave it waiting out the quiet spell. See end_conversation.
+        self._open_lock = threading.Lock()
+        self._open_feed: Optional[AudioFeed] = None
+        self._ended_by: Optional[str] = None
         # The last volume beep the settings page played, stopped as the next starts,
         # so dragging a slider doesn't pile them up - see boop.
         self._last_boop = None
@@ -396,7 +453,8 @@ class Session:
                                          max_follow_ups=self.thresholds.get("max_follow_ups", 3),
                                          routines=brain.routines, satellite=satellite.name,
                                          playing=self.playing_here, progress=self._moved,
-                                         room=lambda: brain.room_of(satellite.name), here=self._here)
+                                         room=lambda: brain.room_of(satellite.name), here=self._here,
+                                         conversing=self._conversation_here)
 
     @property
     def thresholds(self) -> Dict:
@@ -704,9 +762,10 @@ class Session:
         the reply is said out loud on the satellite, never sent back. Muted or not makes
         no difference, as typing uses no microphone.
 
-        While a turn waits for the answer to a question it's asked, it's that answer -
-        ending the listen for it, if there is one, so what was typed is used rather than
-        whatever the microphone caught. Otherwise it waits its turn, as Speak does, once
+        While a turn waits for the answer to a question it's asked - or, in an open
+        conversation, waits for its next turn - it's that answer, or that turn: ending the
+        listen for it, if there is one, so what was typed is used rather than whatever the
+        microphone caught. Otherwise it waits its turn, as Speak does, once
         any conversation going on has finished: as the answer to a typed question still
         open (see _await_typed_answer), or else as a fresh request.
 
@@ -974,9 +1033,21 @@ class Session:
             # Not talked over, even if the satellite says it was - over a chime, say. Only
             # a wake word said over a reply is that - see _say.
             heard_over = self._answer(wake)
-            while heard_over is not None:
-                heard_over = self._answer(heard_over, talked_over=heard_over["talked_over"])
+            while True:
+                while heard_over is not None:
+                    heard_over = self._answer(heard_over, talked_over=heard_over["talked_over"])
+                # In an open conversation every reply - and every turn with nothing in it - is
+                # followed by listening again, with no wake word, until it ends. A loop, rather
+                # than each turn starting the next, as a conversation can run to hundreds.
+                begun = self._conversation_begun()
+                if not self._conversation_goes_on():
+                    break
+                # Only the turn straight after a question is its answer.
+                follow_up, self._asked = self._asked, False
+                heard_over = self._open_turn(follow_up, listening_sound=begun)
         finally:
+            # Not left on once its turns are over, however they ended.
+            self._leave_conversation()
             # The satellite silences anything going off when it hears the wake word, and
             # leaves it to the brain to let it back.
             self.speaker.allow("announcement")
@@ -997,6 +1068,100 @@ class Session:
             room, self._room_held = self._room_held, [self]
             for session in room:
                 session.music.release()
+
+    # An open conversation - see OpenConversation
+
+    def end_conversation(self, reason: str) -> None:
+        """
+        Ends the conversation on at this satellite, from any thread - Home Assistant's switch, a
+        mute, its quiet spell - and stops the listen its turn waits in, so the turns end at once.
+        What the end says and plays is left to the session's own thread, which does the speaking
+        (see _conversation_goes_on): a reply already being worked out or said is finished, and
+        nothing more is listened for. Nothing happens with none on here.
+
+        Args:
+            reason: Why, as OpenConversation.end has it.
+        """
+        talk = self.brain.open_conversation
+        if talk is None:
+            return
+        with self._open_lock:
+            if not talk.end(reason, satellite=self.satellite.name):
+                return
+            self._ended_by = reason
+            feed = self._open_feed
+        logger.info(f"The conversation on the {self.satellite.name} satellite was ended ({reason})")
+        if feed is not None:
+            self.satellite.stop_listening(feed)
+
+    def _conversation_here(self) -> bool:
+        """Whether an open conversation is on at this satellite."""
+        talk = self.brain.open_conversation
+        return talk is not None and talk.on_at(self.satellite.name)
+
+    def _conversation_begun(self) -> bool:
+        """
+        Tells the satellite a conversation has begun here, once the turn which started it has
+        been answered - so a computer holds its microphone and speaker open for it.
+
+        Returns:
+            True if one has just begun, whose first turn plays the listening sound.
+        """
+        if self._conversing or not self._conversation_here() or not self.satellite.connected:
+            return False
+        with self._open_lock:
+            # An end from before this one began isn't this one's.
+            self._ended_by = None
+        self._conversing = True
+        logger.info(f"A conversation has begun on the {self.satellite.name} satellite, so it listens after "
+                    f"every reply")
+        self.satellite.set_conversation(True)
+        return True
+
+    def _conversation_goes_on(self) -> bool:
+        """
+        Whether a conversation here goes on to another turn - ending it once its quiet spell is
+        up. One which has ended is closed off: the satellite told, "I'll leave it there." said if
+        he didn't ask for the end, and the falling sound played.
+
+        Returns:
+            False outside one, as for any request - and once it has ended, or its satellite has
+            gone or the session been let go, when the brain ends it and there's nobody to tell.
+        """
+        talk = self.brain.open_conversation
+        if not self._conversing or not self.satellite.connected or self._closed.is_set():
+            return False
+        if talk.on_at(self.satellite.name) and talk.idle_in() <= 0:
+            self.end_conversation("idle")
+        with self._open_lock:
+            if talk.on_at(self.satellite.name):
+                return True
+            ended_by, self._ended_by = self._ended_by, None
+        self._conversing = False
+        logger.info(f"The conversation on the {self.satellite.name} satellite is over")
+        self.satellite.set_conversation(False)
+        if ended_by in UNASKED_ENDS:
+            self._say(CONVERSATION_LEFT)
+        self._not_heard()
+        return False
+
+    def _leave_conversation(self):
+        """
+        Ends a conversation which is still on here once its turns are over - which only happens
+        when its satellite has gone or the session been let go, as the brain ends it too, or
+        something went wrong part way - so the microphone is never left open with nothing
+        listening to it.
+        """
+        if not self._conversing and not self._conversation_here():
+            return
+        self._conversing = False
+        self.brain.open_conversation.end("gone", satellite=self.satellite.name)
+        if self.satellite.connected and not self._closed.is_set():
+            try:
+                self.satellite.set_conversation(False)
+                self._not_heard()
+            except Exception as e:
+                logger.error(f"Couldn't tell the {self.satellite.name} satellite its conversation is over: {e}")
 
     def _room_now(self) -> List["Session"]:
         """
@@ -1225,6 +1390,8 @@ class Session:
         """
         typed = wake.get("typed")
         follow_up = typed is not None and bool(wake.get("follow_up"))
+        # Nothing it asks is answered until this request's reply has been said.
+        self._asked = False
         # Times the interaction from this moment on - see Timeline.
         timeline = Timeline(follow_up=follow_up)
         timeline.mark("wake")
@@ -1273,8 +1440,76 @@ class Session:
         finally:
             timeline.save(self.latency_file)
 
+    def _open_turn(self, follow_up: bool, listening_sound: bool = False) -> Optional[Dict]:
+        """
+        One turn of an open conversation: whatever the user says next, with no wake word or
+        press, answered as a fresh request - so the everyday commands, routines and dismissals
+        all work - or, straight after a question, as its answer. Something typed in Home
+        Assistant is the turn instead, whether it was typed while the reply before was said or
+        while this waits.
+
+        Args:
+            follow_up: True when the last reply asked something.
+            listening_sound: True for the conversation's first turn, which plays the listening
+                sound as it starts - never between turns, where it would play dozens of times.
+
+        Returns:
+            As _answer.
+        """
+        timeline = Timeline(follow_up=follow_up, open_turn=True)
+        try:
+            if not follow_up:
+                try:
+                    typed = self._typed.get_nowait()[0]
+                except queue.Empty:
+                    typed = None
+                # Afresh, as a wake word starts a request - what's going off read as it starts.
+                ringing = self.brain.clock.ringing_state(
+                    satellite=heard_in(self.brain.room_of(self.satellite.name)))
+                with self._conversation_lock:
+                    self.conversation.start(ringing)
+                if typed is not None:
+                    return self._handle_typed(typed, timeline=timeline)
+                # From now, what's typed is this turn, as the answer to a question is the next.
+                self._open_answer()
+            feed = self._open_listen()
+            if feed is None:
+                return None
+            self._listening_for_answer(feed)
+            if listening_sound and self.listening_sound_enabled:
+                self._play_sound("listening.wav")
+            return self._handle_interaction(feed, follow_up=follow_up, timeline=timeline, open_turn=True)
+        except Exception as e:
+            # Said, as for any request, so it isn't taken for not having been heard - and the
+            # conversation ended, rather than every turn after it going wrong the same way at once.
+            logger.error(f"A turn of the conversation failed: {e}", exc_info=True)
+            self._apologise()
+            self.end_conversation("failed")
+            return None
+        finally:
+            with self._open_lock:
+                self._open_feed = None
+            timeline.save(self.latency_file)
+
+    def _open_listen(self) -> Optional[AudioFeed]:
+        """
+        Waiting for him to start speaking: has the satellite send what it hears for a turn of
+        the conversation, for as long as he takes, noted so that ending the conversation stops it.
+
+        Returns:
+            The feed - or None if the conversation has ended meanwhile, when it's stopped at once.
+        """
+        feed = self.satellite.listen(open=True)
+        with self._open_lock:
+            if self._conversation_here():
+                self._open_feed = feed
+                return feed
+        self.satellite.stop_listening(feed)
+        return None
+
     def _handle_interaction(self, feed, follow_up: bool = False, timeline: Optional[Timeline] = None,
-                            pre_roll: Optional[int] = None, pressed: bool = False) -> Optional[Dict]:
+                            pre_roll: Optional[int] = None, pressed: bool = False, open_turn: bool = False,
+                            listen_from: Optional[int] = None) -> Optional[Dict]:
         """
         Handles one full interaction after the wake word: records the query from what
         the satellite sends, transcribes it, has the conversation work out the reply
@@ -1294,6 +1529,12 @@ class Session:
                 plays neither the listening sound nor the falling one for a recording with
                 no speech in it. One the satellite ended on a press plays no falling one
                 either - see AudioFeed.pressed.
+            open_turn: True for a turn of an open conversation (see _open_turn), from its
+                open listen: it waits for the user to start for as long as the conversation's
+                quiet spell has left, with no listening sound and nothing from before kept, and
+                is as patient as the conversation's settings say. Silence, noise and words
+                imagined in noise say and play nothing, as the next turn simply begins.
+            listen_from: For an open turn, where in the feed it starts - its start if None.
 
         Returns:
             The wake word heard over the reply, which the next request starts from - see
@@ -1304,11 +1545,24 @@ class Session:
 
         # Read once, so the whole of a recording is by the same settings.
         thresholds = self.thresholds
+        silence_duration = thresholds.get("silence_duration", 0.6)
+        timeout = thresholds.get("recording_timeout", 15.0)
         speech_timeout = thresholds.get("speech_timeout", 3.0)
         if follow_up:
             # Answering a question takes a moment's thought, so there's more time to
             # start talking than when the user has just said the wake word.
             speech_timeout = thresholds.get("follow_up_timeout", speech_timeout * 2)
+        open_wait = None
+        if open_turn:
+            # A conversation's own patience: people pause longer between thoughts in one
+            # than when asking for something, and talk for longer.
+            talk = self.brain.config.section("conversation")
+            silence_duration = _number(talk.get("pause_seconds"), DEFAULT_PAUSE_SECONDS)
+            timeout = _number(talk.get("longest_turn"), DEFAULT_LONGEST_TURN)
+            # Until the quiet spell would end the conversation - not at all once that's due,
+            # or once the conversation has ended meanwhile, when there's no spell left.
+            open_wait = self.brain.open_conversation.idle_in()
+            open_wait = max(0.0, open_wait) if math.isfinite(open_wait) else 0.0
 
         self.activity = "listening"
         self.heard = ""
@@ -1317,7 +1571,8 @@ class Session:
         # way to tell the wake word was heard, or when to start talking. The satellite
         # is already sending what its microphone hears, so nothing said while the sound
         # plays goes missing, and it's far too short to count as the user starting to speak.
-        if self.listening_sound_enabled and not pressed:
+        # Not between a conversation's turns, where it would play dozens of times.
+        if self.listening_sound_enabled and not pressed and not open_turn:
             self._play_sound("listening.wav")
 
         # Speech-to-text is given the recording as it's made, so it can work out the
@@ -1336,6 +1591,9 @@ class Session:
             # Nemotron's in a test - leaves the rule about the words off.
             words_quiet = getattr(listening, "quiet_words", None)
         no_words_after = _number(thresholds.get("press_no_words_seconds"), DEFAULT_PRESS_NO_WORDS_SECONDS)
+        if open_turn:
+            # Nothing may end a turn of a conversation sooner than its pause.
+            no_words_after = max(no_words_after, silence_duration)
         # Filled in as the recording ends, for what ended it and how loud the user was.
         report: Dict = {}
 
@@ -1344,21 +1602,29 @@ class Session:
         # "Hey Nova what time is it" said in one breath has often started on "what" by
         # then. That's kept, but not listened to: it often holds the end of "Nova" too,
         # which would otherwise start the recording, and the pause for the listening
-        # sound then end it. An answer comes with nothing from before.
-        if follow_up:
+        # sound then end it. An answer comes with nothing from before - and a turn of a
+        # conversation with only what the recording keeps of its own wait.
+        detector = self.speech_detector
+        if open_turn:
             before = 0
+            start = 0 if listen_from is None else listen_from
+            # Waiting for him to start can go on for minutes, during which the session is moving.
+            detector = _Moving(detector, self._moved)
+        elif follow_up:
+            before = start = 0
         elif pre_roll is None:
-            before = round(self.pre_roll * RATE)
+            before = start = round(self.pre_roll * RATE)
         else:
-            before = pre_roll
+            before = start = pre_roll
         try:
             audio_data = record_until_silence(
-                feed, self.speech_detector, listen_from=before, keep_before=before / RATE,
-                silence_duration=thresholds.get("silence_duration", 0.6),
+                feed, detector, listen_from=start, keep_before=before / RATE,
+                silence_duration=silence_duration,
                 speech_timeout=speech_timeout,
-                timeout=thresholds.get("recording_timeout", 15.0),
+                timeout=timeout,
                 timeline=timeline, heard=listening.add, voice_drop=voice_drop,
-                words_quiet=words_quiet, no_words_after=no_words_after, report=report)
+                words_quiet=words_quiet, no_words_after=no_words_after, report=report,
+                open_wait=open_wait)
         except BaseException:
             # Otherwise it would wait on for the rest of a recording which isn't coming.
             listening.cancel()
@@ -1376,10 +1642,19 @@ class Session:
         # their mind, as one begun on a press is.
         pressed = pressed or feed.pressed
 
+        if open_turn and not self._conversation_here():
+            # Ended meanwhile - from Home Assistant, say - so half a turn isn't acted on, and
+            # anything typed for it is kept as a fresh request.
+            listening.cancel()
+            self._close_answer(keep=True)
+            timeline.note(outcome="conversation_ended")
+            return None
+
         # Anything typed from now on is a fresh request - and an answer typed while this
-        # was listening, which ended it, is used instead of what was heard. (Should the
-        # recording fail, _converse keeps that answer as a fresh request.)
-        typed = self._close_answer() if follow_up else None
+        # was listening, which ended it, is used instead of what was heard - or, for a turn
+        # of a conversation, the turn typed. (Should the recording fail, _converse keeps that
+        # answer as a fresh request.)
+        typed = self._close_answer() if follow_up or open_turn else None
 
         if not self.satellite.connected:
             # Gone part way through, so there's nobody to answer - and half a request
@@ -1391,20 +1666,21 @@ class Session:
 
         if typed is not None:
             listening.cancel()
-            return self._handle_typed(typed, follow_up=True, timeline=timeline)
+            return self._handle_typed(typed, follow_up=follow_up, timeline=timeline)
 
         if audio_data is None or len(audio_data) == 0:
             listening.cancel()
             timeline.note(outcome="no_speech")
-            self._not_heard(pressed)
+            # Between a conversation's turns, nothing heard is said nothing of: the next begins.
+            if not open_turn:
+                self._not_heard(pressed)
             return None
 
         # The words, once speech-to-text has caught up with the end of the recording,
         # carrying on listening if no text comes back. The audio is already at the
         # 16kHz speech-to-text expects, since the satellite sends it at that.
         self.activity = "thinking"
-        transcription = listening.finish(audio_data, timeline=timeline,
-                                         quiet_after=thresholds.get("silence_duration", 0.6),
+        transcription = listening.finish(audio_data, timeline=timeline, quiet_after=silence_duration,
                                          wake_word=self.wake_word)
         timeline.mark("stt_done")
         timeline.note(audio_seconds=round(len(audio_data) / RATE, 2))
@@ -1416,7 +1692,13 @@ class Session:
             self._note_if_long(report, timeline, text, stt_error="error" in (transcription or {}))
         if not text.strip():
             timeline.note(outcome="nothing_transcribed")
-            if (transcription or {}).get("imagined"):
+            if open_turn:
+                # Between a conversation's turns, sound heard as nothing - a cough, a door, words
+                # imagined in noise - is said nothing of, as the next turn simply begins. Only
+                # Nemotron failing is said.
+                if "error" in (transcription or {}):
+                    self._apologise()
+            elif (transcription or {}).get("imagined"):
                 # Words imagined in noise - a cough heard as "Thank you." - are most
                 # likely a false wake word, so aren't apologised for. A press has no
                 # false wake word, so is told nothing.
@@ -1433,7 +1715,8 @@ class Session:
             return None
 
         heard_over, asked = self._reply_to(text, follow_up=follow_up, timeline=timeline)
-        if heard_over is not None or not asked:
+        # In a conversation, its own next turn is the answer - see _converse.
+        if heard_over is not None or not asked or self._conversation_here():
             return heard_over
 
         # The assistant asked something, so it listens straight away for the answer.
@@ -1508,7 +1791,8 @@ class Session:
             heard_over, asked = self._reply_to(text, follow_up=follow_up, timeline=timeline)
         finally:
             self._typing = False
-        if heard_over is not None or not asked:
+        # In a conversation, its own next turn is the answer, spoken or typed - see _converse.
+        if heard_over is not None or not asked or self._conversation_here():
             return heard_over
 
         # The microphone stays shut, as the user chose to type - and it may be muted. An
@@ -1543,6 +1827,8 @@ class Session:
         self.heard = text
         self._show(f"You: {text}")
 
+        # Whether it was heard in an open conversation - not the turn which started one.
+        conversing = self._conversation_here()
         # Everything between hearing the request and answering it - see conversation.py.
         with self._conversation_lock:
             reply = self.conversation.handle(text, follow_up=follow_up, timeline=timeline)
@@ -1560,12 +1846,35 @@ class Session:
             heard_over = self._say(reply.say, timeline=timeline, listen=True)
         # Once it's said, talked over or not - or when there was nothing to say.
         self._run_after(reply.after)
+        if conversing:
+            self._noted_in_conversation(text, reply)
+        # A question talked over goes unanswered.
+        self._asked = bool(reply.listen_again) and heard_over is None
         if heard_over is not None:
             # Talked over, so the question goes unanswered - and anything typed for
             # it is a fresh request, after the one just begun.
             self._close_answer(keep=True)
             return heard_over, bool(reply.listen_again)
         return None, bool(reply.listen_again)
+
+    def _noted_in_conversation(self, text: str, reply) -> None:
+        """
+        Notes a turn of an open conversation once its reply has been said: one Nova answered
+        puts off the quiet spell, and is kept for the conversation's end; one Claude took for
+        speech from what's playing doesn't, and enough of those in a row end it.
+
+        Args:
+            text: What the user said or typed.
+            reply: The Reply to it.
+        """
+        talk = self.brain.open_conversation
+        here = self.satellite.name
+        if reply.not_for_me:
+            if talk.not_for_nova(satellite=here):
+                self.end_conversation("not for nova")
+            return
+        model = talk.model(self.llm.model_name) if reply.claude_answered else "local"
+        talk.answered(text, reply.say, model, satellite=here)
 
     @staticmethod
     def _run_after(after: List[Callable[[], Dict]]) -> None:
