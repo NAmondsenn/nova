@@ -1198,8 +1198,8 @@ def test_power_words_only_whole(text, action):
             assert actions is None or all(action.tool != "pc_power" for action in actions)
 
 
-def test_shut_down_bare_asks():
-    # Through pc_power, whose question before shutting down is tested in test_pc - never press_pc_button.
+def test_shut_down_bare_goes_to_pc_power():
+    # Through pc_power, which presses straight away and confirms with the chime (see test_pc).
     assert _computer("Shut down.") == [Action("pc_power", {"action": "off"})]
     assert _computer("Restart.") == [Action("pc_power", {"action": "restart"})]
 

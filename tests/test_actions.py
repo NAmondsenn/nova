@@ -2716,21 +2716,14 @@ def test_an_assist_error_after_sending_is_said_not_done_again(make_lists_executo
 # The PC - see pc.py
 
 class FakePC:
-    """Stands in for PCPower, noting what it's asked and asking first for a shutdown."""
+    """Stands in for PCPower, noting what it's asked and confirming with the chime."""
 
     def __init__(self):
         self.asked = []
 
     def act(self, action, name=None, defer=False):
         self.asked.append(("act", action, name))
-        if action == "off":
-            return {"success": True, "message": "Shut down the PC?",
-                    "ask_first": Action("press_pc_button", {"action": "off", "name": name})}
-        return {"success": True, "message": "Locking your PC."}
-
-    def press(self, action, name=None):
-        self.asked.append(("press", action, name))
-        return {"success": True, "message": "Shutting down the PC."}
+        return {"success": True, "message": "Locking your PC.", "chime": True}
 
 
 def test_the_pcs_power_words_are_deferred_only_at_a_pc():
@@ -2750,28 +2743,21 @@ def test_a_power_word_at_one_of_two_pcs_is_that_ones():
     at_desk.execute(Action("pc_power", {"action": "lock", "name": "Desk PC"}))
     ActionExecutor(pc=pc, pc_name=lambda: "Gaming PC").execute(Action("pc_power", {"action": "lock"}))
     assert pc.asked == [("act", "lock", "Gaming PC"), ("act", "lock", "Desk PC"), ("act", "lock", None)]
-    # Asked to shut down, the yes presses that PC's button too.
+    # Shutting down is the same: that PC's, with no question.
     result = at_desk.execute(Action("pc_power", {"action": "off"}))
-    assert result.ask_first.params == {"action": "off", "name": "Gaming PC"}
+    assert (result.ask_first, result.confirm) == (None, "chime")
+    assert pc.asked[-1] == ("act", "off", "Gaming PC")
 
 
-def test_claude_cant_press_the_pcs_button_itself():
+def test_pc_power_never_asks_and_press_pc_button_is_gone():
+    assert "press_pc_button" not in ActionExecutor.tools()
     pc = FakePC()
     executor = ActionExecutor(pc=pc)
-    offered = {schema["name"] for schema in executor.tool_schemas()}
-    assert "pc_power" in offered and "press_pc_button" not in offered
-    result = executor.execute(Action("press_pc_button", {"action": "off"}, from_model=True))
-    assert (result.ok, result.say) == (False, "Sorry, I can't do that.")
-    assert pc.asked == []
-
-    # Claude's own pc_power only asks.
+    assert "press_pc_button" not in {schema["name"] for schema in executor.tool_schemas()}
+    assert executor.execute(Action("press_pc_button", {"action": "off"})).ok is False
     result = executor.execute(Action("pc_power", {"action": "off"}, from_model=True))
-    assert (result.ok, result.say) == (True, "Shut down the PC?")
-    assert (result.ask_first.tool, result.ask_first.params) == ("press_pc_button", {"action": "off", "name": None})
-    assert executor.execute(Action("pc_power", {"action": "lock"})).ask_first is None
-    # The yes, which only the conversation gives.
-    assert executor.execute(Action("press_pc_button", {"action": "off"})).say == "Shutting down the PC."
-    assert pc.asked == [("act", "off", None), ("act", "lock", None), ("press", "off", None)]
+    assert (result.ok, result.ask_first, result.confirm) == (True, None, "chime")
+    assert pc.asked == [("act", "off", None)]
 
 
 def test_the_pc_needs_home_assistant():

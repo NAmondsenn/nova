@@ -45,7 +45,7 @@ NOT_CAUGHT = "Sorry, I didn't catch that."
 
 # The whole of what may be said back to "Shut down the PC?" to do it, and to leave it. Not
 # Clock.answer_to_offer, which takes "stop", "cancel" or "thanks" for a yes - harmless for a
-# reminder, but here it'd shut a PC down - and "yes" with a request after it ("yes, play
+# reminder, but for a download it'd start one - and "yes" with a request after it ("yes, play
 # music") for one too. Anything else is a fresh request, and nothing is pressed.
 AGREED = {"yes", "yeah", "yep", "yup", "yes please", "do it", "go ahead", "go on", "sure", "ok do it",
           "okay do it"}
@@ -162,8 +162,8 @@ class Conversation:
         # the next one.
         self.reminder_offered = False
         self.reminder_answer_pending = False
-        # What a yes to the question just asked would do - shutting the PC down, after
-        # "Shut down the PC?" - or, for a question with set answers, what each would do
+        # What a yes to the question just asked would do - setting the reminder to leave, after
+        # "Want a reminder?" - or, for a question with set answers, what each would do
         # ("The mic or the audio?"), or None. Only ever the very next thing said in the same
         # conversation answers it, so a new wake word drops it.
         self.asked_first: Union[Action, Choice, None] = None

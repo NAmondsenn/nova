@@ -232,8 +232,8 @@ class ActionResult:
             understanding it and failing.
         private: Whether what it says is the user's alone - where their phone is - and
             so kept from Claude when it was asked for locally (see Conversation.handle).
-        ask_first: What to do if the user says yes to the question it asks - shutting
-            the PC down, after "Shut down the PC?" - or a Choice, for a question with set
+        ask_first: What to do if the user says yes to the question it asks - downloading,
+            after "Do you want me to download it?" - or a Choice, for a question with set
             answers ("The mic or the audio?"), or None (see Conversation.handle).
         after_said: Something to do once the reply has been said, not before - putting the PC
             to sleep, so "Putting your PC to sleep." is heard - or None. Gives {"success",
@@ -2769,8 +2769,7 @@ class ActionExecutor:
 
     @tool(
         "Turn the user's PC on, shut it down, restart it, put it or its screen to sleep, lock it, or say whether "
-        "it's on. Shutting down and restarting ask the user first. What happens is said for you, so just reply "
-        "'Okay.'",
+        "it's on. What happens is confirmed for you, so just reply 'Okay.'",
         needs="pc",
         required=["action"],
         action={"type": "string", "enum": ["on", "off", "restart", "sleep", "screen_off", "lock", "status"]},
@@ -2782,19 +2781,6 @@ class ActionExecutor:
         if at_pc and not name:
             name = self.pc_name()
         return self.pc.act(action or "", name or None, defer=at_pc)
-
-    # Only ever run by the conversation, on the user's yes to pc_power's question - so Claude,
-    # which isn't offered it, can't shut the PC down without one.
-    @tool(
-        "Shut down or restart the PC, once the user has said yes.",
-        needs="pc",
-        required=["action"],
-        for_model=False,
-        action={"type": "string", "enum": ["off", "restart"]},
-        name={"type": "string", "description": "Which PC, as the user said it, or left out."},
-    )
-    def press_pc_button(self, action: Optional[str] = None, name: Optional[str] = None):
-        return self.pc.press(action or "", name or None)
 
     # Journeys - see journeys.py
 

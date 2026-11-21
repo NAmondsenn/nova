@@ -920,59 +920,29 @@ def _pc_conversation(tmp_path, *replies):
     return _conversation(intents=LocalIntents(), llm=llm, actions=actions), home, llm
 
 
-def test_shutting_down_asks_first_and_only_a_yes_does_it(tmp_path):
+def test_shut_down_the_pc_just_chimes(tmp_path):
     conversation, home, llm = _pc_conversation(tmp_path)
     reply = conversation.handle("Shut down the PC.")
-    assert (reply.say, reply.listen_again) == ("Shut down the PC?", True)
-    assert home.pressed == []
-    # Read before the follow-up window would send it to Claude.
-    assert conversation.handle("yes", follow_up=True).say == "Shutting down the PC."
+    assert reply.say == "" and reply.sounds == [("success_chime.wav", "general")]
+    assert not reply.listen_again
     assert home.pressed == ["button.desk_off"] and llm.asked == []
 
-    conversation, home, llm = _pc_conversation(tmp_path)
-    conversation.handle("Shut down the PC.")
-    assert conversation.handle("no", follow_up=True).say == "Okay, I'll leave it."
-    # And once answered, a later yes is nobody's.
-    conversation.handle("Restart the PC.")
-    assert conversation.handle("leave it", follow_up=True).say == "Okay, I'll leave it."
-    assert home.pressed == []
 
-    # Anything else drops it, and is a fresh request - so a yes after that is Claude's.
-    conversation, home, llm = _pc_conversation(tmp_path, _answer("It's sunny. Anything else?"), _answer("Okay."))
-    conversation.handle("Shut down the PC.")
-    assert conversation.handle("what's the weather", follow_up=True).say == "It's sunny. Anything else?"
-    conversation.handle("yes", follow_up=True)
-    assert home.pressed == [] and llm.asked == ["what's the weather", "yes"]
-
-
-def test_claudes_shutdown_asks_first_too(tmp_path):
+def test_claudes_restart_just_chimes_too(tmp_path):
     conversation, home, llm = _pc_conversation(
         tmp_path, _answer("Okay.", Action("pc_power", {"action": "restart"}, from_model=True)))
-    assert conversation.handle("could you reboot the thing on my desk").say == "Restart the PC?"
-    assert home.pressed == []
-    assert conversation.handle("go on", follow_up=True).say == "Restarting the PC."
+    reply = conversation.handle("could you reboot the thing on my desk")
+    assert reply.say == "" and reply.sounds == [("success_chime.wav", "general")]
     assert home.pressed == ["button.desk_again"]
 
 
-def test_a_yes_in_a_new_conversation_presses_nothing(tmp_path):
-    conversation, home, llm = _pc_conversation(tmp_path, _answer("Okay."), _answer("Okay."))
-    conversation.handle("Shut down the PC.")
-    conversation.start()
-    conversation.handle("yes")
-    assert home.pressed == [] and llm.asked == ["yes"]
-
-    # Nor does a yes said to any other question.
-    conversation, home, llm = _pc_conversation(tmp_path, _answer("Shall I play some music?"), _answer("Okay."))
-    conversation.handle("I'm bored")
-    conversation.handle("yes", follow_up=True)
-    assert home.pressed == []
-
-    # Nor one said with no question listened for - the follow-ups had run out.
-    conversation, home, llm = _pc_conversation(tmp_path, _answer("Okay."))
-    conversation.follow_ups = conversation.max_follow_ups
-    assert not conversation.handle("Shut down the PC.").listen_again
-    conversation.handle("yes")
-    assert home.pressed == []
+def test_with_the_chime_off_it_says_shutting_down(tmp_path):
+    home = FakePCHome()
+    actions = AskingActions(home=home, pc=PCPower(home, ChoiceStore(str(tmp_path / "pcs.json"), {"wake": {}})))
+    conversation = _conversation(intents=LocalIntents(), llm=FakeLLM(), actions=actions, chime_enabled=False)
+    reply = conversation.handle("Shut down the PC.")
+    assert (reply.say, reply.sounds) == ("Shutting down the PC.", [])
+    assert home.pressed == ["button.desk_off"]
 
 
 # Asking whether to set the reminder to leave
@@ -1018,54 +988,6 @@ def test_a_no_to_want_a_reminder_leaves_it():
     conversation.handle("when should I leave for work to be there for nine")
     assert conversation.handle("no", follow_up=True).say == "Okay, I'll leave it."
     assert journeys.reminded == [] and len(llm.asked) == 1
-
-
-@pytest.mark.parametrize("answer", ["yes", "Yes please.", "Nova, yeah.", "yep", "go ahead", "Go on.", "sure",
-                                    "Do it.", "Okay, do it.", "ok do it please", "Yes.", "'yes'",
-                                    "\u2018yes\u2019"])
-def test_only_a_plain_yes_shuts_the_pc_down(tmp_path, answer):
-    conversation, home, llm = _pc_conversation(tmp_path)
-    conversation.handle("Shut down the PC.")
-    assert conversation.handle(answer, follow_up=True).say == "Shutting down the PC."
-    assert home.pressed == ["button.desk_off"]
-
-
-@pytest.mark.parametrize("answer, said", [
-    # Backing out - "stop" and "cancel" most of all, which a reminder's offer takes for a yes.
-    ("stop", "Okay, I'll leave it."), ("Cancel.", "Okay, I'll leave it."), ("no thanks", "Okay, I'll leave it."),
-    ("Never mind.", "Okay, I'll leave it."), ("don't", "Okay, I'll leave it."), ("Nope.", "Okay, I'll leave it."),
-    ("leave it", "Okay, I'll leave it."),
-    # Neither, so a fresh request, Claude's - nor a yes with more said after it.
-    ("shut up", "Okay."), ("thanks", "Okay."), ("fine", "Okay."), ("okay thanks", "Okay."),
-    ("yes, play music", "Okay."), ("yes in a minute", "Okay."), ("absolutely", "Okay."),
-    # Digits and other scripts are words too - "Yes, 10." most likely means in ten minutes.
-    ("Yes, 10.", "Okay."), ("Yes. 10:30", "Okay."), ("yes 10", "Okay."), ("yes \u4e0d\u8981", "Okay."),
-])
-def test_no_or_anything_else_said_back_presses_nothing(tmp_path, answer, said):
-    conversation, home, llm = _pc_conversation(tmp_path, _answer("Okay."), _answer("Okay."))
-    conversation.handle("Shut down the PC.")
-    assert conversation.handle(answer, follow_up=True).say == said
-    assert home.pressed == []
-    assert llm.asked == ([] if said.startswith("Okay, I'll") else [answer])
-    # Either way, it's gone.
-    conversation.handle("yes", follow_up=True)
-    assert home.pressed == []
-
-
-@pytest.mark.parametrize("actions", [
-    # The PC's question isn't the whole reply...
-    [Action("pc_power", {"action": "off"}, from_model=True), Action("dim_lights", {}, from_model=True)],
-    [Action("dim_lights", {}, from_model=True), Action("pc_power", {"action": "off"}, from_model=True)],
-    # ...or there are two to answer.
-    [Action("pc_power", {"action": "off"}, from_model=True),
-     Action("pc_power", {"action": "restart"}, from_model=True)],
-])
-def test_a_yes_to_more_than_the_pcs_question_presses_nothing(tmp_path, actions):
-    conversation, home, llm = _pc_conversation(tmp_path, _answer("Okay.", *actions), _answer("Okay."))
-    reply = conversation.handle("shut it all down")
-    assert reply.listen_again and reply.say.count("?") == 2
-    conversation.handle("yes", follow_up=True)
-    assert home.pressed == [] and llm.asked == ["shut it all down", "yes"]
 
 
 # Asking before downloading - see downloads.py
