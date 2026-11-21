@@ -62,7 +62,7 @@ When a push-to-talk recording's speech (speech_started to speech_ended) lasts ov
 | Setting | Meaning | Default | Limits |
 |---|---|---|---|
 | `thresholds.press_voice_drop_db` | How far below his own loudness counts as stopped, at a computer | 18 | 6 to 40 |
-| `thresholds.press_no_words_seconds` | Seconds without a new word that end it, at a computer | 1.5 | 0.8 to 5 |
+| `thresholds.press_no_words_seconds` | Seconds without a new word that end it, at a computer | 1.5 | 1.2 to 5 |
 
 Read as each recording starts, so a save is used straight away.
 
