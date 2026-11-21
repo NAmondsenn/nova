@@ -29,7 +29,7 @@ from voice_assistant.approvals import NO_WAY
 from voice_assistant.batteries import HOME_FAILURES, find, said
 from voice_assistant.clock_ringing import heard_in
 from voice_assistant.computers import safe_url, url_host
-from voice_assistant.devices import AppDevice, ring_call, said_as, where
+from voice_assistant.devices import AppDevice, FindMyDevice, RangLately, find_my_for, ring_call, said_as, where
 from voice_assistant.football import NO_TEAM
 from voice_assistant.football_words import describe as describe_football
 from voice_assistant.listening_words import describe as describe_listening
@@ -38,6 +38,7 @@ from voice_assistant.google_calendar import named_by_address
 from voice_assistant.home_assistant import CANT_REACH, HomeAssistant, NotAllowed
 from voice_assistant.lists import NO_ANSWER, names_list
 from voice_assistant.navidrome import NavidromeError, NavidromeLibrary
+from voice_assistant.satellite_names import listed
 from voice_assistant.notes import NO_NOTES
 from voice_assistant.undo import LastChange
 
@@ -429,7 +430,8 @@ class ActionExecutor:
                  device: Optional[Callable[[Optional[str]], Tuple[Optional[Any], Optional[str]]]] = None,
                  at_pc: Callable[[], bool] = lambda: False,
                  pc_name: Callable[[], Optional[str]] = lambda: None,
-                 microphone: Optional[Callable[[bool, Optional[str]], Dict]] = None, approvals=None):
+                 microphone: Optional[Callable[[bool, Optional[str]], Dict]] = None, approvals=None,
+                 rang: Optional[RangLately] = None):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -509,6 +511,8 @@ class ActionExecutor:
                 Session._mute_microphone. None if there's no satellite to mute.
             approvals: The brain's Approvals, which a big action asks before it's done - see
                 approvals.py. None if there's no way to ask, so a big action is never done.
+            rang: What was rung through Find My lately, for stop_finding - the brain's, so a phone
+                rung at one satellite is stopped at another - or None for one of its own.
         """
         self.music = music
         self.clock = clock
@@ -554,6 +558,7 @@ class ActionExecutor:
         # satellite when the brain gives it: with the PC and the Pi in one room, "cancel the dentist" at
         # one and "add milk" at the other would otherwise leave "undo that" at the first putting it back.
         self.last_change = last_change if last_change is not None else LastChange()
+        self.rang = rang if rang is not None else RangLately()
 
     def _ring_on_satellite(self) -> Optional[str]:
         """Returns the satellite a timer or alarm set now rings on - None if the user isn't at one in particular."""
@@ -589,7 +594,8 @@ class ActionExecutor:
         """
         return [{"name": name,
                  "description": (method.tool["description"] + (self._activities_told() if name == "get_activity" else "")
-                                 + (self._teams_told() if name == "get_football" else "")),
+                                 + (self._teams_told() if name == "get_football" else "")
+                                 + (self._find_my_told() if name == "find_device" else "")),
                  "input_schema": {"type": "object", "properties": method.tool["parameters"],
                                   "required": method.tool["required"]}}
                 for name, method in self.tools().items()
@@ -621,6 +627,25 @@ class ActionExecutor:
         if not names:
             return ""
         return f" The user follows: {names[0] if len(names) == 1 else ', '.join(names[:-1]) + ' and ' + names[-1]}."
+
+    def _find_my_told(self) -> str:
+        """
+        The devices Google's Find My has, to end find_device's description - " Home Assistant's Find
+        My has: Galaxy S25 Ultra and Wallet." - or nothing while it has none. Their names as said
+        aloud, without an owner's (see devices.FindMyDevice), in order, so the tools, and the API's
+        cache, don't change with the order Home Assistant gives them in. From the registry's snapshot
+        alone, so a request isn't held up - and read with every request to Claude, so nothing here
+        may lose the turn.
+        """
+        try:
+            names = self.home.find_my_names()
+        except Exception as e:
+            logger.warning(f"Couldn't read Find My's devices for Claude ({type(e).__name__}): {e}")
+            return ""
+        said = sorted({FindMyDevice.from_home({"device": "", "name": name}).said for name in names}, key=str.lower)
+        if not said:
+            return ""
+        return f" Home Assistant's Find My has: {listed(said, 'and')}."
 
     @classmethod
     def private_tools(cls) -> List[str]:
@@ -2669,38 +2694,138 @@ class ActionExecutor:
 
     # Not HomeAssistant.find_device, which finds Nova's own device for its room.
     @tool(
-        "Say where one of the user's devices is - their phone, tablet or Mac - and ring it if asked ('find my "
-        "phone', 'make my tablet ring'). What's found is said for you, so just reply 'Okay.'",
+        "Say where one of the user's devices is - their phone, tablet or Mac, or anything in Home Assistant's "
+        "Find My, such as a tracker tag - and ring it if asked ('find my phone', 'make my tablet ring', 'where's "
+        "my wallet'). What's found is said for you, so just reply 'Okay.'",
         needs="home",
         required=["device"],
         private=True,
         device={
             "type": "string",
-            "description": "Which device, as the user said it, e.g. 'phone', 'tablet', 'mac' or 's25 ultra'.",
+            "description": "Which device, as the user said it, e.g. 'phone', 'tablet', 'mac', 's25 ultra' or 'wallet'.",
         },
         ring={"type": "boolean", "description": "True to ring it as well, wherever it is."},
     )
     def find_device(self, device: Optional[str] = None, ring: bool = False):
         # Every answer is private: even "I haven't got a device called that" is about the user's devices.
+        targets, trouble = self._devices_meant(device or "phone")
+        if trouble:
+            return {"success": False, "message": trouble, "private": True}
+        now = time.time()
+        parts, ok = [], True
+        for app_device, find_my in targets:
+            shown = app_device or find_my
+            parts.append(where(shown, now))
+            # Never the place itself, which is the user's alone.
+            logger.info(f"Said where the {shown.name} is")
+            if ring:
+                rang, said_of_ringing = self._ring_through(app_device, find_my)
+                ok = ok and rang
+                parts.append(said_of_ringing)
+        return {"success": ok, "message": " ".join(parts), "private": True}
+
+    @tool(
+        "Stop a device ringing which find_device rang through Find My - 'stop ringing my phone', 'found it', 'I've "
+        "found my wallet'. Leave device out for whatever was rung in the last few minutes. What happens is said "
+        "for you, so just reply 'Okay.'",
+        needs="home",
+        device={"type": "string", "description": "Which device, as the user said it - only when they named one."},
+    )
+    def stop_finding(self, device: Optional[str] = None):
+        if device:
+            targets, trouble = self._devices_meant(device)
+            if trouble:
+                return {"success": False, "message": trouble}
+            stopping = []
+            for app_device, find_my in targets:
+                if find_my is None or find_my.stop is None:
+                    return {"success": False, "message": f"I can't stop your {said_as(app_device or find_my)} "
+                                                         f"ringing from here."}
+                stopping.append((app_device, find_my))
+        else:
+            stopping = [(None, find_my) for find_my in self.rang.lately()]
+            if not stopping:
+                return {"success": False, "message": "I haven't rung anything lately."}
+        failed = []
+        for app_device, find_my in stopping:
+            word = said_as(app_device or find_my)
+            try:
+                self.home.press(find_my.stop)
+            except (requests.RequestException, NotAllowed) as e:
+                logger.warning(f"Couldn't stop the {find_my.name} ringing through Find My: {e}")
+                failed.append(word)
+                continue
+            self.rang.stopped(find_my)
+            logger.info(f"Stopped the {find_my.name} ringing through Find My")
+        if failed:
+            return {"success": False, "message": f"I couldn't stop your {listed(failed, 'and')} ringing."}
+        return {"success": True, "message": "Stopped."}
+
+    def _devices_meant(self, asked: str) -> Tuple[List[Tuple[Optional[AppDevice], Optional[FindMyDevice]]],
+                                                   Optional[str]]:
+        """
+        The devices some words mean, each as the app's device and Find My's for the same
+        phone or tablet - either of them None where there's only the other.
+
+        The app's devices are found first, by kind ("phone") or name ("s25 ultra"), as the
+        batteries are; else Find My's alone, by their names ("wallet"). Find My being
+        unreadable only means there's none of its devices to go by.
+
+        Args:
+            asked: The words, e.g. "phone" or "my wallet".
+
+        Returns:
+            The devices and None - or no devices and what to say: Home Assistant can't be
+            reached, there's no device called that, or - for several of Find My's alone -
+            "Which one: Keys or Wallet?".
+        """
         try:
             devices = [AppDevice.from_home(found) for found in self.home.app_devices()]
         except HOME_FAILURES as e:
             logger.warning(f"Couldn't read the Home Assistant app's devices: {e}")
-            return {"success": False, "message": CANT_REACH, "private": True}
-        found = find(devices, device or "phone")
-        if not found:
-            return {"success": False, "message": "I haven't got a device called that.", "private": True}
-        now = time.time()
-        parts, ok = [], True
-        for app_device in found:
-            parts.append(where(app_device, now))
-            # Never the place itself, which is the user's alone.
-            logger.info(f"Said where the {app_device.name} is")
-            if ring:
-                rang, said_of_ringing = self._ring(app_device)
-                ok = ok and rang
-                parts.append(said_of_ringing)
-        return {"success": ok, "message": " ".join(parts), "private": True}
+            return [], CANT_REACH
+        try:
+            find_mys = [FindMyDevice.from_home(found) for found in self.home.find_my_devices()]
+        except HOME_FAILURES as e:
+            logger.warning(f"Couldn't read Find My's devices, so the app's are all there is: {e}")
+            find_mys = []
+        found = find(devices, asked)
+        if found:
+            return [(app_device, find_my_for(app_device, find_mys)) for app_device in found], None
+        theirs = find(find_mys, asked)
+        if not theirs:
+            return [], "I haven't got a device called that."
+        if len(theirs) > 1:
+            return [], f"Which one: {listed([said_as(find_my) for find_my in theirs], 'or')}?"
+        # One the app is on as well, called by Find My's name for it - "the galaxy" - is still the app's too.
+        app_device = next((app_device for app_device in devices if find_my_for(app_device, theirs) is theirs[0]), None)
+        return [(app_device, theirs[0])], None
+
+    def _ring_through(self, app_device: Optional[AppDevice], find_my: Optional[FindMyDevice]) -> Tuple[bool, str]:
+        """
+        Rings a device through Find My's Play sound, which is louder and surer, and can be
+        stopped by voice - else, if Find My hasn't got it or can't ring it, through the app's
+        notification, as before. The Mac always by notification: Google doesn't find it.
+
+        Returns:
+            Whether it rang, and what to say: "Ringing your phone.", or why not.
+        """
+        if find_my is not None and find_my.play and not (app_device is not None and app_device.computer):
+            word = said_as(app_device or find_my)
+            try:
+                self.home.press(find_my.play)
+            except (requests.RequestException, NotAllowed) as e:
+                # Home Assistant answers with an error when Google can't be reached, too.
+                logger.warning(f"Couldn't ring the {find_my.name} through Find My: {e}"
+                               + (" - ringing it by the app's notification" if app_device else ""))
+            else:
+                self.rang.rang(find_my)
+                logger.info(f"Rang the {find_my.name} through Find My")
+                return True, f"Ringing your {word}."
+            if app_device is None:
+                return False, f"I couldn't ring your {word}."
+        logger.info(f"Ringing the {app_device.name} by the app's notification")
+        return self._ring(app_device)
 
     def _ring(self, device: AppDevice) -> Tuple[bool, str]:
         """

@@ -38,6 +38,7 @@ from voice_assistant.clean_store import CleanStore
 from voice_assistant.clean_swap import Ears, Swapper, listening_library
 from voice_assistant.clock import Clock, spoken_clock_time
 from voice_assistant.computers import Computers
+from voice_assistant.devices import RangLately
 from voice_assistant.display_feed import DisplayFeed
 from voice_assistant.display_server import DisplayServer
 from voice_assistant.displays import Displays
@@ -453,6 +454,9 @@ class Brain:
         # What "undo that" takes back, one for the whole house: the last playlist or calendar change by voice
         # at any satellite, which anything else done at any other satellite since leaves as it is.
         self.last_change = LastChange()
+        # What was rung through Google's Find My lately, one for the whole house, so a phone rung at one
+        # satellite stops at "found it" said at another - see devices.RangLately.
+        self.find_my_rang = RangLately()
         # The brain's second device in Home Assistant, showing that snapshot - or None with no MQTT
         # broker set. Made here as it needs the listening stats. Started by run().
         self.music_device = MusicDevice.from_config(config, os.getenv("MQTT_PASSWORD"), self.listening)

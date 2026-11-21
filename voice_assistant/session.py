@@ -345,17 +345,21 @@ class Session:
                                       computer=ComputerControl(brain, satellite.name), device=self._device,
                                       at_pc=lambda: brain.rooms.machine(satellite.name) == "pc",
                                       pc_name=lambda: brain.pc_called(satellite.name),
-                                      microphone=self._mute_microphone)
+                                      microphone=self._mute_microphone, rang=brain.find_my_rang)
 
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.
         # The teams followed are given by every name they have, as they are left to Claude, not Assist.
         # Opening, closing and searching are only a computer's when the brain finds what's said there.
+        # Find My's devices are heard by their names in Home Assistant now, and a bare "found it" only
+        # once something was rung through it, anywhere in the house.
         self.intents = LocalIntents(clock=brain.clock, ntfy=brain.ntfy, home=self.home,
                                     activities=brain.calendar.activity_words if brain.calendar else None,
                                     football=brain.football.known_as if brain.football else None,
                                     wake_word=self.wake_word, names_satellite=brain.names_satellite,
-                                    computer=ComputerHooks.for_satellite(brain, satellite.name))
+                                    computer=ComputerHooks.for_satellite(brain, satellite.name),
+                                    find_my_names=self.home.find_my_names if self.home else None,
+                                    rang_lately=lambda: bool(brain.find_my_rang.lately()))
 
         # The satellite as a device of its own in Home Assistant, over MQTT, or None
         # until mqtt.host is set - see ha_device.py. It's named after the satellite's

@@ -1,6 +1,7 @@
 """
 Devices Module
-Where the user's phone, tablet or Mac is, and ringing it, through the Home Assistant app.
+Where the user's phone, tablet or Mac is, and ringing it, through the Home Assistant app -
+or through Google's Find My Device, which Home Assistant has as well (FindMyDevice).
 
 Home Assistant is the only source of these, as of the batteries (see
 HomeAssistant.app_devices): every device with the app on it, its tracker, the place its
@@ -8,19 +9,31 @@ geocoded location sensor names, and its notify service. What kind of device each
 and which one "my phone" means, are batteries.py's own rules, so "my phone" is the same
 device for both.
 
+Google's Find My Device rings a phone louder and more surely than the app's notification,
+and can stop it again, so a device it has is rung through it first (see same_device and
+ActionExecutor.find_device). It has things the app isn't on, too - a tracker tag in a
+wallet - found by their own names. Which devices it has is read from Home Assistant at
+run time, as the app's are, never kept in code.
+
 Where a device is never goes to Claude, whoever asked - see Conversation.handle, which
 gives Claude's history only that it was said. The place is the user's, and Claude's
 history goes to Anthropic with every later request.
 """
 
+import re
+import threading
+import time
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 from voice_assistant.batteries import is_mac, is_phone, kind_of, spoken_name
 from voice_assistant.clock import format_duration
 
 # What a tracker says when it can't tell where its device is.
 UNKNOWN_STATES = ("unavailable", "unknown", "")
+# Seconds after Nova rang something through Find My that a bare "stop ringing" or "found it"
+# still means it - long enough to walk round the house looking.
+RANG_LATELY = 600.0
 # What a part of a place is when it isn't there - the Android app gives a town it hasn't
 # got as the word "null" (live, 25 Oct), which would be "near Example Road, null".
 MISSING_PARTS = ("null", "none", "unknown", "unavailable", "")
@@ -85,6 +98,134 @@ class AppDevice:
         )
 
 
+@dataclass
+class FindMyDevice:
+    """
+    One device Google's Find My Device has, as Home Assistant's googlefindmy integration
+    gives it - a phone or tablet the app may be on as well, or a tracker tag.
+
+    Its kind, phone, computer and apple are those of a thing batteries.find can't tell
+    the kind of, so "phone" never finds one by itself: the phone is the app's device,
+    which same_device ties to its Find My one.
+
+    Attributes:
+        id: The Home Assistant device id.
+        name: Its name in Home Assistant, e.g. "Galaxy S25 Ultra" or "Sam's Wallet".
+        said: What it's called aloud: the name without an owner's name before it, e.g. "Wallet".
+        play: Its Play sound button, e.g. "button.galaxy_s25_ultra_play_sound", or None.
+        stop: Its Stop sound button, or None.
+        tracker: Its tracker's state, e.g. "home", or None with no tracker, or one which
+            can't tell.
+        reported: When Google last saw it, in epoch seconds, or None.
+        place: Always None - see from_home - so where says only how long ago it was seen.
+    """
+
+    id: str
+    name: str
+    said: str
+    play: Optional[str]
+    stop: Optional[str]
+    tracker: Optional[str]
+    reported: Optional[float]
+    place: Optional[str] = None
+    kind: str = "other"
+    phone: bool = False
+    computer: bool = False
+    apple: bool = False
+
+    @classmethod
+    def from_home(cls, found: Dict) -> "FindMyDevice":
+        """
+        Builds a device from one of HomeAssistant.find_my_devices()'s dicts.
+
+        Args:
+            found: The dict, with device, name, play, stop and tracker.
+
+        Returns:
+            The device. Never a place: Find My's tracker gives coordinates, which are the
+            user's alone, and no street.
+        """
+        tracker = found.get("tracker") or {}
+        name = str(found.get("name") or "").strip()
+        return cls(id=found["device"], name=name, said=_said_name(name), play=found.get("play"),
+                   stop=found.get("stop"), tracker=tracker.get("state"), reported=tracker.get("reported"))
+
+
+def _said_name(name: str) -> str:
+    """A Find My device's name without an owner's before it - "Wallet" for "Sam's Wallet" - or the name as it is."""
+    words = name.split()
+    while len(words) > 1 and re.search(r"['’]s$", words[0].lower()):
+        words = words[1:]
+    return " ".join(words) or name
+
+
+def _plain_words(name: str) -> List[str]:
+    """A name's words in lower case, letters and digits only - "Galaxy S25 Ultra" is ["galaxy", "s25", "ultra"]."""
+    return re.findall(r"[a-z0-9]+", name.lower())
+
+
+def same_device(app: "AppDevice", find_my: FindMyDevice) -> bool:
+    """
+    Whether a device of the Home Assistant app's and one of Find My's are the same
+    phone or tablet - when every word of one's name is in the other's, as "S25 Ultra" is
+    in "Galaxy S25 Ultra". Never the Mac, which Google doesn't find.
+    """
+    if app.computer:
+        return False
+    ours, theirs = set(_plain_words(app.name)), set(_plain_words(find_my.name))
+    return bool(ours and theirs) and (ours <= theirs or theirs <= ours)
+
+
+def find_my_for(app: "AppDevice", find_mys: Sequence[FindMyDevice]) -> Optional[FindMyDevice]:
+    """
+    The Find My device which is the same as an app's device, or None if there's none - or
+    several, and none of them shares more words of its name than the rest.
+    """
+    fits = [find_my for find_my in find_mys if same_device(app, find_my)]
+    if len(fits) <= 1:
+        return fits[0] if fits else None
+    ours = set(_plain_words(app.name))
+    shared = [len(ours & set(_plain_words(find_my.name))) for find_my in fits]
+    best = max(shared)
+    return fits[shared.index(best)] if shared.count(best) == 1 else None
+
+
+class RangLately:
+    """
+    What Nova rang through Find My in the last RANG_LATELY seconds, for a bare "stop
+    ringing" or "found it" - one for the whole house, as a phone rung at one satellite
+    may be stopped at another.
+    """
+
+    def __init__(self, clock=time.time):
+        """
+        Args:
+            clock: Gives the time now, in epoch seconds.
+        """
+        self._clock = clock
+        self._lock = threading.Lock()
+        # Stop button to what was rung, and when.
+        self._rung: Dict[str, Tuple[FindMyDevice, float]] = {}
+
+    def rang(self, device: FindMyDevice):
+        """Notes that a device was rung, now - if it has a Stop sound button to stop it by."""
+        if device.stop:
+            with self._lock:
+                self._rung[device.stop] = (device, self._clock())
+
+    def stopped(self, device: FindMyDevice):
+        """Notes that a device has been stopped."""
+        with self._lock:
+            self._rung.pop(device.stop, None)
+
+    def lately(self) -> List[FindMyDevice]:
+        """What was rung in the last RANG_LATELY seconds and not stopped since, the earliest first."""
+        now = self._clock()
+        with self._lock:
+            return [device for device, when in sorted(self._rung.values(), key=lambda kept: kept[1])
+                    if now - when <= RANG_LATELY]
+
+
 def _place(place: Optional[Dict]) -> Optional[str]:
     """
     The place a geocoded location sensor names, e.g. "Example Road, Sometown" - its street and
@@ -105,8 +246,13 @@ def _part(value) -> Optional[str]:
     return None if text.lower() in MISSING_PARTS else text
 
 
-def said_as(device: AppDevice) -> str:
-    """What a device is called aloud: "phone", "tablet" or "Mac", or its name if it's none of those."""
+def said_as(device: Union[AppDevice, FindMyDevice]) -> str:
+    """
+    What a device is called aloud: "phone", "tablet" or "Mac", or its name if it's none of
+    those - for one of Find My's alone, its name without its owner's, e.g. "Wallet".
+    """
+    if isinstance(device, FindMyDevice):
+        return device.said
     if device.phone:
         return "phone"
     if device.computer:
@@ -114,7 +260,7 @@ def said_as(device: AppDevice) -> str:
     return "tablet" if device.kind == "mobile" else device.name
 
 
-def where(device: AppDevice, now: float) -> str:
+def where(device: Union[AppDevice, FindMyDevice], now: float) -> str:
     """
     Says where a device is.
 

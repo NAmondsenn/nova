@@ -43,6 +43,14 @@ KIND_NAMES = {"reboot": "restart"}
 # Nova's own MQTT device, whose maker is "Nova", has a Restart button too.
 HASS_AGENT_MAKER = "HASS.Agent"
 
+# The integration Google's Find My Device comes through (HACS's googlefindmy), and what its
+# entities are, by their translation key - else by their original name's letters, for a
+# version without the keys. Its other buttons (Locate now, and the service's own: new
+# tokens, statistics reset) are never pressed.
+FIND_MY = "googlefindmy"
+FIND_MY_KINDS = {"play_sound": "play", "playsound": "play", "stop_sound": "stop", "stopsound": "stop",
+                 "device": "tracker", "last_location": "last_location", "lastlocation": "last_location"}
+
 
 # Seconds the registry's own socket allows each of a read's two calls - the lists, then
 # every entity in full - which are a lot of entities (over a thousand, through a proxy)
@@ -212,6 +220,25 @@ class Entry:
     # The registry's own id for it, e.g. "4b1e...", which a device action gives in place of
     # its entity id - "" if it isn't known.
     registry_id: str = ""
+    # The integration's own key for what it is, e.g. "play_sound" - "" if it has none.
+    translation_key: str = ""
+
+
+def find_my_kind(entry: Entry) -> Optional[str]:
+    """
+    What one of Find My's entities is: "play" or "stop" for its sound buttons, "tracker"
+    for its device's own tracker, "last_location" for the tracker of where it was last seen,
+    or None for anything else, or anything which isn't Find My's.
+    """
+    if entry.platform != FIND_MY:
+        return None
+    domain = entry.entity_id.partition(".")[0]
+    kind = FIND_MY_KINDS.get(entry.translation_key) or FIND_MY_KINDS.get(_letters(entry.original_name))
+    if kind is None and domain == "device_tracker" and not entry.original_name:
+        # The device's own tracker has no name of its own, as the device's name is its name.
+        kind = "tracker"
+    wanted = "button" if kind in ("play", "stop") else "device_tracker"
+    return kind if kind is not None and domain == wanted else None
 
 
 def button_kind(entry: Entry) -> str:
@@ -278,6 +305,21 @@ class Snapshot:
     def device_name(self, device_id: str) -> Optional[str]:
         """The device's name - the user's own, if they gave one - or None if it isn't known."""
         return (self.devices.get(device_id) or {}).get("name")
+
+    def find_my(self) -> Dict[str, Dict[str, str]]:
+        """
+        Each device of Find My's which can be rung - with a Play sound button - by device id.
+
+        Returns:
+            {device id: {"play": its Play sound button, and "stop", "tracker" and
+            "last_location" if it has them}}, each an entity id.
+        """
+        found: Dict[str, Dict[str, str]] = {}
+        for entry in self.entries.values():
+            kind = find_my_kind(entry)
+            if kind is not None and entry.device_id:
+                found.setdefault(entry.device_id, {}).setdefault(kind, entry.entity_id)
+        return {device: kinds for device, kinds in found.items() if "play" in kinds}
 
     def wake_buttons(self) -> List[str]:
         """The entity ids of the Wake-on-LAN integration's buttons, each of which wakes one machine."""
@@ -370,7 +412,7 @@ class HomeRegistry:
                 unique_id=str(item.get("unique_id") or ""), original_name=item.get("original_name"),
                 aliases=tuple(alias for alias in aliases if alias is not None),
                 exposed=bool((exposed.get(entity_id) or {}).get("conversation")),
-                registry_id=str(item.get("id") or ""))
+                registry_id=str(item.get("id") or ""), translation_key=str(item.get("translation_key") or ""))
         return Snapshot(entries=entries, devices=device_info,
                         areas={area["area_id"]: area["name"] for area in areas}, read_at=time.time())
 

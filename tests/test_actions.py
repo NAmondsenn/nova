@@ -18,6 +18,7 @@ from voice_assistant.batteries import Battery
 from voice_assistant.computers import ComputerControl
 from voice_assistant.approvals import NO_WAY, pending_said
 from voice_assistant.downloads import ON_ITS_WAY, Downloads, Wanted
+from voice_assistant.home_assistant import NotAllowed
 from voice_assistant.google_calendar import Removal
 from voice_assistant.undo import (NOTHING_TO_UNDO, SOMETHING_ELSE_SINCE, TOO_LATE, UNDO_CHANGE_KEPT,
                                    LastChange)
@@ -1940,16 +1941,33 @@ def test_batteries_are_only_offered_with_home_assistant():
 # Where the phone is, and ringing it - see devices.py
 
 class FakeAppHome:
-    """Stands in for Home Assistant: the app's devices, and the notifications it was asked to send."""
+    """
+    Stands in for Home Assistant: the app's devices, Find My's - none unless a test gives
+    some - and the notifications it was asked to send, and the buttons it was asked to press.
+    """
 
-    def __init__(self, devices, notify_fails=None):
+    def __init__(self, devices, notify_fails=None, find_mys=(), press_fails=None):
         self.devices = devices
         self.notify_fails = notify_fails
+        self.find_mys = list(find_mys)
+        self.press_fails = press_fails
         self.sent = []
         self.titles = []
+        self.pressed = []
 
     def app_devices(self):
         return self.devices
+
+    def find_my_devices(self):
+        return self.find_mys
+
+    def find_my_names(self):
+        return [found["name"] for found in self.find_mys]
+
+    def press(self, entity_id):
+        if self.press_fails is not None:
+            raise self.press_fails
+        self.pressed.append(entity_id)
 
     def notify(self, service, message, title=None, data=None):
         if self.notify_fails is not None:
@@ -2025,16 +2043,146 @@ def test_find_device_with_home_assistant_down_says_so(failure):
 
 
 def test_find_device_is_offered_with_home_assistant():
+    described = ("Say where one of the user's devices is - their phone, tablet or Mac, or anything in Home "
+                 "Assistant's Find My, such as a tracker tag - and ring it if asked ('find my phone', 'make my "
+                 "tablet ring', 'where's my wallet'). What's found is said for you, so just reply 'Okay.'")
+    schemas = {s["name"]: s for s in ActionExecutor(home=FakeAppHome([])).tool_schemas()}
+    assert schemas["find_device"]["description"] == described
+    # Stopping it is offered with it.
+    assert "stop_finding" in schemas
+    # What Find My has is told, by the names said aloud, in order - and a Home Assistant which can't say isn't
+    # the turn lost.
+    home = FakeAppHome([], find_mys=[_find_my("Sam's Wallet", "w"), _find_my("Galaxy Phone 9", "p"),
+                                     _find_my("Keys tag", "k")])
+    schema = {s["name"]: s for s in ActionExecutor(home=home).tool_schemas()}["find_device"]
+    assert schema["description"] == described + " Home Assistant's Find My has: Galaxy Phone 9, Keys tag and Wallet."
     schema = {s["name"]: s for s in ActionExecutor(home=object()).tool_schemas()}["find_device"]
-    assert schema["description"] == (
-        "Say where one of the user's devices is - their phone, tablet or Mac - and ring it if asked ('find my "
-        "phone', 'make my tablet ring'). What's found is said for you, so just reply 'Okay.'")
+    assert schema["description"] == described
     assert "find_device" not in {s["name"] for s in ActionExecutor().tool_schemas()}
     assert ActionExecutor().execute(Action("find_device", {"device": "phone"})).say == "Home Assistant isn't set up yet."
     # Its answers are the user's alone - see Conversation.handle.
     assert ActionExecutor.private_tools() == ["find_device"]
     # What it finds is said, never read back to Claude.
     assert "find_device" not in ActionExecutor().read_tools()
+
+
+def _find_my(name="Galaxy Phone 9", key="phone", stop=True, tracker="home"):
+    """One of HomeAssistant.find_my_devices()'s dicts."""
+    return {"device": f"fm_{key}", "name": name, "play": f"button.{key}_play_sound",
+            "stop": f"button.{key}_stop_sound" if stop else None,
+            "tracker": {"state": tracker, "reported": time.time() - 600}}
+
+
+# The phone, as the app has it ("phone 9", from "phone-9"), and as Find My does ("Galaxy Phone 9") - the same phone.
+def _phone_both_ways(**more):
+    return FakeAppHome([_app_device("phone-9", tracker="home", notify="mobile_app_phone_9"),
+                        _app_device("macbook-pro", "Apple", "Mac16,8", notify="mobile_app_macbook_pro",
+                                    tracker="home")],
+                       find_mys=[_find_my(), _find_my("Sam's Wallet", "wallet", tracker="not_home")], **more)
+
+
+def test_phone_rings_through_find_my():
+    home = _phone_both_ways()
+    result = ActionExecutor(home=home).execute(Action("find_device", {"device": "phone", "ring": True}))
+    assert (result.ok, result.say, result.private) == (True, "Your phone's at home. Ringing your phone.", True)
+    assert home.pressed == ["button.phone_play_sound"] and home.sent == []
+
+
+@pytest.mark.parametrize("failure", [requests.HTTPError("500", response=SimpleNamespace(status_code=500)),
+                                     requests.ConnectionError("down"), NotAllowed("button.press")])
+def test_falls_back_to_the_app_notification_when_find_my_fails(failure, caplog):
+    # A 500 is Home Assistant failing to reach Google, too.
+    home = _phone_both_ways(press_fails=failure)
+    with caplog.at_level("INFO"):
+        result = ActionExecutor(home=home).execute(Action("find_device", {"device": "phone", "ring": True}))
+    assert (result.ok, result.say) == (True, "Your phone's at home. Ringing your phone.")
+    assert [(service, message) for service, message, _ in home.sent] == [("mobile_app_phone_9", "TTS")]
+    assert "Couldn't ring the Galaxy Phone 9 through Find My" in caplog.text
+    assert "by the app's notification" in caplog.text
+    # And with Find My having no such device, or unreadable, it's the notification as before.
+    for found in ([], requests.ConnectionError("down")):
+        home = _phone_both_ways()
+        if isinstance(found, list):
+            home.find_mys = found
+        else:
+            def unreadable():
+                raise found
+            home.find_my_devices = unreadable
+        result = ActionExecutor(home=home).execute(Action("find_device", {"device": "phone", "ring": True}))
+        assert result.say == "Your phone's at home. Ringing your phone."
+        assert home.pressed == [] and [service for service, _, _ in home.sent] == ["mobile_app_phone_9"]
+
+
+def test_mac_still_rings_by_notification():
+    # Even with a Find My device whose name has every word of the Mac's.
+    home = _phone_both_ways()
+    home.find_mys.append(_find_my("MacBook Pro", "mac"))
+    result = ActionExecutor(home=home).execute(Action("find_device", {"device": "mac", "ring": True}))
+    assert result.say == "Your Mac's at home. Ringing your Mac."
+    assert home.pressed == [] and [service for service, _, _ in home.sent] == ["mobile_app_macbook_pro"]
+
+
+def test_wallet_found_and_rung_by_its_name():
+    home = _phone_both_ways()
+    executor = ActionExecutor(home=home)
+    result = executor.execute(Action("find_device", {"device": "wallet", "ring": True}))
+    assert (result.ok, result.private) == (True, True)
+    assert result.say == "Your Wallet's away from home, as of 10 minutes ago. Ringing your Wallet."
+    assert home.pressed == ["button.wallet_play_sound"] and home.sent == []
+    # Its owner's name is a word of its name too, and a Find My device with no app's is never rung another way.
+    home.press_fails = requests.ConnectionError("down")
+    result = executor.execute(Action("find_device", {"device": "sam's wallet", "ring": True}))
+    assert (result.ok, result.say) == (False, "Your Wallet's away from home, as of 10 minutes ago. "
+                                              "I couldn't ring your Wallet.")
+    # Several which fit are asked about.
+    home.find_mys.append(_find_my("Wallet tag", "tag"))
+    result = executor.execute(Action("find_device", {"device": "wallet", "ring": True}))
+    assert (result.ok, result.say, result.private) == (False, "Which one: Wallet or Wallet tag?", True)
+
+
+def test_where_is_my_wallet_is_private(caplog):
+    home = _phone_both_ways()
+    home.find_mys[1]["tracker"] = {"state": "Gym", "reported": time.time()}
+    with caplog.at_level("DEBUG"):
+        result = ActionExecutor(home=home).execute(Action("find_device", {"device": "wallet"}))
+    assert (result.ok, result.say, result.private) == (True, "Your Wallet's at Gym.", True)
+    assert home.pressed == []
+    assert "Gym" not in caplog.text and "Said where the Sam's Wallet is" in caplog.text
+
+
+def test_stop_presses_stop_sound_for_what_was_rung():
+    home = _phone_both_ways()
+    executor = ActionExecutor(home=home)
+    executor.execute(Action("find_device", {"device": "phone", "ring": True}))
+    executor.execute(Action("find_device", {"device": "wallet", "ring": True}))
+    home.pressed.clear()
+    # Rung at one satellite, stopped at another: the brain's record is shared.
+    elsewhere = ActionExecutor(home=home, rang=executor.rang)
+    result = elsewhere.execute(Action("stop_finding"))
+    assert (result.ok, result.say) == (True, "Stopped.")
+    assert home.pressed == ["button.phone_stop_sound", "button.wallet_stop_sound"]
+    # Nothing's left ringing, so a second says so.
+    assert elsewhere.execute(Action("stop_finding")).say == "I haven't rung anything lately."
+    # One named is stopped whether or not Nova rang it.
+    home.pressed.clear()
+    assert elsewhere.execute(Action("stop_finding", {"device": "phone"})).say == "Stopped."
+    assert home.pressed == ["button.phone_stop_sound"]
+    # The Mac rings by notification, which can't be stopped.
+    assert elsewhere.execute(Action("stop_finding", {"device": "mac"})).say == \
+        "I can't stop your Mac ringing from here."
+    home.press_fails = requests.ConnectionError("down")
+    result = elsewhere.execute(Action("stop_finding", {"device": "wallet"}))
+    assert (result.ok, result.say) == (False, "I couldn't stop your Wallet ringing.")
+
+
+def test_what_was_rung_is_forgotten_after_ten_minutes():
+    home = _phone_both_ways()
+    executor = ActionExecutor(home=home)
+    now = [1000.0]
+    executor.rang._clock = lambda: now[0]
+    executor.execute(Action("find_device", {"device": "phone", "ring": True}))
+    now[0] += 601
+    assert executor.execute(Action("stop_finding")).say == "I haven't rung anything lately."
 
 
 # Sending to the Mac or the tablet - see devices.py
