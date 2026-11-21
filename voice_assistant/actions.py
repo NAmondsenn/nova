@@ -38,6 +38,7 @@ from voice_assistant.home_assistant import CANT_REACH, HomeAssistant, NotAllowed
 from voice_assistant.lists import NO_ANSWER, names_list
 from voice_assistant.navidrome import NavidromeError, NavidromeLibrary
 from voice_assistant.notes import NO_NOTES
+from voice_assistant.open_conversation import OpenConversation
 from voice_assistant.undo import LastChange
 
 # Logger setup
@@ -68,7 +69,16 @@ UNAVAILABLE = {
     "computer": "There's no computer here to open things on.",
     "microphone": "The microphone can't be muted from here.",
     "computer_mic": "This device's own microphone can't be muted by Nova.",
+    # Switched off on the settings page - or, for the end, none on here - which only a race can
+    # reach, as neither tool is offered then.
+    "conversation": "Conversations are switched off.",
+    "conversation_open": "We're not in a conversation.",
 }
+
+# What's said on starting a conversation, and on ending one he asked to end. Said through the
+# ordinary reply, so the session adds only the sounds.
+CONVERSATION_STARTED = "Go ahead."
+CONVERSATION_ENDED = "Okay."
 
 # What's said when the new-music playlist isn't there - before Nova's first morning making it,
 # see new_music.py - or isn't set, and when Spotify, which has none of it, is the player.
@@ -428,7 +438,8 @@ class ActionExecutor:
                  device: Optional[Callable[[Optional[str]], Tuple[Optional[Any], Optional[str]]]] = None,
                  at_pc: Callable[[], bool] = lambda: False,
                  pc_name: Callable[[], Optional[str]] = lambda: None,
-                 microphone: Optional[Callable[[bool, Optional[str]], Dict]] = None):
+                 microphone: Optional[Callable[[bool, Optional[str]], Dict]] = None,
+                 conversation: Optional[OpenConversation] = None):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -506,6 +517,8 @@ class ActionExecutor:
             microphone: Turns a satellite's listening off or on - given True to mute, and the words
                 for which satellite as the user said them, or None - and gives what to say: see
                 Session._mute_microphone. None if there's no satellite to mute.
+            conversation: The brain's one OpenConversation, which these tools start and end, or None
+                for no conversations - then neither tool is offered, as when it's switched off.
         """
         self.music = music
         self.clock = clock
@@ -541,6 +554,7 @@ class ActionExecutor:
         self.at_pc = at_pc
         self.pc_name = pc_name
         self.microphone = microphone
+        self.conversation = conversation
         # The music's level before "mute", for "unmute" to put it back to - see _mute_music.
         self._level_before_mute: Optional[int] = None
         # What was last asked, and what the assistant said - or the last alert, and
@@ -644,12 +658,17 @@ class ActionExecutor:
         """
         Whether the part of the assistant a tool needs is there - for the computer, one which opens things,
         and for notes, a satellite which saves them, whichever one the user is talking to - and for the
-        computer's own microphone, being at one which can mute it.
+        computer's own microphone, being at one which can mute it - and for conversations, their being
+        switched on and the user being at a satellite, and for ending one, its being on at this satellite.
         """
+        if name == "conversation_open":
+            return self.conversation is not None and self.conversation.on_at(self.satellite)
         if name == "computer_mic":
             # Only at a computer which said it can reach Windows' volume, whatever it opens.
             return self.computer is not None and self.computer.has_microphone()
         part = getattr(self, name)
+        if name == "conversation":
+            return part is not None and self.satellite is not None and part.enabled
         if name == "computer":
             return part is not None and part.offered()
         if name == "notes":
@@ -2490,6 +2509,40 @@ class ActionExecutor:
             # The kind of error only: its message could quote the note, whose text is never logged.
             logger.warning(f"Couldn't save a note: {type(e).__name__}")
             return {"success": False, "message": "I couldn't save the note."}
+
+    # Conversations
+
+    @tool(
+        "Start an open conversation, for when the user asks to talk something through, have a conversation or "
+        "a chat, in any words - 'can we talk this through', 'let's chat'. From then on you keep listening after "
+        "every reply with no wake word, until it's ended, so never call it unasked. What happened is said for "
+        "you, so just reply 'Okay.'",
+        needs="conversation",
+    )
+    def start_conversation(self):
+        started = self.conversation.start(self.satellite)
+        if started == "off":
+            # Switched off since the tool was offered.
+            return ActionResult(False, UNAVAILABLE["conversation"])
+        if started == "elsewhere":
+            there = self.conversation.satellite
+            where = f"at {self.spoken_name(there)}" if there else "somewhere else"
+            return ActionResult(False, f"We're already talking {where}.")
+        # Also when one is on here already, which just says it again. No chime: the session plays the
+        # listening sound.
+        return ActionResult(True, CONVERSATION_STARTED)
+
+    @tool(
+        "End the open conversation, for when the user says they're done or says goodbye, in any words - 'okay, "
+        "I'm done, thanks', 'that's enough for now'. Not for 'stop', said to stop a reply, nor for a request "
+        "which is only finished with. What happened is said for you, so just reply 'Okay.'",
+        needs="conversation_open",
+    )
+    def end_conversation(self):
+        if not self.conversation.end("said"):
+            # It ended itself since the tool was offered.
+            return ActionResult(False, UNAVAILABLE["conversation_open"])
+        return ActionResult(True, CONVERSATION_ENDED)
 
     # Opening, searching and closing on a computer
 

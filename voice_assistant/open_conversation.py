@@ -66,6 +66,11 @@ class OpenConversation:
             return self._satellite
 
     @property
+    def enabled(self) -> bool:
+        """Whether conversations can be started at all, as `enabled` is set now."""
+        return bool(self._settings().get("enabled", True))
+
+    @property
     def bigger(self) -> bool:
         """Whether the conversation has moved up to the bigger model."""
         with self._lock:

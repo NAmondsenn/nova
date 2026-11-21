@@ -19,6 +19,7 @@ from voice_assistant import llm as llm_module
 from voice_assistant.actions import Action, ActionExecutor
 from voice_assistant.home_assistant import CANT_REACH
 from voice_assistant.llm import LLMHandler
+from voice_assistant.open_conversation import OpenConversation
 from voice_assistant.usage import UsageLog
 
 
@@ -1228,3 +1229,24 @@ def test_the_real_log_keeps_both_calls_of_a_turn_under_one_kind(tmp_path):
                                                                   ("Lights and devices", 30)]
     # Only counts, never anything said.
     assert "5:52" not in json.dumps(lines) and "sunset" not in json.dumps(lines)
+
+
+def test_claude_is_offered_the_conversation_tools_only_as_they_apply_and_can_call_them():
+    conversation = OpenConversation(lambda: {"enabled": True})
+    executor = ActionExecutor(satellite="pc", conversation=conversation)
+    llm = LLMHandler(api_key=None, tools=executor.tool_schemas())
+    llm.client = FakeClient([_reply("Okay.", _tool("start_conversation")), _reply("Okay.", _tool("end_conversation"))])
+    # Asked in other words, with none on: only a start is offered, and it's an action of the model's.
+    result = llm.process_query("can we talk something through")
+    assert {tool["name"] for tool in llm.client.requests[0]["tools"]} >= {"start_conversation"}
+    assert "end_conversation" not in {tool["name"] for tool in llm.client.requests[0]["tools"]}
+    assert result["actions"] == [Action("start_conversation", {}, from_model=True)]
+    # With one on, the end is offered too, and called.
+    conversation.start("pc")
+    llm.tools = executor.tool_schemas()
+    result = llm.process_query("okay, I'm done, thanks")
+    assert "end_conversation" in {tool["name"] for tool in llm.client.requests[1]["tools"]}
+    assert result["actions"] == [Action("end_conversation", {}, from_model=True)]
+    # Switched off, neither.
+    off = ActionExecutor(satellite="pc", conversation=OpenConversation(lambda: {"enabled": False}))
+    assert not {"start_conversation", "end_conversation"} & {tool["name"] for tool in off.tool_schemas()}

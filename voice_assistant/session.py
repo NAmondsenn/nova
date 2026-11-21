@@ -355,7 +355,7 @@ class Session:
                                       computer=ComputerControl(brain, satellite.name), device=self._device,
                                       at_pc=lambda: brain.rooms.machine(satellite.name) == "pc",
                                       pc_name=lambda: brain.pc_called(satellite.name),
-                                      microphone=self._mute_microphone)
+                                      microphone=self._mute_microphone, conversation=brain.open_conversation)
 
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.
@@ -365,7 +365,8 @@ class Session:
                                     activities=brain.calendar.activity_words if brain.calendar else None,
                                     football=brain.football.known_as if brain.football else None,
                                     wake_word=self.wake_word, names_satellite=brain.names_satellite,
-                                    computer=ComputerHooks.for_satellite(brain, satellite.name))
+                                    computer=ComputerHooks.for_satellite(brain, satellite.name),
+                                    conversation=brain.open_conversation, satellite=satellite.name)
 
         # The satellite as a device of its own in Home Assistant, over MQTT, or None
         # until mqtt.host is set - see ha_device.py. It's named after the satellite's

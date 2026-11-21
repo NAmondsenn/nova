@@ -48,6 +48,16 @@ def test_start_and_end():
     assert conversation.satellite is None
 
 
+def test_enabled_is_read_as_it_is_set_now():
+    conversation, _, settings = make()
+    assert conversation.enabled
+    settings["enabled"] = False
+    assert not conversation.enabled
+    # Missing means on, as start() has it.
+    del settings["enabled"]
+    assert conversation.enabled
+
+
 def test_only_answered_turns_put_off_the_idle_end():
     conversation, clock, _ = make()
     assert conversation.idle_in() == float("inf")

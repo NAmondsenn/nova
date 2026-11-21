@@ -27,6 +27,7 @@ from voice_assistant.clock import spoken_clock_time
 from voice_assistant.computers import ComputerHooks
 from voice_assistant.lists import names_list
 from voice_assistant.logging_setup import TRANSCRIPT
+from voice_assistant.open_conversation import OpenConversation
 from voice_assistant.wake_phrase import DEFAULT_WAKE_WORD
 
 # Logger setup
@@ -90,6 +91,13 @@ PC = r"(?:my |the )?(?:pc|computer)"
 MOVED_THING = r"(?:(?:it|this|that|the music|music|the song|this song) )?"
 MOVE_TO = rf"(?:(?:move|switch|change|swap|transfer|take|play) {MOVED_THING}(?:to|onto|over to)|play {MOVED_THING}on)"
 MOVE_WHERE = r"(?P<where>[a-z0-9']+(?: [a-z0-9']+){0,3})"
+
+# The whole of what starts an open conversation, and what ends one - see OpenConversation. Never
+# "bye" alone: the speech-to-text blanks a lone "bye" as a word imagined in noise.
+START_CONVERSATION = (r"let's talk|let's have a conversation|conversation mode|start conversation mode|"
+                      r"start a conversation")
+END_CONVERSATION = (r"end conversation|end the conversation|end conversation mode|stop the conversation|that's all|"
+                    r"that's everything|goodbye")
 
 # A web address said with its dots - "bbc.co.uk", "my-site.com" - as written in the request
 # itself, since the rules see it without them. The last part is letters, so "open 3.5" isn't one.
@@ -340,7 +348,8 @@ class LocalIntents:
 
     def __init__(self, clock=None, ntfy=None, home=None, activities: Optional[Callable[[], Dict[str, str]]] = None,
                  wake_word: str = DEFAULT_WAKE_WORD, football: Optional[Callable[[], List[str]]] = None,
-                 names_satellite: Optional[Callable[[str], bool]] = None, computer: Optional[ComputerHooks] = None):
+                 names_satellite: Optional[Callable[[str], bool]] = None, computer: Optional[ComputerHooks] = None,
+                 conversation: Optional[OpenConversation] = None, satellite: Optional[str] = None):
         """
         Args:
             clock: The Clock, to check there's exactly one timer before cancelling
@@ -367,6 +376,9 @@ class LocalIntents:
             computer: Says which requests are a computer's to open, close or search, and whether
                 this is a PC, whose bare power words are its own - see ComputerHooks. Without
                 it, those are left to the rules after, or Claude.
+            conversation: The brain's one OpenConversation, whose start and end phrases are heard -
+                the end ones only while it's on at this satellite. Without it, they are left to Claude.
+            satellite: The satellite the user is talking to, for where a conversation is on.
         """
         self.clock = clock
         self.ntfy = ntfy
@@ -375,6 +387,8 @@ class LocalIntents:
         self.football = football
         self.names_satellite = names_satellite
         self.computer = computer
+        self.conversation = conversation
+        self.satellite = satellite
         # How the wake word's last word starts a lone word it's been run into - and, for
         # "Nova", how Nemotron heard it so: "Nova, pause." said in one breath was "Novopause.".
         ending = (wake_word.split() or [""])[-1].lower()
@@ -389,6 +403,12 @@ class LocalIntents:
         self._said = ""
         # Each pattern has to match the whole request, after politeness is taken off.
         self._rules = [
+            # Starting and ending an open conversation. First, so that no rule below takes them: "start a
+            # conversation" is the whole name of an app to the "start" rule, as "stop the conversation"
+            # is nearly the music's "stop". Only the whole of what's said, as it's the same words which
+            # start a longer request.
+            (START_CONVERSATION, self._conversation_started),
+            (END_CONVERSATION, self._conversation_ended),
             # "Set of one minute timer" is how Moonshine heard "set a one minute timer"
             # with the network cable out - so it went to Claude, who couldn't be asked.
             (r"(?:(?:set|start) (?:me )?(?:a |an |of )?)?timer for (?P<amount>[a-z0-9 ]+?) (?P<unit>second|minute|hour)s?",
@@ -621,6 +641,19 @@ class LocalIntents:
                 logger.info(f"Took '{text}' for the wake word run into '{run_into[1]}'", extra=TRANSCRIPT)
             return result
         return None
+
+    def _conversation_started(self, found) -> Optional[Dict]:
+        # Not while conversations are switched off, nor without one to start: left to Claude, who has no tool
+        # for it then either.
+        if self.conversation is None or not self.conversation.enabled:
+            return None
+        return self._result("Okay.", [Action("start_conversation")])
+
+    def _conversation_ended(self, found) -> Optional[Dict]:
+        # Only in one, here: said otherwise it's just words, which are Claude's.
+        if self.conversation is None or not self.conversation.on_at(self.satellite):
+            return None
+        return self._result("Okay.", [Action("end_conversation")])
 
     @staticmethod
     def _result(response: str, actions: Optional[List[Action]] = None) -> Dict:

@@ -11,11 +11,12 @@ from types import SimpleNamespace
 import pytest
 import requests
 
-from voice_assistant import volume as volume_module
+from voice_assistant import satellite_names, volume as volume_module
 from voice_assistant.actions import NOT_A_COMMAND, ON_A_COMPUTER, Action, ActionExecutor, ActionResult, confirm
 from voice_assistant.batteries import Battery
 from voice_assistant.computers import ComputerControl
 from voice_assistant.downloads import ON_ITS_WAY, Downloads, Wanted
+from voice_assistant.open_conversation import OpenConversation
 from voice_assistant.undo import (NOTHING_TO_UNDO, SOMETHING_ELSE_SINCE, TOO_LATE, UNDO_CHANGE_KEPT,
                                    LastChange)
 from voice_assistant.volume import VolumeControl
@@ -3732,3 +3733,124 @@ def test_a_failed_mute_of_the_sound_still_speaks(pc_and_pi):
     failed = pc_and_pi.pi.actions.execute(Action("set_volume", {"mute": True}))
     assert not failed.ok and failed.confirm == "speak" and failed.say
     assert confirm([failed]) == ([], [failed.say])
+
+
+# Starting and ending an open conversation
+
+def _spoken(name):
+    """A satellite as a reply calls it, the PC's name being "pc" and the Pi's "bedroom"."""
+    return satellite_names.spoken(name, "pc" if name == "pc" else "pi", [])
+
+
+def _talking(satellite="pc", on_at=None, settings=None):
+    """An executor at a satellite with the brain's one OpenConversation, on at on_at or not."""
+    conversation = OpenConversation(lambda: {"enabled": True} if settings is None else settings)
+    if on_at:
+        conversation.start(on_at)
+    return ActionExecutor(satellite=satellite, conversation=conversation, spoken_name=_spoken), conversation
+
+
+def _offered_conversation(executor):
+    return {tool["name"] for tool in executor.tool_schemas()} & {"start_conversation", "end_conversation"}
+
+
+def test_start_conversation_starts_one_and_says_so_with_no_chime():
+    executor, conversation = _talking("bedroom")
+    result = executor.execute(Action("start_conversation"))
+    assert (result.ok, result.say, result.confirm) == (True, "Go ahead.", "speak")
+    assert conversation.satellite == "bedroom"
+    # Said, with no sound: the session plays the listening sound, and the chime would be a second.
+    assert confirm([result], chime_enabled=True, fallback="Okay.") == ([], ["Go ahead."])
+
+
+def test_start_conversation_where_one_is_on_already_says_go_ahead_again():
+    executor, conversation = _talking("pc", on_at="pc")
+    result = executor.execute(Action("start_conversation"))
+    assert (result.ok, result.say) == (True, "Go ahead.")
+    assert conversation.satellite == "pc"
+
+
+def test_a_second_satellite_is_told_where_it_is():
+    executor, conversation = _talking("pc", on_at="bedroom")
+    result = executor.execute(Action("start_conversation"))
+    # The name as a reply gives the Pi, "the Pi", and nothing is started at the PC.
+    assert (result.ok, result.say) == (False, "We're already talking at the Pi.")
+    assert conversation.satellite == "bedroom"
+    # A name he gave it is its name.
+    named = ActionExecutor(satellite="pc", conversation=conversation, spoken_name=lambda name: "Desk")
+    assert named.execute(Action("start_conversation")).say == "We're already talking at Desk."
+
+
+def test_end_conversation_ends_it_and_says_okay():
+    executor, conversation = _talking("pc", on_at="pc")
+    result = executor.execute(Action("end_conversation"))
+    assert (result.ok, result.say, result.confirm) == (True, "Okay.", "speak")
+    assert conversation.satellite is None
+    assert confirm([result], fallback="Okay.") == ([], ["Okay."])
+
+
+def test_end_conversation_is_offered_only_while_one_is_on_here():
+    executor, conversation = _talking("pc")
+    assert _offered_conversation(executor) == {"start_conversation"}
+    conversation.start("pc")
+    assert _offered_conversation(executor) == {"start_conversation", "end_conversation"}
+    # On at another satellite, there's nothing here to end.
+    elsewhere, _ = _talking("bedroom", on_at="pc")
+    assert _offered_conversation(elsewhere) == {"start_conversation"}
+    # Asked for by name where none is on, it's said, and nothing is ended.
+    result = elsewhere.execute(Action("end_conversation", from_model=True))
+    assert (result.ok, result.say) == (False, "We're not in a conversation.")
+    assert elsewhere.conversation.satellite == "pc"
+
+
+def test_end_conversation_says_so_when_it_ended_itself_since_it_was_offered():
+    executor, conversation = _talking("pc", on_at="pc")
+    method = ActionExecutor.tools()["end_conversation"]
+    conversation.end("idle")
+    result = method(executor)
+    assert (result.ok, result.say) == (False, "We're not in a conversation.")
+
+
+def test_switched_off_there_are_no_tools():
+    settings = {"enabled": False}
+    executor, conversation = _talking("pc", settings=settings)
+    assert _offered_conversation(executor) == set()
+    result = executor.execute(Action("start_conversation", from_model=True))
+    assert (result.ok, result.say) == (False, "Conversations are switched off.")
+    assert conversation.satellite is None
+    # It is read as it is now: switched on, they come back.
+    settings["enabled"] = True
+    assert _offered_conversation(executor) == {"start_conversation"}
+    # Switched off while one is on, a start goes but the end stays, so the microphone is never left open.
+    conversation.start("pc")
+    settings["enabled"] = False
+    assert _offered_conversation(executor) == {"end_conversation"}
+    assert executor.execute(Action("end_conversation")).ok
+    assert conversation.satellite is None
+
+
+def test_start_conversation_says_so_when_it_was_switched_off_since_it_was_offered():
+    settings = {"enabled": True}
+    executor, conversation = _talking("pc", settings=settings)
+    # Between the tool being offered and run - the race start() answers "off" for.
+    method = ActionExecutor.tools()["start_conversation"]
+    executor.conversation = SimpleNamespace(start=lambda satellite: "off")
+    result = method(executor)
+    assert (result.ok, result.say) == (False, "Conversations are switched off.")
+
+
+def test_without_a_conversation_there_are_no_tools():
+    # As for every executor which isn't given one - and one with no satellite to talk at.
+    assert _offered_conversation(ActionExecutor(satellite="pc")) == set()
+    assert _offered_conversation(ActionExecutor(conversation=OpenConversation(lambda: {"enabled": True}))) == set()
+    result = ActionExecutor(satellite="pc").execute(Action("start_conversation"))
+    assert (result.ok, result.say) == (False, "Conversations are switched off.")
+
+
+def test_the_conversation_tools_are_for_claude_to_use_in_any_words():
+    executor, _ = _talking("pc", on_at="pc")
+    schemas = {tool["name"]: tool for tool in executor.tool_schemas()}
+    for name in ("start_conversation", "end_conversation"):
+        assert schemas[name]["input_schema"] == {"type": "object", "properties": {}, "required": []}
+    assert "never call it unasked" in schemas["start_conversation"]["description"]
+    assert "'stop'" in schemas["end_conversation"]["description"]

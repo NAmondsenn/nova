@@ -12,8 +12,10 @@ import pytest
 
 from voice_assistant import intents as intents_module
 from voice_assistant.actions import Action
+from voice_assistant.clock_words import ClockWords
 from voice_assistant.computers import ComputerHooks, Computers
 from voice_assistant.intents import LocalIntents, calendar_days
+from voice_assistant.open_conversation import OpenConversation
 
 
 # Stands in for Home Assistant, which the Assist shapes need to be there at all.
@@ -1250,3 +1252,105 @@ def test_a_pc_which_cant_reach_windows_sound_mutes_as_before():
     # An older PC satellite, which never said it has system_volume, isn't asked of its microphone.
     assert _computer("Mute.", system_volume=False) == [Action("mute_microphone", {"muted": True})]
     assert _computer("Mute the mic.", system_volume=False) == [Action("mute_microphone", {"muted": True})]
+
+
+# Starting and ending an open conversation - see open_conversation.py
+
+START_PHRASES = ["let's talk", "let's have a conversation", "conversation mode", "start conversation mode",
+                 "start a conversation"]
+END_PHRASES = ["end conversation", "end the conversation", "end conversation mode", "stop the conversation",
+               "that's all", "that's everything", "goodbye"]
+
+
+def _talk(text, on_at=None, enabled=True, here="pc", **intents):
+    """
+    The actions a request gives at a satellite, with a conversation on at on_at or none, or None if it's left to
+    Claude.
+    """
+    conversation = OpenConversation(lambda: {"enabled": enabled})
+    if on_at:
+        conversation.start(on_at)
+    result = LocalIntents(conversation=conversation, satellite=here, **intents).match(text)
+    return None if result is None else result["actions"]
+
+
+@pytest.mark.parametrize("phrase", START_PHRASES)
+def test_each_start_phrase_starts_one(phrase):
+    assert _talk(phrase) == [Action("start_conversation")]
+    # Any capitals, and the punctuation a transcript puts on it.
+    assert _talk(phrase.capitalize() + ".") == [Action("start_conversation")]
+    assert _talk(phrase.upper() + "!") == [Action("start_conversation")]
+    # Also when one is on already, for the tool to say so.
+    assert _talk(phrase, on_at="pc") == [Action("start_conversation")]
+
+
+@pytest.mark.parametrize("phrase", END_PHRASES)
+def test_each_end_phrase_ends_it(phrase):
+    assert _talk(phrase, on_at="pc") == [Action("end_conversation")]
+    assert _talk(phrase.capitalize() + ".", on_at="pc") == [Action("end_conversation")]
+    assert _talk(phrase.upper() + "!", on_at="pc") == [Action("end_conversation")]
+
+
+@pytest.mark.parametrize("text", [
+    "That's all I can think of for the kitchen.", "Goodbye for now.", "End the conversation about the bins.",
+    "Let's talk about the weather.", "Start a conversation with the neighbours.", "Let's talk later.",
+])
+def test_a_phrase_inside_a_sentence_doesnt_start_or_end_it(text):
+    # Only the whole of what's said: the same words open longer requests, which are Claude's.
+    assert _talk(text, on_at="pc") is None
+    assert _talk(text) is None
+
+
+def test_bye_alone_isnt_an_end_phrase():
+    # The speech-to-text blanks a lone "bye" as a word imagined in noise, so it can't be told from one.
+    assert _talk("Bye.", on_at="pc") is None
+    assert _talk("Bye bye.", on_at="pc") is None
+
+
+@pytest.mark.parametrize("phrase", END_PHRASES)
+def test_end_phrases_mean_nothing_outside_a_conversation(phrase):
+    # They go on to Claude as any other words would.
+    assert _talk(phrase) is None
+    # Nor when it's on at another satellite, which isn't the one he's talking to.
+    assert _talk(phrase, on_at="bedroom") is None
+
+
+@pytest.mark.parametrize("phrase", START_PHRASES)
+def test_without_a_conversation_there_are_no_phrases(phrase):
+    # As for every session which isn't given one.
+    assert LocalIntents().match(phrase) is None
+
+
+def test_switched_off_there_are_no_phrases():
+    for phrase in START_PHRASES + END_PHRASES:
+        assert _talk(phrase, enabled=False) is None
+    # Switched off while one is on, it can still be ended by words, so the microphone is never left open.
+    settings = {"enabled": True}
+    conversation = OpenConversation(lambda: settings)
+    conversation.start("pc")
+    intents = LocalIntents(conversation=conversation, satellite="pc")
+    assert intents.match("That's all.")["actions"] == [Action("end_conversation")]
+    settings["enabled"] = False
+    assert intents.match("That's all.")["actions"] == [Action("end_conversation")]
+    assert intents.match("Let's talk.") is None
+
+
+def test_the_phrases_are_the_conversations_before_any_rule_which_might_take_them():
+    # An app called by the same words, which "start" would open.
+    apps = PC_APPS + ["A Conversation", "Conversation Mode"]
+    hooks = ComputerHooks.for_satellite(ComputerBrain(apps=apps), "pc")
+    # Which it would, with no conversation to ask.
+    assert _computer("Start a conversation.", apps=apps) == [Action("open_on_computer", {"name": "a conversation"})]
+    conversation = OpenConversation(lambda: {"enabled": True})
+    intents = LocalIntents(home=HOME, names_satellite=SATELLITE_WORDS.__contains__, computer=hooks,
+                           conversation=conversation, satellite="pc")
+    assert intents.match("Start a conversation.")["actions"] == [Action("start_conversation")]
+    assert intents.match("Start conversation mode.")["actions"] == [Action("start_conversation")]
+    assert intents.match("Conversation mode.")["actions"] == [Action("start_conversation")]
+
+
+def test_the_end_phrases_arent_dismissals():
+    # A timer going off while he ends a conversation: the dismissal shortcut, which Conversation.handle
+    # tries before the rules, takes only words which are all dismissals or filler, and none of these are
+    # - so the end phrase is the request, and saying anything silences what rang in the same turn.
+    assert not any(ClockWords.looks_like_dismissal(phrase) for phrase in END_PHRASES + START_PHRASES)
