@@ -4,9 +4,9 @@ Checks the parts of scripts/manual/measure_cut_in.py, score_cut_in.py and
 measure_voice_load.py which need neither a speaker, a microphone nor a model: that a
 recording is never written into the repository, that nothing plays at volumes it couldn't
 find or on a speaker which didn't open, what's recorded before and after the echo canceller is
-ready, how a recording is scored, what counts as the reply's own words, how the voice's speed
-is worked out, and that the brain's two scripts can be run from standard input. The speaker, microphone, echo
-canceller and speech detector are stood in for, so nothing here makes a sound.
+ready, how a recording is scored, how the voice's speed is worked out, and that the brain's two
+scripts can be run from standard input. The speaker, microphone, echo canceller and speech
+detector are stood in for, so nothing here makes a sound.
 """
 
 import importlib.util
@@ -207,21 +207,6 @@ def test_a_part_frame_at_the_end_is_left_out():
 
 def test_nothing_recorded_scores_nothing():
     assert score_cut_in.score(np.zeros(0, dtype=np.int16), Detector())["speech_share"] == 0.0
-
-
-def test_words_are_the_replys_own_when_they_are_a_run_of_what_it_said():
-    said = "The weather today is dry, and bright!"
-    assert score_cut_in.own_words("weather today is dry", said)
-    assert score_cut_in.own_words("Dry and bright.", said)
-    assert score_cut_in.own_words("the weather today is dry and bright", said)
-    assert not score_cut_in.own_words("weather is dry", said)
-    assert not score_cut_in.own_words("stop the music", said)
-    assert not score_cut_in.own_words("the weather today is dry and bright and warm", said)
-
-
-def test_an_apostrophe_stays_in_a_word():
-    assert score_cut_in.own_words("that's all", "Well that's all I know.")
-    assert not score_cut_in.own_words("thats all", "Well that's all I know.")
 
 
 # The voice's speed

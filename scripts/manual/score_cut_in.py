@@ -27,7 +27,6 @@ delete it once it's scored - and the copy on the brain - and never commit it.
 import argparse
 import json
 import os
-import re
 import sys
 from typing import Optional
 
@@ -99,27 +98,6 @@ def score(audio: np.ndarray, detector) -> dict:
             "first_speech_at": round(first * FRAME / RATE, 3) if first is not None else None}
 
 
-def _words(text: str) -> list:
-    """The words of a text, lower-cased and without punctuation."""
-    return [word for word in (found.strip("'") for found in re.findall(r"[\w']+", text.lower())) if word]
-
-
-# When voice_assistant/cut_in.py exists (Task 12), replace this function with
-# `from voice_assistant.cut_in import own_words`, which allows one word in four wrong
-# and is the check the satellite's cut-in really makes - this one is only a plain run.
-def own_words(heard: str, said: str) -> bool:
-    """
-    Args:
-        heard: What the speech-to-text heard.
-        said: What the reply was saying.
-
-    Returns:
-        Whether the words heard are a run of consecutive words of what was said.
-    """
-    heard, said = _words(heard), _words(said)
-    return any(said[start:start + len(heard)] == heard for start in range(len(said) - len(heard) + 1))
-
-
 def hear(nemotron, audio: np.ndarray) -> str:
     """
     Args:
@@ -147,6 +125,10 @@ def report(audio: np.ndarray, detector, nemotron, said: Optional[str], start: fl
         The numbers for the recording from there on, as the top of this file says, with
         first_speech_at in seconds into the whole recording.
     """
+    # Imported here, not at the top, as the package can only be imported once the tree it's
+    # in is on the path - which it is by the time anything is reported.
+    from voice_assistant.cut_in import own_words
+
     part = audio[round(start * RATE):]
     result = score(part, detector)
     if result["first_speech_at"] is not None:
