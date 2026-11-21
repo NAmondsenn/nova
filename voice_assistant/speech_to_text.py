@@ -96,6 +96,16 @@ def _words(text: str) -> list:
     return re.findall(r"[a-z0-9']+", text.lower())
 
 
+def _no_word_yet(text: str) -> bool:
+    """
+    Whether the words so far, in a recording which isn't over, are still no real word:
+    nothing but punctuation, or all of them the start of something speech models imagine in
+    noise - Nemotron's words come a word at a time, so "Thank" is how "Thank you." starts.
+    """
+    words = _words(text)
+    return not words or any(imagined.split()[:len(words)] == words for imagined in HALLUCINATIONS)
+
+
 def _said_twice(text: str) -> str:
     """
     What a recording heard again said twice over was, if Nemotron heard the same both times.
@@ -387,7 +397,8 @@ class NemotronTranscription:
 
         Returns:
             None until a real word has been heard in this recording - words imagined in
-            noise, such as a lone "Thank you.", aren't one. After that, the seconds of
+            noise, such as a lone "Thank you.", aren't one, nor is the start of them
+            ("Thank") or punctuation on its own. After that, the seconds of
             audio Nemotron has been given since its words last changed. Also None, from
             then on, if Nemotron can't say what it has heard so far - the words may be
             changing unseen, so they can't be taken to have stopped.
@@ -535,7 +546,7 @@ class NemotronTranscription:
                 if self._words_failed:
                     return
             words = nemotron.words(stream)
-            real = bool(words) and not _imagined(words)
+            real = not _no_word_yet(words)
             with self._words_lock:
                 if words != self._last_words:
                     self._last_words = words

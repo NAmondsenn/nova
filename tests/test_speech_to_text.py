@@ -290,6 +290,23 @@ def test_a_word_heard_stays_heard_when_the_words_later_come_to_nothing_but_noise
     assert _heard_pieces(nemotron, 5).quiet_words() == pytest.approx(0.3, abs=0.01)
 
 
+@pytest.mark.parametrize("script", [["Thank", "Thank you."], ["Thanks for"], ["Thank you for"], ["Bye", "Bye bye."],
+                                    [".", "..."]])
+def test_the_start_of_words_imagined_in_noise_isnt_a_word_yet(script):
+    # Nemotron's words come a word at a time, so "Thank" is how "Thank you." starts; nor is
+    # punctuation on its own a word.
+    nemotron = FakeNemotron()
+    nemotron.script = script
+    assert _heard_pieces(nemotron, 5).quiet_words() is None
+
+
+@pytest.mark.parametrize("first", ["Set", "By", "Thanks, set", "You know", "5"])
+def test_words_which_start_nothing_imagined_are_real_at_once(first):
+    nemotron = FakeNemotron()
+    nemotron.script = [first, first + " a"]
+    assert _heard_pieces(nemotron, 1).quiet_words() == pytest.approx(0.0, abs=0.01)
+
+
 def _wait_for(condition, seconds=2.0):
     import time
 
