@@ -1111,7 +1111,10 @@ class AskedDownloads(Downloads):
         self.requested.append((query, search_type, satellite))
         return super().request(query, search_type, satellite)
 
-    def start(self, wanted, satellite):
+    def start(self, wanted, satellite, unless_large=False):
+        with self._lock:
+            if unless_large and wanted.kind == "album" and self._albums_lately() + 1 >= self._album_count():
+                return None
         self.started.append((wanted.name, satellite))
         return True
 
@@ -1239,7 +1242,7 @@ def test_a_yes_to_a_third_album_offer_asks_for_approval(download_settings):
     fake = FakeApprovals("wait")
     downloads = AskedDownloads(download_settings)
     downloads._approvals = fake
-    for name in ("Hotel California", "Tusk"):
+    for _ in range(2):
         downloads._album_starts.append(downloads._now())
     actions = ActionExecutor(music=NotInNavidrome(), downloads=downloads, satellite="kitchen")
     llm = FakeLLM(_answer("Okay.", Action("play_music", {"query": "Rumours by Fleetwood Mac", "search_type": "album"},

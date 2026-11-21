@@ -611,11 +611,10 @@ class Downloads:
                 return had
         if not asked:
             return self._offered(query, search_type, wanted)
-        if wanted.kind == "album":
-            count = self._albums_lately() + 1
-            if count >= self._album_count():
-                return self._ask_for_albums(wanted, satellite, count)
-        if not self.start(wanted, satellite):
+        started = self.start(wanted, satellite, unless_large=True)
+        if started is None:
+            return self._ask_for_albums(wanted, satellite)
+        if not started:
             # Asked for elsewhere since it was checked.
             return already
         # Kept in Claude's history as its call's answer; "X requested." is said once SoulSync has it.
@@ -637,12 +636,15 @@ class Downloads:
             return ALBUM_COUNT
 
     def _albums_lately(self) -> int:
-        """How many albums were started in the last trust minutes. Songs never count."""
+        """
+        How many albums were started in the last trust minutes, dropping the older ones.
+        Songs never count. The caller holds the lock.
+        """
         since = self._now() - self._trust_minutes() * 60
-        with self._lock:
-            return len([started for started in self._album_starts if started > since])
+        self._album_starts = [started for started in self._album_starts if started > since]
+        return len(self._album_starts)
 
-    def _ask_for_albums(self, wanted: Wanted, satellite: Optional[str], count: int) -> Dict:
+    def _ask_for_albums(self, wanted: Wanted, satellite: Optional[str]) -> Dict:
         """
         Asks approval to start an album which makes a large download, with the albums
         before it in the trust minutes.
@@ -650,13 +652,14 @@ class Downloads:
         Args:
             wanted: The album.
             satellite: The satellite that asked, which is told how it went - or None.
-            count: The albums, this one included.
 
         Returns:
             What the gate gives; a refusal when there's no way to approve.
         """
         if self._approvals is None:
             return {"success": False, "message": NO_WAY}
+        with self._lock:
+            count = self._albums_lately() + 1
 
         def do() -> Dict:
             if not self.start(wanted, satellite):
@@ -709,21 +712,27 @@ class Downloads:
         logger.info(f"Navidrome already has {had}, so {wanted.name} isn't requested")
         return {"success": True, "message": f"You've already got {had}."}
 
-    def start(self, wanted: Wanted, satellite: Optional[str]) -> bool:
+    def start(self, wanted: Wanted, satellite: Optional[str], unless_large: bool = False) -> Optional[bool]:
         """
         Starts watching a request, on a thread of its own.
 
         Args:
             wanted: What was asked for.
             satellite: The satellite that asked, which is told how it went - or None.
+            unless_large: Whether an album which would make a large download is left
+                unstarted. The count and the start are one step under the lock, so two
+                albums asked at once can't both slip in below the limit.
 
         Returns:
             False if the same request is already waiting, so nothing was started;
-            else True.
+            None if it would be a large download, which needs approval, so nothing was
+            started; else True.
         """
         with self._lock:
             if wanted.key in self._waiting:
                 return False
+            if unless_large and wanted.kind == "album" and self._albums_lately() + 1 >= self._album_count():
+                return None
             self._waiting[wanted.key] = wanted
             self._asked_at[wanted.key] = self._now()
             if wanted.kind == "album":

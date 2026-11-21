@@ -151,12 +151,14 @@ class FakeLibrary:
     fake clock's time. A song is only ever looked for under one of the names given.
     """
 
-    def __init__(self, clock, songs=([],), tracks=([],), scans_allowed=True, names=(("Gooba", "6ix9ine"),)):
+    def __init__(self, clock, songs=([],), tracks=([],), scans_allowed=True, names=(("Gooba", "6ix9ine"),),
+                 albums=(("Rumours", "Fleetwood Mac"),)):
         self.clock = clock
         self.songs = list(songs)
         self.tracks = list(tracks)
         self.scans_allowed = scans_allowed
         self.names = names
+        self.albums = albums
         self.looked_for = []
         self.scans = []
 
@@ -166,7 +168,7 @@ class FakeLibrary:
         return list(_answer(self.songs))
 
     def find_album_tracks(self, title, artist):
-        assert (title, artist) == ("Rumours", "Fleetwood Mac")
+        assert (title, artist) in self.albums
         return list(_answer(self.tracks))
 
     def start_scan(self):
@@ -1723,3 +1725,38 @@ def test_already_had_or_waiting_is_answered_without_asking(approving, clock, set
     assert downloads.download("Rumours by Fleetwood Mac", "album", "kitchen")["message"] == (
         "I'm already getting Rumours by Fleetwood Mac.")
     assert fake.asked == [] and downloads._album_starts == _two
+
+
+def test_albums_really_started_add_up_and_the_third_asks(approving, clock, set_up):
+    library = FakeLibrary(clock, albums=(("Rumours", "Fleetwood Mac"), ("Tusk", "Fleetwood Mac"),
+                                         ("Mirage", "Fleetwood Mac")))
+    downloads, fake = approving(FakeSoulSync(), library, settings=set_up)
+    for name in ("Tusk", "Mirage"):
+        assert downloads.download(f"{name} by Fleetwood Mac", "album", "kitchen")["later"]
+    assert fake.asked == []
+
+    downloads.download("Rumours by Fleetwood Mac", "album", "kitchen")
+
+    assert fake.asked == [(BIG_ALBUM, "kitchen")]
+
+
+def test_two_albums_asked_at_once_cant_both_slip_in_below_the_limit(approving, clock, set_up):
+    library = FakeLibrary(clock, albums=(("Rumours", "Fleetwood Mac"), ("Tusk", "Fleetwood Mac")))
+    downloads, fake = approving(FakeSoulSync(), library, settings=set_up)
+    _two_albums_before(downloads, 1)
+    barrier = threading.Barrier(2)
+    replies = []
+
+    def ask(name):
+        barrier.wait(5)
+        replies.append(downloads.download(f"{name} by Fleetwood Mac", "album", "kitchen"))
+
+    threads = [threading.Thread(target=ask, args=(name,)) for name in ("Rumours", "Tusk")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+
+    # One started unasked; the other, which would have been the third, went to the gate.
+    assert len(fake.asked) == 1 and len(downloads._album_starts) == 2
+    assert sorted(bool(reply.get("later")) for reply in replies) == [False, True]
