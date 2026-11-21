@@ -7,6 +7,9 @@ minute - with a clock of the test's own, so nothing here waits.
 import threading
 import time
 
+from tests.fake_approvals import FakeApprovals
+from voice_assistant.actions import Action, ActionExecutor
+from voice_assistant.google_calendar import Removal
 from voice_assistant.undo import MOST_KEPT, UNDO_KEPT, UndoShelf
 
 
@@ -122,3 +125,68 @@ def test_two_undos_at_once_put_back_once():
         each.join()
     assert put_back == [{"id": 3}]
     assert sorted(answers, key=lambda answer: answer is None) == [{"success": True, "message": "Put back."}, None]
+
+
+# "Undo that" of Nova's own change - see ActionExecutor.undo_last_change
+
+class OneEventCalendar:
+    """A calendar with the dentist on it, which can be removed, put back, or added and taken back off."""
+
+    def __init__(self):
+        self.on = True
+
+    def activity_calendars(self):
+        return {}
+
+    def find_removal(self, search, day=None, at=None, following=False, calendar=None, today=None, now=None):
+        return Removal("Remove 'Dentist', Thu 26 Nov 15:00", self._remove)
+
+    def _remove(self):
+        self.on = False
+        return {"success": True, "message": "Removed Dentist, Thursday at 3 PM.", "undo": self._put_back}
+
+    def _put_back(self):
+        self.on = True
+        return {"success": True, "message": "Put Dentist back, Thursday at 3 PM."}
+
+    def add(self, summary, start, end=None, all_day=None, calendar=None):
+        self.on = True
+        return {"success": True, "message": "Added Dentist.", "undo": self._take_off}
+
+    def _take_off(self):
+        self.on = False
+        return {"success": True, "message": "Took Dentist back off your calendar."}
+
+
+CANCEL_DENTIST = Action("remove_from_calendar", {"search": "dentist"}, from_model=True)
+UNDO_THAT = Action("undo_last_change")
+
+
+def test_undoing_an_approved_removal_needs_no_approval():
+    # Approved after waiting: the removal done then is the one "undo that" takes back.
+    calendar = OneEventCalendar()
+    approvals = FakeApprovals("wait")
+    executor = ActionExecutor(calendar=calendar, approvals=approvals)
+    executor.execute(CANCEL_DENTIST)
+    approvals.approve_waiting()
+    assert calendar.on is False
+    assert executor.execute(UNDO_THAT).say == "Put Dentist back, Thursday at 3 PM."
+    assert calendar.on is True and len(approvals.asked) == 1
+
+    # Approved at once, by the trust window: the same.
+    calendar = OneEventCalendar()
+    approvals = FakeApprovals("approve")
+    executor = ActionExecutor(calendar=calendar, approvals=approvals)
+    assert executor.execute(CANCEL_DENTIST).say == "Removed Dentist, Thursday at 3 PM."
+    assert executor.execute(UNDO_THAT).say == "Put Dentist back, Thursday at 3 PM."
+    assert calendar.on is True and len(approvals.asked) == 1
+
+
+def test_undoing_an_event_nova_just_added_needs_no_approval():
+    # Taking it back off removes it, but it's Nova's own change: never asked about, even with no way to approve.
+    calendar = OneEventCalendar()
+    approvals = FakeApprovals("none")
+    executor = ActionExecutor(calendar=calendar, approvals=approvals)
+    executor.execute(Action("add_to_calendar", {"summary": "Dentist", "start": "2026-11-26 15:00"}))
+    assert executor.execute(UNDO_THAT).say == "Took Dentist back off your calendar."
+    assert calendar.on is False and approvals.asked == []

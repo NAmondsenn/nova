@@ -10,12 +10,15 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.fake_approvals import FakeApprovals
 from voice_assistant import network
 from voice_assistant.actions import Action, ActionExecutor, ActionResult
+from voice_assistant.approvals import pending_said
 from voice_assistant.choices import ChoiceStore
 from voice_assistant.clock import Clock
 from voice_assistant.conversation import LIGHTS_TIMEOUT, Conversation, Reply
 from voice_assistant.downloads import NOT_SET_UP, ON_ITS_WAY, Downloads
+from voice_assistant.google_calendar import Removal
 from voice_assistant.ha_registry import Entry, Snapshot
 from voice_assistant.intents import LocalIntents
 from voice_assistant.llm import LLMHandler
@@ -795,6 +798,26 @@ def test_a_routines_steps_are_each_done_as_if_said_and_their_answers_said_togeth
     assert actions.run == ["control_playback", "home_command"]
     # Two chimes would only be one sound twice.
     assert reply.say == "It's sunny." and reply.sounds == [("success_chime.wav", "general")]
+
+
+def test_a_routine_step_removing_an_event_asks_first():
+    # A routine is run for him, but a step which removes an event still waits for his OK.
+    class RemovingCalendar(FakeCalendar):
+        removed = []
+
+        def find_removal(self, search, day=None, at=None, following=False, calendar=None, today=None, now=None):
+            return Removal("Remove 'Gym', Mon 23 Nov 08:00", lambda: self.removed.append(search) or {
+                "success": True, "message": "Removed Gym, Monday at 8 AM."})
+
+    calendar = RemovingCalendar()
+    approvals = FakeApprovals("wait")
+    actions = ActionExecutor(calendar=calendar, approvals=approvals, satellite="kitchen")
+    llm = FakeLLM(_answer("Okay.", Action("remove_from_calendar", {"search": "gym"}, from_model=True)))
+    routine = {"name": "Rest day", "phrases": ["rest day"], "steps": ["cancel the gym"]}
+    reply = _conversation(llm=llm, actions=actions, routines=FakeRoutines(routine)).handle("rest day")
+    assert approvals.asked == [("Remove 'Gym', Mon 23 Nov 08:00", "kitchen")]
+    assert calendar.removed == []
+    assert pending_said(["your phone"]) in reply.say + reply.shown
 
 
 def test_a_long_turn_says_its_getting_on_after_each_of_claudes_replies_and_each_step():

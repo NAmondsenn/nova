@@ -31,8 +31,8 @@ from voice_assistant import google_calendar, storage
 from voice_assistant.actions import Action, ActionExecutor
 from voice_assistant.choices import ChoiceStore
 from voice_assistant.google_calendar import (CANT_REACH_GOOGLE, NEEDS_SIGN_IN, ClientRefused, GoogleCalendar,
-                                             GoogleSignIn, GoogleSignInError, SignInNeeded, describe_agenda,
-                                             describe_found, named_by_address, spoken_name)
+                                             GoogleSignIn, GoogleSignInError, Removal, SignInNeeded,
+                                             describe_agenda, describe_found, named_by_address, spoken_name)
 from voice_assistant.intents import LocalIntents
 
 CLIENT_ID = "made-up-client.apps.example.com"
@@ -2213,6 +2213,86 @@ def test_several_matches_remove_nothing_and_ask_which(for_changing):
         # Nothing changed, so there's nothing to undo.
         assert calendar.remove(search, following=following, today=NOVEMBER_21) == {"success": False, "message": said}
         assert calendar._session.sent == []
+
+
+def test_find_removal_describes_one_event(for_changing):
+    # What he's asked to approve names the real event, in local time - and nothing is removed
+    # until it's run, which does what remove did.
+    dentist = _event_url("calendar-personal", "made-up-dentist")
+    calendar = for_changing(personal=[DENTIST_THURSDAY], answers={f"DELETE {dentist}": [DELETED]})
+    found = calendar.find_removal("dentist", today=NOVEMBER_21)
+    assert isinstance(found, Removal)
+    assert found.description == "Remove 'Dentist', Thu 26 Nov 15:00"
+    assert calendar._session.sent == []
+    reply = found.run()
+    assert _said(reply) == {"success": True, "message": "Removed Dentist, Thursday at 3 PM."}
+    assert callable(reply["undo"])
+    assert calendar._session.sent == [_write("DELETE", dentist)]
+
+    # All day, it's the day alone; and a one-off from this one on is still just the one.
+    holiday = _own("Holiday", "2026-11-22", "2026-11-23", "made-up-holiday")
+    calendar = for_changing(personal=[holiday])
+    assert calendar.find_removal("holiday", following=True, today=NOVEMBER_21).description == \
+        "Remove 'Holiday', Sun 22 Nov"
+    # One day of a repeating event alone is one event too.
+    calendar = for_changing(personal=[GYM_24TH])
+    assert calendar.find_removal("gym", day=date(2026, 11, 24), today=NOVEMBER_21).description == \
+        "Remove 'Gym', Tue 24 Nov 18:00"
+    # In BST, at the time on his clock, not Google's UTC.
+    summer = _own("Dentist", "2027-06-01T09:00:00Z", "2027-06-01T09:30:00Z", "made-up-summer")
+    calendar = for_changing(personal=[summer])
+    assert calendar.find_removal("dentist", day=date(2027, 6, 1), today=NOVEMBER_21).description == \
+        "Remove 'Dentist', Tue 1 Jun 10:00"
+    assert calendar._session.sent == []
+
+
+def test_find_removal_describes_a_series_from_then_on(for_changing):
+    series = _event_url("calendar-personal", "made-up-gym")
+    calendar = for_changing(personal=[GYM_24TH, GYM_1ST], answers={
+        series: [GYM], f"{series}/instances": [_events_page()], f"PATCH {series}": [GYM]})
+    found = calendar.find_removal("gym", following=True, today=NOVEMBER_21)
+    assert found.description == "Remove 'Gym', Tue 24 Nov 18:00, and every time after it"
+    assert calendar._session.sent == []
+    assert _said(found.run()) == {"success": True, "message": "Removed Gym from Tuesday on."}
+    assert [sent["method"] for sent in calendar._session.sent] == ["PATCH"]
+
+
+def test_find_removal_describes_several(for_changing):
+    calendar = for_changing(personal=SESSIONS, answers=_answers(SESSIONS, "DELETE", DELETED))
+    found = calendar.find_removal("gym", following=True, today=NOVEMBER_21)
+    # From the first found, whether a day was said or not.
+    assert found.description == "Remove 5 'Gym' events from Mon 23 Nov on"
+    assert calendar._session.sent == []
+    assert _said(found.run()) == {"success": True, "message": "Removed 5 Gym events."}
+    assert len(calendar._session.sent) == 5
+
+    calendar = for_changing(personal=SESSIONS[2:])
+    assert calendar.find_removal("gym", day=date(2026, 11, 25), following=True, today=NOVEMBER_21).description == \
+        "Remove 3 'Gym' events from Wed 25 Nov on"
+    assert calendar._session.sent == []
+
+
+def test_find_removal_answers_no_match_and_which_one_as_before(for_changing):
+    # The same words remove gives, before any approval is asked - and nothing written.
+    personal = [_own("Dentist", "2026-11-23T09:00:00Z", "2026-11-23T09:30:00Z", "made-up-dentist-1"),
+                DENTIST_THURSDAY]
+    calendar = for_changing(personal=personal, reads=2)
+    which = {"success": False,
+             "message": "I found 2: Dentist on Monday, at 9 AM; and Dentist on Thursday, at 3 PM. Which one?"}
+    assert calendar.find_removal("dentist", today=NOVEMBER_21) == which
+    assert calendar.remove("dentist", today=NOVEMBER_21) == which
+
+    calendar = for_changing(personal=personal, reads=2)
+    nothing = {"success": False, "message": "I can't find the optician on your calendar on Thursday."}
+    assert calendar.find_removal("optician", day=THURSDAY, today=NOVEMBER_21) == nothing
+    assert calendar.remove("optician", day=THURSDAY, today=NOVEMBER_21) == nothing
+
+    calendar = for_changing(personal=[GYM_24TH])
+    assert calendar.find_removal("gym", day=date(2026, 11, 17), following=True, today=NOVEMBER_21) == GONE
+    calendar = for_changing()
+    assert calendar.find_removal("  ", today=NOVEMBER_21) == {
+        "success": False, "message": "I didn't catch which event you meant."}
+    assert calendar._session.sent == []
 
 
 def test_nothing_found_says_where_it_looked(for_changing):

@@ -198,6 +198,10 @@ MOST_OTHERS_IN_OVERVIEW = 5
 SEARCH_DAYS = 90
 MOST_FOUND = 3
 
+# A day as an approval names it - "Tue 25 Nov" - see _approval_when. The brain runs on Linux,
+# whose strftime has %-d for the day without a nought.
+APPROVAL_DAY = "%a %-d %b"
+
 # The most events "all of them" changes at once - a series counting as one. Past that nothing is
 # changed and the number is said, so "remove all my gym sessions" misheard as "remove all my
 # sessions" can't empty the calendar.
@@ -1077,7 +1081,8 @@ class GoogleCalendar:
         Thursday" - straight away, and said back so a mistake is heard, and undone by "undo
         that". Only that day's of a repeating event, unless following: then from that one on,
         as Google Calendar's "this and following events" does, so the times before it - past
-        shifts and lectures - stay. It's sent once, never again by itself.
+        shifts and lectures - stay. It's sent once, never again by itself. It's find_removal,
+        then the removal run at once - Nova's remove_from_calendar asks his OK in between.
 
         Args:
             search: A word or two from its name, e.g. "dentist".
@@ -1094,15 +1099,41 @@ class GoogleCalendar:
             Dict with 'success' and what was removed, or why not, as the 'message' - and once
             it's removed, an 'undo', which puts it back - or all of them.
         """
+        found = self.find_removal(search, day, at, following, calendar, today, now)
+        return found if isinstance(found, dict) else found.run()
+
+    def find_removal(self, search: str, day: Optional[date] = None, at: Optional[str] = None,
+                     following: bool = False, calendar: Optional[str] = None, today: Optional[date] = None,
+                     now: Optional[datetime] = None) -> Union[Dict, "Removal"]:
+        """
+        Works out what remove would remove, writing nothing - so his OK can be asked for the
+        real event, and "which one?" or "I can't find it" is said first, as remove says it.
+
+        Args:
+            The same as remove's.
+
+        Returns:
+            The reply when there's nothing to remove - several to choose from, none found, a day
+            gone - else the Removal: what it is, as he's shown it, and what removes it, giving
+            just what remove would have.
+        """
         today, now = _today_and_now(today, now)
         found = (self._all_to_change if following else self._to_change)(search, day, at, today, now, calendar)
         if isinstance(found, str):
             return {"success": False, "message": found}
         if not isinstance(found, _Found):
-            return self._remove_one(found, False, today)
+            return Removal(f"Remove '{found['summary']}', {_approval_when(found)}",
+                           lambda: self._remove_one(found, False, today))
         if len(found.units) > 1:
-            return self._remove_all(found, day, today)
-        return _and_left(self._remove_one(found.units[0], True, today), found.left)
+            first = min((_day_of(unit) for unit in found.units))
+            return Removal(f"Remove {len(found.units)} '{found.units[0]['summary']}' events from "
+                           f"{first.strftime(APPROVAL_DAY)} on",
+                           lambda: self._remove_all(found, day, today))
+        unit = found.units[0]
+        # One time of a series takes every time after it - however many, as one with no end has no count.
+        after = ", and every time after it" if unit["recurring_id"] else ""
+        return Removal(f"Remove '{unit['summary']}', {_approval_when(unit)}{after}",
+                       lambda: _and_left(self._remove_one(unit, True, today), found.left))
 
     def _remove_one(self, found: Dict, following: bool, today: date) -> Dict:
         """
@@ -2007,6 +2038,15 @@ class _NotSure(Exception):
 
 class _SeriesUnreadable(ValueError):
     """A repeating event's rules can't be used: Google gave none, or none of the times the new series needs."""
+
+
+class Removal(NamedTuple):
+    """What find_removal found to remove, before anything is written - see GoogleCalendar.find_removal."""
+
+    # What it will do, as he's shown it to approve: "Remove 'Dentist', Tue 25 Nov 10:00".
+    description: str
+    # Removes it, giving what remove would: 'success', the 'message', and an 'undo' once it's removed.
+    run: Callable[[], Dict]
 
 
 class _Found(NamedTuple):
@@ -3178,6 +3218,16 @@ def _started(event: Dict, now: datetime) -> bool:
             # When it was meant to be can't be read, so it's never changed.
             return True
     return any(start <= now if isinstance(start, datetime) else start <= now.date() for start in starts)
+
+
+def _approval_when(event: Dict) -> str:
+    """
+    When an event is on, as an approval names it - "Tue 25 Nov 10:00", or "Tue 25 Nov" all day -
+    written short and plain for a notification or a Windows Hello prompt, in local time.
+    """
+    if event["all_day"]:
+        return event["start"].strftime(APPROVAL_DAY)
+    return event["start"].strftime(f"{APPROVAL_DAY} %H:%M")
 
 
 def _when_changed(event: Dict, today: date) -> str:

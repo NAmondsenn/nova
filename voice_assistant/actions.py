@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 import requests
 
 from voice_assistant import network
+from voice_assistant.approvals import NO_WAY
 from voice_assistant.batteries import HOME_FAILURES, find, said
 from voice_assistant.clock_ringing import heard_in
 from voice_assistant.computers import safe_url, url_host
@@ -727,6 +728,27 @@ class ActionExecutor:
             self.last_change.keep(undo)
         elif method.tool["changes"] and not method.tool["reads"]:
             self.last_change.note_other()
+
+    def _approved(self, description: str, do: Callable[[], Dict], tool: Callable) -> Dict:
+        """
+        Does a big action once he's approved it, the tool having found what it will do - see
+        approvals.py. Every way to the tool comes here, local commands, Claude, routines alike,
+        as it's the tool that asks; "undo that" of Nova's own change never does.
+
+        Args:
+            description: What it will do, as he's shown it - "Remove 'Dentist', Tue 25 Nov 10:00".
+            do: Does it, giving the tool's reply.
+            tool: The tool, for keeping what it did once approved for "undo that" - see _keep_or_note.
+
+        Returns:
+            do's reply when the trust window is open; else the words saying where to look, its
+            outcome said later where he asked - or, with no Approvals or no way to approve, that
+            it needs a way first, and nothing is done.
+        """
+        if self.approvals is None:
+            return {"success": False, "message": NO_WAY}
+        return self.approvals.gate(description, do, self.satellite,
+                                   done=lambda reply: self._keep_or_note(tool, reply))
 
     # Music
 
@@ -2261,8 +2283,12 @@ class ActionExecutor:
     def remove_from_calendar(self, search: Optional[str] = None, day: Optional[str] = None,
                              time: Optional[str] = None, following: Optional[bool] = None,
                              calendar: Optional[str] = None):
-        return self._calendar_event(self.calendar.remove, day, search=search or "", at=time,
-                                    following=following is True, calendar=calendar)
+        # Found first, so "which one?" or no match is said without asking, and his OK names the real event.
+        found = self._calendar_event(self.calendar.find_removal, day, search=search or "", at=time,
+                                     following=following is True, calendar=calendar)
+        if isinstance(found, dict):
+            return found
+        return self._approved(found.description, found.run, ActionExecutor.remove_from_calendar)
 
     @tool(
         "Move or rename an event on the user's Google calendar, for 'move the dentist to Friday at 4', 'push my "
@@ -2307,18 +2333,19 @@ class ActionExecutor:
                                     calendar=calendar)
 
     @staticmethod
-    def _calendar_event(act, day: Optional[str], **asked) -> Dict:
+    def _calendar_event(act, day: Optional[str], **asked) -> Any:
         """
-        Removes or changes an event on the day the model gave, if it gave one which can be read.
+        Finds an event to remove, or changes one, on the day the model gave, if it gave one which
+        can be read.
 
         Args:
-            act: The calendar's remove or change.
+            act: The calendar's find_removal or change.
             day: The event's day as the model gave it, 'YYYY-MM-DD', or None for the user not
                 having said one.
             **asked: The rest of what to pass on.
 
         Returns:
-            What the calendar said, or that the day wasn't caught.
+            What the calendar gave - a reply, or a Removal - or that the day wasn't caught.
         """
         when = None
         if day:
