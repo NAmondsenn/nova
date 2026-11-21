@@ -32,6 +32,15 @@ def test_not_connected_greys_only_the_music():
     assert greyed == ["play_pause", "next"]
 
 
+def test_without_media_controls_the_music_is_greyed():
+    # The brain drops a media press from a satellite which has said it has no media controls.
+    assert ready.music is True
+    greyed = [item.id for item in items(ready._replace(music=False)) if item.enabled is False]
+    assert greyed == ["play_pause", "next"]
+    greyed = [item.id for item in items(ready._replace(music=False, connected=False)) if item.enabled is False]
+    assert greyed == ["play_pause", "next"]
+
+
 def test_mute_is_ticked_when_muted_and_greyed_when_unreachable():
     assert by_id(ready._replace(mic_muted=True))["mute"].ticked is True
     assert by_id(ready)["mute"].ticked is False

@@ -20,6 +20,8 @@ class AppState(NamedTuple):
         shortcut: The shortcut as shown ("Ctrl+Alt+N"), or None when there is none or it's taken.
         page: Whether there's an address for the settings page.
         at_logon: Whether the app starts when he signs in.
+        music: Whether the app has media controls, without which the brain ignores a press of
+            Play / Pause or Next from it.
     """
 
     connected: bool
@@ -28,6 +30,7 @@ class AppState(NamedTuple):
     shortcut: Optional[str]
     page: bool
     at_logon: bool
+    music: bool = True
 
 
 class Item(NamedTuple):
@@ -61,17 +64,19 @@ def items(state: AppState) -> List[Item]:
 
     Returns:
         The lines in order: listen, play_pause, next, mute, a separator, settings, at_logon,
-        restart and quit. The music is greyed while not connected, mute while the microphone
-        can't be reached, and settings while there's no address for the page.
+        restart and quit. The music is greyed while not connected or without media controls,
+        mute while the microphone can't be reached, and settings while there's no address for
+        the page.
     """
     if state.playing is None:
         play_pause = "Play / Pause"
     else:
         play_pause = "Pause" if state.playing else "Play"
+    music = state.connected and state.music
     return [
         Item("listen", "Listen", keys=state.shortcut or ""),
-        Item("play_pause", play_pause, enabled=state.connected),
-        Item("next", "Next", enabled=state.connected),
+        Item("play_pause", play_pause, enabled=music),
+        Item("next", "Next", enabled=music),
         Item("mute", "Mute microphone", ticked=state.mic_muted is True, enabled=state.mic_muted is not None),
         SEPARATOR,
         Item("settings", "Settings", enabled=state.page),

@@ -3793,6 +3793,17 @@ def test_now_playing_sets_playing_even_without_media_controls(brain, make):
         assert wait_for(lambda: made._app_state().playing is playing and len(made.tray.changes) > told)
 
 
+def test_the_state_says_whether_there_are_media_controls(brain, make, windows):
+    made = tray_pressable(brain, make)
+    assert made.media is not None and made._app_state().music is True
+
+
+def test_the_state_says_there_is_no_music_without_media_controls(brain, make):
+    # The brain drops Play / Pause and Next from a satellite without them, so the menu greys them.
+    made = tray_pressable(brain, make)
+    assert made.media is None and made._app_state().music is False
+
+
 def test_a_now_playing_which_makes_no_sense_leaves_playing_alone(brain, make):
     made = tray_pressable(brain, make)
     brain.say("now_playing", state="playing")

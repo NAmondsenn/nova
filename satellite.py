@@ -1296,7 +1296,7 @@ class Satellite:
             Whether the brain is connected, whether the microphone is muted - None when it
             can't be told, or there's no Windows volume to ask - whether music plays, the
             shortcut as shown (None for none, or while another program has it), whether
-            there's a page, and whether Nova starts at logon.
+            there's a page, whether Nova starts at logon, and whether there are media controls.
         """
         shortcut_now = self._shortcut
         return AppState(
@@ -1306,6 +1306,7 @@ class Satellite:
             shortcut=None if shortcut_now is None or self._shortcut_taken else shortcut.shown(shortcut_now),
             page=self._page is not None,
             at_logon=not os.path.exists(NO_LOGON_MARK),
+            music=self.media is not None,
         )
 
     def _mic_for_the_tray(self, opening: bool) -> Optional[bool]:
