@@ -149,7 +149,8 @@ def test_check_app_only_looks():
     assert not re.search(changing, code)
     for call in ("New-Item", "Out-File", "Add-Content", ".Save("):
         assert call not in code
-    for name in ("Nova satellite", "Nova start", "Nova.lnk", "no_logon_start", "Nova.exe"):
+    for name in ("Nova satellite", "Nova start", "Nova.lnk", "no_logon_start", "Nova.exe", "Get-ScheduledTaskInfo",
+                 "LastTaskResult"):
         assert name in code
 
 

@@ -1,11 +1,11 @@
 # Shows how Nova stands on this Windows PC after a deploy: each Nova process (its id, its
 # parent's, its description and path), whether venv\Scripts\Nova.exe is there, both tasks'
-# states and what they run, whether the Start-menu shortcut Nova.lnk points at Nova.exe,
-# and whether "Start with Windows" is off (the file no_logon_start in the data folder). It
-# only looks: nothing is started, stopped or changed, and it prints no file's contents and
-# nothing of the environment. Run by hand from CT 109, encoded as scripts/deploy_pc.sh
-# runs its own PowerShell, with the comments left out so it fits cmd.exe's 8191
-# characters there:
+# states, what they run and how each last ended, whether the Start-menu shortcut Nova.lnk
+# points at Nova.exe, and whether "Start with Windows" is off (the file no_logon_start in
+# the data folder). It only looks: nothing is started, stopped or changed, and it prints
+# no file's contents and nothing of the environment. Run by hand from CT 109, encoded as
+# scripts/deploy_pc.sh runs its own PowerShell, with the comments left out so it fits
+# cmd.exe's 8191 characters there:
 #
 #   encoded=$(grep -v '^ *#' scripts/windows/check_app.ps1 | iconv -f utf-8 -t utf-16le | base64 -w0)
 #   ssh pc "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}"
@@ -44,7 +44,12 @@ foreach ($name in @('Nova satellite', 'Nova start')) {
     $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
     if ($task) {
         $action = @($task.Actions)[0]
-        Write-Host "$($name): $($task.State), runs $($action.Execute) $($action.Arguments)"
+        # How it last ended, in decimal and hex: Nova.exe's own failures are 120 to 126, and
+        # Windows' own (267011, 0x00041303, has not yet run) are known by their hex.
+        $last = 'unknown'
+        $info = Get-ScheduledTaskInfo -TaskName $name -ErrorAction SilentlyContinue
+        if ($info) { $last = '{0} (0x{0:X8})' -f $info.LastTaskResult }
+        Write-Host "$($name): $($task.State), runs $($action.Execute) $($action.Arguments), last result $last"
     }
     else { Write-Host "$($name): not registered" }
 }
