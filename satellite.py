@@ -1716,9 +1716,13 @@ class Satellite:
         threading.Thread(target=self._approve, args=(id, description), daemon=True, name="approval").start()
 
     def _approve(self, id: str, description: str):
-        """Asks Hello, and sends the answer - unless the brain withdrew the approval meanwhile, and so wants none."""
+        """
+        Asks Hello, and sends the answer - unless the brain withdrew the approval
+        meanwhile, and so wants none, or Hello gave no answer (anything but verified or
+        his own Cancel), when the brain goes on waiting for the phone.
+        """
         approved = self.hello.ask(id, description)
-        if self.hello.withdrawn(id):
+        if approved is None or self.hello.withdrawn(id):
             return
         self.link.send("approval_answer", id=id, approved=approved)
 

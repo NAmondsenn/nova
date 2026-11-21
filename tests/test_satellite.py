@@ -3779,6 +3779,23 @@ def test_an_approval_is_asked_and_answered(brain, make, hello):
     assert made.hello.asked == [("approval-1", "Remove 'Dentist', Tue 25 Nov 10:00"), ("approval-2", "Remove 'Gym'")]
 
 
+def test_no_answer_from_hello_sends_nothing(brain, make, hello):
+    # Hello busy, its reader missing, a fault: nothing is sent, so the brain goes on
+    # waiting for the phone rather than taking it as a refusal.
+    made = pressable(brain, make)
+    made.hello.answer = None
+    brain.say("approval", id="approval-1", description="Remove 'Dentist'")
+    assert wait_for(lambda: made.hello.asked)
+    time.sleep(0.2)
+    assert brain.messages("approval_answer") == []
+    made.hello.answer = False
+    brain.say("approval", id="approval-2", description="Remove 'Gym'")
+    assert wait_for(lambda: brain.messages("approval_answer"))
+    time.sleep(0.2)
+    assert [(answer["id"], answer["approved"]) for answer in brain.messages("approval_answer")] == \
+        [("approval-2", False)]
+
+
 def test_withdraw_cancels(brain, make, hello):
     made = pressable(brain, make)
     brain.say("approval_withdraw", id="approval-1")

@@ -69,7 +69,8 @@ class FakeBackend:
     def wait(self, operation, seconds):
         self._called()
         if operation.cancelled:
-            return "CANCELED"
+            # As _Winrt.wait has an operation cancelled by a withdraw or a close.
+            return "STOPPED"
         if not self.go.wait(seconds):
             return None
         return operation.result
@@ -92,15 +93,18 @@ def test_off_windows_it_isnt_available_and_imports_nothing(monkeypatch):
     hello = WindowsHello()
     assert not hello.available
     assert not [name for name in sys.modules if name.startswith("winrt")]
-    assert hello.ask("approval-1", "Remove 'Dentist'") is False
+    assert hello.ask("approval-1", "Remove 'Dentist'") is None
     hello.cancel("approval-1")
     hello.close()
 
 
-def test_verified_is_true_and_the_rest_false():
-    for result, approved in [("VERIFIED", True), ("CANCELED", False), ("DEVICE_BUSY", False),
-                             ("RETRIES_EXHAUSTED", False), ("DEVICE_NOT_PRESENT", False),
-                             ("NOT_CONFIGURED_FOR_USER", False), ("DISABLED_BY_POLICY", False)]:
+def test_verified_is_true_his_cancel_false_and_the_rest_no_answer():
+    # Only his own Cancel refuses: on 21 November a refusal he never gave settled a
+    # request at the PC, so anything else leaves the phone to answer.
+    for result, approved in [("VERIFIED", True), ("CANCELED", False), ("DEVICE_BUSY", None),
+                             ("RETRIES_EXHAUSTED", None), ("DEVICE_NOT_PRESENT", None),
+                             ("NOT_CONFIGURED_FOR_USER", None), ("DISABLED_BY_POLICY", None),
+                             ("UNKNOWN", None), ("STOPPED", None)]:
         backend = FakeBackend(result=result)
         hello = WindowsHello(backend)
         assert hello.available
@@ -109,6 +113,28 @@ def test_verified_is_true_and_the_rest_false():
         hello.close()
         # Every call to Windows on the one thread which owns them.
         assert backend.threads == {"windows-hello"} and backend.closed
+
+
+def test_the_result_is_logged_by_its_kind_and_a_short_id(caplog):
+    backend = FakeBackend(result="DEVICE_BUSY")
+    hello = WindowsHello(backend)
+    with caplog.at_level(logging.INFO, logger=windows_hello.__name__):
+        assert hello.ask("approval-0123456789abcdef0123456789abcdef", "Remove 'Dentist', Tue 25 Nov 10:00") is None
+    hello.close()
+    assert "Windows Hello's answer to approval 01234567: DEVICE_BUSY" in caplog.text
+    # Never the description, nor the request's id beyond 8 characters.
+    assert "Dentist" not in caplog.text and "012345678" not in caplog.text
+
+
+def test_a_stopped_operation_is_not_his_cancel():
+    class Stopped:
+        def status(self):
+            return windows_hello._CANCELED
+
+        def close(self):
+            pass
+
+    assert _winrt().wait(Stopped(), 1) == "STOPPED"
 
 
 def test_the_message_is_cut_to_200_characters():
@@ -150,13 +176,13 @@ def test_cancel_drops_a_queued_one_and_cancels_the_one_showing():
     # The queued one ends now, and never shows.
     hello.cancel("approval-2")
     queued.join(5)
-    assert ("approval-2", False) in answers and hello.withdrawn("approval-2")
+    assert ("approval-2", None) in answers and hello.withdrawn("approval-2")
 
-    # The one showing has its prompt cancelled, and gives False.
+    # The one showing has its prompt cancelled, and gives no answer.
     hello.cancel("approval-1")
     showing.join(5)
     assert wait_for(lambda: backend.operations[0].cancelled)
-    assert ("approval-1", False) in answers and hello.withdrawn("approval-1")
+    assert ("approval-1", None) in answers and hello.withdrawn("approval-1")
     backend.go.set()
     time.sleep(0.3)
     assert len(backend.operations) == 1
@@ -167,7 +193,7 @@ def test_a_withdraw_before_its_approval_means_no_prompt():
     backend = FakeBackend()
     hello = WindowsHello(backend)
     hello.cancel("approval-1")
-    assert hello.ask("approval-1", "Remove 'Dentist'") is False
+    assert hello.ask("approval-1", "Remove 'Dentist'") is None
     assert backend.operations == []
     # Another id still asks.
     assert not hello.withdrawn("approval-2")
@@ -179,7 +205,7 @@ def test_unavailable_hello_says_so():
     backend = FakeBackend(availability="NOT_CONFIGURED_FOR_USER")
     hello = WindowsHello(backend)
     assert not hello.available
-    assert hello.ask("approval-1", "Remove 'Dentist'") is False
+    assert hello.ask("approval-1", "Remove 'Dentist'") is None
     assert backend.operations == []
     hello.close()
 
@@ -196,12 +222,12 @@ def test_an_availability_which_fails_is_unavailable(caplog):
     hello.close()
 
 
-def test_an_exception_is_false_and_logged_once(caplog):
+def test_an_exception_is_no_answer_and_logged_once(caplog):
     backend = FakeBackend(error=OSError("the prompt couldn't be shown"))
     hello = WindowsHello(backend)
     with caplog.at_level(logging.WARNING, logger=windows_hello.__name__):
-        assert hello.ask("approval-1", "First") is False
-        assert hello.ask("approval-2", "Second") is False
+        assert hello.ask("approval-1", "First") is None
+        assert hello.ask("approval-2", "Second") is None
     failures = [record for record in caplog.records if "OSError" in record.getMessage()]
     assert len(failures) == 1
     hello.close()
@@ -215,7 +241,7 @@ def test_close_ends_the_one_showing():
     assert wait_for(lambda: len(backend.operations) == 1)
     hello.close()
     showing.join(5)
-    assert answers == [("approval-1", False)]
+    assert answers == [("approval-1", None)]
     assert wait_for(lambda: backend.operations[0].cancelled and backend.closed)
 
 
@@ -282,7 +308,7 @@ def test_a_result_never_written_is_never_verified(monkeypatch):
 
     hello = WindowsHello(Unwritten())
     try:
-        assert hello.ask("approval-1", "Remove 'Dentist'") is False
+        assert hello.ask("approval-1", "Remove 'Dentist'") is None
     finally:
         hello.close()
 

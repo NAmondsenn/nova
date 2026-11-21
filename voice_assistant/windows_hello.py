@@ -3,7 +3,10 @@ Windows Hello Module.
 
 The PC satellite's way to give the user's OK to a big action: the brain sends an
 approval, and this asks Windows Hello (fingerprint, face or PIN) with the action's
-description as the prompt's message. Only a verified answer is a yes.
+description as the prompt's message. Only a verified answer is a yes, and only his own
+Cancel is a no: anything else - Hello busy, the reader missing, too many tries, a fault,
+a prompt withdrawn - is no answer at all, so the brain goes on waiting for the phone
+(21 November: a refusal nobody gave settled a request before he could use the phone).
 
 LIVE CHECK PENDING: the test of Hello from the windowless satellite on the PC (Task 0 of
 the approvals plan) hasn't been run. So this tries, in turn, what should work: first the
@@ -48,6 +51,11 @@ CLOSE_WAIT = 5
 # How many withdrawn ids are remembered, so an approval which arrives after its withdraw
 # is never shown.
 WITHDRAWN_KEPT = 50
+
+# The only results which answer: verified is a yes, and his own Cancel a no. Every other -
+# DEVICE_BUSY, DEVICE_NOT_PRESENT, NOT_CONFIGURED_FOR_USER, DISABLED_BY_POLICY,
+# RETRIES_EXHAUSTED, a result with no name, a prompt stopped - leaves the phone to answer.
+ANSWERS = {"VERIFIED": True, "CANCELED": False}
 
 # The interop's IID, from UserConsentVerifierInterop.h in the Windows SDK (as its metadata
 # gives it).
@@ -146,8 +154,10 @@ class _Winrt:
                     operation.close()
                 return result
             if status == _CANCELED:
+                # The operation cancelled, by a withdraw or a close - not his Cancel, which
+                # completes it with the result CANCELED.
                 operation.close()
-                return "CANCELED"
+                return "STOPPED"
             if status == _ERROR:
                 operation.close()
                 raise OSError("Windows Hello's prompt failed")
@@ -320,6 +330,11 @@ class _OwnerWindow:
         self._factory = None
 
 
+def _short(id: str) -> str:
+    """Enough of an approval's id ("approval-" and the request's) to tell it apart in the log."""
+    return id.removeprefix("approval-")[:8]
+
+
 def _load_backend():
     """winrt's parts, on Windows with winrt installed - else None, said in the log."""
     if sys.platform != "win32":
@@ -339,7 +354,8 @@ class _Ask:
     def __init__(self, id: str, message: str):
         self.id = id
         self.message = message
-        self.approved = False
+        # True verified, False his own Cancel, None no answer.
+        self.answer: Optional[bool] = None
         self.cancelled = False
         self.done = threading.Event()
 
@@ -347,7 +363,7 @@ class _Ask:
 class WindowsHello:
     """
     Asks Windows Hello for the user's OK, one prompt at a time, for as long as the
-    satellite runs. Never raises into its callers: a prompt which fails is a no, logged.
+    satellite runs. Never raises into its callers: a prompt which fails is no answer, logged.
     """
 
     def __init__(self, backend=None):
@@ -418,7 +434,7 @@ class WindowsHello:
         """Whether Hello can be asked - and so whether the hello says the satellite approves."""
         return self._available
 
-    def ask(self, id: str, description: str) -> bool:
+    def ask(self, id: str, description: str) -> Optional[bool]:
         """
         Asks Hello for the user's OK, and waits for the answer - in turn after any prompts
         before it.
@@ -429,19 +445,20 @@ class WindowsHello:
                 MESSAGE_MOST characters.
 
         Returns:
-            True only if the user was verified: False for anything else, for one withdrawn
-            or asked already, and when Hello isn't available.
+            True only if the user was verified; False only if he pressed Cancel; None,
+            no answer to send, for anything else: any other result, a failure, one
+            withdrawn or asked already, and when Hello isn't available.
         """
         if not self._available:
-            return False
+            return None
         with self._lock:
             if self._closing or id in self._withdrawn or id in self._asks:
-                return False
+                return None
             ask = _Ask(id, description[:MESSAGE_MOST])
             self._asks[id] = ask
         self._jobs.put(ask)
         ask.done.wait()
-        return ask.approved
+        return ask.answer
 
     def withdrawn(self, id: str) -> bool:
         """Whether the brain withdrew this approval - so its answer, if any, is no longer wanted."""
@@ -450,7 +467,7 @@ class WindowsHello:
 
     def cancel(self, id: str):
         """
-        Withdraws an approval: one still waiting its turn ends now with False and never
+        Withdraws an approval: one still waiting its turn ends now with no answer and never
         shows; the one showing is cancelled, as far as Windows lets it be; and one not yet
         asked is remembered, so it never shows. Never waits for Windows.
         """
@@ -460,7 +477,7 @@ class WindowsHello:
             if ask is None:
                 return
             ask.cancelled = True
-            # Its answer is False now: the brain has stopped waiting for it. The owning
+            # It has no answer now: the brain has stopped waiting for it. The owning
             # thread cancels its prompt if it's showing, or skips it at its turn.
             ask.done.set()
 
@@ -486,14 +503,15 @@ class WindowsHello:
                 if cancelled_at is not None and time.monotonic() - cancelled_at > CANCEL_WAIT:
                     logger.warning("Windows Hello's prompt didn't go when cancelled, so it's left")
                     return
+            logger.info(f"Windows Hello's answer to approval {_short(ask.id)}: {result}")
             with self._lock:
                 if not ask.done.is_set():
-                    ask.approved = result == "VERIFIED"
+                    ask.answer = ANSWERS.get(result)
             self._failing = None
         except Exception as e:
             kind = type(e).__name__
             if self._failing != kind:
-                logger.warning(f"Windows Hello couldn't ask for approval, so it's a no ({kind})")
+                logger.warning(f"Windows Hello couldn't ask for approval, so it's not answered ({kind})")
             self._failing = kind
         finally:
             with self._lock:
@@ -501,7 +519,7 @@ class WindowsHello:
             ask.done.set()
 
     def close(self):
-        """Ends every approval waiting with False, cancels the one showing, and lets the owning thread go."""
+        """Ends every approval waiting with no answer, cancels the one showing, and lets the owning thread go."""
         with self._lock:
             self._closing = True
             asks = list(self._asks.values())
