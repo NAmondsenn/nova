@@ -283,6 +283,9 @@ LONGEST_APP_NAME = 40
 # address only: through NPM, a password stands between the internet and the page, but
 # approving a big action, or changing how one is approved, needs more than a password.
 APPROVAL_PATHS = ("/approve", "/api/approvals", "/api/passkeys")
+# Nor is a satellite made, given a new password or removed there: a satellite's password
+# lets a PC in, and a PC can be one which approves.
+SATELLITE_KEYS = ("/api/satellites/add", "/api/satellites/password", "/api/satellites/remove")
 ONLY_TAILNET = "Approvals are only at the page's Tailscale address."
 # The phone's page, at the address its notification opens.
 APPROVE_PAGE = re.compile(r"/approve/[0-9a-f]{32}")
@@ -292,6 +295,7 @@ NEEDS_OK = "That needs your OK first, so nothing was changed."
 TOO_LONG = "Start again: that took too long."
 NOT_HTTPS = "Passkeys can only be added at the page's https address."
 DIDNT_CHECK_OUT = "That passkey didn't check out."
+ADDED_MEANWHILE = "Start again: another passkey was added meanwhile."
 # How long a passkey's registration may take, from Add a passkey to the phone's answer.
 REGISTRATION_SECONDS = 120
 # The longest credential id WebAuthn allows.
@@ -576,10 +580,12 @@ class SettingsPage:
         # already have moved to the default and the one put back would ring nowhere.
         self._removing = threading.Lock()
         self._spotify = self._spotify_sign_in(running)
-        # The challenge of the passkey being added, the time it runs out and the origin it
-        # was asked for at - one at a time, each used once.
-        self._registration: Optional[Tuple[bytes, float, str]] = None
+        # The challenge of the passkey being added, the time it runs out, the origin it
+        # was asked for at, whether it was approved and the passkeys there then - one at
+        # a time, each used once.
+        self._registration: Optional[Tuple[bytes, float, str, bool, frozenset]] = None
         self._registration_lock = threading.Lock()
+        self._adding_lock = threading.Lock()
         self._now = time.monotonic
         self._server: Optional[ThreadingHTTPServer] = None
         self._proxy_server: Optional[ThreadingHTTPServer] = None
@@ -1434,7 +1440,7 @@ class SettingsPage:
         if not raised or not approvals.ways():
             return True
         for label, value in raised:
-            if not approvals.ask(f"Change '{label}' to {value}"):
+            if not approvals.ask(f"Change '{label}' to {value}", fresh=True):
                 logger.info(f"Settings page: {who} wasn't let raise {label}, without an approval")
                 return False
         return True
@@ -2685,12 +2691,14 @@ class SettingsPage:
         keys = passkeys.all()
         if len(keys) >= MOST_PASSKEYS:
             return {"success": False, "message": f"Nova keeps at most {MOST_PASSKEYS} passkeys."}
-        if keys and approvals.ways() and not approvals.ask("Add a passkey"):
+        approved = bool(keys) and bool(approvals.ways())
+        if approved and not approvals.ask("Add a passkey", fresh=True):
             logger.info(f"Settings page: {who} wasn't let add a passkey, without an approval")
             return {"success": False, "message": NEEDS_OK}
         challenge = secrets.token_bytes(32)
         with self._registration_lock:
-            self._registration = (challenge, self._now() + REGISTRATION_SECONDS, origin)
+            self._registration = (challenge, self._now() + REGISTRATION_SECONDS, origin, approved,
+                                  frozenset(each.id for each in keys))
         # A fresh user id each time, so a new passkey never takes another's place on a phone.
         return {"success": True, "challenge": b64url(challenge), "rp_id": rp,
                 "user_id": b64url(secrets.token_bytes(16)), "exclude": [each.id for each in keys]}
@@ -2724,7 +2732,7 @@ class SettingsPage:
             begun, self._registration = self._registration, None
         if begun is None or self._now() >= begun[1]:
             return {"success": False, "message": TOO_LONG}
-        challenge, _, begun_at = begun
+        challenge, _, begun_at, approved, there = begun
         try:
             if origin != begun_at:
                 raise NotVerified("another origin")
@@ -2741,8 +2749,15 @@ class SettingsPage:
             # A few words, with nothing secret in them.
             logger.warning(f"Settings page: a passkey {who} was adding didn't check out ({e})")
             return {"success": False, "message": DIDNT_CHECK_OUT}
-        problem = passkeys.add(Passkey(id=b64url(made_id), name=name, public_key=b64url(public_key),
-                                       algorithm=algorithm, counter=counter, origin=origin, added=time.time()))
+        # Checked and added as one, so two registrations begun free can't both add.
+        with self._adding_lock:
+            # Begun free as he had no passkey, it's only free while that's still so: one
+            # added since needs to approve this one.
+            if not approved and any(each.id not in there for each in passkeys.all()):
+                logger.info(f"Settings page: a passkey {who} was adding wasn't added, as another was added first")
+                return {"success": False, "message": ADDED_MEANWHILE}
+            problem = passkeys.add(Passkey(id=b64url(made_id), name=name, public_key=b64url(public_key),
+                                           algorithm=algorithm, counter=counter, origin=origin, added=time.time()))
         if problem:
             return {"success": False, "message": problem}
         logger.info(f"Settings page: {who} added the passkey {name}")
@@ -2800,7 +2815,7 @@ class SettingsPage:
         if not rooms.approves(name):
             return {"success": False, "message": f"{name} can't approve."}
         if on and not rooms.can_approve(name) and approvals.ways() and not approvals.ask(
-                f"Let {self.brain.spoken_name(name)} approve"):
+                f"Let {self.brain.spoken_name(name)} approve", fresh=True):
             logger.info(f"Settings page: {who} wasn't let have the {name} satellite approve, without an approval")
             return {"success": False, "message": NEEDS_OK}
         try:
@@ -3151,13 +3166,16 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _approvals_through_npm(self, path: Optional[str]) -> bool:
         """
-        Refuses anything to do with approvals through NPM, before anything is read or
-        changed, whatever its login: they're at the page's Tailscale address only.
+        Refuses anything to do with approvals through NPM, or with a satellite's password,
+        before anything is read or changed, whatever its login: they're at the page's
+        Tailscale address only.
 
         Returns:
             Whether it was refused.
         """
-        if self.server.route != "npm" or path is None or not path.startswith(APPROVAL_PATHS):
+        if self.server.route != "npm" or path is None:
+            return False
+        if not path.startswith(APPROVAL_PATHS) and path.split("?")[0] not in SATELLITE_KEYS:
             return False
         self._send_json({"success": False, "message": ONLY_TAILNET}, 403)
         return True

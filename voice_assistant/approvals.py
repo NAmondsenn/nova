@@ -114,6 +114,10 @@ class Request:
     # A passkey id which mustn't answer it. The trust window never covers such a request:
     # removing a passkey needs a fresh answer from another way, not one the passkey gave.
     without: Optional[str] = None
+    # A change to how approval itself works - adding a passkey, letting a PC approve,
+    # loosening an approval setting - which needs an answer of its own: the trust window
+    # never covers it, so a minute-old approval of something else can't loosen the guard.
+    fresh: bool = False
 
 
 class Approvals:
@@ -225,16 +229,17 @@ class Approvals:
         ways = [PHONE] if self._phone_keys(without) else []
         return ways + [self._spoken(each.name) for each in self._approvers_now()]
 
-    def request(self, description: str, without: Optional[str] = None) -> Request:
+    def request(self, description: str, without: Optional[str] = None, fresh: bool = False) -> Request:
         """Asks for approval of a big action, every way at once, without waiting for it.
 
         Args:
             description: What it will do, as he'll be shown it; cut to MOST_DESCRIPTION.
             without: A passkey id which mustn't answer it, e.g. the one being removed.
+            fresh: Whether it needs an answer of its own, which the trust window never gives.
 
         Returns:
             The request: already approved by the trust window if it's open (unless
-            made `without` a passkey), settled "no_way" if there's no way to approve,
+            made `without` a passkey or `fresh`), settled "no_way" if there's no way to approve,
             "stopped" once the service has stopped, else open.
         """
         description = _cut(description)
@@ -250,11 +255,12 @@ class Approvals:
             credentials=tuple(each.id for each in keys),
             approvers=tuple(each.name for each in approvers),
             without=without,
+            fresh=fresh,
         )
         with self._lock:
             if self._stopped:
                 self._finish(request, "stopped", None)
-            elif without is None and self._trust_ends() is not None:
+            elif without is None and not fresh and self._trust_ends() is not None:
                 self._finish(request, "approved", TRUST)
             elif not asked:
                 self._finish(request, "no_way", None)
@@ -316,9 +322,9 @@ class Approvals:
             request.settled.wait(min(left, CHECK_EVERY))
         return request.outcome
 
-    def ask(self, description: str, without: Optional[str] = None) -> bool:
+    def ask(self, description: str, without: Optional[str] = None, fresh: bool = False) -> bool:
         """Asks and waits, for the settings page. Returns whether it was approved."""
-        return self.wait(self.request(description, without)) == "approved"
+        return self.wait(self.request(description, without, fresh)) == "approved"
 
     def gate(self, description: str, do: Callable[[], Dict], satellite: Optional[str],
              done: Optional[Callable[[Dict], None]] = None) -> Dict:
@@ -494,7 +500,7 @@ class Approvals:
         (and gives False), so a late answer from anywhere neither runs the action nor
         opens the trust window. An approval opens the trust window and approves every
         other request still waiting and not run out, except one made `without` a
-        passkey. Each PC showing a prompt for a request settled here has it withdrawn -
+        passkey or `fresh`. Each PC showing a prompt for a request settled here has it withdrawn -
         now, or by the caller if it passes `withdraw_later`.
         """
         with self._lock:
@@ -513,7 +519,7 @@ class Approvals:
                     for other in list(self._open.values()):
                         if now >= other.expires:
                             self._finish(other, "timeout", None)
-                        elif other.without is None:
+                        elif other.without is None and not other.fresh:
                             self._finish(other, "approved", TRUST)
                         else:
                             continue

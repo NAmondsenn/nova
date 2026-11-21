@@ -528,3 +528,22 @@ def test_a_slow_withdraw_holds_up_no_other_passkey_answer(tmp_path, made):
     release.set()
     _until(lambda: answered)
     assert answered == [{"success": True, "message": "Approved."}]
+
+
+def test_the_trust_window_never_settles_a_fresh_request(tmp_path, made):
+    world = World(tmp_path, made)
+    assert world.approve(world.service.request("Remove 'Dentist'"))["message"] == "Approved."
+    assert world.service.trusted() is True
+    # A change to approval itself asks afresh, however recent the last approval.
+    fresh = world.service.request("Add a passkey", fresh=True)
+    assert fresh.outcome is None
+    assert world.approve(fresh)["message"] == "Approved."
+
+
+def test_an_approval_leaves_a_fresh_request_waiting(tmp_path, made):
+    world = World(tmp_path, made)
+    other = world.service.request("Remove 'Dentist'")
+    fresh = world.service.request("Let the PC approve", fresh=True)
+    assert world.approve(other)["message"] == "Approved."
+    assert other.outcome == "approved" and fresh.outcome is None
+    assert world.approve(fresh)["message"] == "Approved."

@@ -2154,7 +2154,7 @@ def test_every_setting_on_the_page_has_a_group_of_its_own(files):
     for section, name, *_ in page_module.EDITABLE:
         key = f"{section}.{name}"
         # Until the Approvals section is drawn (Task 10 of the approvals plan adds it, and drops this line).
-        if section == "approvals" and "approvals" not in starts:
+        if section == "approvals" and not any("approvals." in prefixes for prefixes in starts.values()):
             continue
         assert any(key.startswith(start) for prefixes in starts.values() for start in prefixes), key
 
@@ -4698,12 +4698,26 @@ def test_a_second_passkey_needs_an_approval(approving):
     assert begun["success"] and begun["exclude"] == [b64url(approving.phones[0].credential_id)]
     assert _register(approving, FakeAuthenticator(), "Mac", begun=begun) == {"success": True, "message": "Added Mac."}
     assert [each.name for each in approving.passkeys.all()] == ["Phone", "Mac"]
+    # The approval a moment ago doesn't cover another: each passkey needs one of its own.
+    assert approving.approvals.trusted()
+    assert approving.asked("/api/passkeys/begin", {}, approving.refuse) == (200, {"success": False,
+                                                                                  "message": NEEDS_OK})
     approving.add_passkey("Spare")
     # At most three, which is said before any approval is asked for.
     sent = len(approving.ntfy.sent)
     assert approving.post("/api/passkeys/begin", {})[1] == {"success": False,
                                                             "message": "Nova keeps at most 3 passkeys."}
     assert len(approving.ntfy.sent) == sent
+
+
+def test_a_passkey_begun_free_isnt_added_once_another_is_there(no_passkeys):
+    phone = FakeAuthenticator()
+    begun = no_passkeys.post("/api/passkeys/begin", {})[1]
+    # Another added meanwhile - by a registration begun just before, say.
+    no_passkeys.add_passkey("Spare")
+    assert _register(no_passkeys, phone, begun=begun) == {
+        "success": False, "message": "Start again: another passkey was added meanwhile."}
+    assert [each.name for each in no_passkeys.passkeys.all()] == ["Spare"]
 
 
 def test_a_registration_from_http_is_refused(no_passkeys):
@@ -4771,6 +4785,10 @@ def test_raising_the_trust_minutes_needs_an_approval_and_lowering_doesnt(approvi
                            approving.approve_with(approving.phones[0]))
     assert said[1]["success"] and _trust_minutes_saved(files) == 10
     assert approving.running.section("approvals")["trust_minutes"] == 10
+    # Another raise asks again, though the trust window is open.
+    assert approving.approvals.trusted()
+    said = approving.asked("/api/settings", {"changes": {"approvals.album_count": 4}}, approving.refuse)
+    assert said == (200, {"success": False, "message": NEEDS_OK})
     # Lowering, and a raise of one which isn't gated, ask nothing.
     sent = len(approving.ntfy.sent)
     assert approving.post("/api/settings", {"changes": {"approvals.trust_minutes": 1}})[1]["success"]
@@ -4804,6 +4822,11 @@ def test_switching_can_approve_on_needs_an_approval_and_off_doesnt(approving):
                            approving.approve_with(approving.phones[0]))
     assert said == (200, {"success": True, "message": "pc can approve now."})
     assert approving.rooms.can_approve("pc") is True
+    # Switched off and on again, it asks again, though the trust window is open.
+    assert approving.post("/api/approvals/can-approve", {"name": "pc", "on": False})[1]["success"]
+    assert approving.approvals.trusted()
+    said = approving.asked("/api/approvals/can-approve", {"name": "pc", "on": True}, approving.refuse)
+    assert said == (200, {"success": False, "message": NEEDS_OK}) and approving.rooms.can_approve("pc") is False
     # A satellite which never said it approves has no switch.
     for name, on in (("bedroom", True), ("bedroom", False), ("nowhere", True), ("pc", "yes")):
         assert approving.post("/api/approvals/can-approve", {"name": name, "on": on})[1]["success"] is False
@@ -4839,7 +4862,10 @@ def test_approvals_are_refused_through_npm(files, tmp_path, monkeypatch):
                  ("/api/passkeys/remove", {"id": b64url(phone.credential_id)}),
                  ("/api/approvals/can-approve", {"name": "pc", "on": False}),
                  ("/api/settings", {"changes": {"approvals.trust_minutes": 1}}),
-                 ("/api/settings", {"changes": {"ntfy.quiet_from": "22:00", "approvals.wait_minutes": 1}})]
+                 ("/api/settings", {"changes": {"ntfy.quiet_from": "22:00", "approvals.wait_minutes": 1}}),
+                 # A satellite's password lets a PC in, and a PC can approve.
+                 ("/api/satellites/add", {"name": "laptop"}), ("/api/satellites/password", {"name": "pc"}),
+                 ("/api/satellites/remove", {"name": "pc"}), ("/api/satellites/password?x=1", {"name": "pc"})]
         for path in gets:
             status, _, body = _through_npm(page, path, cookie=token)
             assert (status, json.loads(body)) == (403, {"success": False, "message": ONLY_TAILNET}), path
@@ -4847,6 +4873,7 @@ def test_approvals_are_refused_through_npm(files, tmp_path, monkeypatch):
             status, _, said = _through_npm(page, path, body, cookie=token, X_Nova="page")
             assert (status, json.loads(said)) == (403, {"success": False, "message": ONLY_TAILNET}), path
         assert request.outcome is None and world.passkeys.all() == keys
+        assert page.brain.satellites() == ["bedroom", "pc"]
         assert (files / "config.yaml").read_text() == config and world.rooms.can_approve("pc")
         # Nor are the approval settings shown there; the rest of the page is as before.
         status, _, body = _through_npm(page, "/api/state", cookie=token)
@@ -4866,7 +4893,8 @@ def test_a_change_needs_the_pages_own_header(approving):
     request = approving.approvals.request("Remove 'Dentist'")
     phone = approving.phones[0]
     for path, body in (("/api/approvals/refuse", {"id": request.id}), ("/api/approvals/answer", {"id": request.id}),
-                       ("/api/passkeys/begin", {}), ("/api/passkeys/remove", {"id": b64url(phone.credential_id)}),
+                       ("/api/passkeys/begin", {}), ("/api/passkeys/finish", {"name": "Phone"}),
+                       ("/api/passkeys/remove", {"id": b64url(phone.credential_id)}),
                        ("/api/approvals/can-approve", {"name": "pc", "on": False})):
         status, _, said = _ask(approving.page, path, body)
         assert (status, said) == (403, b"Changes can only be made from the page itself."), path
