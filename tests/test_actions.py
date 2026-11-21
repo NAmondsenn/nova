@@ -2066,11 +2066,11 @@ def test_find_device_is_offered_with_home_assistant():
     assert "find_device" not in ActionExecutor().read_tools()
 
 
-def _find_my(name="Galaxy Phone 9", key="phone", stop=True, tracker="home"):
+def _find_my(name="Galaxy Phone 9", key="phone", stop=True, tracker="home", ready=True):
     """One of HomeAssistant.find_my_devices()'s dicts."""
     return {"device": f"fm_{key}", "name": name, "play": f"button.{key}_play_sound",
             "stop": f"button.{key}_stop_sound" if stop else None,
-            "tracker": {"state": tracker, "reported": time.time() - 600}}
+            "tracker": {"state": tracker, "reported": time.time() - 600}, "ready": ready}
 
 
 # The phone, as the app has it ("phone 9", from "phone-9"), and as Find My does ("Galaxy Phone 9") - the same phone.
@@ -2111,6 +2111,26 @@ def test_falls_back_to_the_app_notification_when_find_my_fails(failure, caplog):
         result = ActionExecutor(home=home).execute(Action("find_device", {"device": "phone", "ring": True}))
         assert result.say == "Your phone's at home. Ringing your phone."
         assert home.pressed == [] and [service for service, _, _ in home.sent] == ["mobile_app_phone_9"]
+
+
+def test_an_unavailable_play_sound_falls_back_to_the_app_notification(caplog):
+    # While Google can't be reached the button is unavailable: pressed, it would do nothing, yet HA says it did.
+    home = _phone_both_ways()
+    home.find_mys[0]["ready"] = False
+    executor = ActionExecutor(home=home)
+    with caplog.at_level("INFO"):
+        result = executor.execute(Action("find_device", {"device": "phone", "ring": True}))
+    assert (result.ok, result.say) == (True, "Your phone's at home. Ringing your phone.")
+    assert home.pressed == [] and [service for service, _, _ in home.sent] == ["mobile_app_phone_9"]
+    assert "Play sound is unavailable - ringing it by the app's notification" in caplog.text
+    # Nothing rang through Find My, so there's nothing for "found it" to stop.
+    assert executor.rang.lately() == []
+    # A tag has no other way to ring.
+    home.find_mys[1]["ready"] = False
+    result = executor.execute(Action("find_device", {"device": "wallet", "ring": True}))
+    assert (result.ok, result.say) == (False, "Your Wallet's away from home, as of 10 minutes ago. "
+                                              "I couldn't ring your Wallet.")
+    assert home.pressed == [] and executor.rang.lately() == []
 
 
 def test_mac_still_rings_by_notification():

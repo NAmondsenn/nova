@@ -233,8 +233,10 @@ def find_my_kind(entry: Entry) -> Optional[str]:
     if entry.platform != FIND_MY:
         return None
     domain = entry.entity_id.partition(".")[0]
-    kind = FIND_MY_KINDS.get(entry.translation_key) or FIND_MY_KINDS.get(_letters(entry.original_name))
-    if kind is None and domain == "device_tracker" and not entry.original_name:
+    # The original name only for a version without the keys: with one, a key it doesn't list is something else.
+    kind = (FIND_MY_KINDS.get(entry.translation_key) if entry.translation_key
+            else FIND_MY_KINDS.get(_letters(entry.original_name)))
+    if kind is None and not entry.translation_key and domain == "device_tracker" and not entry.original_name:
         # The device's own tracker has no name of its own, as the device's name is its name.
         kind = "tracker"
     wanted = "button" if kind in ("play", "stop") else "device_tracker"

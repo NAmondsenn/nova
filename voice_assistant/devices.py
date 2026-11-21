@@ -117,6 +117,8 @@ class FindMyDevice:
         tracker: Its tracker's state, e.g. "home", or None with no tracker, or one which
             can't tell.
         reported: When Google last saw it, in epoch seconds, or None.
+        ready: Whether its Play sound can ring it now - not while Home Assistant has the
+            button unavailable, as it is while Google can't be reached.
         place: Always None - see from_home - so where says only how long ago it was seen.
     """
 
@@ -127,6 +129,7 @@ class FindMyDevice:
     stop: Optional[str]
     tracker: Optional[str]
     reported: Optional[float]
+    ready: bool = True
     place: Optional[str] = None
     kind: str = "other"
     phone: bool = False
@@ -139,7 +142,7 @@ class FindMyDevice:
         Builds a device from one of HomeAssistant.find_my_devices()'s dicts.
 
         Args:
-            found: The dict, with device, name, play, stop and tracker.
+            found: The dict, with device, name, play, stop, tracker and ready.
 
         Returns:
             The device. Never a place: Find My's tracker gives coordinates, which are the
@@ -148,7 +151,8 @@ class FindMyDevice:
         tracker = found.get("tracker") or {}
         name = str(found.get("name") or "").strip()
         return cls(id=found["device"], name=name, said=_said_name(name), play=found.get("play"),
-                   stop=found.get("stop"), tracker=tracker.get("state"), reported=tracker.get("reported"))
+                   stop=found.get("stop"), tracker=tracker.get("state"), reported=tracker.get("reported"),
+                   ready=bool(found.get("ready", True)))
 
 
 def _said_name(name: str) -> str:
@@ -168,12 +172,16 @@ def same_device(app: "AppDevice", find_my: FindMyDevice) -> bool:
     """
     Whether a device of the Home Assistant app's and one of Find My's are the same
     phone or tablet - when every word of one's name is in the other's, as "S25 Ultra" is
-    in "Galaxy S25 Ultra". Never the Mac, which Google doesn't find.
+    in "Galaxy S25 Ultra", and the shorter name has two words or one with a digit, so a tag
+    called "Ultra" is never the phone. Never the Mac, which Google doesn't find.
     """
     if app.computer:
         return False
     ours, theirs = set(_plain_words(app.name)), set(_plain_words(find_my.name))
-    return bool(ours and theirs) and (ours <= theirs or theirs <= ours)
+    smaller = ours if len(ours) <= len(theirs) else theirs
+    # A name of one plain word - a tag called "Ultra" or "Tab" - says too little to be the phone.
+    telling = len(smaller) >= 2 or any(any(char.isdigit() for char in word) for word in smaller)
+    return telling and (ours <= theirs or theirs <= ours)
 
 
 def find_my_for(app: "AppDevice", find_mys: Sequence[FindMyDevice]) -> Optional[FindMyDevice]:

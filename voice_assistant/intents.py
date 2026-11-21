@@ -396,6 +396,8 @@ class LocalIntents:
         self.computer = computer
         self.find_my_names = find_my_names
         self.rang_lately = rang_lately
+        # Whether reading Find My's names last failed, so it's logged once until it works again.
+        self._find_my_failing = False
         # How the wake word's last word starts a lone word it's been run into - and, for
         # "Nova", how Nemotron heard it so: "Nova, pause." said in one breath was "Novopause.".
         ending = (wake_word.split() or [""])[-1].lower()
@@ -946,7 +948,16 @@ class LocalIntents:
         if re.fullmatch(FOUND_DEVICE, said):
             return True
         words = set(_device_words(said))
-        names = self.find_my_names() if self.find_my_names is not None else []
+        names = []
+        if self.find_my_names is not None:
+            try:
+                names = self.find_my_names()
+                self._find_my_failing = False
+            except Exception as e:
+                # A rule must never lose the request: without the names, only FOUND_DEVICE's are known.
+                if not self._find_my_failing:
+                    logger.warning(f"Couldn't read Find My's devices' names ({type(e).__name__}): {e}")
+                self._find_my_failing = True
         return bool(words) and any(words <= set(_device_words(name)) for name in names)
 
     def _find_named_device(self, ring: bool):

@@ -2804,7 +2804,8 @@ class ActionExecutor:
     def _ring_through(self, app_device: Optional[AppDevice], find_my: Optional[FindMyDevice]) -> Tuple[bool, str]:
         """
         Rings a device through Find My's Play sound, which is louder and surer, and can be
-        stopped by voice - else, if Find My hasn't got it or can't ring it, through the app's
+        stopped by voice - else, if Find My hasn't got it, has its button unavailable (as while
+        Google can't be reached) or fails to press it, through the app's
         notification, as before. The Mac always by notification: Google doesn't find it.
 
         Returns:
@@ -2812,6 +2813,13 @@ class ActionExecutor:
         """
         if find_my is not None and find_my.play and not (app_device is not None and app_device.computer):
             word = said_as(app_device or find_my)
+            if not find_my.ready:
+                # Pressed, it would do nothing, and Home Assistant would still say it had.
+                logger.warning(f"Find My can't ring the {find_my.name} now - its Play sound is unavailable"
+                               + (" - ringing it by the app's notification" if app_device else ""))
+                if app_device is None:
+                    return False, f"I couldn't ring your {word}."
+                return self._ring(app_device)
             try:
                 self.home.press(find_my.play)
             except (requests.RequestException, NotAllowed) as e:

@@ -476,10 +476,14 @@ APP_DEVICES_TEMPLATE = """
 """
 
 # The trackers of Find My's devices, by entity id - each one's state and when Google last saw it,
-# else when its state was last reported. The ids are put in as JSON, checked as entity ids first.
+# else when its state was last reported - and the state of each Play sound button, as one which
+# is unavailable presses to nothing. The ids are put in as JSON, checked as entity ids first.
 FIND_MY_TRACKERS_TEMPLATE = """
-{%- set found = namespace(trackers=[]) -%}
-{%- for entity in states.device_tracker if entity.entity_id in IDS -%}
+{%- set found = namespace(trackers=[], buttons=[]) -%}
+{%- for entity in states.button if entity.entity_id in BUTTONS -%}
+  {%- set found.buttons = found.buttons + [[entity.entity_id, entity.state]] -%}
+{%- endfor -%}
+{%- for entity in states.device_tracker if entity.entity_id in TRACKERS -%}
   {%- set seen = entity.attributes.get('last_seen') -%}
   {%- set found.trackers = found.trackers + [{
     'id': entity.entity_id,
@@ -488,12 +492,15 @@ FIND_MY_TRACKERS_TEMPLATE = """
     'reported': (entity.last_reported or entity.last_updated) | as_timestamp
   }] -%}
 {%- endfor -%}
-{{ found.trackers | tojson }}
+{{ {'trackers': found.trackers, 'buttons': found.buttons} | tojson }}
 """
 
 # What a tracker says when it can't tell where its device is - when Find My's own tracker
 # says so, the one of where it was last seen is asked instead.
 TRACKER_UNKNOWN = ("unknown", "unavailable", "")
+# What a Play sound button's state is while the integration can't reach Google or the device. Not
+# "unknown", which is the state of a button never pressed (live, 21 Nov: the tag's).
+BUTTON_UNUSABLE = ("unavailable",)
 
 # What the settings page may switch, and run (ha_guard.RUNNABLE), by entity id. A light
 # can't let anyone in, whatever it's called; a script or scene could do anything, so its
@@ -1558,8 +1565,11 @@ class HomeAssistant:
             else its own), "play" and "stop" (its Play sound and Stop sound buttons, the
             stop None if it hasn't got one) and "tracker" ({"state", "reported"}: e.g.
             "home", and when Google last saw it, in epoch seconds or None - or None with no
-            tracker). The tracker is the device's own, else - while that can't tell - the
-            one of where it was last seen. Never the coordinates, which stay in Home Assistant.
+            tracker) and "ready" (whether its Play sound button can ring it now - not while
+            it's unavailable, as it is while Google can't be reached, when a press does
+            nothing yet Home Assistant answers as if it had). The tracker is the device's
+            own, else - while that can't tell - the one of where it was last seen. Never the
+            coordinates, which stay in Home Assistant.
 
         Raises:
             requests.RequestException: If Home Assistant couldn't be asked, or turned
@@ -1572,19 +1582,25 @@ class HomeAssistant:
         devices = snapshot.find_my()
         ids = sorted({entity for kinds in devices.values() for kind, entity in kinds.items()
                       if kind in ("tracker", "last_location") and re.fullmatch(r"device_tracker\.[a-z0-9_]+", entity)})
+        plays = sorted(kinds["play"] for kinds in devices.values() if re.fullmatch(r"button\.[a-z0-9_]+", kinds["play"]))
+        template = FIND_MY_TRACKERS_TEMPLATE.replace("BUTTONS", json.dumps(plays)).replace("TRACKERS", json.dumps(ids))
+        rendered = json.loads(self._template(template)) if devices else {"trackers": [], "buttons": []}
         trackers = {}
-        if ids:
-            for tracker in json.loads(self._template(FIND_MY_TRACKERS_TEMPLATE.replace("IDS", json.dumps(ids)))):
-                trackers[tracker["id"]] = {"state": tracker["state"],
-                                           "reported": tracker["seen"] if tracker["seen"] is not None
-                                           else tracker["reported"]}
+        for tracker in rendered["trackers"]:
+            trackers[tracker["id"]] = {"state": tracker["state"],
+                                       "reported": tracker["seen"] if tracker["seen"] is not None
+                                       else tracker["reported"]}
+        buttons = {button: state for button, state in rendered["buttons"]}
         found = []
         for device, kinds in devices.items():
             tracker = trackers.get(kinds.get("tracker"))
             if tracker is None or str(tracker["state"]).lower() in TRACKER_UNKNOWN:
                 tracker = trackers.get(kinds.get("last_location")) or tracker
+            # A button Home Assistant has no state for at all is no readier than an unavailable one.
+            state = buttons.get(kinds["play"])
             found.append({"device": device, "name": snapshot.device_name(device) or device,
-                          "play": kinds["play"], "stop": kinds.get("stop"), "tracker": tracker})
+                          "play": kinds["play"], "stop": kinds.get("stop"), "tracker": tracker,
+                          "ready": state is not None and str(state).lower() not in BUTTON_UNUSABLE})
         return found
 
     def notify(self, service: str, message: str, title: Optional[str] = None, data: Optional[Dict] = None):

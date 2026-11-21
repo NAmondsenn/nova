@@ -416,7 +416,7 @@ Deploy is not part of this plan. His named jobs after review: push to GitHub's m
 
 His ruling (20 Nov): "find my phone" uses Google Find My Device's Play sound, as Home Assistant has it, and he can stop it through Nova by voice. Separate from approvals; same deploy.
 
-Facts (read live on 20 Nov): the HACS integration `googlefindmy` gives each device `button.<device>_play_sound`, `button.<device>_stop_sound`, `button.<device>_locate_now` and `device_tracker.<device>`, e.g. devices "Galaxy S25 Ultra", "Galaxy Tab S11 Ultra" and "Nathan's Wallet" (a tracker tag). The Home Assistant app's devices (today's `AppDevice`, `home.app_devices()`) are separate HA devices of the same phone.
+Facts (read live on 20 Nov): the HACS integration `googlefindmy` gives each device `button.<device>_play_sound`, `button.<device>_stop_sound`, `button.<device>_locate_now` and `device_tracker.<device>`, e.g. devices "Galaxy S25 Ultra", "Galaxy Tab S11 Ultra" and a wallet tag. The Home Assistant app's devices (today's `AppDevice`, `home.app_devices()`) are separate HA devices of the same phone.
 
 **Files:**
 - Modify: `voice_assistant/devices.py` (a `FindMyDevice` discovered at run time), `voice_assistant/home_assistant.py` (`find_my_devices() -> List[Dict]`: every device with a `googlefindmy` play_sound button, with its name, play/stop button ids and tracker), `voice_assistant/actions.py` (`find_device` rings through Find My first; new tool `stop_finding(device?)`), `voice_assistant/intents.py` (the rules)

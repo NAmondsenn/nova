@@ -563,6 +563,17 @@ def test_find_my_devices_are_found_and_rung_by_their_names():
     assert _actions("Find my wallet.") is None
 
 
+def test_find_mys_names_failing_leaves_the_apps_words(caplog):
+    def failing():
+        raise RuntimeError("no snapshot")
+    intents = LocalIntents(home=HOME, find_my_names=failing, rang_lately=lambda: False)
+    assert intents.match("Find my wallet") is None
+    assert intents.match("Ring my keys") is None
+    assert intents.match("Stop ringing my phone")["actions"] == [Action("stop_finding", {"device": "phone"})]
+    # Said once, until it works again.
+    assert caplog.text.count("Couldn't read Find My's devices' names") == 1
+
+
 def test_where_is_my_wallet_is_private():
     # Found locally, by the private find_device - even while Nova listens for an answer - and never Claude's.
     assert _finding("Where's my wallet?") == [Action("find_device", {"device": "wallet", "ring": False})]

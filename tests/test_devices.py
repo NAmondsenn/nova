@@ -94,7 +94,7 @@ def _find_my_entry(entity, device, translation_key, original_name=None, platform
     return Entry(entity, platform, device, None, f"uid_{entity}", original_name, (), False, "", translation_key)
 
 
-def _find_my_home(trackers):
+def _find_my_home(trackers, buttons=(("button.thing_one", "2026-11-20T10:00:00+00:00"), ("button.tag_ring", "unknown"))):
     """
     A Home Assistant whose registry has a phone and a tracker tag of Find My's, and its own
     service device - with entity ids which say nothing of what each is, as a user may rename
@@ -123,7 +123,7 @@ def _find_my_home(trackers):
 
     def template(text, timeout=None):
         home.asked.append(text)
-        return json.dumps(trackers)
+        return json.dumps({"trackers": trackers, "buttons": [list(button) for button in buttons]})
     home._template = template
 
     def request(method, path, timeout=None, **kwargs):
@@ -144,13 +144,14 @@ def test_find_my_devices_discovered_from_the_integration():
     found = sorted(home.find_my_devices(), key=lambda device: device["device"])
     assert found == [
         {"device": "dev_phone", "name": "Galaxy Phone 9", "play": "button.thing_one", "stop": "button.thing_two",
-         "tracker": {"state": "home", "reported": NOW - 60}},
+         "tracker": {"state": "home", "reported": NOW - 60}, "ready": True},
+        # A button never pressed is "unknown", and still rings.
         {"device": "dev_tag", "name": "Sam's Wallet", "play": "button.tag_ring", "stop": None,
-         "tracker": {"state": "not_home", "reported": TEN_MINUTES_AGO}},
+         "tracker": {"state": "not_home", "reported": TEN_MINUTES_AGO}, "ready": True},
     ]
-    # Every tracker is read in one template, by the ids the registry gave.
+    # Every tracker and Play sound button is read in one template, by the ids the registry gave.
     assert len(home.asked) == 1 and '["device_tracker.tag", "device_tracker.tag_last", "device_tracker.thing_five", ' \
-        '"device_tracker.thing_four"]' in home.asked[0]
+        '"device_tracker.thing_four"]' in home.asked[0] and '["button.tag_ring", "button.thing_one"]' in home.asked[0]
     assert sorted(home.find_my_names()) == ["Galaxy Phone 9", "Sam's Wallet"]
     wallet = FindMyDevice.from_home(found[1])
     assert (wallet.name, wallet.said, wallet.place) == ("Sam's Wallet", "Wallet", None)
@@ -165,6 +166,12 @@ def test_find_my_devices_discovered_from_the_integration():
     for refused in ("button.thing_three", "button.service_regenerate_fcm_token", "button.other_play_sound"):
         with pytest.raises(NotAllowed):
             home.press(refused)
+
+    # While Google can't be reached its buttons are unavailable, and pressed do nothing - so it isn't ready.
+    unreachable = _find_my_home([], buttons=[("button.thing_one", "unavailable")])
+    assert {found["device"]: found["ready"] for found in unreachable.find_my_devices()} == \
+        {"dev_phone": False, "dev_tag": False}
+    assert FindMyDevice.from_home(unreachable.find_my_devices()[0]).ready is False
 
     # Without the registry's snapshot there's nothing to go by, so nothing is found.
     home.registry = SimpleNamespace(snapshot=lambda: None)
@@ -182,6 +189,22 @@ def test_the_apps_device_and_find_mys_are_matched_by_their_names():
     # Google doesn't find the Mac.
     assert find_my_for(mac, find_mys) is None
     assert find_my_for(phone, [wallet]) is None
+    # A name of one plain word says too little: a tag called "Ultra" or "Tab" is never the phone or tablet.
+    for short in ("Ultra", "Tab", "tab"):
+        tag = FindMyDevice.from_home({"device": "f4", "name": short, "play": "button.d"})
+        assert find_my_for(phone, [tag]) is None and find_my_for(tablet, [tag]) is None, short
+    # One word with a digit in it does.
+    s25 = FindMyDevice.from_home({"device": "f5", "name": "S25", "play": "button.e"})
+    assert find_my_for(phone, [s25]) is s25
+
+
+def test_a_find_my_entity_with_a_key_of_its_own_isnt_taken_by_its_name():
+    from voice_assistant.ha_registry import find_my_kind
+    assert find_my_kind(_find_my_entry("button.a", "d", "play_sound", "Ring it")) == "play"
+    assert find_my_kind(_find_my_entry("button.b", "d", "", "Play sound")) == "play"
+    # A key the integration added since, whatever its name says, is something else.
+    assert find_my_kind(_find_my_entry("button.c", "d", "play_sound_twice", "Play sound")) is None
+    assert find_my_kind(_find_my_entry("device_tracker.e", "d", "history")) is None
 
 
 def test_what_was_rung_lately_is_kept_for_ten_minutes_until_stopped():
