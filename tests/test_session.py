@@ -3092,6 +3092,32 @@ def test_a_typed_request_waits_for_an_announcement_being_said(brain, connect, ma
     thread.join(5)
 
 
+def test_a_typed_turn_which_goes_wrong_is_skipped_and_the_session_carries_on(brain, connect, make_session,
+                                                                             monkeypatch):
+    # It reads the settings - for a start of the Conversation switch - and a failure there mustn't close the
+    # session while its satellite stays connected.
+    satellite, pi = connect()
+    session = make_session(satellite)
+    session.conversation = ScriptedConversation(Reply(say="Okay."))
+    brain.stt.texts = ["What time is it?"]
+    broken = [True]
+    typed_turn = session._typed_turn
+
+    def failing():
+        if broken[0]:
+            broken[0] = False
+            raise RuntimeError("the settings couldn't be read")
+        return typed_turn()
+
+    monkeypatch.setattr(session, "_typed_turn", failing)
+    thread = running(session)
+    assert wait_for(lambda: not broken[0])
+    time.sleep(0.2)
+    assert thread.is_alive() and not session._closed.is_set()
+    pi.wake(said())
+    assert wait_for(lambda: brain.tts.said == ["Okay."], seconds=TURNS)
+
+
 def test_only_a_wake_word_satellite_gets_playlist_tiles(make_session, connect):
     assert make_session()._device_controls().playlist_tiles is True
     satellite, _ = connect(name="pc", hostname="pc.local")

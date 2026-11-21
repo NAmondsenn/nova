@@ -1113,13 +1113,17 @@ class Session:
                 try:
                     wake = self.satellite.wakes.get(timeout=WAKE_CHECK)
                 except queue.Empty:
-                    # Something typed in Home Assistant is answered only once no wake word
-                    # is waiting: one said is always answered first, as the satellite is
-                    # already sending what the user says after it.
-                    wake = self._typed_turn()
-                    if wake is None:
-                        continue
+                    wake = None
                 try:
+                    if wake is None:
+                        # Something typed in Home Assistant is answered only once no wake word
+                        # is waiting: one said is always answered first, as the satellite is
+                        # already sending what the user says after it. Taken in here, as it
+                        # reads the settings, so going wrong skips it rather than closing the
+                        # session while its satellite stays connected.
+                        wake = self._typed_turn()
+                        if wake is None:
+                            continue
                     self._converse(wake)
                 # Logged, and the next wake word answered as usual - after a moment,
                 # in case it would only go wrong again straight away.
