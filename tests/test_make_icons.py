@@ -7,6 +7,7 @@ slash and offline is grey, that an .ico holds every size in the form old Windows
 """
 
 import importlib.util
+import math
 import os
 import struct
 
@@ -70,6 +71,54 @@ def test_the_small_orb_shows_on_a_light_taskbar():
     composite = small[..., :3] * alpha + light * (1 - alpha)
     middle = composite[4:12, 4:12]
     assert np.abs(middle - light).mean() > 60
+
+
+def _quadrant_shares(weights):
+    """What fraction of the total weight lies in each quarter about the middle: TL, TR, BL, BR."""
+    half = weights.shape[0] // 2
+    total = weights.sum()
+    return [weights[:half, :half].sum() / total, weights[:half, half:].sum() / total,
+            weights[half:, :half].sum() / total, weights[half:, half:].sum() / total]
+
+
+@pytest.mark.parametrize("size", [48, 256])
+def test_the_orb_is_balanced_round_its_middle(size):
+    # The orb on the screen drifts to one side at most moments, which in a picture looked
+    # like the core pushed out of its own orb: the icon's is set evenly round the core.
+    alpha = make_icons.picture("ready", size)[..., 3].astype(np.float64)
+    rows, columns = np.mgrid[0:size, 0:size] + 0.5
+    middle = size / 2
+    assert abs((alpha * columns).sum() / alpha.sum() - middle) < 0.03 * size
+    assert abs((alpha * rows).sum() / alpha.sum() - middle) < 0.03 * size
+    assert all(0.21 < share < 0.29 for share in _quadrant_shares(alpha))
+
+
+@pytest.mark.parametrize("size", [48, 256])
+def test_the_core_is_in_the_middle(size):
+    picture = make_icons.picture("ready", size).astype(np.float64)
+    brightness = picture[..., :3].sum(axis=2) * picture[..., 3] / 255
+    # The core is a flat patch of white, so the middle of the brightest pixels is its.
+    brightest = brightness >= brightness.max() * 0.98
+    rows, columns = np.mgrid[0:size, 0:size] + 0.5
+    assert abs(columns[brightest].mean() - size / 2) < 0.04 * size
+    assert abs(rows[brightest].mean() - size / 2) < 0.04 * size
+
+
+def test_the_colour_reaches_as_far_in_every_direction():
+    # The soft glow hides lopsidedness from the totals above, so this looks at the body
+    # alone, where it is more than half solid: its quarters weigh the same, and along
+    # eight rays from the middle it ends at much the same distance.
+    size = 256
+    solid = make_icons.picture("ready", size)[..., 3] > 128
+    assert all(0.22 < share < 0.28 for share in _quadrant_shares(solid.astype(np.float64)))
+    reaches = []
+    for step in range(8):
+        angle = step * math.pi / 4
+        distance = 0.0
+        while solid[int(size / 2 + distance * math.sin(angle)), int(size / 2 + distance * math.cos(angle))]:
+            distance += 0.25
+        reaches.append(distance)
+    assert min(reaches) > 0.85 * max(reaches)
 
 
 def _slash_pixels(picture):
