@@ -1071,18 +1071,27 @@ class Satellite:
         # From the moment it's asked for - before the brain's listening sound - so an
         # answer started over the sound isn't lost.
         with self._lock:
-            self._listen_from = self.microphone.position
-            self._listen_recording = recording
-            self._listen_open = opened
-            self._nudged.set()
+            current = self._recording
+            # An open listen while an open recording is still going is that recording
+            # carrying on under a new number: it is the one being sent, from where it has
+            # got to, so no second recording is started for it, which would send its
+            # audio again. One for a recording the brain has already stopped, which the
+            # main loop hasn't yet finished with, is a recording of its own: it starts
+            # from here, and the stop doesn't reach it.
+            carried = opened and current is not None and recording is not None and not current.is_set()
+            if not carried:
+                self._listen_from = self.microphone.position
+                self._listen_recording = recording
+                self._listen_open = opened
+                self._nudged.set()
             # A recording being sent now is the answer, rather than one after it - see
             # _begin - so the brain may stop it as that, and it has no limit if the
             # brain asked for one which hasn't.
-            if self._recording is not None and recording is not None:
-                self._recording.ids.add(recording)
-                self._recording.latest = recording
+            if current is not None and recording is not None and (carried or not opened):
+                current.ids.add(recording)
+                current.latest = recording
                 if opened:
-                    self._recording.open = True
+                    current.open = True
 
     def _stop_listening(self, message: Dict, payload: bytes):
         # Only ever the recording being sent now. One which has already ended by itself,
@@ -2105,7 +2114,7 @@ class Satellite:
             return
         self._set_conversation(on)
 
-    def _set_conversation(self, on: bool):
+    def _set_conversation(self, on: bool, lost: bool = False):
         """
         Starts or ends a conversation. A push-to-talk satellite holds its microphone and
         speaker open for as long as it lasts, with the echo canceller taking its own sound
@@ -2118,6 +2127,10 @@ class Satellite:
 
         Args:
             on: True as it starts, False as it ends - or as the brain is lost.
+            lost: Whether it ends because the brain is, in which case an open recording is
+                left going, to end as "dropped" when its next piece can't be sent, which
+                says the brain can't be reached - ended here it would end silently or
+                not, by which was looked at first.
         """
         with self._conversation_lock:
             if on == self._conversing:
@@ -2139,7 +2152,7 @@ class Satellite:
             self._unmute_windows()
         else:
             with self._lock:
-                recording = self._recording
+                recording = None if lost else self._recording
                 if recording is not None and recording.open and not recording.is_set():
                     # As _stop_listening does, but with nothing to answer, so the orb is
                     # let go of rather than left thinking.
@@ -2239,7 +2252,7 @@ class Satellite:
             each.let_go()
         # Nobody is left to end a conversation, or to hear it: the devices it held open
         # are let go, and an open recording ends.
-        self._set_conversation(False)
+        self._set_conversation(False, lost=True)
         # Nobody is left to end the turn which a press opened the microphone for.
         self._mute_mic_again()
         if waiting:

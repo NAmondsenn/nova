@@ -531,7 +531,9 @@ class AudioFeed:
                 return np.zeros(0, dtype=np.int16)
             # What's gone is silence, so the samples are as many as were asked for and where they were.
             gone = np.zeros(max(0, min(end, self._dropped) - start), dtype=np.int16)
-            kept = self._samples[max(start, self._dropped) - self._dropped:end - self._dropped]
+            # The stop is kept from going negative, which numpy would count from the end of
+            # what's kept: a span wholly before it is all silence.
+            kept = self._samples[max(start, self._dropped) - self._dropped:max(0, end - self._dropped)]
             return np.concatenate([gone, kept])
 
 

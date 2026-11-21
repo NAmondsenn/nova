@@ -228,7 +228,11 @@ def test_an_install_from_before_conversations_has_its_echo_canceller_turned_on(t
 
 
 def test_a_settings_file_with_anything_else_under_audio_is_left_as_it_is():
+    # Including a blank line or two between, which would leave what follows under the section before.
     for text in ('audio:\n  echo_cancellation: false\n  pre_roll: 0.5\n', 'audio:\n  pre_roll: 0.5\n  echo_cancellation: false\n',
+                 'audio:\n  echo_cancellation: false\n\n  pre_roll: 0.5\n',
+                 'audio:\r\n  echo_cancellation: false\r\n\r\n  pre_roll: 0.5\r\n',
+                 'audio:\n  echo_cancellation: false\n \n\t\n  pre_roll: 0.5\n',
                  'audio:\n  echo_cancellation: true\n', 'backend:\n  satellite: "pc"\n'):
         assert re.search(_old_echo_pattern(), text) is None
 

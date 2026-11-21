@@ -157,9 +157,9 @@ else {
     # An install from before conversations wrote the echo canceller off, which a conversation
     # needs. Only those two lines as it wrote them are taken out, which leaves config.yaml's
     # setting, on; a file with anything else under audio is left alone, as every file is.
-    # (The last part of the pattern is that nothing indented follows, which would then be
-    # under the section before.)
-    $oldEcho = '(?m)^audio:\r?\n  echo_cancellation: false[ \t]*(?:\r?\n(?![ \t]+\S)|(?![\s\S]))'
+    # (The last part of the pattern is that the next line which isn't blank isn't indented,
+    # or there is none: anything indented would then be under the section before.)
+    $oldEcho = '(?m)^audio:\r?\n  echo_cancellation: false[ \t]*(?:\r?\n|(?![\s\S]))(?=(?:[ \t]*\r?\n)*(?:[^ \t\r\n]|(?![\s\S])))'
     $text = [System.IO.File]::ReadAllText($settings)
     if ([regex]::IsMatch($text, $oldEcho)) {
         Write-Host "Turning the echo canceller on in $settings"

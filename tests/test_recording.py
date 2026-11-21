@@ -169,6 +169,27 @@ def test_an_open_feed_keeps_at_least_the_last_ten_seconds_and_reads_older_audio_
     assert feed.time_at(total) >= feed.time_at(0)
 
 
+def test_a_span_before_what_an_open_feed_keeps_is_silence_of_the_length_asked_for():
+    feed = AudioFeed(open=True)
+    total = 100 * RATE
+    for start in range(0, total, RATE // 10):
+        feed.feed(_counting(start, start + RATE // 10))
+    edge = feed._dropped
+    assert edge > 3 * RATE and len(feed._samples) > 3 * RATE
+    # Ending a few seconds before what's kept, which numpy would take as a place counted
+    # back from the end of it, and answer with nearly all of it.
+    before = feed.listen(start=edge - 3 * RATE)
+    assert not np.any(before.read(RATE)) and len(before.read(RATE)) == RATE
+    assert before.position == edge - RATE
+    # Right up to the edge, and with its end exactly on it.
+    assert len(feed.listen(start=edge - RATE).read(RATE)) == RATE
+    assert not np.any(feed.listen(start=edge - RATE).read(RATE))
+    # Straddling it: silence, then what's kept, in the one read.
+    across = feed.listen(start=edge - RATE).read(2 * RATE)
+    assert len(across) == 2 * RATE and not np.any(across[:RATE])
+    assert np.array_equal(across[RATE:], _counting(edge, edge + RATE))
+
+
 def test_an_open_feed_still_ends_when_the_satellite_stops_sending():
     feed = AudioFeed(stall_seconds=0.05, open=True)
     feed.feed(_counting(0, 1600))

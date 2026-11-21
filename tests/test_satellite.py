@@ -4927,3 +4927,58 @@ def test_losing_the_brain_during_an_open_recording_leaves_the_orb_hidden(brain, 
     brain.drop()
     assert wait_for(lambda: orb.shown[-1] == "hidden")
     assert wait_for(lambda: made._recording is None and made.microphone.holds == 0)
+    # The microphone closing is never silent: the brain can't be reached is said, once - not
+    # by which of the recording's own check and the link being lost came first.
+    assert wait_for(lambda: PHRASE in made.speaker.files())
+    time.sleep(0.3)
+    assert made.speaker.files().count(PHRASE) == 1
+
+
+def test_an_open_listen_after_the_stop_of_the_last_starts_from_where_it_was_asked(brain, make):
+    # The brain stops one open recording and asks for the next at once, before the main
+    # loop has seen the stop and finished sending the first.
+    made = pressable(brain, make)
+    start_conversation(brain, made)
+    open_listen(brain, made, "listen-1")
+    first = made._recording
+    sent = len(brain.recordings())
+    # Both handled in a moment, on this thread, as the link's would be one after the other.
+    made._stop_listening({"recording": "listen-1"}, b"")
+    asked_at = made.microphone.position
+    made._listen({"recording": "listen-2", "open": True}, b"")
+    assert first.is_set()
+    # A recording of its own, under its own number.
+    assert wait_for(lambda: made._recording is not None and made._recording is not first)
+    second = made._recording
+    assert second.ids == {"listen-2"} and second.open and second.latest == "listen-2"
+    assert wait_for(lambda: len(brain.recordings()) >= sent + 3)
+    # From where it was asked for, and so nothing of the first's is sent again.
+    pieces = brain.recordings()[sent:]
+    # (Each sample is its own position, modulo 32768.) Not before it was asked for, and soon after.
+    assert 0 <= (int(pieces[0][0]) - asked_at) % 32768 < RATE
+    # And carrying on from there, with no piece of the first's repeated.
+    assert all(int(after[0]) == (int(before[0]) + len(before)) % 32768 for before, after in zip(pieces, pieces[1:]))
+
+    # Stopping the first again, late, doesn't end the second.
+    brain.say("stop_listening", recording="listen-1")
+    time.sleep(0.1)
+    assert not second.is_set() and brain.messages("audio_end") == []
+    brain.say("stop_listening", recording="listen-2")
+    assert wait_for(lambda: second.is_set())
+    assert wait_for(lambda: made._recording is None)
+
+
+def test_an_open_listen_while_one_is_going_carries_it_on_and_sends_nothing_twice(brain, make):
+    made = pressable(brain, make)
+    start_conversation(brain, made)
+    open_listen(brain, made, "listen-1")
+    first = made._recording
+    brain.say("listen", recording="listen-2", open=True)
+    assert wait_for(lambda: first.ids == {"listen-1", "listen-2"})
+    # The same recording, which the brain stops by either number, and no other is waiting for its turn.
+    assert made._listen_from is None
+    brain.say("stop_listening", recording="listen-2")
+    assert wait_for(lambda: made._recording is None)
+    sent = len(brain.recordings())
+    time.sleep(0.3)
+    assert len(brain.recordings()) == sent and made._recording is None
