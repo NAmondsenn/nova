@@ -7,6 +7,10 @@ docs/decisions/0029. A reply said by one satellite reaches the others' microphon
 satellite cancels only its own echo, so while one speaks every other one ignores the wake
 word, and the one speaking keeps listening, to be talked over as ever.
 
+In an open conversation the others in the same room stay quiet for the whole of it, not
+only while Nova speaks, so "Hey Nova" said from habit at one of them can't start a second
+turn while he is talking to the satellite next to it. The brain says which those are.
+
 QuietOthers only works out who's to be told what, from who is speaking now; the brain
 asks it on a thread of its own, whenever a satellite starts or stops speaking and every
 QUIET_RENEW seconds besides, and sends what it says - see Brain._quiet_others_forever.
@@ -15,7 +19,7 @@ two changes heard in the wrong order can't leave a satellite deaf, or listening 
 another speaks.
 """
 
-from typing import Dict, Hashable, List, Tuple
+from typing import AbstractSet, Dict, Hashable, List, Tuple
 
 # How often, in seconds, a satellite which is to stay quiet is told so again, so speech
 # longer than the minute a satellite stays quiet by itself (satellite.QUIET_MOST) still
@@ -30,7 +34,8 @@ class QuietOthers:
         # (quiet, when it was told) for each satellite, by its connection.
         self._told: Dict[Hashable, Tuple[bool, float]] = {}
 
-    def tell(self, speaking: Dict[Hashable, bool], now: float) -> List[Tuple[Hashable, bool]]:
+    def tell(self, speaking: Dict[Hashable, bool], now: float,
+             also_quiet: AbstractSet[Hashable] = frozenset()) -> List[Tuple[Hashable, bool]]:
         """
         Works out which satellites to tell, and what.
 
@@ -39,6 +44,9 @@ class QuietOthers:
                 connection - so one which connects again, under the same name, is a new
                 one, told afresh. One not here is forgotten.
             now: The time, by time.monotonic().
+            also_quiet: The connections of the satellites to keep quiet whoever is speaking
+                - those in the room of an open conversation, other than the one it is on
+                at. One which isn't in speaking is left out, as it isn't connected.
 
         Returns:
             (connection, quiet) for each to tell: one whose state has changed, one new
@@ -48,7 +56,7 @@ class QuietOthers:
         self._told = {key: told for key, told in self._told.items() if key in speaking}
         changes = []
         for key in speaking:
-            quiet = any(on for other, on in speaking.items() if other is not key)
+            quiet = key in also_quiet or any(on for other, on in speaking.items() if other is not key)
             told = self._told.get(key)
             if told is None:
                 due = quiet

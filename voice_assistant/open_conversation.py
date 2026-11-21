@@ -34,7 +34,8 @@ class OpenConversation:
     """Whether a conversation is on, at which satellite, and what has been said in it."""
 
     def __init__(self, settings: Callable[[], Dict], now: Callable[[], float] = time.monotonic,
-                 ended: Optional[Callable[[List[Dict]], None]] = None):
+                 ended: Optional[Callable[[List[Dict]], None]] = None,
+                 changed: Optional[Callable[[], None]] = None):
         """
         Args:
             settings: Returns the `conversation` section of the config as it is now. Read
@@ -42,10 +43,14 @@ class OpenConversation:
             now: The time, by time.monotonic() - given so tests can move it.
             ended: Called with the exchanges of a conversation as it ends - the hook a plan
                 is saved from. None means nothing is called.
+            changed: Called, with no arguments, just after a conversation starts or ends - the
+                hook which has the brain's quiet-others thread look again at once, not at its
+                next round. None means nothing is called.
         """
         self._settings = settings
         self._now = now
         self._ended = ended
+        self._changed = changed
         # When the last conversation at each satellite ended, by `now` - see ended_at.
         self._ended_at: Dict[str, float] = {}
         # Sessions, the brain's threads and Home Assistant's switch all come here.
@@ -143,10 +148,11 @@ class OpenConversation:
         with self._lock:
             if not enabled:
                 return "off"
-            if self._satellite is None:
-                self._reset(satellite)
-                return "started"
-            return "already here" if self._satellite == satellite else "elsewhere"
+            if self._satellite is not None:
+                return "already here" if self._satellite == satellite else "elsewhere"
+            self._reset(satellite)
+        self._tell_changed()
+        return "started"
 
     def end(self, reason: str, satellite: Optional[str] = None) -> bool:
         """
@@ -169,6 +175,8 @@ class OpenConversation:
             exchanges = self._exchanges[-cap:]
             self._ended_at[self._satellite] = self._now()
             self._reset(None)
+        # Before the step, which may take a while, so whatever waits on the change isn't held up by it.
+        self._tell_changed()
         # Outside the lock, as the step may take a while or come back here.
         if self._ended is not None:
             try:
@@ -178,6 +186,15 @@ class OpenConversation:
                 # saved must not leave the microphone open.
                 logger.error(f"The step for a conversation which ended ({reason}) failed: {type(e).__name__}")
         return True
+
+    def _tell_changed(self):
+        """Calls `changed` if there is one. Outside the lock, as it may come back here."""
+        if self._changed is not None:
+            try:
+                self._changed()
+            except Exception as e:
+                # A thread which couldn't be woken must not stop a conversation starting or ending.
+                logger.error(f"The step for a conversation starting or ending failed: {type(e).__name__}")
 
     def answered(self, user: str, assistant: str, model: str, satellite: Optional[str] = None):
         """

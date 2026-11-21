@@ -321,13 +321,15 @@ class Brain:
         # Which satellites ignore the wake word while Nova speaks on another - see
         # _quiet_others_forever, which _quiet_nudge wakes.
         self.quiet_others = QuietOthers()
+        self._quiet_nudge = threading.Event()
         # Whether an open conversation is on, and where - one for the whole brain, as only one is
         # allowed at a time. Its settings are read at each use, so ones changed on the settings
-        # page are used at once.
-        self.open_conversation = OpenConversation(lambda: self.config.section("conversation"))
+        # page are used at once. One starting or ending wakes the quiet-others thread, so the
+        # room goes quiet, and is let go, at once.
+        self.open_conversation = OpenConversation(lambda: self.config.section("conversation"),
+                                                  changed=self._quiet_nudge.set)
         # The apps and open windows of each computer satellite - see computers.py.
         self.computers = Computers()
-        self._quiet_nudge = threading.Event()
         # Each satellite's session, by its name, for as long as it's connected.
         self.sessions: Dict[str, Session] = {}
         # Guards sessions and the other notes below. Only ever held for a moment, and
@@ -1630,9 +1632,11 @@ class Brain:
         """
         Tells each satellite whether to ignore the wake word while Nova speaks on another
         - see quiet_others.py - whenever one starts or stops speaking, or one joins or
-        goes, and every QUIET_RENEW seconds besides. The one thread works from who is
-        speaking now, so nothing heard in the wrong order is acted on, and a satellite
-        slow to take a message holds up only this, never what Nova is saying.
+        goes, or an open conversation starts or ends, and every QUIET_RENEW seconds besides.
+        The others in the room of an open conversation are told to be quiet for the whole of
+        it, whoever is speaking. The one thread works from who is speaking now, so nothing
+        heard in the wrong order is acted on, and a satellite slow to take a message holds up
+        only this, never what Nova is saying.
         """
         while not self._stopped.is_set():
             self._quiet_nudge.wait(quiet_others_module.QUIET_RENEW)
@@ -1642,7 +1646,7 @@ class Brain:
             try:
                 speaking = {session.satellite: session.satellite.speaker.speaking
                             for session in self.connected_sessions() if session.satellite.connected}
-                changes = self.quiet_others.tell(speaking, time.monotonic())
+                changes = self.quiet_others.tell(speaking, time.monotonic(), self._kept_quiet())
             except Exception as e:
                 logger.error(f"Couldn't work out which satellites to quiet: {e}")
                 continue
@@ -1652,6 +1656,19 @@ class Brain:
                     satellite.send("quiet", on=quiet)
                 except Exception as e:
                     logger.error(f"Couldn't tell the {satellite.name} satellite whether to be quiet: {e}")
+
+    def _kept_quiet(self) -> Set[Any]:
+        """
+        Returns:
+            The connections of the satellites in the room of an open conversation, other than
+            the one it is on at, rooms being as room_sessions has them - so a satellite with no
+            room has none. Empty if no conversation is on.
+        """
+        conversing = self.open_conversation.satellite
+        if conversing is None:
+            return set()
+        return {session.satellite for session in self.room_sessions(conversing)
+                if session.satellite.name != conversing}
 
     def _removed(self, name: str, password: Optional[str] = None) -> bool:
         """

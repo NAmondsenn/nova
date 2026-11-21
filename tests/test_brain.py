@@ -4524,6 +4524,58 @@ def test_long_speech_keeps_the_others_quiet(brain, connect, monkeypatch):
     release.set()
 
 
+def in_two_rooms(brain, connect, passwords):
+    """Connects the bedroom and kitchen, in one room, and the hall, in another - the bedroom and hall to watch."""
+    passwords.add("hall", HALL)
+    serving(brain)
+    bedroom = connect(brain, "bedroom", BEDROOM)
+    connect(brain, "kitchen", KITCHEN)
+    hall = connect(brain, "hall", HALL)
+    for name in ("bedroom", "kitchen", "hall"):
+        connected(brain, name)
+    brain.rooms.set_area("kitchen", "Study")
+    brain.rooms.set_area("bedroom", "Study")
+    brain.rooms.set_area("hall", "Hall")
+    return bedroom, hall
+
+
+def test_the_rooms_other_satellite_is_quiet_from_the_start_of_a_conversation_to_its_end(brain, connect, passwords):
+    bedroom, hall = in_two_rooms(brain, connect, passwords)
+
+    # Nobody speaks, and it's well before a renewal is due: the conversation itself wakes the thread.
+    assert brain.open_conversation.start("kitchen") == "started"
+    assert wait_for(lambda: bedroom.messages("quiet") == [{"type": "quiet", "on": True}])
+    # Released as it ends, not at the next renewal.
+    assert brain.open_conversation.end("said")
+    assert wait_for(lambda: bedroom.messages("quiet") == [{"type": "quiet", "on": True}, {"type": "quiet", "on": False}])
+    # Another room's was never told anything.
+    assert hall.messages("quiet") == []
+
+
+def test_the_rooms_other_satellite_is_kept_quiet_all_through_a_conversation(brain, connect, passwords, monkeypatch):
+    monkeypatch.setattr(quiet_others_module, "QUIET_RENEW", 0.2)
+    bedroom, hall = in_two_rooms(brain, connect, passwords)
+
+    assert brain.open_conversation.start("kitchen") == "started"
+    # Told again and again with nobody speaking, so the bedroom's own limit never runs out.
+    assert wait_for(lambda: len(bedroom.messages("quiet")) >= 3)
+    assert all(message["on"] for message in bedroom.messages("quiet"))
+    assert hall.messages("quiet") == []
+
+
+def test_a_satellite_with_no_room_isnt_kept_quiet_by_a_conversation(brain, connect):
+    serving(brain)
+    bedroom = connect(brain, "bedroom", BEDROOM)
+    connect(brain, "kitchen", KITCHEN)
+    connected(brain, "bedroom")
+    connected(brain, "kitchen")
+
+    # Neither is in a room, so each is a room of its own - as a session's room is.
+    assert brain.open_conversation.start("kitchen") == "started"
+    time.sleep(0.3)
+    assert bedroom.messages("quiet") == []
+
+
 def test_music_never_quiets_the_others(brain, connect):
     serving(brain)
     bedroom = connect(brain, "bedroom", BEDROOM)

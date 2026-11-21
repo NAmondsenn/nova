@@ -48,6 +48,37 @@ def test_start_and_end():
     assert conversation.satellite is None
 
 
+def test_changed_is_called_as_a_conversation_starts_and_as_it_ends():
+    called = []
+    conversation = OpenConversation(lambda: dict(SETTINGS), changed=lambda: called.append(conversation.satellite))
+    conversation.start("pc")
+    # Not again for one which is on already, or elsewhere, or when none is on to end.
+    conversation.start("pc")
+    conversation.start("bedroom")
+    assert called == ["pc"]
+    conversation.end("said", satellite="bedroom")
+    assert called == ["pc"]
+    conversation.end("said")
+    conversation.end("said")
+    # Seen from the hook, the conversation has already ended.
+    assert called == ["pc", None]
+
+
+def test_changed_isnt_called_for_a_conversation_which_is_off_and_a_failing_one_cant_stop_it():
+    called = []
+    conversation = OpenConversation(lambda: {"enabled": False}, changed=lambda: called.append(1))
+    assert conversation.start("pc") == "off"
+    assert called == []
+
+    def failing():
+        raise RuntimeError("no")
+
+    conversation = OpenConversation(lambda: dict(SETTINGS), changed=failing)
+    assert conversation.start("pc") == "started"
+    assert conversation.end("said") is True
+    assert conversation.satellite is None
+
+
 def test_enabled_is_read_as_it_is_set_now():
     conversation, _, settings = make()
     assert conversation.enabled
