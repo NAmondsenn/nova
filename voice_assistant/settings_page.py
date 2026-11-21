@@ -84,6 +84,8 @@ FILES = {"/": ("settings.html", "text/html; charset=utf-8"),
          "/settings.css": ("settings.css", "text/css; charset=utf-8"),
          # The night sky behind the settings page and the phone's approval page.
          "/sky.js": ("sky.js", "text/javascript; charset=utf-8"),
+         # Base64url for passkeys, used by the settings page and the phone's approval page.
+         "/base64url.js": ("base64url.js", "text/javascript; charset=utf-8"),
          "/icon.svg": ("icon.svg", "image/svg+xml"),
          # The Wrapped's story page - see wrapped.py - which asks /api/wrapped for what it shows.
          "/wrapped": ("wrapped.html", "text/html; charset=utf-8"),
@@ -99,7 +101,8 @@ FILES = {"/": ("settings.html", "text/html; charset=utf-8"),
 # update that it's out of date - see page_version. Not the Wrapped's: it is read once, as
 # it's opened, and asks for nothing after, so a change to it would only reload a settings
 # page for nothing. The approval page's are, as it asks the brain for the request it shows.
-PAGE_FILES = ("settings.html", "settings_list.js", "settings.js", "settings.css", "sky.js", "approve.html", "approve.js")
+PAGE_FILES = ("settings.html", "settings_list.js", "settings.js", "settings.css", "sky.js", "base64url.js",
+              "approve.html", "approve.js")
 
 # Sent with every answer: nothing but the page's own files may run in it, no other
 # site may show it in a frame, and nothing is kept in a cache.

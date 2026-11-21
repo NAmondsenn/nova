@@ -1527,7 +1527,7 @@ def test_the_page_comes_with_its_safety_headers(served):
     assert headers["Cache-Control"] == "no-store" and headers["X-Content-Type-Options"] == "nosniff"
 
 
-@pytest.mark.parametrize("path", ["/settings.js", "/settings_list.js", "/settings.css", "/sky.js"])
+@pytest.mark.parametrize("path", ["/settings.js", "/settings_list.js", "/settings.css", "/sky.js", "/base64url.js"])
 def test_the_pages_script_and_style_are_served_with_its_safety_headers(served, path):
     # There's no JavaScript engine to check the script with, so this is what stands in.
     status, headers, body = _ask(served, path)
@@ -3993,7 +3993,7 @@ def test_the_right_password_logs_in_for_thirty_days(npm, caplog):
 
 
 def test_the_page_files_are_served_before_a_login(npm):
-    for path in ("/", "/settings.js", "/settings_list.js", "/settings.css", "/sky.js", "/icon.svg"):
+    for path in ("/", "/settings.js", "/settings_list.js", "/settings.css", "/sky.js", "/base64url.js", "/icon.svg"):
         status, headers, _ = _through_npm(npm, path)
         assert status == 200 and headers["Content-Type"] == page_module.FILES[path][1]
         assert headers["Content-Security-Policy"] == page_module.SAFETY_HEADERS["Content-Security-Policy"]
@@ -4139,7 +4139,8 @@ def test_the_version_changes_with_any_of_the_pages_files_and_only_then(files, mo
     monkeypatch.setattr(page_module, "WEB_FOLDER", str(web))
     first = _page()
     assert _page().page_version == first.page_version
-    for name in ("settings.html", "settings_list.js", "settings.js", "settings.css", "sky.js", "approve.html", "approve.js"):
+    for name in ("settings.html", "settings_list.js", "settings.js", "settings.css", "sky.js", "base64url.js",
+                 "approve.html", "approve.js"):
         before = (web / name).read_bytes()
         (web / name).write_bytes(before + b"\n")
         assert _page().page_version != first.page_version, name

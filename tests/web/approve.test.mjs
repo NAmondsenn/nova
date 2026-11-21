@@ -11,6 +11,8 @@ import { test } from "node:test";
 import vm from "node:vm";
 
 const SCRIPT = readFileSync(new URL("../../voice_assistant/web/approve.js", import.meta.url), "utf8");
+// Its base64url helpers, loaded before it as the page loads them.
+const BASE64URL = readFileSync(new URL("../../voice_assistant/web/base64url.js", import.meta.url), "utf8");
 const HTML = readFileSync(new URL("../../voice_assistant/web/approve.html", import.meta.url), "utf8");
 
 const ID = "0123456789abcdef0123456789abcdef";
@@ -88,6 +90,7 @@ async function page({ path = `/approve/${ID}`, request = null, prompt = null } =
       return answer(request);
     },
   });
+  vm.runInContext(BASE64URL, context, { filename: "base64url.js" });
   vm.runInContext(SCRIPT, context, { filename: "approve.js" });
   await context.NovaApprove.ready;
   const node = (id) => document.getElementById(id);
@@ -101,26 +104,13 @@ async function page({ path = `/approve/${ID}`, request = null, prompt = null } =
 const OPEN = { state: "open", description: "Remove 'Dentist', Tue 25 Nov 10:00", challenge: "AAEC_w",
                credentials: ["AQID", "BAUG"], rp_id: "nova.example.ts.net" };
 
-test("base64url round trips bytes", () => {
-  const context = vm.createContext({ atob, btoa, document: undefined });
-  vm.runInContext(SCRIPT, context);
-  const { b64urlToBytes, bytesToB64url } = context.NovaApprove;
-  // Every byte, so + and / (as - and _) and the padding left off are all there.
-  const all = Uint8Array.from({ length: 256 }, (_, at) => at);
-  const text = bytesToB64url(all.buffer);
-  assert.equal(/^[A-Za-z0-9_-]+$/.test(text), true);
-  assert.equal(Array.from(b64urlToBytes(text)).join(","), Array.from(all).join(","));
-  assert.equal(bytesToB64url(bytes(0, 1, 2, 255)), "AAEC_w");
-  assert.equal(Array.from(b64urlToBytes("AAEC_w")).join(","), "0,1,2,255");
-  // A view of part of a buffer gives only its own bytes.
-  assert.equal(bytesToB64url(new Uint8Array([9, 0, 1, 2, 255, 9]).subarray(1, 5)), "AAEC_w");
-  assert.equal(bytesToB64url(bytes()), "");
-});
-
 test("the id is read from the path", () => {
   const context = vm.createContext({ atob, btoa, document: undefined });
+  vm.runInContext(BASE64URL, context);
   vm.runInContext(SCRIPT, context);
-  const { idFromPath } = context.NovaApprove;
+  const { idFromPath, b64urlToBytes } = context.NovaApprove;
+  // base64url.js's own, handed on.
+  assert.equal(b64urlToBytes, context.NovaBase64url.b64urlToBytes);
   assert.equal(idFromPath(`/approve/${ID}`), ID);
   for (const path of ["/approve/", `/approve/${ID}/`, `/approve/${ID}0`, `/approve/${ID.toUpperCase()}`,
                       `/approve/${ID.slice(1)}`, `/other/approve/${ID}`, "/", "", null, undefined]) {
@@ -189,6 +179,24 @@ test("an answered request shows only Already answered.", async () => {
   assert.equal(late.shows(), "Already answered.");
 });
 
+test("an open request missing its description or challenge says so plainly, with no buttons", async () => {
+  for (const missing of [{ description: "" }, { description: undefined }, { challenge: undefined }, { challenge: 7 }]) {
+    const shown = await page({ request: { ...OPEN, ...missing } });
+    assert.equal(shown.shows(), "Nova didn't send this request properly. Open the notification again.", JSON.stringify(missing));
+  }
+});
+
+test("the passkeys' relying party is left out only when Nova gives none", async () => {
+  const signed = () => ({ id: "AQID", rawId: bytes(1, 2, 3),
+                          response: { clientDataJSON: bytes(1), authenticatorData: bytes(2), signature: bytes(3) } });
+  const without = await page({ request: { ...OPEN, rp_id: null }, prompt: signed });
+  await without.node("approve").click();
+  assert.equal("rpId" in without.prompts[0].publicKey, false);
+  const given = await page({ request: OPEN, prompt: signed });
+  await given.node("approve").click();
+  assert.equal(given.prompts[0].publicKey.rpId, "nova.example.ts.net");
+});
+
 test("a cancelled passkey prompt keeps the buttons", async () => {
   const shown = await page({
     request: OPEN,
@@ -219,4 +227,6 @@ test("the page has each id the script asks for, exactly once, and loads its look
   // At /approve/<id>, so its files are asked for from the top.
   assert.equal(HTML.includes('<link rel="stylesheet" href="/settings.css">'), true);
   assert.equal(HTML.includes('<script src="/approve.js" defer></script>'), true);
+  assert.equal(HTML.indexOf('<script src="/base64url.js" defer></script>') < HTML.indexOf('<script src="/approve.js"'), true);
+  assert.equal(HTML.includes('<script src="/base64url.js" defer></script>'), true);
 });

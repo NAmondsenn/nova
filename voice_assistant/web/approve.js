@@ -5,7 +5,7 @@
 // which needs his fingerprint, face or PIN, against the request's own challenge, and sends
 // Nova what the phone signed; Nova checks it. Refuse needs no passkey. A request already
 // answered, or run out, is said as that and nothing else. It sets one global, NovaApprove,
-// for the tests.
+// for the tests, with base64url.js's helpers, which it uses.
 
 "use strict";
 
@@ -16,21 +16,8 @@
   // How long the phone's passkey prompt may wait for him, in milliseconds.
   const PROMPT_WAIT = 120000;
 
-  // Base64url, as Nova sends and takes every binary part: no padding, - and _ for + and /.
-  const b64urlToBytes = (text) => {
-    const plain = String(text).replace(/-/g, "+").replace(/_/g, "/");
-    const binary = atob(plain + "=".repeat((4 - (plain.length % 4)) % 4));
-    return Uint8Array.from(binary, (character) => character.charCodeAt(0));
-  };
-
-  // An ArrayBuffer, or a view of part of one, as the browser gives the passkey's answer.
-  const bytesToB64url = (buffer) => {
-    const view = ArrayBuffer.isView(buffer)
-      ? new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength) : new Uint8Array(buffer);
-    let binary = "";
-    for (const byte of view) binary += String.fromCharCode(byte);
-    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  };
+  // From base64url.js, loaded first.
+  const { b64urlToBytes, bytesToB64url } = globalThis.NovaBase64url;
 
   // The request's id in the page's address, as Nova serves the page: /approve/ and 32
   // lower-case hex digits, and nothing more - else null.
@@ -104,6 +91,13 @@
       only(SAID[request && request.state] || NO_SUCH);
       return;
     }
+    // Open, but missing what it needs to be shown or answered: said plainly, rather than an empty
+    // request with buttons which can't work.
+    if (typeof request.description !== "string" || !request.description
+        || typeof request.challenge !== "string" || !request.challenge) {
+      only("Nova didn't send this request properly. Open the notification again.");
+      return;
+    }
     // As text: a description names his own events and albums, which could hold anything.
     description.textContent = request.description;
     description.hidden = false;
@@ -120,7 +114,9 @@
           userVerification: "required",
           timeout: PROMPT_WAIT,
         };
-        if (request.rp_id) publicKey.rpId = request.rp_id;
+        // The passkeys' relying party, whenever Nova gives it - left out, the browser would take
+        // the page's own host, which is the same unless the page was reached another way.
+        if (typeof request.rp_id === "string" && request.rp_id) publicKey.rpId = request.rp_id;
         credential = await navigator.credentials.get({ publicKey });
         if (!credential) throw new Error("no passkey");
       } catch (error) {

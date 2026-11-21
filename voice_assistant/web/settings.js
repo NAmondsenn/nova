@@ -476,15 +476,16 @@ function answered(response) {
 }
 
 // Sends Nova a change, answering with what it said - for the chosen satellite, which
-// only the changes to its own volumes, music, lights, mute and alarms look at.
-async function send(path, body) {
+// only the changes to its own volumes, music, lights, mute and alarms look at. `within` is how
+// long Nova is given to begin answering: longer for a change which waits for his OK.
+async function send(path, body, within = CHANGE_WITHIN) {
   let response;
   try {
     response = answered(await fetchWithin(path, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Nova": "page" },
       body: JSON.stringify(chosen ? { ...body, satellite: chosen } : body || {}),
-    }, CHANGE_WITHIN));
+    }, within));
   } catch (error) {
     // Said as that rather than as unreachable: Nova got it, and may have done it.
     if (error.name === "AbortError") {
@@ -496,11 +497,11 @@ async function send(path, body) {
 }
 
 // Sends a change, says how it went, and shows the page as it is now - or, as reload,
-// the part of it which changed.
-async function change(path, body, reload = load) {
+// the part of it which changed. `within` is as send's.
+async function change(path, body, reload = load, within = CHANGE_WITHIN) {
   let result;
   try {
-    result = await send(path, body);
+    result = await send(path, body, within);
   } catch (error) {
     result = { success: false, message: "Couldn't reach Nova." };
   }
@@ -1682,21 +1683,6 @@ async function finishSignIn(service, reload) {
 // approve (the PC, with Windows Hello), the approval settings, drawn with the others, and the
 // recent approvals. Through NPM Nova refuses all of it, so it isn't asked for and only that is said.
 
-// Base64url, as Nova sends and takes every binary part of a passkey - as approve.js has it.
-function b64urlToBytes(text) {
-  const plain = String(text).replace(/-/g, "+").replace(/_/g, "/");
-  const binary = atob(plain + "=".repeat((4 - (plain.length % 4)) % 4));
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
-}
-
-function bytesToB64url(buffer) {
-  const view = ArrayBuffer.isView(buffer)
-    ? new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength) : new Uint8Array(buffer);
-  let binary = "";
-  for (const byte of view) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
 // A satellite which can approve, as it's said: "the PC".
 function spokenOf(satellite) {
   return satellite.spoken || satellite.name;
@@ -1738,15 +1724,29 @@ function checkWords(without) {
 
 // Runs a change which may wait for his OK, with the control it came from saying where to give
 // it until Nova answers. With no words, it's run as it is.
-async function whileAsking(label, words, work) {
+// `restore` puts the control's words back as they should be then - by default, as they were.
+async function whileAsking(label, words, work, restore = null) {
   if (!words) return work();
   const before = label.textContent;
   label.textContent = words;
   try {
     return await work();
   } finally {
-    label.textContent = before;
+    if (restore) restore();
+    else label.textContent = before;
   }
+}
+
+// How long a change which may wait for his OK is given to be answered, in milliseconds: as long
+// as Nova waits for an answer (its "Minutes to wait for an answer", or the most it can be while
+// the page doesn't know it), and a little more - else the page would give up first, and say it
+// may not have worked of a change which goes through once he approves.
+const LONGEST_WAIT_MINUTES = 10;
+function approvalWithin() {
+  const found = stateSaid && Array.isArray(stateSaid.settings)
+    ? stateSaid.settings.find((one) => one.key === "approvals.wait_minutes") : null;
+  const minutes = found && Number.isFinite(found.value) && found.value > 0 ? found.value : LONGEST_WAIT_MINUTES;
+  return (minutes * 60 + 15) * 1000;
 }
 
 // When an approval was asked for, as "Today 14:05" or "3 Nov 14:05", from epoch seconds.
@@ -1813,8 +1813,9 @@ function passkeyRow(passkey) {
 function approverRow(satellite) {
   const row = element("li");
   const what = element("span", undefined, "what");
-  what.append(satellite.name);
-  what.append(element("span", satellite.connected ? "Connected" : "Not connected", "detail"));
+  // As it's said - "The PC" - with its machine name, as the Satellites section has it, under it.
+  what.append(element("span", capitalised(spokenOf(satellite)), "name"));
+  what.append(element("span", `${satellite.name} · ${satellite.connected ? "Connected" : "Not connected"}`, "detail"));
   const actions = element("span", undefined, "actions");
   const choice = element("label", undefined, "choice");
   const words = element("span", "Can approve");
@@ -1822,8 +1823,17 @@ function approverRow(satellite) {
   Object.assign(box, { type: "checkbox", checked: Boolean(satellite.can_approve) });
   box.setAttribute("role", "switch");
   box.setAttribute("aria-label", `${capitalised(spokenOf(satellite))} can approve`);
-  box.addEventListener("change", () => whileAsking(words, box.checked ? checkWords() : null,
-    () => change("/api/approvals/can-approve", { name: satellite.name, on: box.checked }, reloadApprovals)));
+  // Off while its change is out, so it can't be flipped back and forth under a request still waiting.
+  box.addEventListener("change", async () => {
+    box.disabled = true;
+    try {
+      await whileAsking(words, box.checked ? checkWords() : null,
+        () => change("/api/approvals/can-approve", { name: satellite.name, on: box.checked }, reloadApprovals,
+                     approvalWithin()));
+    } finally {
+      box.disabled = false;
+    }
+  });
   choice.append(words, box);
   actions.append(choice);
   row.append(dot(satellite.connected ? "good" : "off"), what, actions);
@@ -1880,7 +1890,7 @@ async function addPasskey(event) {
   button.disabled = true;
   try {
     const words = approvals && approvals.passkeys.length ? checkWords() : null;
-    const begun = await whileAsking(button, words, () => send("/api/passkeys/begin", {}));
+    const begun = await whileAsking(button, words, () => send("/api/passkeys/begin", {}, approvalWithin()));
     if (!begun.success) {
       toast(begun.message || "That didn't work.", false);
       return;
@@ -1888,13 +1898,13 @@ async function addPasskey(event) {
     let made;
     try {
       made = await navigator.credentials.create({ publicKey: {
-        challenge: b64urlToBytes(begun.challenge),
+        challenge: NovaBase64url.b64urlToBytes(begun.challenge),
         rp: { id: begun.rp_id, name: "Nova" },
-        user: { id: b64urlToBytes(begun.user_id), name: "nova", displayName: "Nova" },
+        user: { id: NovaBase64url.b64urlToBytes(begun.user_id), name: "nova", displayName: "Nova" },
         pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
         authenticatorSelection: { residentKey: "discouraged", userVerification: "required" },
         attestation: "none",
-        excludeCredentials: begun.exclude.map((id) => ({ type: "public-key", id: b64urlToBytes(id) })),
+        excludeCredentials: begun.exclude.map((id) => ({ type: "public-key", id: NovaBase64url.b64urlToBytes(id) })),
         timeout: PASSKEY_WAIT,
       } });
     } catch (error) {
@@ -1909,10 +1919,10 @@ async function addPasskey(event) {
     }
     const result = await change("/api/passkeys/finish", {
       name,
-      credential_id: bytesToB64url(made.rawId),
-      client_data: bytesToB64url(response.clientDataJSON),
-      authenticator_data: bytesToB64url(response.getAuthenticatorData()),
-      public_key: bytesToB64url(key),
+      credential_id: NovaBase64url.bytesToB64url(made.rawId),
+      client_data: NovaBase64url.bytesToB64url(response.clientDataJSON),
+      authenticator_data: NovaBase64url.bytesToB64url(response.getAuthenticatorData()),
+      public_key: NovaBase64url.bytesToB64url(key),
       algorithm: response.getPublicKeyAlgorithm(),
     }, reloadApprovals);
     if (result.success) field.value = "";
@@ -1931,7 +1941,7 @@ async function removePasskey(passkey, button) {
   button.disabled = true;
   try {
     await whileAsking(button, checkWords(passkey.id),
-      () => change("/api/passkeys/remove", { id: passkey.id }, reloadApprovals));
+      () => change("/api/passkeys/remove", { id: passkey.id }, reloadApprovals, approvalWithin()));
   } finally {
     button.disabled = false;
   }
@@ -3790,7 +3800,7 @@ function setUpSettings() {
     // Raising an approval setting needs his OK, which the save waits for.
     const raised = changed.some((input) => input.name.startsWith("approvals.") && Number(input.value) > Number(input.dataset.saved));
     const result = await whileAsking(document.getElementById("unsaved"), raised ? checkWords() : null,
-      () => change("/api/settings", { changes }));
+      () => change("/api/settings", { changes }, load, raised ? approvalWithin() : CHANGE_WITHIN), countChanges);
     if (result.success) {
       for (const input of changed) input.dataset.saved = valueOf(input);
       offerRestart = Boolean(result.restart_needed);

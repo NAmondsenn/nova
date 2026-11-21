@@ -129,7 +129,7 @@ const APPROVALS = {
 // each { state, hash }, which belong to another load of a document - going back to one is a
 // whole new load, not a popstate. `state` is what Nova says of itself.
 function page({ hash = "", entry = null, before = [], loggedIn = true, wide = false, state = STATE, route = null,
-                approvals = APPROVALS } = {}) {
+                approvals = APPROVALS, post = null } = {}) {
   const nodes = new Map();
   const document = {
     hidden: false,
@@ -208,8 +208,10 @@ function page({ hash = "", entry = null, before = [], loggedIn = true, wide = fa
         this.value = value;
       }
     },
-    async fetch(path) {
+    async fetch(path, options = {}) {
       asked.push(path);
+      // A change, answered by the test's own `post` where it has one.
+      if (options.method === "POST" && post) return post(path, options, answer);
       if (path === "/api/login-state") return answer(login);
       if (path === "/api/state") return answer(answers.state);
       if (path === "/api/approvals") return answer(answers.approvals);
@@ -576,4 +578,63 @@ test("the approvals section is hidden through npm", async () => {
   assert.equal(tailnet.node("passkeys").textContent.includes("Phone"), true);
   assert.equal(tailnet.node("approvers").textContent.includes("Can approve"), true);
   assert.equal(tailnet.node("recent-approvals").textContent.includes("Remove 'Dentist'"), true);
+});
+
+// A change Nova answers only once he approves, `after` milliseconds of the page's time on - or
+// never, if the page gives up first, as fetch does when its signal aborts.
+const waitsForOk = (after, message) => (path, options, answer) => new Promise((resolve, reject) => {
+  options.signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+  setTimeout(() => resolve(answer({ success: true, message })), after);
+});
+
+// Lets the page's promises settle, with no time passing.
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+test("a change which waits for his OK is given as long as Nova waits, the control saying where to give it", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const off = { ...APPROVALS, satellites: [{ ...APPROVALS.satellites[0], can_approve: false }] };
+  const run = async (state, after) => {
+    const shown = page({ state, approvals: off, post: waitsForOk(after, "pc can approve now.") });
+    await arrived(shown);
+    await shown.context.loadApprovals();
+    const box = descendants(shown.node("approvers")).find((one) => one.getAttribute("role") === "switch");
+    const words = descendants(shown.node("approvers")).find((one) => one.text === "Can approve" || one.text.startsWith("Check"));
+    box.checked = true;
+    const done = Promise.all(box.listeners.change.map((listener) => listener()));
+    await settle();
+    // Waiting: the switch is off and its words say where to approve.
+    assert.equal(words.text, "Check your phone.");
+    assert.equal(box.disabled, true);
+    return { shown, box, words, done };
+  };
+  // With Nova's wait not known, it's given the longest Nova waits: well past a change's usual 60 seconds.
+  const unknown = await run(STATE, 90000);
+  t.mock.timers.tick(61000);
+  await settle();
+  assert.equal(unknown.words.text, "Check your phone.");
+  t.mock.timers.tick(30000);
+  await unknown.done;
+  assert.equal(unknown.shown.node("toast").textContent, "pc can approve now.");
+  assert.equal(unknown.words.text, "Can approve");
+  assert.equal(unknown.box.disabled, false);
+  // With it known, 2 minutes and 15 seconds - and no longer.
+  const wait = { key: "approvals.wait_minutes", label: "Minutes to wait for an answer", kind: "number", value: 2,
+                 used: "Used straight away", form: "number", min: 1, max: 10, whole: true };
+  const known = await run({ ...STATE, settings: [wait] }, 200000);
+  t.mock.timers.tick(134000);
+  await settle();
+  assert.equal(known.words.text, "Check your phone.");
+  t.mock.timers.tick(2000);
+  await known.done;
+  assert.equal(known.shown.node("toast").textContent, "Nova didn't answer in time, so that may or may not have worked.");
+  assert.equal(known.box.disabled, false);
+});
+
+test("a satellite which can approve is named as it's said, with its machine name under it", async () => {
+  const shown = page();
+  await arrived(shown);
+  await shown.context.loadApprovals();
+  const texts = descendants(shown.node("approvers")).map((one) => one.text).filter(Boolean);
+  assert.equal(texts.includes("The PC"), true);
+  assert.equal(texts.includes("pc · Connected"), true);
 });
