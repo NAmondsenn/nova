@@ -4589,6 +4589,13 @@ def test_a_session_with_no_conversations_leaves_the_phrases_to_claude(make_sessi
 
 # An open conversation, turn after turn
 
+# How long a conversation's test waits for its turns to go by, in seconds: each turn records until its pause,
+# with the brain's polling and the feed's own wall-clock rules besides, on a machine which may be running the
+# whole suite. Long, as it's only ever used up by a test which is failing - and the wait is for a count of turns
+# reached, not met exactly, so a wrong turn fails on what was said rather than by timing out.
+TURNS = 20
+
+
 def _in_a_conversation(brain, connect, make_session, *replies, ended=None, **settings):
     """
     A session at a satellite which knows conversations, answering with the replies given, with one
@@ -4668,7 +4675,8 @@ def test_more_than_three_turns(brain, connect, make_session):
     running(session)
 
     pi.wake(said())
-    assert wait_for(lambda: len(brain.tts.said) == 6)
+    assert wait_for(lambda: len(brain.tts.said) >= 6, seconds=TURNS)
+    assert brain.tts.said == ["One?", "Two.", "Three?", "Four?", "Five?", "Six."]
     assert session.conversation.heard == [("First.", False), ("Second.", True), ("Third.", False),
                                           ("Fourth.", True), ("Fifth.", True), ("Sixth.", True)]
     # Each turn not after a question starts afresh, as a wake word does.
@@ -4696,7 +4704,7 @@ def test_a_turn_uses_the_conversations_pause_and_longest_turn(brain, connect, ma
     running(session)
 
     pi.wake(said())
-    assert wait_for(lambda: len(pi.messages("play_stream")) == 2)
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 2, seconds=TURNS)
     ordinary, turn = given
     assert (ordinary["silence_duration"], ordinary["timeout"], ordinary.get("open_wait")) == (0.6, 15.0, None)
     assert ordinary["no_words_after"] == 1.0
@@ -4708,7 +4716,7 @@ def test_a_turn_uses_the_conversations_pause_and_longest_turn(brain, connect, ma
     # Read as each turn starts, so a change on the settings page is used from the next.
     brain.config.data["conversation"] = {"pause_seconds": 2.5, "longest_turn": 120}
     pi.say("played", id=pi.messages("play_stream")[1]["id"])
-    assert wait_for(lambda: len(given) == 3)
+    assert wait_for(lambda: len(given) >= 3, seconds=TURNS)
     assert (given[2]["silence_duration"], given[2]["timeout"]) == (2.5, 120)
     _ended(session)
 
@@ -4720,7 +4728,8 @@ def test_no_listening_sound_between_turns(brain, connect, make_session):
     running(session)
 
     pi.wake(said())
-    assert wait_for(lambda: len(brain.tts.said) == 4 and len(pi.messages("listen")) == 4)
+    assert wait_for(lambda: len(brain.tts.said) >= 4 and len(pi.messages("listen")) >= 4, seconds=TURNS)
+    assert brain.tts.said == ["Okay."] * 4
     # The wake word's, and the conversation's own once as its turns begin - none between them.
     assert _sounds(pi) == ["listening.wav", "listening.wav"]
     _ended(session)
@@ -4736,7 +4745,7 @@ def test_starting_plays_it_once_and_says_go_ahead(brain, connect, make_session):
     running(session)
 
     pi.wake(said())
-    assert wait_for(lambda: len(brain.tts.said) == 3)
+    assert wait_for(lambda: len(brain.tts.said) >= 3, seconds=TURNS)
     # Said once, by the start itself, and the satellite told before its first open listen, which the
     # listening sound follows - once.
     assert brain.tts.said[0] == "Go ahead." and brain.tts.said.count("Go ahead.") == 1
@@ -4757,12 +4766,12 @@ def test_silence_and_noise_between_turns_say_nothing(brain, connect, make_sessio
     running(session)
 
     pi.wake(said())
-    assert wait_for(lambda: len(brain.tts.said) == 2, seconds=10)
+    assert wait_for(lambda: len(brain.tts.said) >= 2, seconds=TURNS)
     assert brain.tts.said == ["Okay.", "Right."]
     assert session.conversation.heard == [("Hello.", False), ("Again.", False)]
     # No falling sound, and the next turn listens.
     assert _sounds(pi) == ["listening.wav", "listening.wav"]
-    assert wait_for(lambda: len(pi.messages("listen")) == 5)
+    assert wait_for(lambda: len(pi.messages("listen")) >= 5, seconds=TURNS)
     assert brain.open_conversation.on_at(session.satellite.name)
     _ended(session)
 
@@ -4780,7 +4789,7 @@ def test_a_command_mid_conversation_runs_locally(brain, connect, make_session, m
 
     pi.wake(said())
     # Heard as a fresh request, so the everyday command is Nova's own, not Claude's.
-    assert wait_for(lambda: len(pi.messages("listen")) == 2)
+    assert wait_for(lambda: len(pi.messages("listen")) >= 2, seconds=TURNS)
     assert brain.stt.made[1].finished_with is not None
     assert asked == []
     _ended(session)
@@ -4796,7 +4805,10 @@ def test_a_turn_after_a_question_is_its_answer(brain, connect, make_session):
     running(session)
 
     pi.wake(said())
-    assert wait_for(lambda: len(brain.tts.said) == 2)
+    assert wait_for(lambda: len(brain.tts.said) >= 2, seconds=TURNS)
+    # Both turns heard, and the answer's reply said.
+    assert [made.text for made in brain.stt.made[:2]] == ["Turn the lights on.", "The kitchen."]
+    assert brain.tts.said == ["Which room?", "The kitchen lights are on."]
     # Its answer - with the conversation not started again for it, so a yes to it confirms.
     assert session.conversation.heard == [("Turn the lights on.", False), ("The kitchen.", True)]
     assert session.conversation.started == [False]
@@ -4813,7 +4825,7 @@ def test_the_quiet_spell_ends_it_and_says_so(brain, connect, make_session):
     running(session)
 
     pi.wake(said())
-    assert wait_for(lambda: len(brain.tts.said) == 2 and session._idle.is_set(), seconds=10)
+    assert wait_for(lambda: len(brain.tts.said) >= 2 and session._idle.is_set(), seconds=TURNS)
     assert brain.tts.said == ["Okay.", "I'll leave it there."]
     assert [message["on"] for message in pi.messages("conversation")] == [True, False]
     assert _sounds(pi) == ["listening.wav", "listening.wav", "not_heard.wav"]
@@ -4828,7 +4840,7 @@ def test_three_turns_not_for_nova_end_it(brain, connect, make_session):
     running(session)
 
     pi.wake(said())
-    assert wait_for(lambda: len(brain.tts.said) == 2 and session._idle.is_set())
+    assert wait_for(lambda: len(brain.tts.said) >= 2 and session._idle.is_set(), seconds=TURNS)
     assert brain.tts.said == ["Okay.", "I'll leave it there."]
     assert len(session.conversation.heard) == 4
     assert [message["on"] for message in pi.messages("conversation")] == [True, False]
@@ -4845,7 +4857,7 @@ def test_an_end_phrase_ends_it_with_okay(brain, connect, make_session):
     running(session)
 
     pi.wake(said())
-    assert wait_for(lambda: len(brain.tts.said) == 2 and session._idle.is_set())
+    assert wait_for(lambda: len(brain.tts.said) >= 2 and session._idle.is_set(), seconds=TURNS)
     # "Okay." from the end itself, and nothing more said: he asked.
     assert brain.tts.said == ["Go ahead.", "Okay."]
     assert [message["on"] for message in pi.messages("conversation")] == [True, False]
@@ -4884,7 +4896,7 @@ def test_a_turn_which_goes_wrong_ends_the_conversation_and_says_so(brain, connec
     running(session)
 
     pi.wake(said())
-    assert wait_for(lambda: len(brain.tts.said) == 3 and session._idle.is_set())
+    assert wait_for(lambda: len(brain.tts.said) >= 3 and session._idle.is_set(), seconds=TURNS)
     assert brain.tts.said == ["Okay.", "Sorry, something went wrong there.", "I'll leave it there."]
     assert [message["on"] for message in pi.messages("conversation")] == [True, False]
     assert _sounds(pi)[-1] == "not_heard.wav" and brain.open_conversation.satellite is None
@@ -4924,7 +4936,7 @@ def test_ended_while_nova_speaks_its_reply_finishes_and_nothing_more_is_listened
     running(session)
 
     pi.wake(said())
-    assert wait_for(lambda: len(pi.messages("play_stream")) == 2)
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 2, seconds=TURNS)
     session.end_conversation("switch")
     time.sleep(0.2)
     reply = pi.messages("play_stream")[1]["id"]
@@ -4944,7 +4956,7 @@ def test_ended_is_given_every_exchange(brain, connect, make_session):
     running(session)
 
     pi.wake(said())
-    assert wait_for(lambda: len(pi.messages("listen")) == 3)
+    assert wait_for(lambda: len(pi.messages("listen")) >= 3, seconds=TURNS)
     _ended(session)
     # Each turn Nova answered, and by what - not the one taken for speech from what's playing.
     assert [(exchange["user"], exchange["assistant"], exchange["model"]) for exchange in given[0]] == [
@@ -4963,16 +4975,16 @@ def test_something_typed_mid_conversation_is_a_turn(brain, connect, make_session
     assert wait_for(lambda: pi.messages("listen"))
     # Typed while it waits: the listen is ended for it, and it's the next turn.
     session.ask("What's next?")
-    assert wait_for(lambda: len(pi.messages("play_stream")) == 2)
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 2, seconds=TURNS)
     recording = pi.messages("listen")[0]["recording"]
     assert any(message.get("recording") == recording for message in pi.messages("stop_listening"))
     # Typed while a reply is said: the turn after it.
     session.ask("And then?")
     pi.say("played", id=pi.messages("play_stream")[1]["id"])
-    assert wait_for(lambda: len(brain.tts.said) == 3)
+    assert wait_for(lambda: len(brain.tts.said) >= 3, seconds=TURNS)
     assert session.conversation.heard == [("Hello.", False), ("What's next?", False), ("And then?", False)]
     # And it carries on.
-    assert wait_for(lambda: len(pi.messages("listen")) == 2)
+    assert wait_for(lambda: len(pi.messages("listen")) >= 2, seconds=TURNS)
     assert brain.open_conversation.on_at(session.satellite.name)
     _ended(session)
 
@@ -5306,7 +5318,7 @@ def test_an_announcements_own_words_are_not_taken_for_his_turn(brain, connect, m
     pi.wake(said())
     assert wait_for(lambda: pi.messages("listen"))
     saying, results = _announcing(session, "Homelab: the backup failed.")
-    assert wait_for(lambda: len(pi.messages("play_stream")) == 2, seconds=10)
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 2, seconds=TURNS)
     # Their echo, as loud as he is.
     heard.put(said(seconds=0.5, before=0, after=0))
     time.sleep(0.5)
@@ -5333,7 +5345,7 @@ def test_his_turn_over_an_announcements_sound_is_answered_once_it_ends(brain, co
     pi.wake(said())
     assert wait_for(lambda: pi.messages("listen"))
     saying, results = _announcing(session, "Homelab: the backup failed.")
-    assert wait_for(lambda: len(session.conversation.heard) == 2, seconds=10)
+    assert wait_for(lambda: len(session.conversation.heard) >= 2, seconds=TURNS)
     time.sleep(0.3)
     assert brain.tts.said == ["Okay."]
     sound = next(message["id"] for message in pi.messages("play_sound") if message["name"] == "announcement_sound.wav")
@@ -5361,10 +5373,10 @@ def test_a_timer_dismissed_while_its_words_wait_takes_no_gap(brain, connect, mak
     wanted = [True]
     ringing, rang = _announcing(session, "Timer for five minutes.", sound="timer_beep.wav",
                                 still_wanted=lambda: wanted[0], ringing=True)
-    assert wait_for(lambda: len(session.conversation.heard) == 2, seconds=10)
+    assert wait_for(lambda: len(session.conversation.heard) >= 2, seconds=TURNS)
     beep = next(message["id"] for message in pi.messages("play_sound") if message["name"] == "timer_beep.wav")
     pi.say("played", id=beep)
-    assert wait_for(lambda: len(pi.messages("play_stream")) == 2)
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 2, seconds=TURNS)
     # Dismissed - on the phone, say - while its words wait for the gap after the reply.
     wanted[0] = False
     ringing.join(2)
@@ -5398,7 +5410,7 @@ def test_a_routine_due_mid_conversation_is_said_in_a_gap_and_leaves_the_turn_as_
     routine = threading.Thread(target=session.run_routine, args=({"name": "Morning", "steps": ["Say good morning."]},),
                                daemon=True)
     routine.start()
-    assert wait_for(lambda: len(pi.messages("play_stream")) == 2, seconds=10)
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 2, seconds=TURNS)
     assert brain.tts.said == ["Want it quieter?", "Good morning."]
     assert [message["kind"] for message in pi.messages("play_stream")] == ["reply", "announcement"]
     # Its echo, as loud as he is.
@@ -5413,7 +5425,7 @@ def test_a_routine_due_mid_conversation_is_said_in_a_gap_and_leaves_the_turn_as_
     assert all(made.finished_with is None for made in brain.stt.made[1:])
     # His answer is still its answer.
     heard.put(said(seconds=0.5, before=0, after=0))
-    assert wait_for(lambda: session.volume.percent("general") == 40, seconds=10)
+    assert wait_for(lambda: session.volume.percent("general") == 40, seconds=TURNS)
     assert brain.open_conversation.on_at(satellite.name)
     _ended(session)
 
@@ -5456,7 +5468,7 @@ def _music_asked_for(brain, connect, make_session, *then):
     pi.held = {len(replies)}
     running(session)
     pi.wake(said())
-    assert wait_for(lambda: len(pi.messages("play_stream")) == len(replies), seconds=10)
+    assert wait_for(lambda: len(pi.messages("play_stream")) == len(replies), seconds=TURNS)
     return session, pi, speaker
 
 
@@ -5498,7 +5510,7 @@ def test_music_from_before_comes_back_when_it_ends(brain, connect, make_session)
     running(session)
 
     pi.wake(said())
-    assert wait_for(lambda: len(pi.messages("play_stream")) == 2)
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 2, seconds=TURNS)
     assert speaker.started[0].paused
     pi.say("played", id=pi.messages("play_stream")[1]["id"])
     _ended(session)
@@ -5572,12 +5584,12 @@ def test_music_asked_for_on_spotify_waits_for_the_end_of_the_conversation(brain,
     running(session)
 
     pi.wake(said())
-    assert wait_for(lambda: len(pi.messages("play_stream")) == 2, seconds=10)
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 2, seconds=TURNS)
     assert brain.tts.said[-1] == "I'll play it when we're done."
     assert player.played == ["Drake"] and not player.playing
     assert brain.open_conversation.on_at(satellite.name)
     pi.say("played", id=pi.messages("play_stream")[1]["id"])
-    assert wait_for(lambda: session._idle.is_set(), seconds=10)
+    assert wait_for(lambda: session._idle.is_set(), seconds=TURNS)
     assert brain.open_conversation.satellite is None
     assert wait_for(lambda: player.playing)
 
@@ -5621,7 +5633,7 @@ def _over_a_reply(brain, connect, make_session, *texts, ready=True, setup=None):
     pi.held = {2}
     running(session)
     pi.wake(said())
-    assert wait_for(lambda: len(pi.messages("play_stream")) == 2)
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 2, seconds=TURNS)
     return session, pi
 
 
@@ -5635,7 +5647,7 @@ def _open_microphone(pi, after=2):
 
     def send():
         try:
-            wait_for(lambda: len(pi.messages("listen")) >= after, seconds=10)
+            wait_for(lambda: len(pi.messages("listen")) >= after, seconds=TURNS)
             while True:
                 try:
                     pi.send_audio(heard.get_nowait())
@@ -5675,7 +5687,7 @@ def test_a_voice_dips_the_reply_and_words_stop_it(brain, connect, make_session):
     reply = pi.messages("play_stream")[1]["id"]
     # His voice, from a frame's edge almost a second into the reply, for a second.
     heard.put(said(seconds=1.0, before=0.96, after=0))
-    assert wait_for(lambda: len(pi.messages("play_stream")) == 3, seconds=10)
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 3, seconds=TURNS)
     # Down to the dip level of its volume (0.7) at once, then stopped.
     assert _fades(pi, reply) == [(0.21, 0.05)] and _stopped(pi, reply)
     # His words are his next turn, said over a reply, in the listen the reply was heard over - no other asked for.
@@ -5703,7 +5715,7 @@ def test_a_cough_dips_it_and_it_carries_on(brain, connect, make_session):
     pi.say("played", id=reply)
     # Played to the end, and the next turn hears what he says after it in the same listen.
     heard.put(said(seconds=0.5, before=0, after=0))
-    assert wait_for(lambda: len(pi.messages("play_stream")) == 3, seconds=10)
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 3, seconds=TURNS)
     assert not _stopped(pi, reply)
     assert session.conversation.heard[2] == ("And Tuesday?", False)
     assert session.conversation.started == [False, False, False]
@@ -5733,12 +5745,12 @@ def test_a_press_cuts_in(brain, connect, make_session):
     session, pi = _over_a_reply(brain, connect, make_session, "What about Tuesday?")
     heard = _open_microphone(pi)
     reply = pi.messages("play_stream")[1]["id"]
-    assert wait_for(lambda: len(pi.messages("listen")) == 2)
+    assert wait_for(lambda: len(pi.messages("listen")) >= 2, seconds=TURNS)
     # The satellite has stopped the reply itself, and played its press sound.
     pi.say("cut_in", recording=pi.messages("listen")[1]["recording"])
     assert wait_for(lambda: _stopped(pi, reply))
     heard.put(said(seconds=0.5, before=0.2, after=0))
-    assert wait_for(lambda: len(pi.messages("play_stream")) == 3, seconds=10)
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 3, seconds=TURNS)
     # His turn begins there and then, in the same listen, said over a reply - with nothing for speech-to-text
     # to hear over the reply first.
     assert session.conversation.heard[2] == ("What about Tuesday?", False)
@@ -5758,7 +5770,7 @@ def test_hey_nova_over_a_reply_stops_it_and_is_taken_off_the_turn(brain, connect
     heard = _open_microphone(pi)
     reply = pi.messages("play_stream")[1]["id"]
     heard.put(said(seconds=1.0, before=0.5, after=0))
-    assert wait_for(lambda: len(pi.messages("play_stream")) == 3, seconds=10)
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 3, seconds=TURNS)
     assert _stopped(pi, reply)
     assert session.conversation.heard[2] == ("What about Tuesday", False)
     _ended(session)
@@ -5777,10 +5789,10 @@ def _only_the_wake_word_cuts_in(session, pi, then):
     pi.held = {2, 3}
     pi.wake(said(), talked_over=True)
     assert wait_for(lambda: _stopped(pi, reply))
-    assert wait_for(lambda: len(pi.messages("play_stream")) == 3, seconds=10)
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 3, seconds=TURNS)
     assert session.conversation.heard[2] == ("What about Tuesday?", False)
     assert session.conversation.started == [False, False, True]
-    assert wait_for(lambda: len(pi.messages("listen")) == 2)
+    assert wait_for(lambda: len(pi.messages("listen")) >= 2, seconds=TURNS)
     assert _listens_and_replies(pi)[-2:] == ["listen", "play_stream"]
     pi.say("played", id=pi.messages("play_stream")[2]["id"])
     _ended(session)
@@ -5836,8 +5848,8 @@ def test_outside_a_conversation_nothing_listens_during_a_reply(brain, connect, m
     brain.open_conversation.start(satellite.name)
     pi.answers = [said(before=0, after=2)]
     pi.wake(said())
-    assert wait_for(lambda: len(pi.messages("play_stream")) == 3, seconds=10)
-    assert wait_for(lambda: len(pi.messages("listen")) == 2)
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 3, seconds=TURNS)
+    assert wait_for(lambda: len(pi.messages("listen")) >= 2, seconds=TURNS)
     assert _listens_and_replies(pi)[-2:] == ["listen", "play_stream"]
     pi.say("played", id=pi.messages("play_stream")[2]["id"])
     _ended(session)
@@ -5846,7 +5858,7 @@ def test_outside_a_conversation_nothing_listens_during_a_reply(brain, connect, m
 def test_nemotron_only_hears_once_a_voice_has(brain, connect, make_session):
     session, pi = _over_a_reply(brain, connect, make_session, "Hang on.", "Hang on.")
     heard = _open_microphone(pi)
-    assert wait_for(lambda: len(pi.messages("listen")) == 2)
+    assert wait_for(lambda: len(pi.messages("listen")) >= 2, seconds=TURNS)
     # A second of the reply with only quiet heard over it: nothing for speech-to-text, though the session is
     # getting on all the while.
     moved_at = session.moved_at
@@ -5858,7 +5870,7 @@ def test_nemotron_only_hears_once_a_voice_has(brain, connect, make_session):
     first = brain.stt.made[2].added[0]
     pre_roll = round(session_module.CUT_IN_PRE_ROLL * RATE)
     assert pre_roll <= np.flatnonzero(first)[0] < pre_roll + FRAME
-    assert wait_for(lambda: len(pi.messages("play_stream")) == 3, seconds=10)
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 3, seconds=TURNS)
     _ended(session)
 
 
@@ -5867,7 +5879,7 @@ def test_a_cut_in_reply_is_marked_cut_short(brain, connect, make_session):
     session, pi = _over_a_reply(brain, connect, make_session, "Stop.", "Stop.")
     heard = _open_microphone(pi)
     heard.put(said(seconds=0.5, before=0.5, after=0))
-    assert wait_for(lambda: len(session.conversation.heard) == 3, seconds=10)
+    assert wait_for(lambda: len(session.conversation.heard) >= 3, seconds=TURNS)
     assert session.conversation.started[2] is True
     assert wait_for(lambda: any(turn.get("cut_in") for turn in _turns_logged()))
     turn = next(turn for turn in _turns_logged() if turn.get("cut_in"))
@@ -5899,11 +5911,11 @@ def test_ended_while_a_reply_is_listened_over_stops_the_listen_and_the_reply_fin
 def test_a_wake_word_over_a_reply_listened_over_still_stops_it(brain, connect, make_session):
     session, pi = _over_a_reply(brain, connect, make_session, "What about Tuesday?")
     reply = pi.messages("play_stream")[1]["id"]
-    assert wait_for(lambda: len(pi.messages("listen")) == 2)
+    assert wait_for(lambda: len(pi.messages("listen")) >= 2, seconds=TURNS)
     # From a satellite which can still hear its wake word while it sends what it hears.
     pi.wake(said(), talked_over=True)
     assert wait_for(lambda: _stopped(pi, reply))
-    assert wait_for(lambda: len(session.conversation.heard) == 3, seconds=10)
+    assert wait_for(lambda: len(session.conversation.heard) >= 3, seconds=TURNS)
     assert session.conversation.heard[2] == ("What about Tuesday?", False)
     assert session.conversation.started == [False, False, True]
     _ended(session)
@@ -5924,7 +5936,7 @@ def test_a_voice_still_going_as_the_reply_ends_starts_the_next_turn(brain, conne
     heard.put(said(seconds=1.0, before=0.96, after=0))
     assert wait_for(lambda: _fades(pi, reply))
     pi.say("played", id=reply)
-    assert wait_for(lambda: len(pi.messages("play_stream")) == 3, seconds=10)
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 3, seconds=TURNS)
     # Never stopped, nor brought back up once it had finished.
     assert not _stopped(pi, reply) and _fades(pi, reply) == [(0.21, 0.05)]
     # The next turn is in the same listen, from half a second before his voice began, so all of it is heard.
@@ -5950,7 +5962,7 @@ def test_listening_noises_or_novas_own_echo_as_the_reply_ends_arent_the_next_tur
     pi.say("played", id=reply)
     # What he says after the reply, quieter than what was heard over it.
     heard.put(np.full(round(0.5 * RATE), 4000, np.int16))
-    assert wait_for(lambda: len(pi.messages("play_stream")) == 3, seconds=10)
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 3, seconds=TURNS)
     assert session.conversation.heard[2] == ("And Tuesday?", False)
     # The next turn starts where the reply ended, so none of what was heard over it is in it.
     recording = brain.stt.made[3].finished_with
@@ -5962,10 +5974,10 @@ def test_something_typed_while_a_reply_is_listened_over_is_the_turn_after_it(bra
     session, pi = _over_a_reply(brain, connect, make_session)
     _open_microphone(pi)
     reply = pi.messages("play_stream")[1]["id"]
-    assert wait_for(lambda: len(pi.messages("listen")) == 2)
+    assert wait_for(lambda: len(pi.messages("listen")) >= 2, seconds=TURNS)
     session.ask("And then?")
     pi.say("played", id=reply)
-    assert wait_for(lambda: len(pi.messages("play_stream")) == 3, seconds=10)
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 3, seconds=TURNS)
     assert session.conversation.heard[2] == ("And then?", False)
     # The listen the reply was heard over isn't left sending what the satellite hears.
     recording = pi.messages("listen")[1]["recording"]
@@ -6003,7 +6015,7 @@ def test_a_failure_hearing_over_a_reply_lets_it_finish_at_full_volume(brain, con
     assert not _stopped(pi, reply) and brain.tts.said == ["Okay.", TODAY]
     pi.say("played", id=reply)
     # The conversation goes on, with the one listen of its next turn - nothing said, and nothing left open.
-    assert wait_for(lambda: len(pi.messages("listen")) == 3)
+    assert wait_for(lambda: len(pi.messages("listen")) >= 3, seconds=TURNS)
     time.sleep(0.3)
     assert len(pi.messages("listen")) == 3 and brain.tts.said == ["Okay.", TODAY]
     third = pi.messages("listen")[2]["recording"]
@@ -6042,7 +6054,7 @@ def test_words_stop_the_reply_before_speech_to_text_is_let_go_of(brain, connect,
                                 "Hang on, what about Tuesday?", setup=noting_stops)
     heard = _open_microphone(pi)
     heard.put(said(seconds=1.0, before=0.5, after=0))
-    assert wait_for(lambda: "cancel" in order, seconds=10)
+    assert wait_for(lambda: "cancel" in order, seconds=TURNS)
     assert "stop" in order and order.index("stop") < order.index("cancel")
     _ended(session)
 
@@ -6067,7 +6079,7 @@ def test_a_wake_word_while_the_reply_is_dipped_doesnt_bring_it_back_up(brain, co
     time.sleep(0.2)
     # Stopped where it was, not swelling back up first.
     assert _fades(pi, reply) == [(0.21, 0.05)]
-    assert wait_for(lambda: len(session.conversation.heard) == 3, seconds=10)
+    assert wait_for(lambda: len(session.conversation.heard) >= 3, seconds=TURNS)
     assert session.conversation.heard[2] == ("What about Tuesday?", False)
     # The turn after it may have begun by now.
     assert session.conversation.started[:3] == [False, False, True]
@@ -6081,7 +6093,7 @@ def test_a_short_word_heard_only_once_the_voice_has_stopped_stops_the_reply(brai
     heard = _open_microphone(pi)
     reply = pi.messages("play_stream")[1]["id"]
     heard.put(said(seconds=0.3, before=0.96, after=0))
-    assert wait_for(lambda: len(pi.messages("play_stream")) == 3, seconds=10)
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 3, seconds=TURNS)
     assert _stopped(pi, reply) and _fades(pi, reply) == [(0.21, 0.05)]
     assert brain.stt.made[2].settled
     assert session.conversation.heard[2] == ("Wait.", False)
@@ -6096,14 +6108,14 @@ def test_a_short_word_heard_only_once_the_voice_has_stopped_stops_the_reply(brai
 def test_a_listen_which_stalls_over_a_reply_is_let_go_of_and_the_reply_finishes(brain, connect, make_session):
     session, pi = _over_a_reply(brain, connect, make_session)
     reply = pi.messages("play_stream")[1]["id"]
-    assert wait_for(lambda: len(pi.messages("listen")) == 2)
+    assert wait_for(lambda: len(pi.messages("listen")) >= 2, seconds=TURNS)
     recording = pi.messages("listen")[1]["recording"]
     # Nothing comes from the satellite, so the listen is taken to have ended - and is stopped there too.
     assert wait_for(lambda: any(message.get("recording") == recording for message in pi.messages("stop_listening")))
     assert not _stopped(pi, reply) and not session._idle.is_set()
     pi.say("played", id=reply)
     # The next turn asks for a listen of its own.
-    assert wait_for(lambda: len(pi.messages("listen")) == 3)
+    assert wait_for(lambda: len(pi.messages("listen")) >= 3, seconds=TURNS)
     _ended(session)
 
 
@@ -6115,7 +6127,7 @@ def test_a_reply_never_said_to_have_finished_is_given_up_on_and_the_next_turn_li
     reply = pi.messages("play_stream")[1]["id"]
     assert wait_for(lambda: _stopped(pi, reply))
     heard.put(said(seconds=0.5, before=0, after=0))
-    assert wait_for(lambda: len(pi.messages("play_stream")) == 3, seconds=10)
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 3, seconds=TURNS)
     assert session.conversation.heard[2] == ("And Tuesday?", False)
     assert session.conversation.started == [False, False, False]
     assert _listens_and_replies(pi)[:6] == ["play_stream", "listen", "listen", "play_stream", "listen",
