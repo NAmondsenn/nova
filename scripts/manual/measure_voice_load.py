@@ -10,7 +10,9 @@ speech itself) and the longest gap between two pieces of it, which is how long a
 played would have to be held back.
 
 It plays no sound and uses no microphone: the speech is only made, and thrown away. Run it
-on the brain, where the models are, as the brain's user (the release checklist says how).
+on the brain, where the models are, as the brain's user. Through the brain's read-only check
+command the script arrives on standard input, so it can't tell where the repository is: pass
+--tree, as the release checklist shows.
 """
 
 import argparse
@@ -19,19 +21,14 @@ import os
 import sys
 import threading
 import time
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import soxr
 
-# Add the project root to the path so the voice_assistant package imports work
-# no matter where the scripts are run from.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-from voice_assistant import paths
-from voice_assistant.config import Config
-from voice_assistant.nemotron import RATE, Nemotron
-from voice_assistant.text_to_speech import TextToSpeech
+# Nemotron's rate, from voice_assistant/nemotron.py (a test checks it still is), written out
+# here as the package can only be imported once the tree it's in is on the path.
+RATE = 16000
 
 # What the reply says, a sentence at a time as a reply is made, said over again until
 # there's enough. Plain sentences like Nova's own, none longer than it would speak at once.
@@ -52,7 +49,30 @@ def parse_args():
     """CLI args: how much speech to make."""
     parser = argparse.ArgumentParser(description="Measure the brain's voice with and without Nemotron listening")
     parser.add_argument("--seconds", type=float, required=True, help="About how much speech to make")
+    parser.add_argument("--tree", default=None,
+                        help="The repository to import voice_assistant and find the models in - needed when the "
+                             "script is run from standard input")
     return parser.parse_args()
+
+
+def tree_to_import(tree: Optional[str], file: str) -> str:
+    """
+    Args:
+        tree: --tree, or None.
+        file: This script's __file__, which is "<stdin>" when it's run from standard input.
+
+    Returns:
+        The repository to import from: --tree, else the one this script is in.
+
+    Raises:
+        SystemExit: If neither is known.
+    """
+    if tree:
+        return os.path.abspath(os.path.expanduser(tree))
+    if os.path.isfile(file):
+        return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(file))))
+    raise SystemExit("This script was run from standard input, so it can't tell where the repository is: "
+                     "pass --tree <the repository's folder>.")
 
 
 def longest_gap(arrivals: List[float]) -> float:
@@ -139,6 +159,15 @@ def listen(nemotron, pieces: List[np.ndarray], stop: threading.Event):
 def measure_voice_load():
     """Makes the speech on its own and then with Nemotron listening, and prints how each went."""
     args = parse_args()
+    tree = tree_to_import(args.tree, globals().get("__file__", "<stdin>"))
+    # The package is imported only now, once the tree it's in is on the path, and so are the
+    # models - importing this file needs none of it.
+    sys.path.insert(0, tree)
+    from voice_assistant import paths
+    from voice_assistant.config import Config
+    from voice_assistant.nemotron import Nemotron
+    from voice_assistant.text_to_speech import TextToSpeech
+
     config = Config()
     folder = os.path.join(paths.PROJECT_DIRECTORY, config.section("backend").get("model"))
     if not os.path.isdir(folder):
