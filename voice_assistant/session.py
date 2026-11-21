@@ -22,6 +22,7 @@ import queue
 import re
 import threading
 import time
+from datetime import datetime
 from typing import Callable, Dict, List, Optional, Tuple
 
 from voice_assistant import paths, storage
@@ -34,6 +35,7 @@ from voice_assistant.ha_device import DeviceControls, NovaDevice
 from voice_assistant.home_assistant import HomeAssistant
 from voice_assistant.intents import LocalIntents
 from voice_assistant.llm import LLMHandler
+from voice_assistant.long_recordings import note_long_recording
 from voice_assistant.media_controls import EVERY as MEDIA_EVERY
 from voice_assistant.media_controls import NowPlayingFeed
 from voice_assistant.logging_setup import transcripts_logged
@@ -209,6 +211,10 @@ class Session:
         # How long each stage of every interaction took, one line per interaction,
         # for scripts/latency_report.py to summarise.
         self.latency_file = os.path.join(paths.LOGS_DIR, "latency.jsonl")
+
+        # The newest push-to-talk recordings whose speech ran long, for seeing whether the
+        # ways of ending a recording work - see long_recordings.py.
+        self.long_recordings_file = os.path.join(paths.LOGS_DIR, "long-recordings.jsonl")
 
         # Set while the assistant is idle, cleared while it's dealing with the user.
         # Timer announcements wait on this, so they don't talk over a conversation.
@@ -1335,6 +1341,10 @@ class Session:
         finally:
             # The user has stopped, or isn't going to start - so the satellite stops sending.
             self.satellite.stop_listening(feed)
+        # A recording the satellite ended on a press of its key ended, as far as the recorder
+        # can tell, when its feed did - the press is what makes that worth saying.
+        if report.get("ended_by") == "feed ended" and feed.pressed:
+            report["ended_by"] = "pressed"
         # So the log of timings says which of the ways to end a recording did.
         timeline.note(ended_by=report.get("ended_by"))
         # An answer the user ended with a press, having said nothing, is their changing
@@ -1377,6 +1387,8 @@ class Session:
         # Retrieves the transcribed text, without the end of the wake word which the
         # recording sometimes catches - see strip_wake_word.
         text = strip_wake_word((transcription or {}).get("text", ""), self.wake_word)
+        if self.satellite.push_to_talk:
+            self._note_if_long(report, timeline, text)
         if not text.strip():
             timeline.note(outcome="nothing_transcribed")
             if (transcription or {}).get("imagined"):
@@ -1416,6 +1428,26 @@ class Session:
             return self._handle_interaction(answer, follow_up=True, timeline=follow_up_timeline)
         finally:
             follow_up_timeline.save(self.latency_file)
+
+    def _note_if_long(self, report: Dict, timeline: Timeline, text: str):
+        """
+        Keeps a note of a recording whose speech ran long, for seeing how well the ways of
+        ending a recording work - see long_recordings.py. Done once the words are known, so
+        they can go in it, and even when there are none: loud sound which wasn't speech is
+        the case it's most wanted for.
+
+        Args:
+            report: What record_until_silence said about the recording.
+            timeline: The recording's Timeline, whose marks say when the speech started
+                and ended.
+            text: What was heard.
+        """
+        started, ended = timeline.marks.get("speech_started"), timeline.marks.get("speech_ended")
+        if started is None or ended is None:
+            return
+        # The words are only kept as they are in the logs: while transcripts are.
+        note_long_recording(self.long_recordings_file, datetime.now(), (ended - started) / 1000, report,
+                            words=text if transcripts_logged() else None)
 
     def _handle_typed(self, text: str, follow_up: bool = False, timeline: Optional[Timeline] = None) -> Optional[Dict]:
         """

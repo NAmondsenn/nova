@@ -8,6 +8,7 @@ and soxr installed (as they are on the Pi), and is skipped anywhere they aren't.
 """
 
 import importlib
+import json
 import logging
 import os
 import socket
@@ -205,6 +206,7 @@ class FakePiper:
 class FakeTimeline:
     def __init__(self):
         self.notes = {}
+        self.marks = {}
 
     def mark(self, stage, at=None):
         pass
@@ -2172,24 +2174,29 @@ class QuietWordsTranscription(FakeTranscription):
         return None
 
 
-def _recordings(monkeypatch, ended_by="silence"):
-    """Replaces record_until_silence with a spy keeping what each recording was asked, and ending as given."""
+def _recordings(monkeypatch, ended_by="silence", speech=None, **report):
+    """
+    Replaces record_until_silence with a spy keeping what each recording was asked, and ending as given -
+    with the user having spoken for this many seconds, if it says, and the rest of the report as given.
+    """
     asked = []
 
     def record_until_silence(source, detector, heard=None, **kwargs):
         asked.append(kwargs)
-        kwargs["report"]["ended_by"] = ended_by
+        kwargs["report"].update(ended_by=ended_by, **report)
+        if speech is not None:
+            kwargs["timeline"].marks.update(speech_started=1200, speech_ended=1200 + round(speech * 1000))
         return np.zeros(480, np.float32)
 
     monkeypatch.setattr(session_module, "record_until_silence", record_until_silence)
     return asked
 
 
-def _record(session, brain, listener):
+def _record(session, brain, listener, feed=None):
     brain.stt = SimpleNamespace(listen=lambda: listener)
     session.conversation = ScriptedConversation(Reply())
     timeline = FakeTimeline()
-    session._handle_interaction(AudioFeed(), timeline=timeline)
+    session._handle_interaction(AudioFeed() if feed is None else feed, timeline=timeline)
     return timeline
 
 
@@ -2256,6 +2263,131 @@ def test_the_timeline_notes_what_ended_it(brain, connect, make_session, monkeypa
 
     assert _record(make_session(satellite), brain, QuietWordsTranscription()).notes["ended_by"] == "voice drop"
     assert _record(make_session(), brain, QuietWordsTranscription()).notes["ended_by"] == "voice drop"
+
+
+def test_a_recording_ended_on_a_press_is_noted_as_pressed(brain, connect, make_session, monkeypatch):
+    # The recorder only knows the feed ended, but the satellite says whether that was his key.
+    _recordings(monkeypatch, ended_by="feed ended")
+    satellite, _ = connect(name="pc", hostname="pc.local")
+    satellite.push_to_talk = True
+    session = make_session(satellite)
+    pressed, let_go = AudioFeed(), AudioFeed()
+    pressed.end(pressed=True)
+    let_go.end()
+
+    assert _record(session, brain, QuietWordsTranscription(), feed=pressed).notes["ended_by"] == "pressed"
+    # A feed which ended without a press - the satellite going, say - isn't one.
+    assert _record(session, brain, QuietWordsTranscription(), feed=let_go).notes["ended_by"] == "feed ended"
+
+
+def test_only_a_feed_ended_is_changed_to_pressed(brain, connect, make_session, monkeypatch):
+    # A recording the quiet or the limit ended had finished before the press, whatever the feed did after.
+    _recordings(monkeypatch, ended_by="silence")
+    satellite, _ = connect(name="pc", hostname="pc.local")
+    satellite.push_to_talk = True
+    feed = AudioFeed()
+    feed.end(pressed=True)
+
+    assert _record(make_session(satellite), brain, QuietWordsTranscription(), feed=feed).notes["ended_by"] == "silence"
+
+
+# The last 50 long recordings, kept for seeing whether the ends work - see long_recordings.py
+
+def _long_recordings(tmp_path):
+    path = tmp_path / "long-recordings.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def test_a_long_push_to_talk_recording_is_noted_with_its_words(brain, connect, make_session, monkeypatch, tmp_path):
+    _recordings(monkeypatch, ended_by="no new words", speech=6.5, loudness=0.3, levels=[0.3, 0.2])
+    monkeypatch.setattr(session_module, "transcripts_logged", lambda: True)
+    satellite, _ = connect(name="pc", hostname="pc.local")
+    satellite.push_to_talk = True
+    before = datetime.now().replace(microsecond=0)
+    _record(make_session(satellite), brain, QuietWordsTranscription("What time is it?"))
+
+    (line,) = _long_recordings(tmp_path)
+    # When it was heard, then the numbers the recorder saw and the words.
+    assert before <= datetime.fromisoformat(line.pop("at")) <= datetime.now()
+    assert line == {"speech_seconds": 6.5, "ended_by": "no new words", "loudness": 0.3, "levels": [0.3, 0.2],
+                    "words": "What time is it?"}
+
+
+def test_a_long_recording_is_noted_without_its_words_while_transcripts_are_off(brain, connect, make_session,
+                                                                              monkeypatch, tmp_path):
+    _recordings(monkeypatch, speech=6.5)
+    monkeypatch.setattr(session_module, "transcripts_logged", lambda: False)
+    satellite, _ = connect(name="pc", hostname="pc.local")
+    satellite.push_to_talk = True
+    _record(make_session(satellite), brain, QuietWordsTranscription("What time is it?"))
+
+    (line,) = _long_recordings(tmp_path)
+    assert line["speech_seconds"] == 6.5
+    assert "words" not in line
+    assert "What time is it?" not in (tmp_path / "long-recordings.jsonl").read_text()
+
+
+def test_a_long_recording_with_no_words_heard_is_still_noted(brain, connect, make_session, monkeypatch, tmp_path):
+    # Loud sound which wasn't speech is the case the notes are partly for.
+    _recordings(monkeypatch, ended_by="limit", speech=9.0)
+    monkeypatch.setattr(session_module, "transcripts_logged", lambda: True)
+    satellite, _ = connect(name="pc", hostname="pc.local")
+    satellite.push_to_talk = True
+    _record(make_session(satellite), brain, QuietWordsTranscription("", imagined=True))
+
+    (line,) = _long_recordings(tmp_path)
+    assert line["ended_by"] == "limit" and line["words"] == ""
+
+
+def test_a_short_push_to_talk_recording_is_not_noted(brain, connect, make_session, monkeypatch, tmp_path):
+    _recordings(monkeypatch, speech=4.0)
+    satellite, _ = connect(name="pc", hostname="pc.local")
+    satellite.push_to_talk = True
+    _record(make_session(satellite), brain, QuietWordsTranscription("What time is it?"))
+
+    assert _long_recordings(tmp_path) == []
+
+
+def test_a_recording_with_no_speech_marks_is_not_noted(brain, connect, make_session, monkeypatch, tmp_path):
+    # Speech which never started has no length to be long.
+    _recordings(monkeypatch)
+    satellite, _ = connect(name="pc", hostname="pc.local")
+    satellite.push_to_talk = True
+    _record(make_session(satellite), brain, QuietWordsTranscription("What time is it?"))
+
+    assert _long_recordings(tmp_path) == []
+
+
+def test_a_long_wake_word_recording_is_not_noted(brain, make_session, monkeypatch, tmp_path):
+    # The Pi's recordings behave as they always have.
+    _recordings(monkeypatch, speech=9.0)
+    _record(make_session(), brain, QuietWordsTranscription("What time is it?"))
+
+    assert _long_recordings(tmp_path) == []
+
+
+def test_a_recording_ended_on_a_press_is_noted_as_pressed_in_the_long_ones(brain, connect, make_session,
+                                                                         monkeypatch, tmp_path):
+    _recordings(monkeypatch, ended_by="feed ended", speech=8.0)
+    satellite, _ = connect(name="pc", hostname="pc.local")
+    satellite.push_to_talk = True
+    feed = AudioFeed()
+    feed.end(pressed=True)
+    _record(make_session(satellite), brain, QuietWordsTranscription("What time is it?"), feed=feed)
+
+    (line,) = _long_recordings(tmp_path)
+    assert line["ended_by"] == "pressed"
+
+
+def test_a_note_which_cannot_be_kept_does_not_stop_the_reply(brain, connect, make_session, monkeypatch, tmp_path):
+    _recordings(monkeypatch, speech=8.0)
+    satellite, _ = connect(name="pc", hostname="pc.local")
+    satellite.push_to_talk = True
+    session = make_session(satellite)
+    session.long_recordings_file = str(tmp_path / "missing" / "long-recordings.jsonl")
+    _record(session, brain, QuietWordsTranscription("What time is it?"))
+
+    assert session.conversation.heard == [("What time is it?", False)]
 
 
 # For a clock display - see docs/decisions/0013
