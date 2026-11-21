@@ -5327,6 +5327,32 @@ def test_stop_dismisses_it_without_the_wake_word(brain, connect, make_session, m
     _ended(session)
 
 
+def test_a_timer_which_rang_while_his_turn_was_waited_for_is_silenced_by_what_he_says(brain, connect,
+                                                                                      make_session):
+    # It came due in the wait for the next turn - which can last minutes - and rang in its gap, so it was heard:
+    # anything said then silences it, as for an ordinary request, not only a word which dismisses it.
+    brain.open_conversation = OpenConversation(lambda: {"enabled": True})
+    satellite, pi = connect(conversations=True)
+    session = make_session(satellite)
+    brain.stt.texts = ["Let's talk.", "What time is it?"]
+    heard = _open_microphone(pi, after=1)
+    running(session)
+
+    pi.wake(said())
+    assert wait_for(lambda: pi.messages("listen"), seconds=TURNS)
+    # A gap, in which it comes due and rings.
+    time.sleep(1.5)
+    brain.clock.set_timer(60, satellite=satellite.name)
+    brain.clock._tick(time.time() + 61)
+    assert brain.clock.is_ringing()
+    heard.put(said(seconds=0.5, before=0, after=0))
+    assert wait_for(lambda: len(brain.tts.said) >= 2, seconds=TURNS)
+    assert [made.text for made in brain.stt.made[:2]] == ["Let's talk.", "What time is it?"]
+    assert not brain.clock.is_ringing()
+    assert brain.open_conversation.on_at(satellite.name)
+    _ended(session)
+
+
 def test_an_announcements_own_words_are_not_taken_for_his_turn(brain, connect, make_session):
     # What's left of them reaching the open microphone would read as speech - so from as they start until just
     # after they end, nothing is listened to.

@@ -415,6 +415,11 @@ class Session:
         # Whether he has started his turn in the wait the session's thread is in, after which it's no
         # gap until the turn is over, however long he pauses. Only ever read and changed on that thread.
         self._turn_begun = False
+        # Whether that wait has been a gap at all, in which what came due will have rung, and what was
+        # ringing as the user then began their turn - for the turn to silence, as what they heard. See
+        # _begun. Both only ever read and changed on that thread.
+        self._gap_had = False
+        self._ringing_begun: Optional[Dict] = None
         # The sessions of the room whose music the conversation here has let go of, for music asked for
         # in it to play before it ends, each with the player it let play - see _let_music_play. Only on
         # the session's own thread.
@@ -1843,6 +1848,7 @@ class Session:
                 it, rather than it being lost.
         """
         gap = not self._turn_begun and quiet >= GAP_QUIET
+        self._gap_had = self._gap_had or gap
         with self._gap:
             if self._gap_words and not self._turn_begun:
                 self._in_gap = False
@@ -1858,12 +1864,19 @@ class Session:
 
         Returns:
             The same, which first ends the wait's gap for the rest of his turn: the recording gives it
-            nothing until he has started talking.
+            nothing until he has started talking. If the wait has been a gap, it reads then what is
+            ringing, for the turn to silence (see _handle_interaction): anything which came due in the
+            minutes the wait can last rang in its gap, and the user talking means they've heard it, as
+            for an ordinary request. Not without a gap, when what came due since the wait began hasn't
+            rung yet, and mustn't be silenced unheard.
         """
         def begun(audio: np.ndarray):
             if not self._turn_begun:
                 self._turn_begun = True
                 self._close_gap()
+                if self._gap_had:
+                    self._ringing_begun = self.brain.clock.ringing_state(
+                        satellite=heard_in(self.brain.room_of(self.satellite.name)))
             heard(audio)
         return begun
 
@@ -2045,7 +2058,8 @@ class Session:
             # is a gap whenever it has heard no speech for a while, until he begins (see _waited).
             detector = _Moving(detector, self._moved, self._waited)
             heard = self._begun(listening.add)
-            self._turn_begun = False
+            self._turn_begun = self._gap_had = False
+            self._ringing_begun = None
         elif follow_up:
             before = start = 0
         elif pre_roll is None:
@@ -2161,6 +2175,10 @@ class Session:
                 self._say(NOT_CAUGHT)
             return None
 
+        if open_turn and self._ringing_begun is not None:
+            # What was ringing as the user began, rather than as the wait for them did - see _begun.
+            with self._conversation_lock:
+                self.conversation.ringing = self._ringing_begun
         heard_over, asked = self._reply_to(text, follow_up=follow_up, timeline=timeline)
         # In a conversation, its own next turn is the answer - see _converse.
         if heard_over is not None or not asked or self._conversation_here():
