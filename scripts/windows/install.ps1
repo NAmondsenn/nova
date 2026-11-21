@@ -80,18 +80,23 @@ else {
     Write-Host 'The packages are as requirements-pc.txt says'
 }
 
-# The echo canceller's library, speexdsp.dll, which Windows has no package for: the 64-bit
-# build in SpeexDSPSharp.Natives 1.3.0 on nuget.org (built from xiph/speexdsp on 18 April
-# 2026), which imports only kernel32.dll and msvcrt.dll, so there is no runtime to ship
-# with it. Nothing is taken out of the package (a zip) until its SHA-256 is the one written
-# here, and only the one DLL is, which is checked as well, into data\lib, where
-# voice_assistant/echo.py looks for it. It is fetched only when the DLL there isn't the
-# pinned one. A failure is a warning, never a failed install: without the library the
-# satellite runs with no echo canceller, as it did before there was one to load.
-$speexUrl = 'https://api.nuget.org/v3-flatcontainer/speexdspsharp.natives/1.3.0/speexdspsharp.natives.1.3.0.nupkg'
-$speexPackageHash = '25645341d244dcef11a07d31f2afd3ce01ea3858b2ea94f8648f5a43e8172d2a'
-$speexEntry = 'runtimes/win-x64/native/speexdsp.dll'
-$speexHash = '7f51f6825b0f9ca6a001b2612585da0ecd2dca576fa62c8e6f6921a74052e05a'
+# The echo canceller's library, speexdsp.dll, which Windows has no package for: conda-forge's
+# speexdsp 1.2.1 (build h5112557_1) for win-64, an MSVC build of xiph/speexdsp. It imports
+# kernel32.dll, the Universal C Runtime's api-ms-win-crt-*.dll (Windows' own) and
+# vcruntime140.dll, which the satellite's Python has already loaded - python313.dll needs it
+# too, and the loader gives a library a module of the name which is loaded already - so
+# nothing is shipped with it. Nothing is taken out of the package until its SHA-256 is the
+# one written here. A .conda file is a zip holding a zstd-compressed tar, which neither
+# PowerShell 5.1 nor Python 3.13 can read by themselves, so unpack_library.py does it with
+# the venv's zstandard (requirements-pc.txt), writing only the one DLL, which is checked as
+# well, into data\lib, where voice_assistant/echo.py looks for it. It is fetched only when
+# the DLL there isn't the pinned one. A failure is a warning, never a failed install:
+# without the library the satellite runs with no echo canceller, as it did before there was
+# one to load.
+$speexUrl = 'https://conda.anaconda.org/conda-forge/win-64/speexdsp-1.2.1-h5112557_1.conda'
+$speexPackageHash = '21b24675b22c7863cf9cadbb6eb0f1f8092df8e23f78bd58a0ab8439f2ac5839'
+$speexMember = 'Library/bin/speexdsp.dll'
+$speexHash = '8d8f90acb6a191f087ec07f80f67b82f296a6e4afad4612f2a4a75e99c6ba21b'
 $speexDll = Join-Path $data 'lib\speexdsp.dll'
 $speexTemp = Join-Path $env:LOCALAPPDATA 'Temp\nova-speexdsp'
 try {
@@ -104,8 +109,8 @@ try {
         Write-Host 'Fetching speexdsp.dll, for the echo canceller'
         if (Test-Path -LiteralPath $speexTemp) { Remove-Item -LiteralPath $speexTemp -Recurse -Force }
         New-Item -ItemType Directory -Path $speexTemp | Out-Null
-        $package = Join-Path $speexTemp 'speexdsp.nupkg'
-        # Windows PowerShell 5.1 offers older TLS than nuget.org takes unless it is told, and
+        $package = Join-Path $speexTemp 'speexdsp.conda'
+        # Windows PowerShell 5.1 offers older TLS than the server takes unless it is told, and
         # draws a progress bar which makes the download many times slower.
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $progress = $ProgressPreference
@@ -114,14 +119,8 @@ try {
         finally { $ProgressPreference = $progress }
         $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $package).Hash
         if ($got -ne $speexPackageHash) { throw "the download's SHA-256 is $got, not the pinned $speexPackageHash" }
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        $zip = [System.IO.Compression.ZipFile]::OpenRead($package)
-        try {
-            $entry = $zip.GetEntry($speexEntry)
-            if (-not $entry) { throw "the package has no $speexEntry" }
-            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path $speexTemp 'speexdsp.dll'), $true)
-        }
-        finally { $zip.Dispose() }
+        & $venvPython -I (Join-Path $windows 'unpack_library.py') $package $speexMember $speexTemp | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "unpack_library.py failed (exit code $LASTEXITCODE)" }
         $got = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $speexTemp 'speexdsp.dll')).Hash
         if ($got -ne $speexHash) { throw "the DLL's SHA-256 is $got, not the pinned $speexHash" }
         # Written beside it and then moved into place, so a failure part way leaves the old

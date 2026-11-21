@@ -26,3 +26,7 @@ winrt-Windows.Foundation.Collections==4!10.0.28000.2957
 winrt-Windows.Media==4!10.0.28000.2957
 winrt-Windows.Media.Playback==4!10.0.28000.2957
 winrt-Windows.Storage.Streams==4!10.0.28000.2957
+# zstandard (the C wheel, no dependencies) is install.ps1's alone, to unpack the echo
+# canceller's library from its conda package (scripts/windows/unpack_library.py): 0.25.0,
+# the newest release (14 September 2025) with a wheel for Windows and Python 3.13.
+zstandard==0.25.0
