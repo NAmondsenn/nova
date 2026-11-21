@@ -386,3 +386,70 @@ def test_a_result_never_written_is_never_verified(monkeypatch):
 
 def test_a_verified_result_is_still_read_as_verified():
     assert _winrt().wait(_Completed(lambda: 0), 1) == "VERIFIED"
+
+
+class _User32:
+    """user32 as the owner window calls it, keeping each call in order, Windows refusing the front once."""
+
+    def __init__(self, calls, front_refused=1):
+        self.calls = calls
+        self.front_refused = front_refused
+
+    def __getattr__(self, name):
+        def call(*args):
+            self.calls.append((name,) + args)
+            if name == "SetForegroundWindow":
+                self.front_refused -= 1
+                return self.front_refused < 0
+            if name == "GetWindowThreadProcessId":
+                return 40
+            return 1
+        return call
+
+
+def test_the_prompt_is_asked_for_a_window_in_the_middle_in_front(monkeypatch):
+    import ctypes
+
+    # Left at 0,0 and hidden, the prompt showed in the top-left corner (21 November).
+    assert windows_hello._centre(0, 0, 2560, 1400) == (1280, 700)
+    assert windows_hello._centre(-1920, 0, 0, 1040) == (-960, 520)
+
+    calls = []
+    monkeypatch.setattr(ctypes, "HRESULT", ctypes.c_long, raising=False)
+    monkeypatch.setattr(windows_hello, "_method",
+                        lambda pointer, index, restype, *argtypes: lambda *args: calls.append(("interop", index)))
+    window = windows_hello._OwnerWindow.__new__(windows_hello._OwnerWindow)
+    window._ctypes = ctypes
+    window._wintypes = __import__("ctypes.wintypes").wintypes
+    window._user32 = _User32(calls)
+    window._kernel32 = _User32(calls)
+    window._combase = _User32([])
+    window._pointer, window._hwnd = 9, 5
+    window._work_area = lambda: (0, 0, 2560, 1400)
+    try:
+        window.request("Remove 'Dentist'")
+    except OSError:
+        pass  # The stand-in interop gives no operation.
+    names = [call[0] for call in calls]
+    # Put in the middle and shown, let to the front - joining the front's input when refused - then asked.
+    assert calls[0] == ("SetWindowPos", 5, -1, 1280, 700, 1, 1, 0x0040)
+    assert names.index("AllowSetForegroundWindow") < names.index("SetForegroundWindow")
+    assert ("AttachThreadInput", 40, 1, True) in calls and ("AttachThreadInput", 40, 1, False) in calls
+    assert names.count("SetForegroundWindow") == 2
+    assert names[-1] == "interop" and calls[-1] == ("interop", 6)
+
+    # A window which can't be placed is still asked for.
+    calls.clear()
+    window._work_area = lambda: (_ for _ in ()).throw(OSError("no work area"))
+    try:
+        window.request("Remove 'Dentist'")
+    except OSError:
+        pass
+    assert [call[0] for call in calls] == ["interop"]
+
+
+def test_the_owner_window_is_hidden_once_the_prompt_goes():
+    hidden = []
+    made = _winrt()
+    made._window = type("Window", (), {"pump": lambda self: None, "hide": lambda self: hidden.append(True)})()
+    assert made.wait(_Completed(lambda: 0), 1) == "VERIFIED" and hidden == [True]

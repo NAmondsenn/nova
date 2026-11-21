@@ -33,7 +33,7 @@ import sys
 import threading
 import time
 import uuid
-from typing import Dict, FrozenSet, Optional, Set
+from typing import Dict, FrozenSet, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +173,8 @@ class _Winrt:
             if self._window is not None:
                 self._window.pump()
             status = operation.status()
+            if status != _STARTED and self._window is not None:
+                self._window.hide()
             if status == _COMPLETED:
                 try:
                     result = self.UserConsentVerificationResult(operation.results()).name
@@ -285,12 +287,33 @@ class _RawOperation:
         self._info = self._pointer = None
 
 
+def _centre(left: int, top: int, right: int, bottom: int) -> Tuple[int, int]:
+    """Where the owner window goes in a work area: its middle, as Hello shows its prompt by its owner."""
+    return (left + right) // 2, (top + bottom) // 2
+
+
 class _OwnerWindow:
     """
-    A hidden window of the satellite's own, never shown, which Hello's prompts are asked
-    for through IUserConsentVerifierInterop - made, pumped and destroyed on the owning
-    thread.
+    A window of the satellite's own which Hello's prompts are asked for through
+    IUserConsentVerifierInterop - made, pumped and destroyed on the owning thread.
+
+    It is one pixel, fully transparent and let clicks through, so never seen. Left at 0,0
+    and hidden, Hello's prompt showed in the top-left corner of the screen (21 November),
+    so before each prompt it is put in the middle of the main screen's work area, shown
+    and brought to the front, and hidden again once the prompt is answered.
     """
+
+    # Windows' own numbers for what's asked of it.
+    WS_EX_TOOLWINDOW = 0x00000080
+    WS_EX_LAYERED = 0x00080000
+    WS_EX_TRANSPARENT = 0x00000020
+    WS_POPUP = 0x80000000
+    LWA_ALPHA = 0x2
+    SPI_GETWORKAREA = 0x0030
+    HWND_TOPMOST = -1
+    SWP_SHOWWINDOW = 0x0040
+    SW_HIDE = 0
+    ASFW_ANY = 0xFFFFFFFF
 
     def __init__(self, verifier_class):
         import ctypes
@@ -306,6 +329,20 @@ class _OwnerWindow:
                                            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.HWND,
                                            wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]
         user32.DestroyWindow.argtypes = [wintypes.HWND]
+        user32.SetLayeredWindowAttributes.argtypes = [wintypes.HWND, wintypes.COLORREF, wintypes.BYTE, wintypes.DWORD]
+        user32.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.c_void_p, wintypes.UINT]
+        user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                        ctypes.c_int, wintypes.UINT]
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.AllowSetForegroundWindow.argtypes = [wintypes.DWORD]
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.c_void_p]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+        kernel32 = ctypes.WinDLL("kernel32")
+        kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+        self._kernel32 = kernel32
         user32.PeekMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT,
                                         wintypes.UINT]
         user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
@@ -320,14 +357,56 @@ class _OwnerWindow:
         # The factory first, so a Windows without the interop leaves no window behind.
         self._factory = interop.get_activation_factory(verifier_class, INTEROP_IID)
         self._pointer = interop.interface_pointer(self._factory)
-        ws_ex_toolwindow, ws_popup = 0x00000080, 0x80000000
-        self._hwnd = user32.CreateWindowExW(ws_ex_toolwindow, "STATIC", "Nova", ws_popup, 0, 0, 0, 0,
-                                            None, None, None, None)
+        self._hwnd = user32.CreateWindowExW(self.WS_EX_TOOLWINDOW | self.WS_EX_LAYERED | self.WS_EX_TRANSPARENT,
+                                            "STATIC", "Nova", self.WS_POPUP, 0, 0, 1, 1, None, None, None, None)
         if not self._hwnd:
             raise ctypes.WinError(ctypes.get_last_error())
+        user32.SetLayeredWindowAttributes(self._hwnd, 0, 0, self.LWA_ALPHA)
+
+    def _work_area(self) -> Tuple[int, int, int, int]:
+        """The main screen's work area (without the taskbar): left, top, right, bottom."""
+        area = self._wintypes.RECT()
+        if not self._user32.SystemParametersInfoW(self.SPI_GETWORKAREA, 0, self._ctypes.byref(area), 0):
+            raise OSError("The screen's work area couldn't be read")
+        return area.left, area.top, area.right, area.bottom
+
+    def to_front(self):
+        """
+        Puts the window in the middle of the main screen, shown, and in front, so the
+        prompt asked for it is too. Best effort: a failure is logged, and the prompt is
+        asked all the same.
+        """
+        user32 = self._user32
+        try:
+            x, y = _centre(*self._work_area())
+            user32.SetWindowPos(self._hwnd, self.HWND_TOPMOST, x, y, 1, 1, self.SWP_SHOWWINDOW)
+            user32.AllowSetForegroundWindow(self.ASFW_ANY)
+            if user32.SetForegroundWindow(self._hwnd):
+                return
+            # Windows' foreground lock stops a background program taking the front; joined
+            # to the input of the thread in front for a moment, it can, as pc_windows does.
+            front = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
+            own = self._kernel32.GetCurrentThreadId()
+            joined = bool(front) and front != own and bool(user32.AttachThreadInput(front, own, True))
+            try:
+                if not user32.SetForegroundWindow(self._hwnd):
+                    logger.info("Windows wouldn't let Hello's prompt come to the front")
+            finally:
+                if joined:
+                    user32.AttachThreadInput(front, own, False)
+        except Exception as e:
+            logger.info(f"Hello's prompt couldn't be put in the middle, in front ({type(e).__name__})")
+
+    def hide(self):
+        """Hides the window again, once its prompt has gone."""
+        try:
+            self._user32.ShowWindow(self._hwnd, self.SW_HIDE)
+        except Exception as e:
+            logger.info(f"Hello's prompt's window couldn't be hidden ({type(e).__name__})")
 
     def request(self, message: str) -> _RawOperation:
-        """RequestVerificationForWindowAsync, for this window."""
+        """RequestVerificationForWindowAsync, for this window, once it's in the middle and in front."""
+        self.to_front()
         ctypes, wintypes = self._ctypes, self._wintypes
         text = ctypes.create_unicode_buffer(message)
         hstring = ctypes.c_void_p()
