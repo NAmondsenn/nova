@@ -277,15 +277,14 @@ class LLMHandler:
         An earlier message, with the API told to cache the request as far as its end.
 
         Args:
-            message: The message, in the API's format.
+            message: The message, in the API's format, whose content is its text - as the newest
+                of the history's always is: Nova's reply (see _earlier_messages).
 
         Returns:
-            A copy whose content is a list of blocks, the last marked with cache_control.
+            A copy whose content is that text as a block, marked with cache_control.
         """
-        content = message["content"]
-        blocks = [{"type": "text", "text": content}] if isinstance(content, str) else [dict(block) for block in content]
-        blocks[-1]["cache_control"] = {"type": "ephemeral"}
-        return {**message, "content": blocks}
+        return {**message, "content": [{"type": "text", "text": message["content"],
+                                        "cache_control": {"type": "ephemeral"}}]}
 
     @property
     def web_search_enabled(self) -> bool:
