@@ -54,6 +54,7 @@ from voice_assistant.music_device import MusicDevice
 from voice_assistant.navidrome import NavidromeLibrary, normalise
 from voice_assistant.new_music import NewMusicPlaylist
 from voice_assistant.ntfy import Alert
+from voice_assistant.open_conversation import OpenConversation
 from voice_assistant.playlist_changes import PlaylistChanges
 from voice_assistant.recording import RATE
 from voice_assistant.remote import RemoteSatellite
@@ -4309,6 +4310,18 @@ def test_a_prices_change_is_used_by_the_next_call_recorded(make_brain):
     spend(brain, 0.10)
     brain.apply_settings({("usage", "pounds_per_dollar"): 0.5})
     assert brain.usage.summary()["today_pounds"] == 0.05
+
+
+def test_the_brain_has_one_open_conversation_which_reads_the_settings_as_they_are_now(make_brain):
+    brain = make_brain(conversation={"enabled": True, "idle_minutes": 5})
+    assert isinstance(brain.open_conversation, OpenConversation)
+    assert brain.open_conversation.start("pc") == "started"
+    assert 299 < brain.open_conversation.idle_in() <= 300
+    # Straight away, with no restart.
+    assert brain.apply_settings({("conversation", "idle_minutes"): 1}) == []
+    assert brain.open_conversation.idle_in() <= 60
+    assert brain.apply_settings({("conversation", "enabled"): False}) == []
+    assert brain.open_conversation.start("bedroom") == "off"
 
 
 def test_passing_the_daily_limit_tells_the_phone_once(make_brain):

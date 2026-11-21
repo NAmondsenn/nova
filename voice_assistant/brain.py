@@ -60,6 +60,7 @@ from voice_assistant.music_folder import MusicFolder
 from voice_assistant.new_music import NewMusicPlaylist
 from voice_assistant.notes import NO_NOTES
 from voice_assistant.ntfy import RETOPIC, Ntfy
+from voice_assistant.open_conversation import OpenConversation
 from voice_assistant.pc import PCPower
 from voice_assistant.playlist_changes import PlaylistChanges
 from voice_assistant.protocol import ProtocolError, Refused, admit
@@ -320,6 +321,10 @@ class Brain:
         # Which satellites ignore the wake word while Nova speaks on another - see
         # _quiet_others_forever, which _quiet_nudge wakes.
         self.quiet_others = QuietOthers()
+        # Whether an open conversation is on, and where - one for the whole brain, as only one is
+        # allowed at a time. Its settings are read at each use, so ones changed on the settings
+        # page are used at once.
+        self.open_conversation = OpenConversation(lambda: self.config.section("conversation"))
         # The apps and open windows of each computer satellite - see computers.py.
         self.computers = Computers()
         self._quiet_nudge = threading.Event()
