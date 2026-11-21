@@ -1391,6 +1391,21 @@ def test_an_exchange_from_before_the_conversation_isnt_made_newer_by_it(make_con
     assert [turn["user"] for turn in handler.history] == ["question 0"]
 
 
+def test_another_satellites_end_doesnt_make_these_newer(make_config, clock):
+    handler, conversation, _ = _talker(make_config, clock)
+    conversation.start("pc")
+    _say(handler, clock, 3)
+    # It ended by itself, with no request at the pc to notice. Twenty minutes on, one runs and ends
+    # at the bedroom, and a minute after that the pc is asked.
+    conversation.end("idle")
+    clock.now += 1200
+    conversation.start("bedroom")
+    conversation.end("said")
+    clock.now += 60
+    handler.forget_stale_history()
+    assert handler.history == []
+
+
 def test_the_first_request_after_the_end_is_sent_only_the_last_five(make_config, clock):
     handler, conversation, _ = _talker(make_config, clock)
     conversation.start("pc")

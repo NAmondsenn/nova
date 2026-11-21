@@ -46,8 +46,8 @@ class OpenConversation:
         self._settings = settings
         self._now = now
         self._ended = ended
-        # When the last conversation ended, by `now`, or None if none has - see ended_at.
-        self._ended_at: Optional[float] = None
+        # When the last conversation at each satellite ended, by `now` - see ended_at.
+        self._ended_at: Dict[str, float] = {}
         # Sessions, the brain's threads and Home Assistant's switch all come here.
         self._lock = threading.Lock()
         self._reset(None)
@@ -67,14 +67,15 @@ class OpenConversation:
         with self._lock:
             return self._satellite
 
-    @property
-    def ended_at(self) -> Optional[float]:
+    def ended_at(self, satellite: str) -> Optional[float]:
         """
-        When the last conversation ended, as `now` has it, or None if none has. The language
-        model, which isn't told when one ends, counts the age of what was said in it from here.
+        When the last conversation at a satellite ended, as `now` has it, or None if none
+        has. The language model, which isn't told when one ends, counts the age of what was
+        said in it from here. Kept for each satellite, as each one's language model notices
+        an end only when it next uses its history, by when another satellite's may have ended.
         """
         with self._lock:
-            return self._ended_at
+            return self._ended_at.get(satellite)
 
     @property
     def enabled(self) -> bool:
@@ -141,7 +142,7 @@ class OpenConversation:
             if self._satellite is None or satellite not in (None, self._satellite):
                 return False
             exchanges = self._exchanges[-cap:]
-            self._ended_at = self._now()
+            self._ended_at[self._satellite] = self._now()
             self._reset(None)
         # Outside the lock, as the step may take a while or come back here.
         if self._ended is not None:

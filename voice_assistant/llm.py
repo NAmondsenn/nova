@@ -238,7 +238,7 @@ class LLMHandler:
         elif self._was_talking:
             self._was_talking = False
             self.history = self.history[-self.history_length:]
-            ended = self.open_conversation.ended_at
+            ended = self.open_conversation.ended_at(self.satellite)
             if ended is None:
                 ended = time.monotonic()
             for turn in self.history:
