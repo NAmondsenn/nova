@@ -772,6 +772,10 @@ class Brain:
         problem = name_problem(name)
         if problem:
             raise ValueError(problem)
+        if name in self.passwords.names():
+            raise ValueError(f"There is already a satellite called {name}")
+        # One added under a name kept from before mustn't inherit its "Can approve".
+        self.rooms.forget_approval(name, self.approvals.guarded())
         return self.passwords.add(name)
 
     def renew_password(self, name: str) -> str:
@@ -789,6 +793,11 @@ class Brain:
         Raises:
             ValueError: If there's no such satellite.
         """
+        if name not in self.passwords.names():
+            raise ValueError(f"There is no satellite called {name}")
+        # Before the new password exists, so a satellite made with it is never let
+        # approve by the old one's switch - see SatelliteRooms.forget_approval.
+        self.rooms.forget_approval(name, self.approvals.guarded())
         password = self.passwords.renew(name)
         # After it's saved, never before - see _start_session, which lets go of one
         # whose session is made after this looks.
@@ -1531,6 +1540,12 @@ class Brain:
             self._satellites_changed()
         # Its apps too, connected or not, so it's never "the only computer" things open on.
         self.computers.forget(name)
+        # And whether it may approve, so one added again by its name is stored afresh.
+        try:
+            self.rooms.forget_approval(name, None)
+        except OSError as e:
+            # Forgotten in memory all the same; adding it again forgets it once more.
+            logger.error(f"Could not save that the removed {name} satellite may not approve: {e}")
         with self._lock:
             self._emptied[name] = emptied
         if not emptied:

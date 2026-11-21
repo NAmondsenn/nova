@@ -4545,6 +4545,54 @@ def test_a_kept_approving_satellite_guards_while_away(brain):
     assert brain.approvals.guarded() is False
 
 
+def test_a_new_password_switches_can_approve_off_once_a_way_is_set_up(brain, connect, passwords):
+    serving(brain)
+    # The PC set up first, so let approve - and it guards, so a re-key is made while guarded.
+    connect(brain, "bedroom", BEDROOM, machine="pc", approves=True)
+    session = connected(brain, "bedroom")
+    assert brain._approvers() == [session.satellite] and brain.approvals.guarded()
+
+    password = brain.renew_password("bedroom")
+
+    # Whoever has the new password could be anything saying it's the PC, so it isn't asked.
+    assert brain.rooms.can_approve("bedroom") is False
+    assert wait_for(lambda: brain.session_for("bedroom") is None)
+    connect(brain, "bedroom", password, machine="pc", approves=True)
+    connected(brain, "bedroom")
+    assert brain._approvers() == [] and brain.rooms.can_approve("bedroom") is False
+    assert SatelliteRooms(os.path.join(paths.DATA_DIR, "satellite_rooms.json")).can_approve("bedroom") is False
+
+
+def test_a_satellite_removed_and_added_again_isnt_let_approve(brain, connect, passwords):
+    serving(brain)
+    brain.passkeys.add(Passkey(id="made-up-credential", name="Phone", public_key="key", algorithm=-7, counter=0,
+                               origin="https://nova.example.ts.net", added=1.0))
+    brain.rooms.seen("bedroom", False, "pc", approves=True, guarded=False)
+    assert brain.rooms.can_approve("bedroom") is True
+
+    brain.remove_satellite("bedroom")
+    # Forgotten entirely as it goes.
+    assert brain.rooms.can_approve("bedroom") is False and brain.rooms.approves("bedroom") is False
+    password = brain.add_satellite("bedroom")
+    connect(brain, "bedroom", password, machine="pc", approves=True)
+    connected(brain, "bedroom")
+    assert brain.rooms.can_approve("bedroom") is False and brain._approvers() == []
+
+
+def test_a_new_password_at_first_set_up_lets_the_pc_approve(brain, connect, passwords):
+    # Nothing set up: the PC's switch off, no passkey. A re-key is then its first set-up, so on.
+    brain.rooms.seen("bedroom", False, "pc", approves=True, guarded=False)
+    brain.rooms.set_can_approve("bedroom", False)
+    assert not brain.approvals.guarded()
+    brain.renew_password("bedroom")
+    assert brain.rooms.can_approve("bedroom") is True
+    # Adding a name already there is refused before its switch is touched.
+    brain.rooms.set_can_approve("bedroom", False)
+    with pytest.raises(ValueError, match="already"):
+        brain.add_satellite("bedroom")
+    assert brain.rooms.can_approve("bedroom") is False
+
+
 def test_a_satellite_whose_switch_cant_be_read_isnt_asked(brain, monkeypatch, caplog):
     put_in_session(brain, "bedroom")
     brain.sessions["bedroom"].satellite.approves = True

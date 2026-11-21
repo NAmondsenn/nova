@@ -4844,6 +4844,20 @@ def test_switching_can_approve_on_needs_an_approval_and_off_doesnt(approving):
     assert approving.rooms.can_approve("bedroom") is False
 
 
+def test_after_a_re_key_switching_can_approve_on_asks_afresh(approving):
+    # The trust window open, from an approval just given.
+    request = approving.approvals.request("Remove 'Dentist'")
+    approving.approve_with(approving.phones[0])(request.id)
+    assert approving.approvals.trusted()
+    # The PC re-keyed, as the brain does it.
+    approving.rooms.forget_approval("pc", approving.approvals.guarded())
+    assert approving.rooms.can_approve("pc") is False
+    sent = len(approving.ntfy.sent)
+    said = approving.asked("/api/approvals/can-approve", {"name": "pc", "on": True}, approving.refuse)
+    assert said == (200, {"success": False, "message": NEEDS_OK}) and len(approving.ntfy.sent) == sent + 1
+    assert approving.rooms.can_approve("pc") is False
+
+
 class AnsweringPC:
     """A connected PC which approves, answering each prompt as it's set to."""
 

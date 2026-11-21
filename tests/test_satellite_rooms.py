@@ -371,6 +371,37 @@ def test_approves_is_what_it_last_said(tmp_path):
     assert rooms.approves("pc") is False
 
 
+def test_forget_approval_follows_the_first_set_up_rule_and_is_saved(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.seen("pc", True, machine="pc", approves=True, guarded=False)
+    rooms.forget_approval("pc", guarded=True)
+    assert rooms.can_approve("pc") is False and _rooms(tmp_path).can_approve("pc") is False
+    rooms.forget_approval("pc", guarded=False)
+    assert rooms.can_approve("pc") is True and _rooms(tmp_path).can_approve("pc") is True
+    # Removed, it's forgotten entirely, so its next hello stores it afresh.
+    rooms.forget_approval("pc", None)
+    again = _rooms(tmp_path)
+    assert again.approves("pc") is False and again.can_approve("pc") is False
+    again.seen("pc", True, machine="pc", approves=True, guarded=True)
+    assert again.can_approve("pc") is False
+    # One never seen is left for its hello.
+    rooms.forget_approval("nowhere", guarded=False)
+    assert "nowhere" not in json.loads((tmp_path / "satellite_rooms.json").read_text())
+
+
+def test_forget_approval_raises_when_it_cant_be_saved_but_is_off_in_memory(tmp_path, monkeypatch):
+    rooms = _rooms(tmp_path)
+    rooms.seen("pc", True, machine="pc", approves=True, guarded=False)
+
+    def refuse(path, data, indent=None):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("voice_assistant.satellite_rooms.save_json", refuse)
+    with pytest.raises(OSError):
+        rooms.forget_approval("pc", guarded=True)
+    assert rooms.can_approve("pc") is False
+
+
 def test_an_older_file_reads_with_no_switch(tmp_path):
     (tmp_path / "satellite_rooms.json").write_text(json.dumps({
         "pc": {"push_to_talk": True, "area": None, "machine": "pc"},
