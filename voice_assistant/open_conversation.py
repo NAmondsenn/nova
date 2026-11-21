@@ -79,7 +79,10 @@ class OpenConversation:
     @bigger.setter
     def bigger(self, value: bool):
         with self._lock:
-            self._bigger = value
+            # A turn still being answered when the conversation ended from another thread
+            # must not leave the bigger model on for the ordinary requests which follow.
+            if self._satellite is not None:
+                self._bigger = value
 
     def on_at(self, satellite: Optional[str]) -> bool:
         """Whether a conversation is on at this satellite. False for None."""
@@ -129,7 +132,7 @@ class OpenConversation:
                 logger.error(f"The step for a conversation which ended ({reason}) failed: {type(e).__name__}")
         return True
 
-    def answered(self, user: str, assistant: str, model: str):
+    def answered(self, user: str, assistant: str, model: str, satellite: Optional[str] = None):
         """
         Notes a turn Nova answered, which puts off the quiet spell and ends the run of turns
         not meant for it. Does nothing if no conversation is on.
@@ -138,10 +141,12 @@ class OpenConversation:
             user: What he said.
             assistant: What Nova replied.
             model: The model which answered.
+            satellite: Where the turn was heard. If given and the conversation is on
+                elsewhere, the turn is from one which has ended, and is left out of this one.
         """
         cap = self._cap()
         with self._lock:
-            if self._satellite is None:
+            if self._satellite is None or satellite not in (None, self._satellite):
                 return
             self._exchanges.append({"user": user, "assistant": assistant,
                                     "at": datetime.now().isoformat(timespec="seconds"), "model": model})
@@ -150,16 +155,20 @@ class OpenConversation:
             self._not_for_me = 0
             self._last_answered = self._now()
 
-    def not_for_nova(self) -> bool:
+    def not_for_nova(self, satellite: Optional[str] = None) -> bool:
         """
         Notes a turn Claude judged not meant for Nova. It doesn't put off the quiet spell.
+
+        Args:
+            satellite: Where the turn was heard. If given and the conversation is on
+                elsewhere, the turn is from one which has ended, and isn't counted.
 
         Returns:
             True if it is the NOT_FOR_ME_MOST-th in a row, when the caller is to end the
             conversation. False if none is on.
         """
         with self._lock:
-            if self._satellite is None:
+            if self._satellite is None or satellite not in (None, self._satellite):
                 return False
             self._not_for_me += 1
             return self._not_for_me >= NOT_FOR_ME_MOST
@@ -177,10 +186,11 @@ class OpenConversation:
             return self._last_answered + minutes * 60 - self._now()
 
     def model(self, usual: str) -> str:
-        """Returns the bigger model while the conversation is on it, else the usual one."""
+        """Returns the bigger model while a conversation is on and has moved up, else the usual one."""
         bigger_model = self._settings().get("bigger_model", "claude-sonnet-5-5")
         with self._lock:
-            return bigger_model if self._bigger else usual
+            # Only in a conversation, so an ordinary request is never answered by the bigger model.
+            return bigger_model if self._bigger and self._satellite is not None else usual
 
     def _cap(self) -> int:
         """Returns the most exchanges one conversation remembers."""

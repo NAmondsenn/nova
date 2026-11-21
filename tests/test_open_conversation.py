@@ -169,3 +169,32 @@ def test_a_changed_setting_is_used_at_once():
     assert conversation.idle_in() == 300
     settings["idle_minutes"] = 1
     assert conversation.idle_in() == 60
+
+
+def test_a_late_move_up_after_the_end_doesnt_leave_the_bigger_model_on():
+    conversation, _, _ = make()
+    conversation.start("pc")
+    conversation.end("idle")
+    # A turn still being answered when the conversation ended.
+    conversation.bigger = True
+    assert not conversation.bigger
+    assert conversation.model("h") == "h"
+    conversation.start("pc")
+    assert not conversation.bigger
+    assert conversation.model("h") == "h"
+
+
+def test_a_late_turn_from_another_satellite_isnt_noted_in_this_conversation():
+    given = []
+    conversation, clock, _ = make(ended=given.append)
+    conversation.start("pc")
+    clock.now += 100
+    conversation.answered("old", "reply", "claude-haiku-5-5", satellite="pi")
+    assert conversation.idle_in() == 200
+    assert [conversation.not_for_nova(satellite="pi") for _ in range(3)] == [False, False, False]
+    # Where it is on, they count as they do without saying where.
+    assert [conversation.not_for_nova(satellite="pc") for _ in range(3)] == [False, False, True]
+    conversation.answered("new", "reply", "claude-haiku-5-5", satellite="pc")
+    assert conversation.idle_in() == 300
+    conversation.end("said")
+    assert [e["user"] for e in given[0]] == ["new"]
