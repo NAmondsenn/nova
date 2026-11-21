@@ -306,12 +306,13 @@ def main(argv: Optional[List[str]] = None):
         if code == QUIT_CODE:
             logger.info("The satellite was quit, so the launcher ends")
             return
-        wait = backoff.next_wait(ran_for)
         if code == RESTART_CODE:
             # Chosen on purpose, so not a failure whatever came before: the shortest wait,
             # and the next failure starts its climb from the bottom.
             backoff.reset()
             wait = FIRST_WAIT
+        else:
+            wait = backoff.next_wait(ran_for)
         logger.warning(f"The satellite exited (code {code}) after {ran_for:.0f} s; starting it again in {wait:.0f} s")
         time.sleep(wait)
 
