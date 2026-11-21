@@ -84,6 +84,9 @@ CONVERSATION_ENDED = "Okay."
 # What's said when one is asked for where the microphone is muted - by typing in Home Assistant at a
 # wake-word satellite, as nothing else can ask it then - and none is started, as nothing would hear him.
 MICROPHONE_MUTED = "The microphone's muted."
+# What's said when a routine's step asks for one: run by itself, at its time or from the settings page, a
+# routine would leave one on with nobody there and no turns to end it - and the room's other satellite quiet.
+NOT_IN_A_ROUTINE = "A routine can't start a conversation."
 # What's said in place of "Playing ..." for music asked for during a conversation on a player which would play
 # it at once at its own volume - Spotify - which is kept paused until the conversation ends.
 PLAY_WHEN_DONE = "I'll play it when we're done."
@@ -371,7 +374,7 @@ def bare_acknowledgement(text: str) -> bool:
 
 def tool(description: str, needs: Union[str, Tuple[str, ...], None] = None, required: Sequence[str] = (),
          for_model: bool = True, reads: bool = False, private: bool = False, changes: bool = True,
-         **parameters: Dict[str, Any]) -> Callable:
+         not_in_routines: Optional[str] = None, **parameters: Dict[str, Any]) -> Callable:
     """
     Declares an ActionExecutor method as a tool the model can call.
 
@@ -395,6 +398,9 @@ def tool(description: str, needs: Union[str, Tuple[str, ...], None] = None, requ
             says something, e.g. what's on the calendar. A tool which reads never counts,
             whatever this says. True when in doubt: one which isn't declared false only
             ever stops an undo, never undoes the wrong thing.
+        not_in_routines: What's said in its place when a routine's step asks for it - for one which
+            needs the user there, as a routine may run by itself - see routine_refusals. None for one
+            a routine runs as any request does.
         parameters: Each parameter's JSON schema, by name - the method's own
             keyword arguments, which it's called with.
 
@@ -404,7 +410,7 @@ def tool(description: str, needs: Union[str, Tuple[str, ...], None] = None, requ
     def declare(method: Callable) -> Callable:
         method.tool = {"description": description, "needs": needs, "required": list(required),
                        "for_model": for_model, "reads": reads, "private": private, "changes": changes,
-                       "parameters": parameters}
+                       "not_in_routines": not_in_routines, "parameters": parameters}
         return method
     return declare
 
@@ -655,6 +661,15 @@ class ActionExecutor:
         an answer (see Conversation.handle).
         """
         return [name for name, method in cls.tools().items() if method.tool["private"]]
+
+    @classmethod
+    def routine_refusals(cls) -> Dict[str, str]:
+        """
+        The tools a routine's step never runs, each with what's said in its place - see Conversation._run.
+        A routine may run by itself, at its time or from the settings page, with nobody there.
+        """
+        return {name: method.tool["not_in_routines"] for name, method in cls.tools().items()
+                if method.tool["not_in_routines"]}
 
     def read_tools(self) -> List[str]:
         """
@@ -2563,6 +2578,7 @@ class ActionExecutor:
         "every reply with no wake word, until it's ended, so never call it unasked. What happened is said for "
         "you, so just reply 'Okay.'",
         needs="conversation",
+        not_in_routines=NOT_IN_A_ROUTINE,
     )
     def start_conversation(self):
         if self.muted():

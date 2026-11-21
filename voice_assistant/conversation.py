@@ -354,7 +354,7 @@ class Conversation:
 
         # Every action asked for is run, in order - "pause the music and set a ten
         # minute timer" is two of them.
-        action_results = self._run(actions)
+        action_results = self._run(actions, in_routine=in_routine)
 
         # Home Assistant's Assist only knows so many sentences. "Dim the lights" isn't
         # one of them, though Claude can set a brightness - so what Assist matched
@@ -373,7 +373,7 @@ class Conversation:
             if result.get("not_for_me"):
                 return self._not_for_me(result["playing"], timeline, in_routine)
             actions = result.get("actions", [])
-            action_results = self._run(actions)
+            action_results = self._run(actions, in_routine=in_routine)
         response_text = result["response"]
         if actions:
             # Marked here rather than as each run finishes, so Assist's failed attempt
@@ -550,12 +550,15 @@ class Conversation:
         logger.info("Taken as speech from what's playing, so ignored")
         return Reply(not_for_me=True)
 
-    def _run(self, actions: List[Action]) -> List[ActionResult]:
+    def _run(self, actions: List[Action], in_routine: bool = False) -> List[ActionResult]:
         """
         Runs the actions asked for, in order.
 
         Args:
             actions: The Actions, if any.
+            in_routine: True for a step of a routine, which never runs a tool that needs the user
+                there - see ActionExecutor.routine_refusals - but says why in its place, as a
+                routine may be running by itself.
 
         Returns:
             The ActionResult of each.
@@ -565,7 +568,9 @@ class Conversation:
         # Music and volume actions talk to the music player too, so the pause has
         # to have landed first.
         self.music.wait()
-        return [self.actions.execute(action) for action in actions]
+        refused = ActionExecutor.routine_refusals() if in_routine else {}
+        return [ActionResult(False, refused[action.tool]) if action.tool in refused else self.actions.execute(action)
+                for action in actions]
 
     def run_routine(self, routine: Dict, timeline: Optional[Timeline] = None) -> Reply:
         """

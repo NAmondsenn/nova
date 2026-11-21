@@ -5430,6 +5430,19 @@ def test_a_routine_due_mid_conversation_is_said_in_a_gap_and_leaves_the_turn_as_
     _ended(session)
 
 
+def test_a_routine_never_starts_a_conversation(brain, connect, make_session):
+    # Run by itself - at its time, or from the settings page - there'd be nobody to listen to and no turns to end
+    # it, with the switch on, the room's other satellite kept quiet and every other refused until the brain
+    # restarted. Said instead, as the routine's own words are.
+    brain.open_conversation = OpenConversation(lambda: {"enabled": True})
+    satellite, pi = connect(conversations=True)
+    session = make_session(satellite)
+    session.run_routine({"name": "Chat", "steps": ["Let's talk."]})
+    assert brain.open_conversation.satellite is None
+    assert brain.tts.said == ["A routine can't start a conversation."]
+    assert [message["on"] for message in pi.messages("conversation")] == []
+
+
 # Music during a conversation
 
 def _doing(conversation, text, do):

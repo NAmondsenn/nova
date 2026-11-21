@@ -900,6 +900,20 @@ def test_a_question_a_step_asks_isnt_listened_for():
     assert reply.say == "Which one?" and not reply.listen_again
 
 
+def test_a_routines_step_never_starts_a_conversation():
+    # Asked for by Claude in a step's own words, the routine said by voice or run by itself - see run_routine in
+    # session.py. Refused, and said why, with the rest of the routine done.
+    llm = FakeLLM(_answer("Okay.", Action("start_conversation")), _answer("It's sunny."))
+    actions = FakeActions()
+    routine = {"name": "Chat", "phrases": ["chat"], "steps": ["can we talk this through", "what's the weather"]}
+    reply = _conversation(llm=llm, actions=actions, routines=FakeRoutines(routine)).handle("chat")
+    assert actions.run == []
+    assert reply.say == "A routine can't start a conversation. It's sunny."
+    # Asked for outside a routine, it's run.
+    _conversation(llm=FakeLLM(_answer("Okay.", Action("start_conversation"))), actions=actions).handle("let's chat")
+    assert actions.run == ["start_conversation"]
+
+
 # Asking before shutting the PC down
 
 class FakePCHome:

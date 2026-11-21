@@ -3796,6 +3796,11 @@ def test_a_muted_microphone_refuses_a_start():
     assert conversation.satellite == "bedroom"
 
 
+def test_a_routine_never_runs_start_conversation():
+    # A routine may run by itself, with nobody there - see Conversation._run.
+    assert ActionExecutor.routine_refusals() == {"start_conversation": "A routine can't start a conversation."}
+
+
 def test_end_conversation_ends_it_and_says_okay():
     executor, conversation = _talking("pc", on_at="pc")
     result = executor.execute(Action("end_conversation"))
