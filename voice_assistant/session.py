@@ -513,7 +513,10 @@ class Session:
                                       microphone=self._mute_microphone, conversation=brain.open_conversation,
                                       # A computer unmutes Windows' microphone for a conversation itself, as
                                       # for a press, so only a wake-word satellite's mute keeps one from starting.
-                                      muted=lambda: self.muted and not self.satellite.push_to_talk)
+                                      muted=lambda: self.muted and not self.satellite.push_to_talk,
+                                      # One not updated since the brain was would have its turns as ordinary
+                                      # listens, so none starts there.
+                                      converses=lambda: self.satellite.can_converse)
 
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.
@@ -3102,8 +3105,8 @@ class Session:
             add_timer=self._add_timer_from_home_assistant,
             add_alarm=self._add_alarm_from_home_assistant,
             # The Conversation switch: on while one is running here, and withdrawn while conversations are
-            # switched off.
-            conversations=self._conversations_enabled,
+            # switched off - and never there at a satellite not updated for them, where none can start.
+            conversations=lambda: self.satellite.can_converse and self._conversations_enabled(),
             in_conversation=self._conversation_here,
             set_conversation=self._conversation_from_home_assistant,
             # Read by the device on a thread of its own, never the one that publishes the

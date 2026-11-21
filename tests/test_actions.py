@@ -3796,6 +3796,21 @@ def test_a_muted_microphone_refuses_a_start():
     assert conversation.satellite == "bedroom"
 
 
+def test_a_satellite_which_doesnt_know_conversations_is_told_it_needs_updating():
+    # Not offered to Claude there, and the phrase refused - though they're switched on.
+    conversation = OpenConversation(lambda: {"enabled": True})
+    executor = ActionExecutor(satellite="pc", conversation=conversation, spoken_name=_spoken,
+                              converses=lambda: False)
+    assert _offered_conversation(executor) == set()
+    result = executor.execute(Action("start_conversation"))
+    assert (result.ok, result.say) == (False, "This satellite needs updating for conversations.")
+    assert conversation.satellite is None
+    # Switched off, that's what's said, wherever it's asked.
+    off = ActionExecutor(satellite="pc", conversation=OpenConversation(lambda: {"enabled": False}),
+                         converses=lambda: False)
+    assert off.execute(Action("start_conversation")).say == "Conversations are switched off."
+
+
 def test_a_routine_never_runs_start_conversation():
     # A routine may run by itself, with nobody there - see Conversation._run.
     assert ActionExecutor.routine_refusals() == {"start_conversation": "A routine can't start a conversation."}

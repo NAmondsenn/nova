@@ -2079,7 +2079,8 @@ def test_a_muted_pi_refuses_a_conversation_and_a_muted_pc_doesnt(brain, connect,
     # Only typing in Home Assistant can ask the Pi for one while it's muted, and nothing would hear him. The
     # PC unmutes Windows' microphone for one itself, as it does for a press.
     brain.open_conversation = OpenConversation(lambda: {"enabled": True})
-    pi, pc = make_session(connect("bedroom")[0]), make_session(connect("pc")[0])
+    pi = make_session(connect("bedroom", conversations=True)[0])
+    pc = make_session(connect("pc", conversations=True)[0])
     monkeypatch.setattr(pc.satellite, "push_to_talk", True)
     pi.set_muted(True)
     assert pi.conversation.handle("Let's talk.").say == "The microphone's muted."
@@ -4557,9 +4558,9 @@ def test_the_device_failing_to_be_worked_out_costs_only_the_sentence(brain, make
 
 # Starting and ending an open conversation, by the brain's one OpenConversation
 
-def test_a_session_starts_and_ends_a_conversation_at_its_satellite_by_voice(brain, make_session):
+def test_a_session_starts_and_ends_a_conversation_at_its_satellite_by_voice(brain, connect, make_session):
     brain.open_conversation = OpenConversation(lambda: {"enabled": True})
-    session = make_session()
+    session = make_session(connect(conversations=True)[0])
     here = session.satellite.name
     # Said, with no chime: the session's own sound for it comes later.
     reply = session.conversation.handle("Let's talk.")
@@ -4585,6 +4586,22 @@ def test_a_session_with_no_conversations_leaves_the_phrases_to_claude(make_sessi
         "response": "Sorry.", "actions": [], "success": True})
     assert session.conversation.handle("Let's talk.").say == "Sorry."
     assert asked == ["Let's talk."]
+
+
+def test_a_satellite_not_updated_for_conversations_starts_none_and_says_so(brain, connect, make_session):
+    # Its turns would be ordinary listens, and a PC not yet updated mutes Windows' microphone again at the end of
+    # each - so the phrase is refused, Claude isn't offered the tool, and Home Assistant isn't given the switch.
+    brain.open_conversation = OpenConversation(lambda: {"enabled": True})
+    older = make_session(connect("pc")[0])
+    assert older.conversation.handle("Let's talk.").say == "This satellite needs updating for conversations."
+    assert brain.open_conversation.satellite is None
+    assert "start_conversation" not in {tool["name"] for tool in older.actions.tool_schemas()}
+    assert older._device_controls().conversations() is False
+    # One which knows them has all three.
+    updated = make_session(connect("bedroom", conversations=True)[0])
+    assert "start_conversation" in {tool["name"] for tool in updated.actions.tool_schemas()}
+    assert updated._device_controls().conversations() is True
+    assert updated.conversation.handle("Let's talk.").say == "Go ahead."
 
 
 # An open conversation, turn after turn

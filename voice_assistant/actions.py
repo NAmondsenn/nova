@@ -87,6 +87,10 @@ MICROPHONE_MUTED = "The microphone's muted."
 # What's said when a routine's step asks for one: run by itself, at its time or from the settings page, a
 # routine would leave one on with nobody there and no turns to end it - and the room's other satellite quiet.
 NOT_IN_A_ROUTINE = "A routine can't start a conversation."
+# What's said when one is asked for at a satellite which doesn't know a conversation's messages - one not
+# updated since the brain was - where its turns would be ordinary listens, and it would mute Windows'
+# microphone again at the end of each.
+NEEDS_UPDATING = "This satellite needs updating for conversations."
 # What's said in place of "Playing ..." for music asked for during a conversation on a player which would play
 # it at once at its own volume - Spotify - which is kept paused until the conversation ends.
 PLAY_WHEN_DONE = "I'll play it when we're done."
@@ -457,7 +461,8 @@ class ActionExecutor:
                  at_pc: Callable[[], bool] = lambda: False,
                  pc_name: Callable[[], Optional[str]] = lambda: None,
                  microphone: Optional[Callable[[bool, Optional[str]], Dict]] = None,
-                 conversation: Optional[OpenConversation] = None, muted: Callable[[], bool] = lambda: False):
+                 conversation: Optional[OpenConversation] = None, muted: Callable[[], bool] = lambda: False,
+                 converses: Callable[[], bool] = lambda: True):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -539,6 +544,8 @@ class ActionExecutor:
                 for no conversations - then neither tool is offered, as when it's switched off.
             muted: Whether the microphone a conversation here would listen through is muted, so none
                 can start. Never, by default.
+            converses: Whether the satellite spoken at knows a conversation's messages, without which
+                none starts there - see RemoteSatellite.can_converse. Always, by default.
         """
         self.music = music
         self.clock = clock
@@ -576,6 +583,7 @@ class ActionExecutor:
         self.microphone = microphone
         self.conversation = conversation
         self.muted = muted
+        self.converses = converses
         # The music's level before "mute", for "unmute" to put it back to - see _mute_music.
         self._level_before_mute: Optional[int] = None
         # What was last asked, and what the assistant said - or the last alert, and
@@ -689,8 +697,9 @@ class ActionExecutor:
         Whether the part of the assistant a tool needs is there - for the computer, one which opens things,
         and for notes, a satellite which saves them, whichever one the user is talking to - and for the
         computer's own microphone, being at one which can mute it - and for conversations, their being
-        switched on and the user being at a satellite, and for ending one, its being on at this satellite,
-        and for thinking harder, its being allowed to move up by itself and not already being up.
+        switched on and the user being at a satellite which knows them, and for ending one, its being on
+        at this satellite, and for thinking harder, its being allowed to move up by itself and not already
+        being up.
         """
         if name == "conversation_open":
             return self.conversation is not None and self.conversation.on_at(self.satellite)
@@ -704,12 +713,23 @@ class ActionExecutor:
             return self.computer is not None and self.computer.has_microphone()
         part = getattr(self, name)
         if name == "conversation":
-            return part is not None and self.satellite is not None and part.enabled
+            return part is not None and self.satellite is not None and part.enabled and self.converses()
         if name == "computer":
             return part is not None and part.offered()
         if name == "notes":
             return part is not None and self.notes_offered()
         return part is not None
+
+    def _unavailable(self, name: str) -> str:
+        """
+        What's said for a tool whose part isn't there, by the part - see UNAVAILABLE. For conversations
+        switched on, at a satellite which doesn't know them, that it needs updating rather than that
+        they're switched off.
+        """
+        if (name == "conversation" and self.conversation is not None and self.satellite is not None
+                and self.conversation.enabled and not self.converses()):
+            return NEEDS_UPDATING
+        return UNAVAILABLE[name]
 
     def execute(self, action: Optional[Action]) -> ActionResult:
         """
@@ -737,7 +757,7 @@ class ActionExecutor:
             return ActionResult(False, "Sorry, I can't do that.")
         if not self._available(method):
             needs = method.tool["needs"]
-            return ActionResult(False, UNAVAILABLE[needs if isinstance(needs, str) else needs[0]])
+            return ActionResult(False, self._unavailable(needs if isinstance(needs, str) else needs[0]))
 
         # Only the parameters the tool takes are passed on, so a stray one the model
         # made up can't stop it running.
