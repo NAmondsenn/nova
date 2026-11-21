@@ -4725,6 +4725,8 @@ def test_more_than_three_turns(brain, connect, make_session):
     # Each turn not after a question starts afresh, as a wake word does.
     assert len(session.conversation.started) == 2
     assert all(message.get("open") for message in pi.messages("listen"))
+    # Its words are made a moment before the satellite is sent them.
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 6)
     pi.say("played", id=pi.messages("play_stream")[5]["id"])
     _ended(session)
 
@@ -4856,6 +4858,8 @@ def test_a_turn_after_a_question_is_its_answer(brain, connect, make_session):
     assert session.conversation.heard == [("Turn the lights on.", False), ("The kitchen.", True)]
     assert session.conversation.started == [False]
     assert pi.messages("listen")[0].get("open") is True
+    # Its words are made a moment before the satellite is sent them.
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 2)
     pi.say("played", id=pi.messages("play_stream")[1]["id"])
     _ended(session)
 
