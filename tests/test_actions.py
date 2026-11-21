@@ -4,6 +4,7 @@ Tests how actions are dispatched, using the real VolumeControl (saving into a
 temporary folder) and a fake Spotify controller, so nothing plays or goes online.
 """
 
+import threading
 import time
 from datetime import date
 from types import SimpleNamespace
@@ -1154,10 +1155,6 @@ class RecordingChangeCalendar:
             return {"success": True, "message": f"Removed {name}.", "undo": self._undo}
         return Removal(f"Remove '{name}', Thu 26 Nov 15:00", run)
 
-    def remove(self, search, day=None, at=None, following=False, calendar=None, today=None, now=None):
-        found = self.find_removal(search, day, at, following, calendar, today, now)
-        return found if isinstance(found, dict) else found.run()
-
     def change(self, search, day=None, at=None, start=None, end=None, summary=None, following=False, calendar=None,
                today=None, now=None):
         self.asked.append(("change", search, day, at, start, end, summary, following, calendar))
@@ -1320,6 +1317,25 @@ def test_two_removals_in_one_turn_each_ask():
     assert calendar.removed == []
     approvals.approve_waiting()
     assert calendar.removed == ["Dentist", "Gym"]
+
+
+def test_a_change_made_while_a_removal_waits_leaves_the_approved_removal_as_that():
+    # The removal is approved and kept on the approval's own thread, after a change made meanwhile:
+    # it's the last thing done, so "undo that" takes it back, and only it.
+    calendar = RecordingChangeCalendar()
+    approvals = FakeApprovals("wait")
+    executor = ActionExecutor(calendar=calendar, approvals=approvals)
+    executor.execute(CANCEL_DENTIST)
+    undone = []
+    assert executor.execute(Action("change_calendar_event", {"search": "gym", "new_start": "2026-11-26 18:00"})).ok
+    calendar._undo = lambda: undone.append("removal") or {"success": True, "message": "Put Dentist back."}
+    approving = threading.Thread(target=approvals.approve_waiting)
+    approving.start()
+    approving.join(5)
+    assert calendar.removed == ["Dentist"]
+    result = executor.execute(UNDO_THAT)
+    assert (result.ok, result.say) == (True, "Put Dentist back.") and undone == ["removal"]
+    assert executor.execute(UNDO_THAT).say == NOTHING_TO_UNDO
 
 
 def test_a_routine_and_a_local_command_ask_too():
