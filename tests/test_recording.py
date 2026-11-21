@@ -623,3 +623,146 @@ def test_without_the_new_arguments_nothing_changes():
         # Asking for a report changes nothing about the recording.
         assert np.array_equal(audio, record(plain[name], listen_from=0, timeout=2.0)), name
         assert report["words_quiet"] is None, name
+
+
+# Listening which waits for the user to start, as in a conversation.
+
+def a_wait_then_speech(wait, talk, tail=1.0, value=2000, max_seconds=400.0):
+    feed = AudioFeed(max_seconds=max_seconds)
+    feed.feed(seconds(wait, 0))
+    feed.feed(seconds(talk, value))
+    feed.feed(seconds(tail, 0))
+    return feed
+
+
+def test_an_open_wait_outlasts_the_speech_timeout():
+    report = {}
+
+    audio = record(a_wait_then_speech(20.0, 1.0), listen_from=0, open_wait=60, speech_timeout=3, report=report)
+
+    assert np.count_nonzero(audio > 0.05) == seconds(1.0, 0).size
+    assert report["ended_by"] == "silence"
+
+    # Without it the same recording is given up on after the speech timeout.
+    audio = record(a_wait_then_speech(20.0, 1.0), listen_from=0, speech_timeout=3, report=report)
+
+    assert len(audio) == 0
+    assert report["ended_by"] == "no speech"
+
+
+def test_a_long_wait_then_a_long_turn_isnt_cut_off():
+    # The timeout is how long a turn may be, however long the wait was before it.
+    report = {}
+
+    audio = record(a_wait_then_speech(100.0, 30.0), listen_from=0, timeout=90, open_wait=300, report=report)
+
+    assert np.count_nonzero(audio > 0.05) == seconds(30.0, 0).size
+    assert report["ended_by"] == "silence"
+
+
+def test_the_limit_counts_from_the_speech_start_with_an_open_wait():
+    report = {}
+
+    audio = record(a_wait_then_speech(3.0, 10.0), listen_from=0, timeout=2.0, open_wait=10, report=report)
+
+    assert report["ended_by"] == "limit"
+    assert np.count_nonzero(audio > 0.05) == seconds(2.0, 0).size
+
+
+def test_the_wait_isnt_kept_or_heard():
+    heard = []
+
+    audio = record(a_wait_then_speech(20.0, 1.0), listen_from=0, open_wait=60, heard=heard.append)
+
+    # What's kept starts OPEN_PRE_ROLL before the speech, and what speech-to-text was given is the same audio, in
+    # order, with nothing twice or missing between the pre-roll and the speech.
+    assert np.argmax(audio > 0.05) == int(recording.OPEN_PRE_ROLL * RATE)
+    assert len(audio) / RATE == pytest.approx(recording.OPEN_PRE_ROLL + 1.0 + 0.6, abs=0.1)
+    assert np.array_equal(np.concatenate(heard), audio)
+    assert len(heard[0]) < len(audio) and all(len(piece) == FRAME for piece in heard[1:])
+
+
+def test_an_open_wait_keeps_whatever_is_less_than_the_pre_roll_when_speech_comes_at_once():
+    feed = a_wait_then_speech(0.2, 1.0)
+
+    audio = record(feed, listen_from=0, open_wait=60)
+
+    assert np.argmax(audio > 0.05) == seconds(0.2, 0).size
+
+
+def test_keep_before_still_reaches_back_from_where_listening_starts():
+    # Speech which began a moment before listen_from is kept, as it is today - it's within the pre-roll - though
+    # the recording only hears speech once it's listening.
+    before = seconds(1.0, 0).size
+    feed = AudioFeed()
+    feed.feed(seconds(1.0, 0))
+    feed.feed(seconds(0.5, 2000))
+    feed.feed(seconds(1.0, 0))
+
+    audio = record(feed, listen_from=before + seconds(0.2, 0).size, keep_before=0.3, open_wait=60)
+
+    assert np.argmax(audio > 0.05) == int(0.3 * RATE) - seconds(0.2, 0).size
+    assert np.count_nonzero(audio > 0.05) == seconds(0.5, 0).size
+
+
+def test_an_open_wait_that_runs_out_says_no_speech():
+    feed = AudioFeed()
+    feed.feed(seconds(5.0, 0))
+    heard, report, marks = [], {}, {}
+
+    class Timeline:
+        def mark(self, stage, at=None):
+            marks[stage] = at
+
+    audio = record(feed, listen_from=0, open_wait=2.0, heard=heard.append, report=report, timeline=Timeline())
+
+    # What an ordinary recording of no speech returns, and nothing was given to speech-to-text.
+    assert len(audio) == 0 and audio.dtype == np.float32
+    assert report["ended_by"] == "no speech"
+    assert heard == []
+    assert set(marks) == {"recording_started"}
+
+    # Speech which starts only after the wait is too late.
+    late = a_wait_then_speech(3.0, 1.0)
+    assert len(record(late, listen_from=0, open_wait=2.0)) == 0
+
+
+def test_the_timeline_marks_the_speech_not_the_pre_roll(monkeypatch):
+    now = [10.0]
+    monkeypatch.setattr(recording, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    marks = {}
+
+    class Timeline:
+        def mark(self, stage, at=None):
+            marks[stage] = at
+
+    feed = AudioFeed()
+    feed.feed(seconds(5.0, 0))
+    now[0] = 15.0
+    feed.feed(np.concatenate([seconds(0.3, 0), seconds(1.0, 2000)]))
+    now[0] = 16.0
+    feed.feed(seconds(1.0, 0))
+
+    record(feed, listen_from=0, open_wait=60, timeline=Timeline())
+
+    # Speech started when the audio of it arrived, not half a second before, where what's kept starts.
+    assert set(marks) == {"recording_started", "speech_started", "speech_ended", "recording_stopped"}
+    assert marks["speech_started"] == pytest.approx(14.0, abs=0.05)
+    assert marks["speech_ended"] == pytest.approx(15.0, abs=0.05)
+
+
+def test_the_press_ends_rules_are_judged_from_the_speech_with_an_open_wait():
+    feed = AudioFeed()
+    feed.feed(seconds(10.0, 0))
+    feed.feed(seconds(1.0, 8000))
+    feed.feed(seconds(3.0, 1500))
+    # The words are heard 2.0s into the speech, which is 2.5s of audio given, with the pre-roll.
+    words, report = FakeWords(2.0 + recording.OPEN_PRE_ROLL), {}
+
+    audio = record(feed, listen_from=0, timeout=3.5, open_wait=60, voice_drop=TWELVE_DB,
+                   words_quiet=words.quiet_words, heard=words.heard, report=report)
+
+    assert report["ended_by"] == "voice drop"
+    assert len(audio) / RATE == pytest.approx(recording.OPEN_PRE_ROLL + 2.0 + 0.6, abs=0.15)
+    # How loud he is comes from his speech, not from the quieter wait before it.
+    assert report["loudness"] == pytest.approx(8000 / 32768, abs=0.001)

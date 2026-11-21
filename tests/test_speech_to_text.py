@@ -957,3 +957,45 @@ def test_a_request_given_up_on_isnt_timed_afterwards(monkeypatch):
         if thread.name == "nemotron-again":
             thread.join(2)
     assert not {"stt_fallback_started", "stt_fallback_done", "stt_retry_done"} & set(timeline.marks)
+
+
+# The words heard so far, which a conversation reads while the recording is still being made.
+
+@pytest.mark.parametrize("script", [None, [""], ["You"], ["Thank", "Thank you."], ["."]])
+def test_words_gives_real_words_only(script):
+    # Nothing heard yet, and words Nemotron imagines in noise (or the start of them), aren't words.
+    nemotron = FakeNemotron()
+    nemotron.script = script
+    assert _heard_pieces(nemotron, 5).words() == ""
+
+
+def test_words_gives_the_words_once_a_real_one_is_heard():
+    nemotron = FakeNemotron()
+    nemotron.script = ["", "Set", "Set a"]
+    assert _heard_pieces(nemotron, 5).words() == "Set a"
+
+
+def test_words_can_be_read_while_the_recording_is_still_being_made():
+    nemotron = FakeNemotron()
+    nemotron.script = ["", "Set", "Set a"]
+    transcription = speech_to_text.NemotronSpeechToText(nemotron).listen()
+    assert transcription.words() == ""
+    for piece in _tenths(2):
+        transcription.add(piece)
+    assert _wait_for(lambda: transcription.words() == "Set")
+    transcription.add(_tenths(1)[0])
+    assert _wait_for(lambda: transcription.words() == "Set a")
+    transcription.cancel()
+
+
+def test_words_is_empty_once_nemotron_cant_say_its_words():
+    # As for quiet_words: what it heard before is no longer to be trusted as the words so far.
+    nemotron = _WordsThenFail(working=2)
+    transcription = speech_to_text.NemotronSpeechToText(nemotron).listen()
+    for piece in _tenths(2):
+        transcription.add(piece)
+    assert _wait_for(lambda: transcription.words() == "Set")
+    for piece in _tenths(3):
+        transcription.add(piece)
+    transcription.cancel()
+    assert transcription.words() == ""

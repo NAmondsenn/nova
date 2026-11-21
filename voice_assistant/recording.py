@@ -39,6 +39,12 @@ PAUSE_SECONDS = 0.2
 # has been dropped, so the first sound of their first word isn't clipped.
 LEAD_IN_SECONDS = 0.15
 
+# How much is kept from just before the user started talking when the recording has been
+# waiting for them (see open_wait), however long the wait was. The same job as LEAD_IN_SECONDS,
+# with room for the quiet which came before the first word as well, and in place of the
+# pause rule: that is for the end of a wake word, which a wait has none of.
+OPEN_PRE_ROLL = 0.5
+
 # The voice-drop rule judges how loud it is over this many frames (0.15s) rather than
 # one: short enough to follow his voice dying away, long enough that a single click
 # doesn't set how loud he is, and the dips between syllables don't count as quiet.
@@ -62,7 +68,8 @@ def record_until_silence(source, detector, listen_from: Optional[int] = None,
                          voice_drop: Optional[float] = None,
                          words_quiet: Optional[Callable[[], Optional[float]]] = None,
                          no_words_after: float = 1.5,
-                         report: Optional[Dict] = None) -> np.ndarray:
+                         report: Optional[Dict] = None,
+                         open_wait: Optional[float] = None) -> np.ndarray:
     """
     Records until the user has spoken and then gone quiet, or a timeout is reached.
 
@@ -76,11 +83,13 @@ def record_until_silence(source, detector, listen_from: Optional[int] = None,
             It isn't listened to for speech, but goes to speech-to-text with the rest,
             so words said straight after the wake word - which can come before
             it's even been detected - aren't cut off.
-        timeout: Maximum recording duration in seconds, from listen_from.
+        timeout: Maximum recording duration in seconds, from listen_from - or, with
+            open_wait, from when the user started talking.
         silence_duration: How long the user has to be quiet, once they've
             started talking, for the recording to stop.
         speech_timeout: How long to wait for the user to start talking before
-            giving up, so a false wake word doesn't sit recording silence.
+            giving up, so a false wake word doesn't sit recording silence. Not used
+            with open_wait.
         min_speech: Seconds of continuous speech which count as the user
             starting to talk. Anything shorter - the end of the wake word, or
             the listening sound, which the microphone hears too - doesn't.
@@ -128,6 +137,19 @@ def record_until_silence(source, detector, listen_from: Optional[int] = None,
                 two places.
             words_quiet: The last number words_quiet gave, or None if it never did.
             Only numbers and the name of what ended it - never audio or words.
+        open_wait: Off if None. Otherwise the seconds to wait for the user to start
+            talking, in place of speech_timeout, for a recording which listens for
+            as long as they might take, as a conversation does. Three things change
+            together: only the last OPEN_PRE_ROLL seconds of the wait are kept, so
+            speech-to-text isn't given minutes of quiet nor the recording holding it
+            (that audio, then the speech from the moment it started, is what's kept and
+            given to heard - the pause rule isn't used); timeout counts from the
+            moment the user started talking, so a turn can be that long however long
+            the wait was; and the wait running out is "no speech". The timeline's
+            recording_started is still when listening began, so speech_started comes
+            as long after it as the wait was, and speech_started and speech_ended are
+            still the speech itself, not the pre-roll. voice_drop and words_quiet go
+            by the speech as they do without it.
 
     Returns:
         The recording as float32 samples at 16kHz, or an empty array if the user
@@ -146,8 +168,16 @@ def record_until_silence(source, detector, listen_from: Optional[int] = None,
 
     detector.reset()
     max_frames = int(timeout * RATE / FRAME)
-    speech_timeout_frames = int(speech_timeout * RATE / FRAME)
+    waited = speech_timeout if open_wait is None else open_wait
+    speech_timeout_frames = int(waited * RATE / FRAME)
+    # The most which is ever recorded: for an open wait, the wait and then a whole turn.
+    last_frame = max_frames if open_wait is None else speech_timeout_frames + max_frames
+    # The frame an open wait's turn has to be over by, once it has started.
+    turn_ends = last_frame
     frames_to_start = max(1, round(min_speech * RATE / FRAME))
+    # What's held while waiting for speech to start in an open wait: the pre-roll, and the
+    # frames which confirm that the speech has started, as it began at the first of them.
+    held = int(OPEN_PRE_ROLL * RATE) + frames_to_start * FRAME
     frames_to_stop = max(1, round(silence_duration * RATE / FRAME))
 
     speech_frames = 0
@@ -195,9 +225,11 @@ def record_until_silence(source, detector, listen_from: Optional[int] = None,
                           levels=levels, speech=speeches,
                           words_quiet=None if last_still is None else round(last_still, 2))
 
-    for i in range(max_frames):
+    for i in range(last_frame):
         frame = reader.read(FRAME)
         kept.append(frame)
+        if open_wait is not None and not speech_started:
+            kept = [np.concatenate(kept)[-held:]]
         if speech_started and heard:
             heard(frame.astype(np.float32) / 32768.0)
         if len(frame) < FRAME:
@@ -226,7 +258,7 @@ def record_until_silence(source, detector, listen_from: Optional[int] = None,
             # Gives up early if the user never started talking, so a false wake
             # word doesn't leave the assistant recording silence.
             if i >= speech_timeout_frames:
-                logger.info(f"No speech within {speech_timeout:.1f}s, cancelling")
+                logger.info(f"No speech within {waited:.1f}s, cancelling")
                 note("no speech")
                 return np.array([], dtype=np.float32)
 
@@ -244,9 +276,15 @@ def record_until_silence(source, detector, listen_from: Optional[int] = None,
                 # over," or "Get over." and which then stops a plain "set a timer"
                 # being recognised. So everything before the pause is dropped -
                 # now, before any of it is handed over, since it can't be taken
-                # back once speech-to-text has heard it.
-                if paused:
+                # back once speech-to-text has heard it. After an open wait there
+                # is no wake word, and what's dropped is all but the pre-roll.
+                keep_from = None
+                if open_wait is not None:
+                    keep_from = reader.position - speech_frames * FRAME - int(OPEN_PRE_ROLL * RATE)
+                    turn_ends = i + 1 - speech_frames + max_frames
+                elif paused:
                     keep_from = reader.position - speech_frames * FRAME - int(LEAD_IN_SECONDS * RATE)
+                if keep_from is not None:
                     so_far = np.concatenate(kept)
                     kept = [so_far[max(0, keep_from - (reader.position - len(so_far))):]]
                 if heard:
@@ -305,6 +343,9 @@ def record_until_silence(source, detector, listen_from: Optional[int] = None,
                 logger.info(f"No new words for {still:.1f}s, stopping after "
                             f"{(reader.position - listen_from) / RATE:.1f}s")
                 break
+
+        if i + 1 >= turn_ends:
+            break
 
     if timeline:
         if speech_started:

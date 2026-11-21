@@ -375,7 +375,8 @@ class NemotronTranscription:
         self._changed_at = 0
         self._word_heard = False
         self._words_failed = False
-        # The words as they were last looked at, which only _hear's thread touches.
+        # The words as they were last looked at, which only _hear's thread changes - under
+        # the lock, as words() reads them too.
         self._last_words = ""
         self._thread = threading.Thread(target=self._hear, name="nemotron", daemon=True)
         self._thread.start()
@@ -407,6 +408,22 @@ class NemotronTranscription:
             if self._words_failed or not self._word_heard:
                 return None
             return (self._given - self._changed_at) / RATE
+
+    def words(self) -> str:
+        """
+        The words heard so far, for what's said in the recording to be read while it's
+        still being made - safe to ask from another thread while Nemotron is still working
+        through it.
+
+        Returns:
+            Nemotron's words so far as one string, once a real word has been heard in this
+            recording - see quiet_words for what isn't one. Until then '' - and from then
+            on if Nemotron can't say what it has heard so far, as they can't be trusted.
+        """
+        with self._words_lock:
+            if self._words_failed or not self._word_heard:
+                return ""
+            return self._last_words
 
     def finish(self, audio: np.ndarray, timeline=None, quiet_after: float = 0.0,
                wake_word: Optional[str] = None) -> Dict[str, Any]:
