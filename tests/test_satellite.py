@@ -4138,6 +4138,35 @@ def test_taken_is_told_to_the_brain_again_on_each_connection(brain, make):
     assert wait_for(lambda: brain.messages("shortcut_taken") == [{"type": "shortcut_taken", "taken": True}])
 
 
+def test_taken_reaches_the_brain_in_the_order_it_changed(brain, make, monkeypatch):
+    # A connection's tell, on the link's thread, read the old value and is slow to send it;
+    # the tray's change meanwhile must not reach the brain first, or the old one would stand.
+    made = tray_pressable(brain, make)
+    assert wait_for(lambda: brain.messages("shortcut_taken"))
+    sent, entered, release = [], threading.Event(), threading.Event()
+    sending = made.link.send
+
+    def slow_send(kind, *args, **fields):
+        if kind == "shortcut_taken" and not entered.is_set():
+            entered.set()
+            release.wait(5)
+        if kind == "shortcut_taken":
+            sent.append(fields["taken"])
+        return sending(kind, *args, **fields)
+
+    monkeypatch.setattr(made.link, "send", slow_send)
+    connecting = threading.Thread(target=made._tell_brain_shortcut_taken, daemon=True)
+    connecting.start()
+    assert entered.wait(5)
+    changing = threading.Thread(target=made.tray.on_taken, args=(True,), daemon=True)
+    changing.start()
+    time.sleep(0.1)
+    release.set()
+    connecting.join(5)
+    changing.join(5)
+    assert sent == [False, True]
+
+
 def test_a_satellite_with_no_tray_says_nothing_of_the_shortcut(brain, make):
     made = pressable(brain, make)
     brain.say("state", volumes={}, muted=False, app={"shortcut": "Ctrl+Alt+M"})

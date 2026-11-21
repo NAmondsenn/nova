@@ -524,6 +524,9 @@ class Satellite:
         # (Task 8's menu uses it); and whether music is playing, None until the brain says.
         self._shortcut: Optional[shortcut.Shortcut] = shortcut.read(shortcut.DEFAULT)
         self._shortcut_taken = False
+        # Held across reading _shortcut_taken and sending it to the brain, and only then - never
+        # with _lock or _mic_lock - so two threads' tells reach the brain in order.
+        self._taken_lock = threading.Lock()
         self._page: Optional[str] = None
         self._mic_minutes = MIC_MUTE_MINUTES
         self._music_playing: Optional[bool] = None
@@ -551,7 +554,9 @@ class Satellite:
         Connects to the brain, and listens for the wake word, until stopped.
 
         Raises:
-            SystemExit: Once stopped - with 1 when the brain asked for a restart.
+            SystemExit: Once stopped - with 1 when the brain asked for a restart, QUIT_CODE (10)
+                when Quit was chosen in the tray's menu and RESTART_CODE (11) for its Restart
+                Nova, which the launcher reads.
         """
         # Tells systemd it has started, and from here on that it's still working.
         watchdog.start()
@@ -1278,7 +1283,10 @@ class Satellite:
             logger.warning(f"The brain's app {field} makes no sense, so {consequence}: {ascii(value)[:80]}")
 
     def _tray_changed(self):
-        """Tells the tray something it shows may have changed. Never waits - see Tray - so never mind what's held."""
+        """
+        Tells the tray something it shows may have changed. Never waits - see Tray - but the tray
+        may call back into the satellite, so it's called with neither _lock nor _mic_lock held.
+        """
         tray = self.tray
         if tray is not None:
             tray.changed()
@@ -1401,10 +1409,15 @@ class Satellite:
         self._tell_brain_shortcut_taken()
 
     def _tell_brain_shortcut_taken(self):
-        """Tells the brain whether the shortcut is taken, if it can be reached; also done as each connection is made."""
+        """
+        Tells the brain whether the shortcut is taken, if it can be reached; also done as each
+        connection is made. From the tray's thread and the link's, so the read and the send are
+        made together under _taken_lock: one which read the old value can't arrive after the new.
+        """
         link = self.link
         if link is not None:
-            link.send("shortcut_taken", taken=self._shortcut_taken)
+            with self._taken_lock:
+                link.send("shortcut_taken", taken=self._shortcut_taken)
 
     def _menu_chosen(self, choice: str):
         """
@@ -1476,6 +1489,10 @@ class Satellite:
         Ends the app with this exit code, as Quit and Restart do. The icon goes at once - closing
         the tray from its own thread doesn't wait for itself - while the rest is closed down
         by the main loop's clean up, which closes it again, harmlessly.
+
+        Args:
+            code: The exit code: QUIT_CODE or RESTART_CODE, which the launcher acts on.
+            why: What's logged, as it goes.
         """
         logger.info(why)
         try:
