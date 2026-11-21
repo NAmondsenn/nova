@@ -2622,7 +2622,8 @@ class ActionExecutor:
         needs="conversation_open",
     )
     def end_conversation(self):
-        if not self.conversation.end("said"):
+        # Where it's on here only: it may have ended, and another begun elsewhere, since the tool was offered.
+        if not self.conversation.end("said", satellite=self.satellite):
             # It ended itself since the tool was offered.
             return ActionResult(False, UNAVAILABLE["conversation_open"])
         return ActionResult(True, CONVERSATION_ENDED)

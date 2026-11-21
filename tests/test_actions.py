@@ -3846,6 +3846,14 @@ def test_end_conversation_says_so_when_it_ended_itself_since_it_was_offered():
     assert (result.ok, result.say) == (False, "We're not in a conversation.")
 
 
+def test_end_conversation_never_ends_one_at_another_satellite():
+    # Only a race reaches it: the one here ended since the tool was offered, and another began elsewhere.
+    executor, conversation = _talking("pc", on_at="bedroom")
+    result = ActionExecutor.tools()["end_conversation"](executor)
+    assert (result.ok, result.say) == (False, "We're not in a conversation.")
+    assert conversation.satellite == "bedroom"
+
+
 def test_switched_off_there_are_no_tools():
     settings = {"enabled": False}
     executor, conversation = _talking("pc", settings=settings)
