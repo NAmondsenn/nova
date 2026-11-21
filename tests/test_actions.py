@@ -2808,7 +2808,7 @@ def downloads(make_config, monkeypatch):
                          navidrome={"url": "http://navidrome.local:4533", "username": "nova"})
     made = Downloads(config, lambda satellite, message: None, soulsync=lambda: None, library=EmptyLibrary)
     made.started = []
-    made.start = lambda wanted, satellite: made.started.append((wanted, satellite)) or True
+    made.start = lambda wanted, satellite, unless_large=False: made.started.append((wanted, satellite)) or True
     return made
 
 
