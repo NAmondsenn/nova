@@ -5825,6 +5825,32 @@ def test_talk_over_set_to_the_wake_word_or_a_press(brain, connect, make_session)
                                 then=lambda: brain.config.data.update(conversation={"talk_over": "voice"}))
 
 
+@pytest.mark.parametrize("pressed", [False, True])
+def test_a_turn_begun_over_a_reply_by_the_wake_word_or_a_press_has_the_conversations_patience(
+        brain, connect, make_session, monkeypatch, pressed):
+    # With no voice cut-in - before the PC's echo canceller is ready, say - the wake word or a press over a reply
+    # starts the next turn as a request, from the moment before it. It's still a turn of the conversation, which
+    # a thinking pause mustn't end, nor its length cut off at 15 seconds.
+    given = []
+    real = session_module.record_until_silence
+
+    def recording(*args, **kwargs):
+        given.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(session_module, "record_until_silence", recording)
+    brain.config.data["thresholds"] = {"press_no_words_seconds": 1.0}
+    session, pi = _over_a_reply(brain, connect, make_session, "What about Tuesday?", ready=False)
+    pi.wake(said(after=2), talked_over=True, pressed=pressed)
+    assert wait_for(lambda: len(session.conversation.heard) >= 3, seconds=TURNS)
+    assert session.conversation.heard[2] == ("What about Tuesday?", False)
+    turn = given[2]
+    assert (turn["silence_duration"], turn["timeout"], turn["no_words_after"]) == (1.5, 90, 1.5)
+    # The rest as for any wake word: as long to start, and the moment before it kept but not listened to.
+    assert (turn["speech_timeout"], turn["keep_before"], turn.get("open_wait")) == (3.0, 0.3, None)
+    _ended(session)
+
+
 def test_outside_a_conversation_nothing_listens_during_a_reply(brain, connect, make_session):
     brain.open_conversation = OpenConversation(lambda: {"enabled": True})
     satellite, pi = connect(conversations=True)

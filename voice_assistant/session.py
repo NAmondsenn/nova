@@ -1976,12 +1976,17 @@ class Session:
             # start talking than when the user has just said the wake word.
             speech_timeout = thresholds.get("follow_up_timeout", speech_timeout * 2)
         open_wait = None
-        if open_turn:
+        # A turn of a conversation under way here - an open one, or one begun by the wake word or a
+        # press over a reply in it (see _converse), which is no less the user's turn. Not the request
+        # which starts one, nor any outside one.
+        conversing = open_turn or (self._conversing and self._conversation_here())
+        if conversing:
             # A conversation's own patience: people pause longer between thoughts in one
             # than when asking for something, and talk for longer.
             talk = self.brain.config.section("conversation")
             silence_duration = _number(talk.get("pause_seconds"), DEFAULT_PAUSE_SECONDS)
             timeout = _number(talk.get("longest_turn"), DEFAULT_LONGEST_TURN)
+        if open_turn:
             open_wait = self._open_wait()
 
         self.activity = "listening"
@@ -2011,7 +2016,7 @@ class Session:
             # Nemotron's in a test - leaves the rule about the words off.
             words_quiet = getattr(listening, "quiet_words", None)
         no_words_after = _number(thresholds.get("press_no_words_seconds"), DEFAULT_PRESS_NO_WORDS_SECONDS)
-        if open_turn:
+        if conversing:
             # Nothing may end a turn of a conversation sooner than its pause.
             no_words_after = max(no_words_after, silence_duration)
         # Filled in as the recording ends, for what ended it and how loud the user was.
