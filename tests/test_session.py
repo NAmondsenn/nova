@@ -4475,6 +4475,13 @@ def test_a_session_starts_and_ends_a_conversation_at_its_satellite_by_voice(brai
     assert not brain.open_conversation.on_at(here) and brain.open_conversation.satellite is None
 
 
+def test_a_sessions_language_model_is_told_of_the_conversation_and_its_satellite(brain, make_session):
+    brain.open_conversation = OpenConversation(lambda: {"enabled": True})
+    session = make_session()
+    assert session.llm.open_conversation is brain.open_conversation
+    assert session.llm.satellite == session.satellite.name
+
+
 def test_a_session_with_no_conversations_leaves_the_phrases_to_claude(make_session, monkeypatch):
     # The fixture's brain has none, as a test's executor has none.
     session = make_session()

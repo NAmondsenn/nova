@@ -1250,3 +1250,273 @@ def test_claude_is_offered_the_conversation_tools_only_as_they_apply_and_can_cal
     # Switched off, neither.
     off = ActionExecutor(satellite="pc", conversation=OpenConversation(lambda: {"enabled": False}))
     assert not {"start_conversation", "end_conversation"} & {tool["name"] for tool in off.tool_schemas()}
+
+
+# Remembering a whole open conversation, and telling Claude it's in one
+
+class Clock:
+    """A time to move by hand, for the brain's conversation and the history's stamps alike."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(llm_module, "time", SimpleNamespace(monotonic=clock))
+    return clock
+
+
+def _talker(make_config, clock, **settings):
+    """Returns a handler at the "pc" with a conversation not yet started, and its settings."""
+    settings = {"enabled": True, "history_exchanges": 100, "history_length": 5, "history_max_age": 300, **settings}
+    conversation = OpenConversation(lambda: settings, now=clock)
+    handler = LLMHandler(config=make_config(conversation=settings), api_key=None,
+                         open_conversation=conversation, satellite="pc")
+    handler.client = FakeClient(_reply("Okay."))
+    return handler, conversation, settings
+
+
+def _say(handler, clock, count, seconds=60, start=0):
+    """Has the handler answer `count` requests, `seconds` apart, numbered from `start`."""
+    for number in range(start, start + count):
+        clock.now += seconds
+        handler.process_query(f"question {number}")
+
+
+def test_a_conversation_keeps_more_than_five_exchanges(make_config, clock):
+    handler, conversation, _ = _talker(make_config, clock)
+    conversation.start("pc")
+    _say(handler, clock, 8)
+    assert [turn["user"] for turn in handler.history] == [f"question {number}" for number in range(8)]
+    # And all of it goes to Claude with the ninth.
+    handler.process_query("question 8")
+    assert len(handler.client.requests[-1]["messages"]) == 8 * 2 + 1
+
+
+def test_without_one_only_five_are_kept_as_ever(make_config, clock):
+    handler, _, _ = _talker(make_config, clock)
+    _say(handler, clock, 8)
+    assert [turn["user"] for turn in handler.history] == [f"question {number}" for number in range(3, 8)]
+    # Nor does a conversation elsewhere keep more here.
+    elsewhere = OpenConversation(lambda: {"enabled": True}, now=clock)
+    elsewhere.start("bedroom")
+    handler.open_conversation = elsewhere
+    _say(handler, clock, 2, start=8)
+    assert len(handler.history) == 5
+
+
+def test_a_conversation_forgets_nothing_after_five_minutes(make_config, clock):
+    handler, conversation, _ = _talker(make_config, clock)
+    conversation.start("pc")
+    _say(handler, clock, 3, seconds=400)
+    # Half an hour on, and a fresh request begins: it's what runs as each starts.
+    clock.now += 1800
+    handler.forget_stale_history()
+    assert len(handler.history) == 3
+    # Where without one, they'd be forgotten.
+    plain = LLMHandler(api_key=None)
+    plain.history = list(handler.history)
+    plain.forget_stale_history()
+    assert plain.history == []
+
+
+def test_the_history_is_capped_at_the_setting(make_config, clock):
+    handler, conversation, settings = _talker(make_config, clock, history_exchanges=4)
+    conversation.start("pc")
+    _say(handler, clock, 6)
+    assert [turn["user"] for turn in handler.history] == [f"question {number}" for number in range(2, 6)]
+    # What isn't asked of Claude is kept to it too, and the setting is read as it is now.
+    handler.remember("what time is it", "It's 7:36 PM.")
+    assert len(handler.history) == 4 and handler.history[-1]["user"] == "what time is it"
+    settings["history_exchanges"] = 2
+    handler.remember("and the date", "It's the 21st.")
+    assert [turn["user"] for turn in handler.history] == ["what time is it", "and the date"]
+
+
+def test_ending_leaves_the_last_five(make_config, clock):
+    handler, conversation, _ = _talker(make_config, clock)
+    conversation.start("pc")
+    # Twenty minutes of it: the last five span nearly seven, so by their own times the oldest is
+    # older than five minutes a minute after.
+    _say(handler, clock, 12, seconds=100)
+    conversation.end("said")
+    assert len(handler.history) == 12
+    # A minute after, "what did you say about X" has the last five - their age counts from the end.
+    clock.now += 60
+    handler.forget_stale_history()
+    assert [turn["user"] for turn in handler.history] == [f"question {number}" for number in range(7, 12)]
+    # And Claude has just those.
+    handler.process_query("what did you say about question 17")
+    assert len(handler.client.requests[-1]["messages"]) == 5 * 2 + 1
+
+
+def test_five_minutes_after_the_end_they_are_forgotten_as_usual(make_config, clock):
+    handler, conversation, _ = _talker(make_config, clock)
+    conversation.start("pc")
+    _say(handler, clock, 12, seconds=100)
+    conversation.end("said")
+    clock.now += 360
+    handler.forget_stale_history()
+    assert handler.history == []
+
+
+def test_what_was_said_still_counts_from_the_end_when_it_ended_by_itself(make_config, clock):
+    handler, conversation, _ = _talker(make_config, clock)
+    conversation.start("pc")
+    _say(handler, clock, 7)
+    # Nobody spoke for the quiet spell: it ended five minutes after the last, and a minute later
+    # the request comes. Counted from the last exchange, that's six minutes and all forgotten.
+    clock.now += 300
+    conversation.end("idle")
+    clock.now += 60
+    handler.forget_stale_history()
+    assert len(handler.history) == 5
+
+
+def test_an_exchange_from_before_the_conversation_isnt_made_newer_by_it(make_config, clock):
+    handler, conversation, _ = _talker(make_config, clock)
+    handler.remember("play that one", "Which one?")
+    clock.now += 250
+    conversation.start("pc")
+    _say(handler, clock, 1, seconds=10)
+    conversation.end("said")
+    # The first is 260 seconds old at the end, and 320 a minute after.
+    clock.now += 60
+    handler.forget_stale_history()
+    assert [turn["user"] for turn in handler.history] == ["question 0"]
+
+
+def test_the_first_request_after_the_end_is_sent_only_the_last_five(make_config, clock):
+    handler, conversation, _ = _talker(make_config, clock)
+    conversation.start("pc")
+    _say(handler, clock, 9)
+    conversation.end("said")
+    handler.process_query("what did you say about question 3")
+    # Five of them, then the new one, which is kept after them as an ordinary exchange.
+    assert len(handler.client.requests[-1]["messages"]) == 5 * 2 + 1
+    assert [turn["user"] for turn in handler.history][-1] == "what did you say about question 3"
+    assert len(handler.history) == 5
+
+
+def test_an_exchange_added_after_the_end_cuts_the_history_too(make_config, clock):
+    handler, conversation, _ = _talker(make_config, clock)
+    conversation.start("pc")
+    _say(handler, clock, 9)
+    conversation.end("said")
+    handler.remember("what time is it", "It's 7:36 PM.")
+    assert len(handler.history) == 5 and handler.history[0]["user"] == "question 5"
+
+
+def test_a_conversation_which_ends_during_a_request_leaves_the_history_at_five(make_config, clock):
+    handler, conversation, _ = _talker(make_config, clock)
+    conversation.start("pc")
+    _say(handler, clock, 9)
+
+    class Ending(FakeClient):
+        def create(self, **request):
+            conversation.end("said")
+            return super().create(**request)
+
+    handler.client = Ending(_reply("Okay."))
+    handler.process_query("one more")
+    assert len(handler.history) == 5 and handler.history[-1]["user"] == "one more"
+
+
+def test_the_prompt_has_the_conversation_part_only_in_one(make_config, clock):
+    handler, conversation, _ = _talker(make_config, clock)
+    handler.process_query("hello")
+    conversation.start("pc")
+    handler.process_query("hello again")
+    conversation.end("said")
+    handler.process_query("and again")
+    outside, inside, after = (request["system"] for request in handler.client.requests)
+    assert len(outside) == 1 and len(after) == 1
+    # A block of its own, after the cached one and not cached itself.
+    assert len(inside) == 2 and inside[1] == {"type": "text", "text": llm_module.CONVERSATION_PROMPT}
+    # It says what the brief does.
+    prompt = llm_module.CONVERSATION_PROMPT
+    for part in ("spoken back-and-forth", "a few short sentences", "one thing at a time",
+                 "Don't end every reply with a question", "not_for_me"):
+        assert part in prompt
+
+
+def test_the_prompt_isnt_added_for_another_satellites_conversation(make_config, clock):
+    handler, conversation, _ = _talker(make_config, clock)
+    conversation.start("bedroom")
+    handler.process_query("hello")
+    assert len(handler.client.requests[0]["system"]) == 1
+
+
+def test_the_cached_system_block_is_unchanged(make_config, clock):
+    handler, conversation, _ = _talker(make_config, clock)
+    plain = LLMHandler(api_key=None)
+    plain.client = FakeClient(_reply("Okay."))
+    plain.process_query("hello")
+    conversation.start("pc")
+    handler.process_query("hello")
+    # Byte for byte what it is outside one, and still the one marked for caching.
+    assert handler.client.requests[0]["system"][0] == plain.client.requests[0]["system"][0]
+    assert handler.client.requests[0]["system"][0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_the_history_is_marked_for_caching(make_config, clock):
+    handler, conversation, _ = _talker(make_config, clock)
+    conversation.start("pc")
+    _say(handler, clock, 3)
+    request = handler.client.requests[-1]
+    messages = request["messages"]
+    # Only the newest of the history, on its last block, which a plain string became a block to carry.
+    assert messages[-2] == {"role": "assistant", "content": [
+        {"type": "text", "text": "Okay.", "cache_control": {"type": "ephemeral"}}]}
+    marked = [message for message in messages if "cache_control" in json.dumps(message["content"])]
+    assert marked == [messages[-2]]
+    # Not the request being asked, whose details change each time.
+    assert isinstance(messages[-1]["content"], str)
+    # The history itself is as it was, so a later turn marks the one newest then.
+    assert handler.history[-1]["assistant"] == "Okay." and handler.history[-1]["user"] == "question 2"
+    # With the system block's, no more than two of the four the API allows.
+    assert json.dumps(request).count("cache_control") == 2
+
+
+def test_nothing_is_marked_in_the_history_outside_a_conversation(make_config, clock):
+    handler, _, _ = _talker(make_config, clock)
+    _say(handler, clock, 3)
+    messages = handler.client.requests[-1]["messages"]
+    assert all(isinstance(message["content"], str) for message in messages)
+    assert "cache_control" not in json.dumps(messages)
+
+
+def test_a_round_of_reading_in_a_conversation_keeps_the_prompt_and_the_marked_history(make_config, clock):
+    handler, conversation, _ = _talker(make_config, clock)
+    handler.read_tools = {"home_status"}
+    conversation.start("pc")
+    _say(handler, clock, 2)
+    handler.client = FakeClient([_reply("", _tool("home_status", use_id="t1", about="sunset")),
+                                 _reply("Sunset's at 5:52 PM.")])
+    handler.process_query("when's sunset?", read=lambda action: SUNSET)
+    first, second = handler.client.requests
+    assert first["system"] == second["system"] and len(second["system"]) == 2
+    # The same message is marked, and the round's own turns follow it unmarked.
+    assert first["messages"][-2] == second["messages"][-4]
+    assert "cache_control" in json.dumps(second["messages"][-4])
+    # Claude's own blocks from the round aren't dicts, so only the ones which are can carry a mark.
+    assert sum(isinstance(block, dict) and "cache_control" in block
+               for message in second["messages"] if isinstance(message["content"], list)
+               for block in message["content"]) == 1
+    assert len(second["messages"]) == len(first["messages"]) + 2
+
+
+def test_a_paused_search_in_a_conversation_is_continued_with_the_same_prompt_and_history(make_config, clock):
+    handler, conversation, _ = _talker(make_config, clock)
+    conversation.start("pc")
+    _say(handler, clock, 2)
+    handler.client = FakeClient([_reply("Okay.", stop_reason="pause_turn"), _reply("Done.")])
+    handler.process_query("search for the weather in Bristol")
+    first, second = handler.client.requests
+    assert first["system"] == second["system"] and len(second["system"]) == 2
+    assert "cache_control" in json.dumps(second["messages"][-3])

@@ -444,7 +444,8 @@ class Session:
         # what's known about the user. Each of its responses is recorded in the brain's usage log.
         self.llm = LLMHandler(config=config, tools=self.actions.tool_schemas(),
                               read_tools=self.actions.read_tools(), memory=brain.memory,
-                              usage=brain.usage)
+                              usage=brain.usage, open_conversation=brain.open_conversation,
+                              satellite=satellite.name)
 
         # How each thing the user says is answered - everything between hearing it and
         # saying the reply. See conversation.py.

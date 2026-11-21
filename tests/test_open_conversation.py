@@ -136,6 +136,20 @@ def test_ended_gets_the_whole_conversation_once():
     assert given[1] == []
 
 
+def test_it_says_when_the_last_conversation_ended():
+    conversation, clock, _ = make()
+    assert conversation.ended_at is None
+    conversation.start("pc")
+    clock.now += 600
+    # Ended from another satellite's session, which leaves it be - nothing has ended.
+    assert conversation.end("gone", satellite="bedroom") is False
+    assert conversation.ended_at is None
+    assert conversation.end("said") is True
+    assert conversation.ended_at == 1600.0
+    clock.now += 60
+    assert conversation.ended_at == 1600.0
+
+
 def test_ended_is_called_outside_the_lock_and_a_failure_doesnt_stop_the_end(caplog):
     def fail(exchanges):
         # Asking again from inside would wait for ever if the lock were still held.

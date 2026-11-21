@@ -27,6 +27,7 @@ from voice_assistant.clock import spoken_clock_time
 from voice_assistant.downloads import OFFERS
 from voice_assistant.intents import not_a_list, points_back
 from voice_assistant.logging_setup import TRANSCRIPT
+from voice_assistant.open_conversation import OpenConversation
 from voice_assistant import network
 from voice_assistant.usage import UsageLog, kind_of, what_it_did
 
@@ -80,12 +81,24 @@ NOT_FOR_ME = {
 }
 
 
+# What Claude is told, after the instructions it is always given, while a conversation is on
+# - see LLMHandler.process_query. A block of its own, so the cached one is the same in and out of one.
+CONVERSATION_PROMPT = (
+    "You're in a spoken back-and-forth with the user, not answering a single question, so talk with them. "
+    "The 1-2 sentence limit above is lifted: answer in a few short sentences, and go longer only if they ask "
+    "for more. Ask one thing at a time. Don't end every reply with a question - a question mark means you're "
+    "waiting for an answer, so keep it for when you need one. The microphone stays open between turns, so "
+    "speech from something playing is still not_for_me, exactly as above."
+)
+
+
 class LLMHandler:
     """Claude, with the conversation so far, for one satellite's session."""
 
     def __init__(self, config=None, api_key=None, model=None, max_tokens=None,
                  temperature=None, history_length=None, assistant_name=None, tools=None, memory=None,
-                 read_tools: Sequence[str] = (), usage: Optional[UsageLog] = None):
+                 read_tools: Sequence[str] = (), usage: Optional[UsageLog] = None,
+                 open_conversation: Optional[OpenConversation] = None, satellite: Optional[str] = None):
         """
         Each argument left out comes from config.yaml.
 
@@ -105,6 +118,8 @@ class LLMHandler:
                 to answer from - see ActionExecutor.read_tools.
             usage: The log each of Claude's responses is recorded in, with what it cost - the
                 brain's, shared by every satellite's session - or None to record nothing.
+            open_conversation: The brain's OpenConversation, or None for no conversations.
+            satellite: This session's satellite's name, to tell whether a conversation is on here.
         """
         # Pulls llm, conversation, assistant and web_search sections from config.yaml
         llm_config = config.section("llm") if config else {}
@@ -163,6 +178,14 @@ class LLMHandler:
         # time, so this handler owns no thread: it's made again with each satellite's session.
         self.usage = usage
 
+        # Whether a conversation is on here decides how much is remembered and what Claude is told -
+        # see _talking_here. It's the brain's one, shared by every satellite's session.
+        self.open_conversation = open_conversation
+        self.satellite = satellite
+        # Whether a conversation was on here when the history was last used or added to, to
+        # notice that it's ended - see _settle_history.
+        self._was_talking = False
+
         # Web search is opt-in per query rather than always on, so ordinary replies
         # aren't slowed down or billed by unnecessary searches.
         self._web_search_enabled = web_search_config.get("enabled", True)
@@ -178,6 +201,75 @@ class LLMHandler:
         if not self.config:
             return self._history_max_age
         return self.config.section("conversation").get("history_max_age", self._history_max_age)
+
+    def _talking_here(self) -> bool:
+        """Whether a conversation is on at this satellite, as it is now."""
+        return self.open_conversation is not None and self.open_conversation.on_at(self.satellite)
+
+    def _settle_history(self) -> bool:
+        """
+        Brings the history up to date with whether a conversation is on here, which it is
+        never told - so it's called whenever the history is about to be used or added to.
+
+        When a conversation has ended since it was last called, the history is cut to
+        history_length, the newest kept. What was said in the conversation is as old as the
+        conversation's end, not as old as it was said, or the last five of a long one would
+        be forgotten by forget_stale_history as soon as the next request began.
+
+        Returns:
+            Whether a conversation is on here.
+        """
+        talking = self._talking_here()
+        if talking:
+            self._was_talking = True
+        elif self._was_talking:
+            self._was_talking = False
+            self.history = self.history[-self.history_length:]
+            ended = self.open_conversation.ended_at
+            if ended is None:
+                ended = time.monotonic()
+            for turn in self.history:
+                # Only what was said in the conversation: an exchange from before it is as
+                # old as it was.
+                if turn.pop("talked", False):
+                    turn["at"] = max(turn.get("at", ended), ended)
+        return talking
+
+    def _keep(self, turn: Dict):
+        """
+        Adds an exchange to the history, which keeps only so many: the last history_length,
+        or in a conversation the last conversation.history_exchanges, read as they are set
+        now - so the history doesn't grow indefinitely.
+
+        Args:
+            turn: The exchange.
+        """
+        talking = self._settle_history()
+        if talking:
+            turn["talked"] = True
+        self.history.append(turn)
+        cap = self.history_length
+        if talking:
+            section = self.config.section("conversation") if self.config else {}
+            cap = max(1, int(section.get("history_exchanges", 100)))
+        if len(self.history) > cap:
+            self.history = self.history[-cap:]
+
+    @staticmethod
+    def _marked_for_caching(message: Dict) -> Dict:
+        """
+        An earlier message, with the API told to cache the request as far as its end.
+
+        Args:
+            message: The message, in the API's format.
+
+        Returns:
+            A copy whose content is a list of blocks, the last marked with cache_control.
+        """
+        content = message["content"]
+        blocks = [{"type": "text", "text": content}] if isinstance(content, str) else [dict(block) for block in content]
+        blocks[-1]["cache_control"] = {"type": "ephemeral"}
+        return {**message, "content": blocks}
 
     @property
     def web_search_enabled(self) -> bool:
@@ -537,11 +629,20 @@ class LLMHandler:
             now = datetime.now().astimezone()
             system_prompt = self._system_prompt(use_web_search)
 
+            # Whether a conversation is on here is asked once, so what Claude is told and what
+            # it's sent are of the same one through every round of this request.
+            talking = self._settle_history()
+
             # Maintains a conversation history to provide context for the model's responses.
             messages = []
             # Loops through the conversation history and adds each user / assistant message to the messages list.
             for number, turn in enumerate(self.history):
                 messages.extend(self._earlier_messages(number, turn))
+            # In a conversation the history is long and goes with every turn, so the API is told to
+            # cache it as far as its newest message - only that one, so the next turn, whose history
+            # is that and one exchange more, reads all this back rather than reading it through again.
+            if talking and messages:
+                messages[-1] = self._marked_for_caching(messages[-1])
             # Adds the current user query to the messages list, after the details which
             # change from one request to the next - see _system_prompt.
             messages.append({"role": "user", "content": self._situation(now, context, lights, playing, device) + text})
@@ -574,6 +675,10 @@ class LLMHandler:
             # the API for five minutes after each request - a follow-up question, or the
             # next request soon after, doesn't have them all read through again.
             system = [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
+            # What's said about a conversation is a block of its own after that one, so what's
+            # cached is the same in and out of one.
+            if talking:
+                system.append({"type": "text", "text": CONVERSATION_PROMPT})
 
             # Sends the system prompt, conversation history, current query and model settings to the LLM
             if self.temperature is not None:
@@ -703,9 +808,9 @@ class LLMHandler:
             # The tools it called, and its own text with them, are kept too, so the next
             # request can show them as called - see _earlier_messages. So are its reads,
             # with what each gave.
-            self.history.append({"user": text, "assistant": response_text, "at": time.monotonic(),
-                                 "tools": [(action.tool, dict(action.params)) for action in actions],
-                                 "model_text": response_text, "reads": read_so_far})
+            self._keep({"user": text, "assistant": response_text, "at": time.monotonic(),
+                        "tools": [(action.tool, dict(action.params)) for action in actions],
+                        "model_text": response_text, "reads": read_so_far})
 
             # A download the user's words didn't ask for is only offered, by Nova's own
             # offer_download, which only asks - for a plain yes, as pc_power only asks. After
@@ -715,11 +820,6 @@ class LLMHandler:
                 logger.info("Claude asked for a download the user's words didn't, so it's offered instead")
                 actions = [Action("offer_download", dict(action.params)) if action.tool == "download_music"
                            else action for action in actions]
-
-            # Stops the history from growing indefinitely by only keeping a specified number of exchanges,
-            # this is defined by history_length.
-            if len(self.history) > self.history_length:
-                self.history = self.history[-self.history_length:]
 
             # Without a note's text, which is never logged - see actions.NOT_LOGGED.
             asked = [action.for_log() for action in actions]
@@ -906,7 +1006,9 @@ class LLMHandler:
         """
         Forgets exchanges older than history_max_age. Called as each new conversation
         starts, rather than every turn, so a back and forth is always remembered in
-        full while it's going on.
+        full while it's going on. While an open conversation is on here it forgets
+        nothing, and the age of what was said in one counts from its end - see
+        _settle_history.
 
         Without this, the last few exchanges were kept however old they were, so a
         conversation from the morning coloured a "yes" or "that one" in the evening.
@@ -914,6 +1016,8 @@ class LLMHandler:
         Args:
             now: The current time.monotonic() value - only given by the tests.
         """
+        if self._settle_history():
+            return
         now = time.monotonic() if now is None else now
         kept = [turn for turn in self.history if now - turn.get("at", now) <= self.history_max_age]
         if len(kept) < len(self.history):
@@ -930,9 +1034,7 @@ class LLMHandler:
             user_text: What the user said.
             reply: What the assistant replied.
         """
-        self.history.append({"user": user_text, "assistant": reply, "at": time.monotonic()})
-        if len(self.history) > self.history_length:
-            self.history = self.history[-self.history_length:]
+        self._keep({"user": user_text, "assistant": reply, "at": time.monotonic()})
 
     def record_reply(self, user_text: str, spoken: str, tool_answers: Sequence[str] = ()):
         """

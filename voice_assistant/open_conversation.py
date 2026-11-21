@@ -46,6 +46,8 @@ class OpenConversation:
         self._settings = settings
         self._now = now
         self._ended = ended
+        # When the last conversation ended, by `now`, or None if none has - see ended_at.
+        self._ended_at: Optional[float] = None
         # Sessions, the brain's threads and Home Assistant's switch all come here.
         self._lock = threading.Lock()
         self._reset(None)
@@ -64,6 +66,15 @@ class OpenConversation:
         """The satellite a conversation is on at, or None if none is."""
         with self._lock:
             return self._satellite
+
+    @property
+    def ended_at(self) -> Optional[float]:
+        """
+        When the last conversation ended, as `now` has it, or None if none has. The language
+        model, which isn't told when one ends, counts the age of what was said in it from here.
+        """
+        with self._lock:
+            return self._ended_at
 
     @property
     def enabled(self) -> bool:
@@ -125,6 +136,7 @@ class OpenConversation:
             if self._satellite is None or satellite not in (None, self._satellite):
                 return False
             exchanges = self._exchanges[-cap:]
+            self._ended_at = self._now()
             self._reset(None)
         # Outside the lock, as the step may take a while or come back here.
         if self._ended is not None:
