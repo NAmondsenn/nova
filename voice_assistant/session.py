@@ -87,10 +87,10 @@ DIP_FADE = 0.05
 # it began, and the first sound of their first word would otherwise be lost.
 CUT_IN_PRE_ROLL = 0.5
 
-# What's said as an open conversation ends without his asking - its quiet spell, turns Claude
+# What's said as an open conversation ends without the user asking - its quiet spell, turns Claude
 # took for speech from what's playing, or a turn which went wrong - so the open microphone never
-# closes silently. One he asked to end has its "Okay." said by what ended it (see actions.py);
-# one ended from Home Assistant's switch or by a mute was his own doing, and has only the
+# closes silently. One the user asked to end has its "Okay." said by what ended it (see actions.py);
+# one ended from Home Assistant's switch or by a mute was the user's own doing, and has only the
 # falling sound.
 CONVERSATION_LEFT = "I'll leave it there."
 UNASKED_ENDS = ("idle", "not for nova", "failed")
@@ -103,15 +103,15 @@ START_PHRASE = "let's talk"
 # see _switch_start_taken.
 SWITCH_START = object()
 
-# How long a conversation's wait for his next turn must have heard no speech before it's a gap, in
-# which what goes off by itself is said, in seconds - so not as he's just starting, and not straight
-# after a reply, where he may be about to answer it.
+# How long a conversation's wait for the user's next turn must have heard no speech before it's a gap,
+# in which what goes off by itself is said, in seconds - so not as the user is just starting, and not
+# straight after a reply, where they may be about to answer it.
 GAP_QUIET = 1.0
 
 # How long after an announcement's words a conversation's wait starts listening again, in seconds -
 # for what's left of them reaching the satellite's microphone late, as the echo canceller lets some
-# through. As long as a turn keeps from before he starts (recording.OPEN_PRE_ROLL), so none of them
-# goes to speech-to-text with what he says next.
+# through. As long as a turn keeps from before the user starts (recording.OPEN_PRE_ROLL), so none of
+# them goes to speech-to-text with what the user says next.
 ANNOUNCED_TAIL = 0.5
 
 # How often an announcement waiting for a gap in a conversation, and a session waiting for one said in
@@ -248,7 +248,7 @@ def _orb_choice(computer: Dict, name: str) -> str:
 
 class _Announced(Exception):
     """
-    Raised in a conversation's wait for his next turn as an announcement's words begin in its gap, so
+    Raised in a conversation's wait for the user's next turn as an announcement's words begin in its gap, so
     the wait stops listening until they're over - see Session._waited.
     """
 
@@ -402,7 +402,7 @@ class Session:
         self._cut_in_detector = None
         # The gaps in an open conversation here, in which what goes off by itself is said rather than
         # waiting for it to end - see _take_gap. Kept under the one condition: whether the session's
-        # own thread is waiting for his next turn and has heard no speech for GAP_QUIET, which only it
+        # own thread is waiting for the user's next turn and has heard no speech for GAP_QUIET, which only it
         # changes (see _waited); and whether an announcement has taken the gap, and is saying words,
         # which only the announcing thread changes. The session's thread says nothing while one has
         # (see _after_announcement), and listens to none of its words.
@@ -412,8 +412,8 @@ class Session:
         self._gap_words = False
         # The thread which took it, so a routine run in it can play its own sounds there.
         self._gap_taker: Optional[int] = None
-        # Whether he has started his turn in the wait the session's thread is in, after which it's no
-        # gap until the turn is over, however long he pauses. Only ever read and changed on that thread.
+        # Whether the user has started their turn in the wait the session's thread is in, after which it's
+        # no gap until the turn is over, however long they pause. Only ever read and changed on that thread.
         self._turn_begun = False
         # Whether that wait has been a gap at all, in which what came due will have rung, and what was
         # ringing as the user then began their turn - for the turn to silence, as what they heard. See
@@ -613,7 +613,7 @@ class Session:
         self.send_state()
         if self._muted:
             # Turning the listening off ends a conversation here, with the falling sound and nothing
-            # said, as it was his doing - rather than its open microphone hearing nothing until its
+            # said, as it was the user's doing - rather than its open microphone hearing nothing until its
             # quiet spell is up.
             self.end_conversation("muted")
 
@@ -1263,7 +1263,7 @@ class Session:
             on: True to start one, False to end the one on here.
         """
         if not on:
-            # A start still waiting its turn is cancelled too: it mustn't begin one he has turned off.
+            # A start still waiting its turn is cancelled too: it mustn't begin one the user has turned off.
             with self._typed_lock:
                 self._switch_start_pending = False
             self.end_conversation("switch")
@@ -1360,7 +1360,7 @@ class Session:
         """
         Whether a conversation here goes on to another turn - ending it once its quiet spell is
         up. One which has ended is closed off: the satellite told, "I'll leave it there." said if
-        he didn't ask for the end, and the falling sound played.
+        the user didn't ask for the end, and the falling sound played.
 
         Returns:
             False outside one, as for any request - and once it has ended, or its satellite has
@@ -1813,8 +1813,8 @@ class Session:
 
     def _open_listen(self) -> Optional[AudioFeed]:
         """
-        Waiting for him to start speaking: has the satellite send what it hears for a turn of
-        the conversation, for as long as he takes, noted so that ending the conversation stops it.
+        Waiting for the user to start speaking: has the satellite send what it hears for a turn of
+        the conversation, for as long as they take, noted so that ending the conversation stops it.
 
         Returns:
             The feed - or None if the conversation has ended meanwhile, when it's stopped at once.
@@ -1831,7 +1831,7 @@ class Session:
     def _open_wait(self) -> float:
         """
         Returns:
-            How long a turn of a conversation waits for him to start, in seconds: until the quiet spell
+            How long a turn of a conversation waits for the user to start, in seconds: until the quiet spell
             would end the conversation - not at all once that's due, or once the conversation has ended
             meanwhile, when there's no spell left.
         """
@@ -1842,17 +1842,17 @@ class Session:
 
     def _waited(self, quiet: float):
         """
-        Notes one frame of a conversation's wait for his next turn, as its detector heard it, on the
-        session's own thread: the wait is a gap once it has heard no speech for GAP_QUIET, until he
-        speaks - and none at all once his turn has begun, however long he pauses in it.
+        Notes one frame of a conversation's wait for the user's next turn, as its detector heard it, on
+        the session's own thread: the wait is a gap once it has heard no speech for GAP_QUIET, until the
+        user speaks - and none at all once their turn has begun, however long they pause in it.
 
         Args:
             quiet: How many seconds of audio in a row up to the frame have been no speech.
 
         Raises:
             _Announced: When an announcement's words have begun in the gap, none of which is to be
-                listened to - see _after_announcement. Once he has begun his turn they're heard with
-                it, rather than it being lost.
+                listened to - see _after_announcement. Once the user has begun their turn they're heard
+                with it, rather than it being lost.
         """
         gap = not self._turn_begun and quiet >= GAP_QUIET
         self._gap_had = self._gap_had or gap
@@ -1870,8 +1870,8 @@ class Session:
             heard: What's given a turn of a conversation as it's recorded - speech-to-text's add.
 
         Returns:
-            The same, which first ends the wait's gap for the rest of his turn: the recording gives it
-            nothing until he has started talking. If the wait has been a gap, it reads then what is
+            The same, which first ends the wait's gap for the rest of the user's turn: the recording gives
+            it nothing until they have started talking. If the wait has been a gap, it reads then what is
             ringing, for the turn to silence (see _handle_interaction): anything which came due in the
             minutes the wait can last rang in its gap, and the user talking means they've heard it, as
             for an ordinary request. Not without a gap, when what came due since the wait began hasn't
@@ -1888,7 +1888,7 @@ class Session:
         return begun
 
     def _close_gap(self):
-        """Ends a gap in a conversation here, as he begins his turn or the wait for it is over."""
+        """Ends a gap in a conversation here, as the user begins their turn or the wait for it is over."""
         with self._gap:
             self._in_gap = False
 
@@ -1896,7 +1896,7 @@ class Session:
         """
         Waits, on the session's own thread, for an announcement's words which began in the gap it was
         waiting in to end - listening to none of them, as what's left of them in what the satellite hears
-        could be taken for his turn.
+        could be taken for the user's turn.
 
         Args:
             feed: The wait's listen.
@@ -1929,9 +1929,9 @@ class Session:
 
         Args:
             words: Whether what's to be played is words, rather than an announcement's sound - which is
-                listened through, as that's when he'd say "stop" to it.
+                listened through, as that's when the user would say "stop" to it.
             still_wanted: The clock's check of what rings, given up on as soon as it's False - a timer
-                dismissed while it waits takes no gap, so nothing he starts saying is lost to its words.
+                dismissed while it waits takes no gap, so nothing the user starts saying is lost to its words.
 
         Returns:
             True once it's taken, or given up on. False at once with no conversation on here, and once the
@@ -2061,8 +2061,8 @@ class Session:
         if open_turn:
             before = 0
             start = 0 if listen_from is None else listen_from
-            # Waiting for him to start can go on for minutes, during which the session is moving - and
-            # is a gap whenever it has heard no speech for a while, until he begins (see _waited).
+            # Waiting for the user to start can go on for minutes, during which the session is moving - and
+            # is a gap whenever it has heard no speech for a while, until they begin (see _waited).
             detector = _Moving(detector, self._moved, self._waited)
             heard = self._begun(listening.add)
             self._turn_begun = self._gap_had = False
@@ -2086,8 +2086,8 @@ class Session:
                         open_wait=open_wait)
                     break
                 except _Announced:
-                    # An announcement's words began in the wait's gap, and aren't his, so the wait starts
-                    # again once they're over. Nothing had been given to speech-to-text, as he hadn't begun.
+                    # An announcement's words began in the wait's gap, and aren't the user's, so the wait starts
+                    # again once they're over. Nothing had been given to speech-to-text, as they hadn't begun.
                     start = self._after_announcement(feed)
                     open_wait = self._open_wait()
         except BaseException:
@@ -2858,7 +2858,7 @@ class Session:
             # then wait for, is that conversation's.
             stopped = not ringing and stops is not None and self._stops != stops
 
-            # Its sound is over, so a reply he started over it in a conversation can be said.
+            # Its sound is over, so a reply the user started over it in a conversation can be said.
             self._let_gap_go()
             if not message:
                 return chimed
@@ -2867,7 +2867,7 @@ class Session:
             # to the assistant - or to dismiss this - before it's finished, so the
             # message waits its turn again rather than talking over them: in a
             # conversation, for a gap of its own, in which nothing is listened to until
-            # it's been said, as what's left of it reaching the microphone isn't him.
+            # it's been said, as what's left of it reaching the microphone isn't the user.
             if not self._wait_for_turn(still_wanted, gap="words"):
                 return False
             # An alert or a battery warning has no still_wanted to stop its words, as what
@@ -2991,7 +2991,7 @@ class Session:
         In an open conversation here, which could go on for half an hour, it runs in
         the next gap instead, taken as an announcement's words are (see _take_gap): it
         isn't said over a reply, and what's left of it reaching the microphone isn't
-        taken for his turn. It leaves the conversation's turn as it found it, so a
+        taken for the user's turn. It leaves the conversation's turn as it found it, so a
         question Nova had just asked can still be answered.
 
         Args:

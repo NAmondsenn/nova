@@ -203,7 +203,7 @@ class Conversation:
         """
         Starts afresh, as start() does, for a routine run by itself during an open conversation - and puts
         back what the conversation's own turn had once it's done, so a question Nova had just asked there
-        is still answered by what he says next, and what was ringing as the turn began still is.
+        is still answered by what the user says next, and what was ringing as the turn began still is.
         """
         kept = {name: getattr(self, name) for name in TURN}
         self.start()
@@ -313,7 +313,7 @@ class Conversation:
         # to make sense of. See intents.py.
         # Bar one whose tool's answer is the user's alone - "where's my phone?" - which can't be
         # the answer to anything Nova asks, and which Claude, once asked, would hear. And in an
-        # open conversation, its own phrases, as he may end it in answer to anything.
+        # open conversation, its own phrases, as the user may end it in answer to anything.
         if follow_up:
             only = ActionExecutor.private_tools() + (CONVERSATION_TOOLS if self.conversing() else [])
             result = self.intents.match(text, only=only)
@@ -321,7 +321,7 @@ class Conversation:
             result = self.intents.match(text)
         local = result is not None
         claude_answered = not local
-        # "Think harder", by his words: the conversation moves up, and what is asked of the bigger
+        # "Think harder", by the user's words: the conversation moves up, and what is asked of the bigger
         # model is answered as any other of Claude's answers is, from here.
         moved_up = local and any(action.tool == "use_bigger_model" for action in result["actions"])
         earlier = None
@@ -463,17 +463,18 @@ class Conversation:
         Moves the conversation up to the bigger model, and says what it is to be asked.
 
         Args:
-            text: What he said, e.g. "think harder about the route to Leeds".
-            move: The use_bigger_model action his words matched, whose "rest" is what came after them.
+            text: What the user said, e.g. "think harder about the route to Leeds".
+            move: The use_bigger_model action the user's words matched, whose "rest" is what came after
+                them.
 
         Returns:
-            None when it has moved up and that is all - he said it alone and the last exchange can't be
-            asked again: it ran something, which would be run twice, or it was a local command or phrase
-            he gave, which isn't a request to answer, or there is none; or it couldn't be moved up.
-            Else the request to ask: the whole of what he said when he said more, as Claude copes with
-            the words before it, with None; or the last request when he said it alone and Claude
-            answered it without running anything, with that exchange - taken out of the history, to be
-            replaced by the answer.
+            None when it has moved up and that is all - the user said it alone and the last exchange
+            can't be asked again: it ran something, which would be run twice, or it was a local command
+            or phrase the user gave, which isn't a request to answer, or there is none; or it couldn't be
+            moved up. Else the request to ask: the whole of what the user said when they said more, as
+            Claude copes with the words before it, with None; or the last request when the user said it
+            alone and Claude answered it without running anything, with that exchange - taken out of the
+            history, to be replaced by the answer.
         """
         if not self._run([Action("use_bigger_model")])[0].ok:
             return None
