@@ -5,13 +5,16 @@ taken back out of it. The tests which use speexdsp itself only run where it's
 installed, as it is on the Pi; the rest run anywhere numpy and soxr are.
 """
 
+import logging
+
 import numpy as np
 import pytest
 
 pytest.importorskip("soxr")
 
 from voice_assistant import echo as echo_module
-from voice_assistant.echo import RATE, EchoCanceller, PlayedAudio, Samples, Speex, make_echo_canceller, measure_delay
+from voice_assistant.echo import (RATE, EchoCanceller, PlayedAudio, Samples, Speex, library_path, make_echo_canceller,
+                                  measure_delay)
 
 try:
     Speex()
@@ -192,6 +195,38 @@ def test_without_speexdsp_the_microphone_is_left_alone(make_config, monkeypatch)
     monkeypatch.setattr(echo_module, "Speex", missing)
     assert make_echo_canceller(make_config(audio={"echo_cancellation": True}), 48000) is None
     assert make_echo_canceller(make_config(audio={"echo_cancellation": False}), 48000) is None
+
+
+def test_ready_only_once_the_gap_is_agreed(monkeypatch):
+    canceller = _canceller(monkeypatch, FakeSpeex())
+    assert not canceller.ready
+    _play_and_hear(canceller, _music(16.0), delay=2000)
+    assert canceller.ready
+    resets = canceller.speex.resets
+    # Devices opened afresh are lined up afresh, from nothing.
+    canceller.reset()
+    assert not canceller.ready and canceller.delay is None and not canceller._measured
+    assert canceller.speex.resets == resets + 1
+
+
+# On Windows, where the library is shipped with the install
+
+@pytest.mark.parametrize("name", ["speexdsp.dll", "libspeexdsp-1.dll"])
+def test_on_windows_the_shipped_library_is_loaded(tmp_path, monkeypatch, name):
+    monkeypatch.setattr(echo_module, "_on_windows", lambda: True)
+    monkeypatch.setattr(echo_module.paths, "DATA_DIR", str(tmp_path))
+    assert library_path() is None
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / name).write_bytes(b"")
+    assert library_path() == str(tmp_path / "lib" / name)
+
+
+def test_on_windows_without_the_library_there_is_no_canceller(make_config, tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(echo_module, "_on_windows", lambda: True)
+    monkeypatch.setattr(echo_module.paths, "DATA_DIR", str(tmp_path))
+    with caplog.at_level(logging.WARNING, logger=echo_module.__name__):
+        assert make_echo_canceller(make_config(audio={"echo_cancellation": True}), 48000) is None
+    assert "No echo cancelling" in caplog.text
 
 
 # With speexdsp itself

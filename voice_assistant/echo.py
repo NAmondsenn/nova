@@ -10,7 +10,9 @@ The speaker keeps a copy of everything it plays (PlayedAudio), and the microphon
 passes what it hears through speexdsp's echo canceller (EchoCanceller), the one
 Linux voice software has long used, with that copy lined up against it. setup.sh
 installs speexdsp (libspeexdsp1) rather than counting on the Pi having it; without
-it, the microphone is simply left as it was.
+it, the microphone is simply left as it was. Windows has no such package, so the PC's
+install (scripts/windows/install.ps1) puts speexdsp.dll in the lib folder of the
+assistant's data, and that is the one loaded there.
 
 Lining them up is the hard part, for two reasons found on the Pi:
 
@@ -34,12 +36,15 @@ Lining them up is the hard part, for two reasons found on the Pi:
 import ctypes
 import ctypes.util
 import logging
+import os
 import threading
 from collections import deque
 from typing import Optional, Tuple
 
 import numpy as np
 import soxr
+
+from voice_assistant import paths
 
 # Logger setup
 logger = logging.getLogger(__name__)
@@ -82,10 +87,35 @@ LEAST_CLOCK_SECONDS = 5.0
 # and its clock is taken afresh.
 CLOCK_JUMP_SECONDS = 0.05
 
+# What the PC's install calls the library it ships, in the lib folder of the data folder.
+WINDOWS_LIBRARIES = ("speexdsp.dll", "libspeexdsp-1.dll")
+
 # From speexdsp's speex_echo.h and speex_preprocess.h.
 SPEEX_ECHO_SET_SAMPLING_RATE = 24
 SPEEX_PREPROCESS_SET_DENOISE = 0
 SPEEX_PREPROCESS_SET_ECHO_STATE = 24
+
+
+def _on_windows() -> bool:
+    """Whether this is Windows, where the PC's satellite runs."""
+    return os.name == "nt"
+
+
+def library_path() -> Optional[str]:
+    """
+    Where speexdsp is: on Windows, the one the install shipped, since the system has
+    none to find; elsewhere, wherever the system keeps it.
+
+    Returns:
+        The path, or None if it isn't there.
+    """
+    if not _on_windows():
+        return ctypes.util.find_library("speexdsp")
+    for name in WINDOWS_LIBRARIES:
+        path = os.path.join(paths.DATA_DIR, "lib", name)
+        if os.path.isfile(path):
+            return path
+    return None
 
 
 class Samples:
@@ -211,7 +241,12 @@ class Speex:
         Raises:
             OSError: If speexdsp isn't installed.
         """
-        name = ctypes.util.find_library("speexdsp") or "libspeexdsp.so.1"
+        name = library_path()
+        if name is None:
+            if _on_windows():
+                # Says where the library should be, rather than trying a Linux name.
+                raise OSError(f"{WINDOWS_LIBRARIES[0]} isn't in {os.path.join(paths.DATA_DIR, 'lib')}")
+            name = "libspeexdsp.so.1"
         self._lib = lib = ctypes.CDLL(name)
         samples = ctypes.POINTER(ctypes.c_int16)
         lib.speex_echo_state_init.restype = ctypes.c_void_p
@@ -301,6 +336,22 @@ class EchoCanceller:
         self._lock = threading.Lock()
         self._stopping = threading.Event()
         threading.Thread(target=self._keep_measuring, daemon=True, name="echo-delay").start()
+
+    @property
+    def ready(self) -> bool:
+        """Whether the speaker is lined up with the microphone and being taken out - the gap measured and agreed."""
+        return self.delay is not None
+
+    def reset(self):
+        """
+        Forgets what was lined up, for when the speaker and microphone are opened afresh
+        and the gap between them, which differs each time, has to be found again. What
+        was measured before is dropped too, or it would be agreed with at once.
+        """
+        with self._lock:
+            self.delay = None
+            self._measured.clear()
+            self.speex.reset()
 
     def process(self, samples: np.ndarray, adc_time: Optional[float]) -> np.ndarray:
         """

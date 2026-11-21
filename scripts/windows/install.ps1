@@ -6,13 +6,14 @@
 #
 # It's safe to run again, which is how an update goes: the code is copied over, the
 # packages are installed again only if requirements-pc.txt changed, venv\Scripts\Nova.exe
-# is built again only if what it's built from changed, the settings file is left alone if
-# there is one, and the tasks and the Start-menu shortcut are replaced. Two tasks run the
-# launcher: "Nova satellite" at logon, and "Nova start", with no trigger, for a deploy to
-# start; the shortcut runs it too. All three run it through Nova.exe, so Windows names the
-# process Nova, or through pythonw.exe if Nova.exe couldn't be built. It never writes .env:
-# the password the brain's `add-satellite pc` gave goes in config\.env by hand, as
-# NOVA_BACKEND_TOKEN=<password>. It doesn't start or stop the satellite either.
+# is built again only if what it's built from changed, data\lib\speexdsp.dll (the echo
+# canceller's library) is fetched again only if it isn't the pinned one, the settings file
+# is left alone if there is one, and the tasks and the Start-menu shortcut are replaced.
+# Two tasks run the launcher: "Nova satellite" at logon, and "Nova start", with no trigger,
+# for a deploy to start; the shortcut runs it too. All three run it through Nova.exe, so
+# Windows names the process Nova, or through pythonw.exe if Nova.exe couldn't be built. It
+# never writes .env: the password the brain's `add-satellite pc` gave goes in config\.env
+# by hand, as NOVA_BACKEND_TOKEN=<password>. It doesn't start or stop the satellite either.
 #
 # Plain ASCII, and nothing newer than Windows PowerShell 5.1. The `python` on this PC's
 # PATH is the Microsoft Store stub, so only the `py` launcher is used.
@@ -78,6 +79,64 @@ if ($hash -ne $installed) {
 else {
     Write-Host 'The packages are as requirements-pc.txt says'
 }
+
+# The echo canceller's library, speexdsp.dll, which Windows has no package for: the 64-bit
+# build in SpeexDSPSharp.Natives 1.3.0 on nuget.org (built from xiph/speexdsp on 18 April
+# 2026), which imports only kernel32.dll and msvcrt.dll, so there is no runtime to ship
+# with it. Nothing is taken out of the package (a zip) until its SHA-256 is the one written
+# here, and only the one DLL is, which is checked as well, into data\lib, where
+# voice_assistant/echo.py looks for it. It is fetched only when the DLL there isn't the
+# pinned one. A failure is a warning, never a failed install: without the library the
+# satellite runs with no echo canceller, as it did before there was one to load.
+$speexUrl = 'https://api.nuget.org/v3-flatcontainer/speexdspsharp.natives/1.3.0/speexdspsharp.natives.1.3.0.nupkg'
+$speexPackageHash = '25645341d244dcef11a07d31f2afd3ce01ea3858b2ea94f8648f5a43e8172d2a'
+$speexEntry = 'runtimes/win-x64/native/speexdsp.dll'
+$speexHash = '7f51f6825b0f9ca6a001b2612585da0ecd2dca576fa62c8e6f6921a74052e05a'
+$speexDll = Join-Path $data 'lib\speexdsp.dll'
+$speexTemp = Join-Path $env:LOCALAPPDATA 'Temp\nova-speexdsp'
+try {
+    $speexHave = ''
+    if (Test-Path -LiteralPath $speexDll) { $speexHave = (Get-FileHash -Algorithm SHA256 -LiteralPath $speexDll).Hash }
+    if ($speexHave -eq $speexHash) {
+        Write-Host 'speexdsp.dll is the one pinned'
+    }
+    else {
+        Write-Host 'Fetching speexdsp.dll, for the echo canceller'
+        if (Test-Path -LiteralPath $speexTemp) { Remove-Item -LiteralPath $speexTemp -Recurse -Force }
+        New-Item -ItemType Directory -Path $speexTemp | Out-Null
+        $package = Join-Path $speexTemp 'speexdsp.nupkg'
+        # Windows PowerShell 5.1 offers older TLS than nuget.org takes unless it is told, and
+        # draws a progress bar which makes the download many times slower.
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $progress = $ProgressPreference
+        $ProgressPreference = 'SilentlyContinue'
+        try { Invoke-WebRequest -UseBasicParsing -Uri $speexUrl -OutFile $package }
+        finally { $ProgressPreference = $progress }
+        $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $package).Hash
+        if ($got -ne $speexPackageHash) { throw "the download's SHA-256 is $got, not the pinned $speexPackageHash" }
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($package)
+        try {
+            $entry = $zip.GetEntry($speexEntry)
+            if (-not $entry) { throw "the package has no $speexEntry" }
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path $speexTemp 'speexdsp.dll'), $true)
+        }
+        finally { $zip.Dispose() }
+        $got = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $speexTemp 'speexdsp.dll')).Hash
+        if ($got -ne $speexHash) { throw "the DLL's SHA-256 is $got, not the pinned $speexHash" }
+        # Written beside it and then moved into place, so a failure part way leaves the old
+        # DLL whole, as for Nova.exe.
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $speexDll) | Out-Null
+        $speexStaged = $speexDll + '.new'
+        Copy-Item -LiteralPath (Join-Path $speexTemp 'speexdsp.dll') -Destination $speexStaged -Force
+        Move-Item -LiteralPath $speexStaged -Destination $speexDll -Force
+        Write-Host "Installed $speexDll"
+    }
+}
+catch {
+    Write-Warning "Couldn't fetch speexdsp.dll, so the satellite has no echo canceller: $($_.Exception.Message)"
+}
+if (Test-Path -LiteralPath $speexTemp) { Remove-Item -LiteralPath $speexTemp -Recurse -Force -ErrorAction SilentlyContinue }
 
 # This install's own settings, only if there are none: what differs from config.yaml,
 # which is the brain's address and name for this satellite, a key press instead of a
