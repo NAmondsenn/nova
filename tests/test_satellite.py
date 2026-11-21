@@ -3870,6 +3870,33 @@ def test_the_watch_tells_the_tray_on_every_look(brain, make, pc, monkeypatch):
     assert made._app_state().mic_muted is False
 
 
+def test_the_watch_backs_off_after_a_failed_look(brain, make, pc, monkeypatch):
+    # A stuck volume thread mustn't have the lock held most of the time: after a look which
+    # failed, the next is MIC_LOOK_EVERY away, until one succeeds.
+    monkeypatch.setattr(satellite, "MIC_WATCH", 0.02)
+    monkeypatch.setattr(satellite, "MIC_LOOK_EVERY", 0.5)
+    made = tray_pressable(brain, make)
+    looks = []
+    volume = made.system_volume
+
+    def look():
+        looks.append(time.monotonic())
+        if volume.mic_fail:
+            raise TimeoutError("stuck")
+        return volume.mic_muted
+
+    # Failing before the look is swapped in, so every look counted here fails.
+    volume.mic_fail = True
+    volume.microphone_muted = look
+    assert wait_for(lambda: looks)
+    failed = len(looks)
+    time.sleep(0.3)
+    assert len(looks) == failed
+    # Once a look succeeds it's back to every MIC_WATCH.
+    volume.mic_fail = False
+    assert wait_for(lambda: len(looks) >= failed + 6)
+
+
 def test_a_mute_by_hand_reaches_the_tray_within_the_watch(brain, make, pc, monkeypatch):
     monkeypatch.setattr(satellite, "MIC_WATCH", 0.02)
     made = tray_pressable(brain, make)

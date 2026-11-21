@@ -77,6 +77,9 @@ class SystemVolume:
         self._backend = None
         self._jobs: "queue.Queue" = queue.Queue()
         self._owner: Optional[threading.Thread] = None
+        # Set when the last job given up on is done - None while none has been - so a thread
+        # which has stopped answering isn't handed more work: see _do.
+        self._stuck: Optional[threading.Event] = None
         if self._make is None:
             return
         # Everything to do with COM is done on this one thread, as with Windows' media
@@ -115,18 +118,27 @@ class SystemVolume:
 
     def _do(self, work, wait: float):
         """
-        Has the owning thread do something, and waits for it.
+        Has the owning thread do something, and waits for it - unless a job given up on is
+        still on the thread, when it's refused at once: queued behind the stuck one it could
+        only time out too, and every caller would wait its full time for nothing.
 
         Returns:
             What it gave.
 
         Raises:
-            TimeoutError: It took longer than `wait` seconds.
+            TimeoutError: It took longer than `wait` seconds, or the thread is still on a job
+                which did.
             Exception: Whatever it raised.
         """
+        stuck = self._stuck
+        if stuck is not None and not stuck.is_set():
+            raise TimeoutError("Windows' volume is still on a job which took too long")
         done, answer = threading.Event(), {}
         self._jobs.put((work, done, answer))
         if not done.wait(wait):
+            # Callers giving up together may each set it: whichever is kept, nothing more is
+            # queued behind the stuck job than the few already there.
+            self._stuck = done
             raise TimeoutError("Windows' volume took too long to answer")
         if "error" in answer:
             raise answer["error"]

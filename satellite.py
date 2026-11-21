@@ -1367,10 +1367,18 @@ class Satellite:
             return None
 
     def _watch_mic(self):
-        """Looks at Windows' microphone each MIC_WATCH seconds, so a mute by hand reaches the tray, until stopped."""
-        while not self._finished.wait(MIC_WATCH):
+        """
+        Looks at Windows' microphone each MIC_WATCH seconds, so a mute by hand reaches the tray,
+        until stopped - each MIC_LOOK_EVERY seconds instead while looking fails.
+        """
+        wait = MIC_WATCH
+        while not self._finished.wait(wait):
             with self._mic_lock:
-                self._note_mic(self._look_at_microphone())
+                muted = self._look_at_microphone()
+                self._note_mic(muted)
+            # After a look which failed - Windows' volume thread may be stuck - the next is
+            # MIC_LOOK_EVERY away, until one succeeds, so the lock isn't held most of the time.
+            wait = MIC_WATCH if muted is not None else MIC_LOOK_EVERY
             # Told on every look, not only on a change: the tray skips a look it already shows,
             # and so a change it missed - read half way through one - is put right within
             # MIC_WATCH. Only once the lock is let go: the tray never waits, but it may call back.
