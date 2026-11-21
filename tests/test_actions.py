@@ -3781,6 +3781,21 @@ def test_a_second_satellite_is_told_where_it_is():
     assert named.execute(Action("start_conversation")).say == "We're already talking at Desk."
 
 
+def test_a_muted_microphone_refuses_a_start():
+    # Asked by typing at a wake-word satellite whose microphone is muted: nothing would hear him, so nothing starts.
+    muted = [True]
+    conversation = OpenConversation(lambda: {"enabled": True})
+    executor = ActionExecutor(satellite="bedroom", conversation=conversation, spoken_name=_spoken,
+                              muted=lambda: muted[0])
+    result = executor.execute(Action("start_conversation"))
+    assert (result.ok, result.say) == (False, "The microphone's muted.")
+    assert conversation.satellite is None
+    # Read as it is now.
+    muted[0] = False
+    assert executor.execute(Action("start_conversation")).say == "Go ahead."
+    assert conversation.satellite == "bedroom"
+
+
 def test_end_conversation_ends_it_and_says_okay():
     executor, conversation = _talking("pc", on_at="pc")
     result = executor.execute(Action("end_conversation"))

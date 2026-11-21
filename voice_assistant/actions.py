@@ -81,6 +81,9 @@ UNAVAILABLE = {
 # ordinary reply, so the session adds only the sounds.
 CONVERSATION_STARTED = "Go ahead."
 CONVERSATION_ENDED = "Okay."
+# What's said when one is asked for where the microphone is muted - by typing in Home Assistant at a
+# wake-word satellite, as nothing else can ask it then - and none is started, as nothing would hear him.
+MICROPHONE_MUTED = "The microphone's muted."
 # What's said on going back to the usual model, and at once on moving up to the bigger one when that is
 # asked again of a slower model, so the wait isn't silence.
 QUICK_ANSWERS = "Okay, quick answers."
@@ -445,7 +448,7 @@ class ActionExecutor:
                  at_pc: Callable[[], bool] = lambda: False,
                  pc_name: Callable[[], Optional[str]] = lambda: None,
                  microphone: Optional[Callable[[bool, Optional[str]], Dict]] = None,
-                 conversation: Optional[OpenConversation] = None):
+                 conversation: Optional[OpenConversation] = None, muted: Callable[[], bool] = lambda: False):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -525,6 +528,8 @@ class ActionExecutor:
                 Session._mute_microphone. None if there's no satellite to mute.
             conversation: The brain's one OpenConversation, which these tools start and end, or None
                 for no conversations - then neither tool is offered, as when it's switched off.
+            muted: Whether the microphone a conversation here would listen through is muted, so none
+                can start. Never, by default.
         """
         self.music = music
         self.clock = clock
@@ -561,6 +566,7 @@ class ActionExecutor:
         self.pc_name = pc_name
         self.microphone = microphone
         self.conversation = conversation
+        self.muted = muted
         # The music's level before "mute", for "unmute" to put it back to - see _mute_music.
         self._level_before_mute: Optional[int] = None
         # What was last asked, and what the assistant said - or the last alert, and
@@ -2532,6 +2538,8 @@ class ActionExecutor:
         needs="conversation",
     )
     def start_conversation(self):
+        if self.muted():
+            return ActionResult(False, MICROPHONE_MUTED)
         started = self.conversation.start(self.satellite)
         if started == "off":
             # Switched off since the tool was offered.

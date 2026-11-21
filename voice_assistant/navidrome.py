@@ -1018,6 +1018,10 @@ class NavidromePlayer(NavidromeLibrary):
         self._talking = False
         self._resume_after = False
         self._interrupted = False
+        # Whether music was asked for while the assistant talked - see asked_for.
+        self._asked_while_talking = False
+        # How much of the music volume it plays at - see set_share.
+        self._share = 1.0
         self._repeat = "off"
         self._shuffle = False
         # The last cover fetched, by its id, so the settings page only has it fetched
@@ -1409,8 +1413,26 @@ class NavidromePlayer(NavidromeLibrary):
         result = self.volume.set("music", percent)
         with self._lock:
             if self._playback is not None:
-                self._playback.volume = self.volume.get("music")
+                self._playback.volume = self._loudness()
         return result
+
+    def set_share(self, share: float):
+        """
+        Plays the music at a share of its volume from now on - turned down while a conversation goes on
+        over music asked for in it, and back to all of it, 1, once that's over (see Session._let_music_play).
+        The volume itself is left as it is, so a change made meanwhile is the one it comes back up to.
+
+        Args:
+            share: How much of the volume, from 0 to 1.
+        """
+        with self._lock:
+            self._share = share
+            if self._playback is not None:
+                self._playback.volume = self._loudness()
+
+    def _loudness(self) -> float:
+        """How loud the music plays: its volume, at the share it's given. Called with the lock held."""
+        return self.volume.get("music") * self._share
 
     # Making way for the assistant - see MusicHold
 
@@ -1426,6 +1448,7 @@ class NavidromePlayer(NavidromeLibrary):
             # user had already stopped used to start again after the next thing they
             # said, because every conversation ended by un-pausing it.
             self._resume_after = self._interrupted
+            self._asked_while_talking = False
             self._talking = True
             self._set_paused(True)
 
@@ -1433,6 +1456,7 @@ class NavidromePlayer(NavidromeLibrary):
         """Lets the music carry on, if it was playing or asked for while the assistant talked."""
         with self._lock:
             self._talking = False
+            self._asked_while_talking = False
             if self._resume_after:
                 self._resume_after = False
                 self._set_paused(False)
@@ -1440,7 +1464,16 @@ class NavidromePlayer(NavidromeLibrary):
     def cancel_resume(self):
         """Keeps the music paused once the assistant has finished - it was asked to pause."""
         with self._lock:
-            self._resume_after = False
+            self._resume_after = self._asked_while_talking = False
+
+    def asked_for(self) -> bool:
+        """
+        Whether music has been asked for while the assistant talks - a song, a playlist, or carrying on -
+        which is waiting for it to finish, rather than music which was only playing as it began. So a
+        conversation, which could go on for half an hour, can let it play before it ends.
+        """
+        with self._lock:
+            return self._talking and self._asked_while_talking
 
     def _carry_on(self):
         """
@@ -1448,7 +1481,7 @@ class NavidromePlayer(NavidromeLibrary):
         with the lock held.
         """
         if self._talking:
-            self._resume_after = True
+            self._resume_after = self._asked_while_talking = True
         else:
             self._set_paused(False)
 
@@ -1488,8 +1521,8 @@ class NavidromePlayer(NavidromeLibrary):
             state = {"queue": list(self._queue), "unshuffled": list(self._unshuffled), "index": self._index,
                      "position": self._place(), "repeat": self._repeat, "shuffle": self._shuffle}
             self._queue, self._unshuffled = [], []
-            # Nothing's left here to carry on after the reply, or to have been playing.
-            self._resume_after = self._interrupted = False
+            # Nothing's left here to carry on after the reply, to have been playing, or to have been asked for.
+            self._resume_after = self._interrupted = self._asked_while_talking = False
             self._jump(0)
         return state
 
@@ -1551,7 +1584,7 @@ class NavidromePlayer(NavidromeLibrary):
             self._queue = list(songs)
             self._paused = self._talking
             if self._talking:
-                self._resume_after = True
+                self._resume_after = self._asked_while_talking = True
             self._jump(index, start)
 
     def _jump(self, index: int, start: float = 0.0):
@@ -1582,7 +1615,7 @@ class NavidromePlayer(NavidromeLibrary):
                 if self._closed:
                     return
                 song, turn = self._queue[self._index], self._turn
-                playback = self.speaker.play_stream(self._decode(song, self._offset), volume=self.volume.get("music"),
+                playback = self.speaker.play_stream(self._decode(song, self._offset), volume=self._loudness(),
                                                     kind="music", paused=self._paused, most_ahead=DECODE_AHEAD)
                 self._playback = playback
 

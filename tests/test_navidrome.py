@@ -1136,6 +1136,43 @@ def test_the_volume_changes_the_song_playing(make_player):
     assert playing.volume == pytest.approx(0.2) and player.get_volume() == 20
 
 
+def test_music_asked_for_while_talking_is_known(make_player):
+    # So a conversation can let it play before it ends - but not music which was only playing as it began.
+    player = make_player({"getStarred2": {"starred2": {"song": SONGS}}})
+    player._start(SONGS)
+    _playing(player)
+    player.pause_for_speech()
+    assert not player.asked_for()
+    player.play_playlist("liked songs")
+    assert player.asked_for()
+    player.resume_after_speech()
+    assert not player.asked_for()
+    # Carrying on counts, and a pause asked for after it doesn't.
+    player.pause()
+    player.pause_for_speech()
+    player.play()
+    assert player.asked_for()
+    player.pause()
+    player.cancel_resume()
+    assert not player.asked_for()
+
+
+def test_a_share_of_the_volume_plays_until_it_is_all_given_back(make_player):
+    player = make_player()
+    player._start(SONGS)
+    playing = _playing(player)
+    player.set_share(0.3)
+    assert playing.volume == pytest.approx(0.15)
+    # A change meanwhile is the volume's own, played at its share, and what it comes back up to.
+    player.set_volume(80)
+    assert playing.volume == pytest.approx(0.24) and player.get_volume() == 80
+    player.skip()
+    _until(lambda: len(player.speaker_started) == 2)
+    assert player.speaker_started[-1].volume == pytest.approx(0.24)
+    player.set_share(1.0)
+    assert player.speaker_started[-1].volume == pytest.approx(0.8)
+
+
 # Handing the music to another player
 
 def _state(**changes):

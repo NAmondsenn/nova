@@ -80,6 +80,8 @@ class Pi:
         # or, with finishes_nothing, every sound and stream, as a satellite which has
         # lost track of them would.
         self.held = set()
+        # Which of the satellite's own sounds, by name, play on until they're stopped.
+        self.held_sounds = set()
         self.finishes_nothing = False
         self._held_ids = set()
         self._streams = 0
@@ -111,7 +113,7 @@ class Pi:
         if kind in ("play_sound", "play_stream") and self.refusing and message["kind"] == "announcement":
             self._refused.add(message["id"])
             self.say("played", id=message["id"], stopped=False, position=0)
-        elif kind == "play_sound":
+        elif kind == "play_sound" and message["name"] not in self.held_sounds:
             self.say("played", id=message["id"])
         elif kind == "play_stream":
             self._streams += 1
@@ -971,8 +973,9 @@ class MovingPlayback:
 
     sample_rate = 48000
 
-    def __init__(self, paused):
+    def __init__(self, paused, volume=1.0):
         self.paused = paused
+        self.volume = volume
         self.stopped = False
         self.position = 0
         self.duration = 200.0
@@ -995,7 +998,7 @@ class MovingSpeaker:
         self.started = []
 
     def play_stream(self, song, volume=1.0, kind="reply", paused=False, most_ahead=None):
-        self.started.append(MovingPlayback(paused))
+        self.started.append(MovingPlayback(paused, volume))
         return self.started[-1]
 
 
@@ -2034,6 +2037,73 @@ def test_mute_a_satellite_not_connected_says_so(pi_and_pc, brain):
     result = pc.actions.execute(Action("mute_microphone", {"muted": True, "where": "the toaster"}))
     assert not result.ok and result.say.startswith("There's no satellite called the toaster.")
     assert not pi.muted
+
+
+# Muting during a conversation
+
+@pytest.mark.parametrize("how", ["switch", "voice", "from the pc"])
+def test_muting_ends_the_conversation_at_the_pi(pi_and_pc, brain, how):
+    # Nova's own mute, however it's done - Home Assistant's switch and the settings page, "stop listening"
+    # there, or the Pi named from the PC - ends one there, as it was his doing.
+    pi, pc = pi_and_pc.pi, pi_and_pc.pc
+    brain.open_conversation = OpenConversation(lambda: {"enabled": True})
+    brain.open_conversation.start("bedroom")
+    if how == "switch":
+        pi._device_controls().set_muted(True)
+    elif how == "voice":
+        pi.actions.execute(Action("mute_microphone", {"muted": True}))
+    else:
+        pc.actions.execute(Action("mute_microphone", {"muted": True, "where": "the Pi"}))
+    assert pi.muted and brain.open_conversation.satellite is None and pi._ended_by == "muted"
+    # Unmuting starts nothing, and a mute where none is on ends nothing elsewhere.
+    pi.set_muted(False)
+    brain.open_conversation.start("pc")
+    pi.set_muted(True)
+    assert brain.open_conversation.on_at("pc")
+
+
+def test_muting_ends_the_conversation_at_the_pc(windows_pc, brain):
+    # At a computer it's Windows' own microphone which hears him.
+    pc, windows = windows_pc.pc, windows_pc.windows
+    brain.open_conversation = OpenConversation(lambda: {"enabled": True})
+    brain.open_conversation.start("pc")
+    pc.conversation.handle("Mute the mic.")
+    assert windows.mic_muted and brain.open_conversation.satellite is None and pc._ended_by == "muted"
+    # Unmuting it ends nothing.
+    brain.open_conversation.start("pc")
+    pc.conversation.handle("Unmute the microphone.")
+    assert not windows.mic_muted and brain.open_conversation.on_at("pc")
+
+
+def test_a_muted_pi_refuses_a_conversation_and_a_muted_pc_doesnt(brain, connect, make_session, monkeypatch):
+    # Only typing in Home Assistant can ask the Pi for one while it's muted, and nothing would hear him. The
+    # PC unmutes Windows' microphone for one itself, as it does for a press.
+    brain.open_conversation = OpenConversation(lambda: {"enabled": True})
+    pi, pc = make_session(connect("bedroom")[0]), make_session(connect("pc")[0])
+    monkeypatch.setattr(pc.satellite, "push_to_talk", True)
+    pi.set_muted(True)
+    assert pi.conversation.handle("Let's talk.").say == "The microphone's muted."
+    assert brain.open_conversation.satellite is None
+    pc.set_muted(True)
+    assert pc.conversation.handle("Let's talk.").say == "Go ahead."
+    assert brain.open_conversation.on_at("pc")
+
+
+def test_muting_a_running_conversation_ends_it_with_the_falling_sound_and_nothing_said(brain, connect,
+                                                                                       make_session):
+    session, pi = _in_a_conversation(brain, connect, make_session, Reply(say="Okay."))
+    brain.stt.texts = ["Hello."]
+    _sending_quiet(pi)
+    running(session)
+
+    pi.wake(said())
+    assert wait_for(lambda: pi.messages("listen"))
+    session.set_muted(True)
+    assert wait_for(lambda: session._idle.is_set())
+    recording = pi.messages("listen")[0]["recording"]
+    assert any(message.get("recording") == recording for message in pi.messages("stop_listening"))
+    assert brain.tts.said == ["Okay."] and _sounds(pi)[-1] == "not_heard.wav"
+    assert [message["on"] for message in pi.messages("conversation")] == [True, False]
 
 
 def test_volumes_are_kept_per_satellite_and_sent_to_it(brain, connect, make_session):
@@ -4244,9 +4314,9 @@ def test_a_stop_in_the_conversation_a_wake_word_over_an_alerts_sound_started_is_
     turns = []
     wait_for_turn = session._wait_for_turn
 
-    def waiting_for_turn(still_wanted=None):
+    def waiting_for_turn(still_wanted=None, gap=None):
         turns.append(True)
-        return wait_for_turn(still_wanted)
+        return wait_for_turn(still_wanted, gap)
 
     session._wait_for_turn = waiting_for_turn
     results = []
@@ -4920,6 +4990,234 @@ def test_a_session_waiting_for_a_turn_is_still_moving(brain, connect, make_sessi
     time.sleep(1.5)
     assert session.activity == "listening" and time.monotonic() - session.moved_at < 0.5
     _ended(session)
+
+
+# What goes off by itself during a conversation
+
+def _announcing(session, *args, **kwargs):
+    """Announces on a thread of its own, as the clock and the brain's watchers do - giving it, and a list of what it gives."""
+    results = []
+    thread = threading.Thread(target=lambda: results.append(session.announce(*args, **kwargs)), daemon=True)
+    thread.start()
+    return thread, results
+
+
+def _announced(pi):
+    """What was played as an announcement, in order: each sound by its name, and "words" for each stream."""
+    return [message.get("name", "words") for message, _ in pi.received
+            if message["type"] in ("play_sound", "play_stream") and message["kind"] == "announcement"]
+
+
+def _played(pi):
+    """Every sound and stream the brain started, in order: each sound by its name, and each stream by its kind."""
+    return [message.get("name", message["kind"]) for message, _ in pi.received
+            if message["type"] in ("play_sound", "play_stream")]
+
+
+def test_a_timer_due_mid_conversation_rings_at_the_next_gap(brain, connect, make_session):
+    # Not held until the conversation ends, which could be half an hour - nor said while Nova speaks, or while
+    # he does: in the next gap, once a second has gone by with no speech in it.
+    session, pi = _in_a_conversation(brain, connect, make_session, Reply(say="Okay."), Reply(say="Right."))
+    brain.stt.texts = ["Hello.", "What about Tuesday?"]
+    # The first reply plays on until the test lets it finish.
+    pi.held = {1}
+    heard = _open_microphone(pi, after=1)
+    running(session)
+
+    pi.wake(said())
+    assert wait_for(lambda: pi.messages("play_stream"))
+    first, rang = _announcing(session, "Timer for five minutes.", sound="timer_beep.wav", still_wanted=lambda: True,
+                              ringing=True)
+    time.sleep(0.5)
+    assert _announced(pi) == []
+    pi.say("played", id=pi.messages("play_stream")[0]["id"])
+    ended = time.monotonic()
+    first.join(10)
+    assert rang == [True] and time.monotonic() - ended >= 0.9
+    assert _announced(pi) == ["timer_beep.wav", "words"] and brain.tts.said == ["Okay.", "Timer for five minutes."]
+    assert brain.open_conversation.on_at(session.satellite.name) and not session._idle.is_set()
+
+    # Asked for while he talks, it waits - through his pause before his turn ends, too - for the gap after the reply.
+    heard.put(said(seconds=1.0, before=0, after=0))
+    time.sleep(0.3)
+    second, rang = _announcing(session, "Timer for ten minutes.", sound="timer_beep.wav", still_wanted=lambda: True,
+                               ringing=True)
+    second.join(15)
+    assert rang == [True]
+    assert brain.tts.said == ["Okay.", "Timer for five minutes.", "Right.", "Timer for ten minutes."]
+    assert _played(pi)[-3:] == ["reply", "timer_beep.wav", "announcement"]
+    assert session.conversation.heard == [("Hello.", False), ("What about Tuesday?", False)]
+    _ended(session)
+
+
+def test_stop_dismisses_it_without_the_wake_word(brain, connect, make_session, monkeypatch, pi_ringing):
+    # He's being listened to already, so "stop" said over what rings is a turn like any other - its sound is
+    # listened through, as that's the time to say it.
+    brain.open_conversation = OpenConversation(lambda: {"enabled": True})
+    satellite, pi = connect(conversations=True)
+    session = make_session(satellite)
+    monkeypatch.setattr(session.llm, "process_query", lambda text, **kwargs: {
+        "response": "Hi.", "actions": [], "success": True})
+    assert brain.open_conversation.start(satellite.name) == "started"
+    brain.stt.texts = ["Hello.", "Stop."]
+    pi.held_sounds = {"timer_beep.wav"}
+    heard = _open_microphone(pi, after=1)
+    _sound_then(session, lambda: heard.put(said(seconds=0.5, before=0, after=0)))
+    running(session)
+
+    pi.wake(said())
+    assert wait_for(lambda: pi.messages("listen"))
+    ringing, rang = _announcing(session, "Timer for five minutes.", sound="timer_beep.wav",
+                                still_wanted=lambda: "bedroom" in pi_ringing, ringing=True)
+    ringing.join(10)
+    # Dismissed, with its sound stopped there and then, its words never said, and the chime - and the
+    # conversation goes on.
+    assert rang == [False] and pi_ringing == set()
+    beep = next(message["id"] for message in pi.messages("play_sound") if message["name"] == "timer_beep.wav")
+    assert _stopped(pi, beep)
+    assert brain.tts.said == ["Hi."] and "success_chime.wav" in _sounds(pi)
+    assert brain.open_conversation.on_at(satellite.name)
+    _ended(session)
+
+
+def test_an_announcements_own_words_are_not_taken_for_his_turn(brain, connect, make_session):
+    # What's left of them reaching the open microphone would read as speech - so from as they start until just
+    # after they end, nothing is listened to.
+    session, pi = _in_a_conversation(brain, connect, make_session, Reply(say="Okay."))
+    brain.stt.texts = ["Hello."]
+    # Its words, the second stream, play on until the test lets them finish.
+    pi.held = {2}
+    heard = _open_microphone(pi, after=1)
+    running(session)
+
+    pi.wake(said())
+    assert wait_for(lambda: pi.messages("listen"))
+    saying, results = _announcing(session, "Homelab: the backup failed.")
+    assert wait_for(lambda: len(pi.messages("play_stream")) == 2, seconds=10)
+    # Their echo, as loud as he is.
+    heard.put(said(seconds=0.5, before=0, after=0))
+    time.sleep(0.5)
+    pi.say("played", id=pi.messages("play_stream")[1]["id"])
+    saying.join(5)
+    assert results == [True]
+    # Long enough for a turn to have been heard and answered.
+    time.sleep(2.5)
+    assert session.conversation.heard == [("Hello.", False)]
+    assert all(made.finished_with is None for made in brain.stt.made[1:])
+    _ended(session)
+
+
+def test_his_turn_over_an_announcements_sound_is_answered_once_it_ends(brain, connect, make_session):
+    # Begun in a gap, it finishes before a reply is said, so the two never talk over each other - and its words
+    # wait for the next gap.
+    session, pi = _in_a_conversation(brain, connect, make_session, Reply(say="Okay."), Reply(say="It's sunny."))
+    brain.stt.texts = ["Hello.", "What's the weather?"]
+    pi.held_sounds = {"announcement_sound.wav"}
+    heard = _open_microphone(pi, after=1)
+    _sound_then(session, lambda: heard.put(said(seconds=0.5, before=0, after=0)))
+    running(session)
+
+    pi.wake(said())
+    assert wait_for(lambda: pi.messages("listen"))
+    saying, results = _announcing(session, "Homelab: the backup failed.")
+    assert wait_for(lambda: len(session.conversation.heard) == 2, seconds=10)
+    time.sleep(0.3)
+    assert brain.tts.said == ["Okay."]
+    sound = next(message["id"] for message in pi.messages("play_sound") if message["name"] == "announcement_sound.wav")
+    pi.say("played", id=sound)
+    saying.join(10)
+    assert results == [True]
+    assert brain.tts.said == ["Okay.", "It's sunny.", "Homelab: the backup failed."]
+    _ended(session)
+
+
+# Music during a conversation
+
+def _doing(conversation, text, do):
+    """Has a scripted conversation do something as it hears some words - as running what they ask for does."""
+    handle = conversation.handle
+
+    def handling(heard, follow_up=False, timeline=None):
+        if heard == text:
+            do()
+        return handle(heard, follow_up=follow_up, timeline=timeline)
+
+    conversation.handle = handling
+
+
+def _songs():
+    return [{"id": str(number), "title": f"Song {number}", "artist": "Band"} for number in range(1, 4)]
+
+
+def _music_asked_for(brain, connect, make_session, *then):
+    """
+    A conversation at a satellite with a real Navidrome player, in which "Play some Drake." starts some, and then
+    each of then - (words, what they do, given the session) - is said. Its last reply plays on until the test
+    lets it finish.
+
+    Returns:
+        The session, the fake Pi and the player's speaker, once that last reply has started.
+    """
+    replies = [Reply(say="Okay."), Reply(say="Playing Drake.")] + [Reply(say="Sure.") for _ in then]
+    session, pi = _in_a_conversation(brain, connect, make_session, *replies)
+    speaker = _with_navidrome(session)
+    _doing(session.conversation, "Play some Drake.", lambda: session.music_player._start(_songs()))
+    for words, do in then:
+        _doing(session.conversation, words, lambda do=do: do(session))
+    brain.stt.texts = ["Hello.", "Play some Drake.", *[words for words, _ in then]]
+    pi.answers = [said(before=0, after=2) for _ in range(1 + len(then))]
+    pi.held = {len(replies)}
+    running(session)
+    pi.wake(said())
+    assert wait_for(lambda: len(pi.messages("play_stream")) == len(replies), seconds=10)
+    return session, pi, speaker
+
+
+def test_music_asked_for_plays_quietly_until_the_end(brain, connect, make_session):
+    # Not held until the conversation's over, which could be half an hour: it plays from the reply on, at a share
+    # of the music volume (0.5) - not paused for the replies after - and at all of it once it ends.
+    session, pi, speaker = _music_asked_for(brain, connect, make_session, ("Thanks.", lambda session: None))
+    assert wait_for(lambda: speaker.started and not speaker.started[-1].paused)
+    assert speaker.started[-1].volume == pytest.approx(0.15)
+    assert brain.open_conversation.on_at(session.satellite.name)
+    pi.say("played", id=pi.messages("play_stream")[-1]["id"])
+    _ended(session)
+    assert wait_for(lambda: speaker.started[-1].volume == pytest.approx(0.5))
+    assert not speaker.started[-1].paused and len(speaker.started) == 1
+
+
+def test_turning_the_music_up_mid_conversation_keeps_it_at_its_share(brain, connect, make_session):
+    def louder(session):
+        session.actions.execute(Action("set_volume", {"category": "music", "level": 80}))
+
+    session, pi, speaker = _music_asked_for(brain, connect, make_session, ("Turn it up.", louder))
+    # What he asked for is the music's volume, which comes back once it's over.
+    assert session.volume.percent("music") == 80
+    assert wait_for(lambda: speaker.started[-1].volume == pytest.approx(0.24))
+    pi.say("played", id=pi.messages("play_stream")[-1]["id"])
+    _ended(session)
+    assert wait_for(lambda: speaker.started[-1].volume == pytest.approx(0.8))
+
+
+def test_music_from_before_comes_back_when_it_ends(brain, connect, make_session):
+    # Held, as for any request, through every turn - one which asked for nothing included - and let go at the end.
+    session, pi = _in_a_conversation(brain, connect, make_session, Reply(say="Okay."), Reply(say="Right."))
+    speaker = _with_navidrome(session)
+    session.music_player._start(_songs())
+    assert wait_for(lambda: speaker.started and not speaker.started[0].paused)
+    brain.stt.texts = ["Hello.", "What's on today?"]
+    pi.answers = [said(before=0, after=2)]
+    pi.held = {2}
+    running(session)
+
+    pi.wake(said())
+    assert wait_for(lambda: len(pi.messages("play_stream")) == 2)
+    assert speaker.started[0].paused
+    pi.say("played", id=pi.messages("play_stream")[1]["id"])
+    _ended(session)
+    session.music.wait()
+    assert wait_for(lambda: not speaker.started[0].paused)
+    assert speaker.started[0].volume == pytest.approx(0.5) and len(speaker.started) == 1
 
 
 # Cutting in on a reply

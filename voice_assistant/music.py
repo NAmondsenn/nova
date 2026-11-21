@@ -8,7 +8,9 @@ Both players do the same things the same way, so actions.py doesn't mind which i
 has: play, play_playlist, pause, skip, previous, restart, repeat, shuffle,
 current_track, get_volume, set_volume, and pause_for_speech / resume_after_speech
 / cancel_resume / was_playing for MusicHold. Each also has a name, for saying what
-went wrong, and says whether it needs the internet.
+went wrong, and says whether it needs the internet. Navidrome alone has asked_for and
+set_share, for music asked for during a conversation, which Spotify plays at once at
+its own volume (see Session._let_music_play).
 """
 
 import difflib

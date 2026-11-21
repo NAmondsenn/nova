@@ -129,6 +129,8 @@ class FakeBrain:
         self.meant = meant or target
         self.aliases = {}
         self.wheres = []
+        # Why each conversation at the computer was ended, by its session.
+        self.ended = []
         self.rooms = SimpleNamespace(app_names=lambda name: dict(self.aliases), opens_things=lambda name: True)
         self.config = SimpleNamespace(section=lambda name: {"search_site": search_site} if name == "computer" else {})
 
@@ -143,7 +145,7 @@ class FakeBrain:
         return {"pc": "Nathaniel's PC", "mac": "the Mac"}.get(name, name)
 
     def session_for(self, name):
-        return SimpleNamespace(satellite=self.computer) if name == self.target else None
+        return SimpleNamespace(satellite=self.computer, end_conversation=self.ended.append) if name == self.target else None
 
 
 def at(brain, spoken_at="pc"):
@@ -310,6 +312,22 @@ def test_the_computers_own_microphone():
                                           "message": "Nathaniel's PC can't change its own microphone."}
     assert len(brain.computer.asked) == asked
     assert at(brain, "bedroom").microphone(True) == {"success": False, "message": "Your PC's off."}
+
+
+def test_muting_the_computers_microphone_ends_a_conversation_there():
+    # Nothing on it can hear him now. Its session ends one only if it's on there.
+    brain = FakeBrain()
+    brain.computer.system_volume = True
+    brain.computer.answer = {"said": "Microphone off.", "muted": True}
+    at(brain).microphone(True)
+    assert brain.ended == ["muted"]
+    # Not when unmuting it, nor when Windows says it stayed on, nor when it couldn't be asked.
+    brain.computer.answer = {"said": "Microphone on.", "muted": False}
+    at(brain).microphone(False)
+    at(brain).microphone(True)
+    brain.computer.answer = None
+    at(brain).microphone(True)
+    assert brain.ended == ["muted"]
 
 
 def hooks(brain, spoken_at="pc", machine="pc"):

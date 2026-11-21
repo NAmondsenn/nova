@@ -576,7 +576,8 @@ class ComputerControl:
     def microphone(self, muted: bool) -> Dict:
         """
         Mutes or unmutes the microphone of the computer the user is talking to, in Windows, for
-        everything which listens to it - "mute the mic" at the PC (his ruling, 20 Nov).
+        everything which listens to it - "mute the mic" at the PC (his ruling, 20 Nov). Muted, it
+        ends a conversation going on there.
 
         Args:
             muted: True to mute it, False to unmute it.
@@ -608,5 +609,9 @@ class ComputerControl:
             return reply
         state = "off" if reply.get("muted", muted) else "on"
         logger.info(f"Windows' microphone on the {target} satellite is {state}")
+        if state == "off":
+            # Nothing on the computer can hear him now, so a conversation there ends - with the falling
+            # sound and nothing said, as it was his doing.
+            session.end_conversation("muted")
         return {"success": True, "message": f"Microphone {state}.", "sound": f"mic_{state}.wav",
                 "sound_category": "general"}

@@ -95,6 +95,25 @@ CUT_IN_PRE_ROLL = 0.5
 CONVERSATION_LEFT = "I'll leave it there."
 UNASKED_ENDS = ("idle", "not for nova", "failed")
 
+# How long a conversation's wait for his next turn must have heard no speech before it's a gap, in
+# which what goes off by itself is said, in seconds - so not as he's just starting, and not straight
+# after a reply, where he may be about to answer it.
+GAP_QUIET = 1.0
+
+# How long after an announcement's words a conversation's wait starts listening again, in seconds -
+# for what's left of them reaching the satellite's microphone late, as the echo canceller lets some
+# through. As long as a turn keeps from before he starts (recording.OPEN_PRE_ROLL), so none of them
+# goes to speech-to-text with what he says next.
+ANNOUNCED_TAIL = 0.5
+
+# How often an announcement waiting for a gap in a conversation, and a session waiting for one said in
+# a gap, look again, in seconds - for the conversation ending, and for the watchdog.
+GAP_CHECK = 0.1
+
+# How loud music asked for during a conversation plays until it ends, as a share of the music volume -
+# so Nova is still heard over it, without its being paused for every reply.
+MUSIC_SHARE = 0.3
+
 # How long a session waits for a wake word before checking its satellite is still
 # there, in seconds - the satellite's wakes never say it has gone.
 WAKE_CHECK = 0.5
@@ -219,23 +238,37 @@ def _orb_choice(computer: Dict, name: str) -> str:
     return value if value in CHOICES[("computer", f"screen_orb_{name}")] else DEFAULT_SCREEN_ORB[name]
 
 
+class _Announced(Exception):
+    """
+    Raised in a conversation's wait for his next turn as an announcement's words begin in its gap, so
+    the wait stops listening until they're over - see Session._waited.
+    """
+
+
 class _Moving:
     """
     A speech detector which notes the session getting on with each frame it decides on - for a
     turn of an open conversation, which can wait as long as its quiet spell for the user to start
     (conversation.idle_minutes, up to 30) and then last conversation.longest_turn: far past the
     watchdog's allowance for a session which is still (see Brain.last_moved), though it's moving
-    for as long as the satellite's audio keeps coming.
+    for as long as the satellite's audio keeps coming. It also says, with each frame, for how long
+    it has heard no speech, which is how the session knows a gap in the conversation.
     """
 
-    def __init__(self, detector, moved: Callable[[], None]):
+    def __init__(self, detector, moved: Callable[[], None], waited: Callable[[float], None]):
         """
         Args:
             detector: The session's own detector, which does the deciding - see vad.py.
             moved: Called with nothing for each frame - Session._moved.
+            waited: Called, once each frame is decided, with how many seconds of audio in a row up
+                to it have been no speech - Session._waited, which may raise _Announced instead of
+                the frame being given back.
         """
         self._detector = detector
         self._moved = moved
+        self._waited = waited
+        # The frames in a row decided not to be speech, since the recording began.
+        self._quiet = 0
 
     @property
     def threshold(self) -> float:
@@ -243,10 +276,14 @@ class _Moving:
 
     def reset(self):
         self._detector.reset()
+        self._quiet = 0
 
     def speech_probability(self, frame) -> float:
         self._moved()
-        return self._detector.speech_probability(frame)
+        probability = self._detector.speech_probability(frame)
+        self._quiet = 0 if probability >= self._detector.threshold else self._quiet + 1
+        self._waited(self._quiet * FRAME / RATE)
+        return probability
 
 
 class Session:
@@ -351,6 +388,22 @@ class Session:
         # it what's heard over the reply, not a recording. Made the first time it's needed, as a
         # satellite with no conversation never needs it. See _cut_in_over.
         self._cut_in_detector = None
+        # The gaps in an open conversation here, in which what goes off by itself is said rather than
+        # waiting for it to end - see _take_gap. Kept under the one condition: whether the session's
+        # own thread is waiting for his next turn and has heard no speech for GAP_QUIET, which only it
+        # changes (see _waited); and whether an announcement has taken the gap, and is saying words,
+        # which only the announcing thread changes. The session's thread says nothing while one has
+        # (see _after_announcement), and listens to none of its words.
+        self._gap = threading.Condition()
+        self._in_gap = False
+        self._gap_taken = False
+        self._gap_words = False
+        # Whether he has started his turn in the wait the session's thread is in, after which it's no
+        # gap until the turn is over, however long he pauses. Only ever read and changed on that thread.
+        self._turn_begun = False
+        # The sessions of the room whose music the conversation here has let go of, for music asked for
+        # in it to play before it ends - see _let_music_play. Only on the session's own thread.
+        self._let_play: List["Session"] = []
         # The last volume beep the settings page played, stopped as the next starts,
         # so dragging a slider doesn't pile them up - see boop.
         self._last_boop = None
@@ -437,7 +490,10 @@ class Session:
                                       computer=ComputerControl(brain, satellite.name), device=self._device,
                                       at_pc=lambda: brain.rooms.machine(satellite.name) == "pc",
                                       pc_name=lambda: brain.pc_called(satellite.name),
-                                      microphone=self._mute_microphone, conversation=brain.open_conversation)
+                                      microphone=self._mute_microphone, conversation=brain.open_conversation,
+                                      # A computer unmutes Windows' microphone for a conversation itself, as
+                                      # for a press, so only a wake-word satellite's mute keeps one from starting.
+                                      muted=lambda: self.muted and not self.satellite.push_to_talk)
 
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.
@@ -516,7 +572,7 @@ class Session:
         """
         Mutes or unmutes the satellite's microphone, straight away - from Home
         Assistant or the settings page. Alarms and timers still ring, and Home
-        Assistant's messages are still said.
+        Assistant's messages are still said. A mute ends a conversation going on here.
 
         Args:
             muted: True to stop the satellite hearing the wake word.
@@ -532,6 +588,11 @@ class Session:
             # It's still muted or unmuted until the brain restarts, just not after.
             logger.error(f"Couldn't save whether the {self.satellite.name} satellite is muted: {e}")
         self.send_state()
+        if self._muted:
+            # Turning the listening off ends a conversation here, with the falling sound and nothing
+            # said, as it was his doing - rather than its open microphone hearing nothing until its
+            # quiet spell is up.
+            self.end_conversation("muted")
 
     def _load_muted(self) -> bool:
         """Whether the satellite was left muted - not, if that can't be told."""
@@ -1074,6 +1135,8 @@ class Session:
                 begun = self._conversation_begun()
                 if not self._conversation_goes_on():
                     break
+                # Music asked for in the turn just answered plays from now, rather than once it's over.
+                self._let_music_play()
                 # Only the turn straight after a question is its answer.
                 follow_up, self._asked = self._asked, False
                 heard_over = self._open_turn(follow_up, listening_sound=begun)
@@ -1100,8 +1163,14 @@ class Session:
             self.activity = "idle"
             self._idle.set()
             room, self._room_held = self._room_held, [self]
+            playing, self._let_play = self._let_play, []
             for session in room:
-                session.music.release()
+                if session in playing:
+                    # Let go of already, for music asked for in a conversation, which plays at all of its
+                    # volume now that it's over.
+                    session.music_player.set_share(1.0)
+                else:
+                    session.music.release()
 
     # An open conversation - see OpenConversation
 
@@ -1215,6 +1284,25 @@ class Session:
                 self._not_heard()
             except Exception as e:
                 logger.error(f"Couldn't tell the {self.satellite.name} satellite its conversation is over: {e}")
+
+    def _let_music_play(self):
+        """
+        Lets music asked for during a conversation play now, between its turns, rather than once it ends,
+        which could be half an hour: the conversation's hold on each player of the room which has had
+        music asked of it is let go of, turned down to MUSIC_SHARE of its volume until the end (see
+        _converse), so Nova is still heard over it without its being paused for every reply. Holds are
+        counted, so an announcement's still keeps it quiet. Music which was playing as the conversation
+        began stays held, as for any request. Spotify plays what's asked for at once, held or not, and
+        neither says so nor takes a share, so is left as it is.
+        """
+        for session in self._room_held:
+            player = session.music_player
+            if session in self._let_play or not getattr(player, "asked_for", lambda: False)():
+                continue
+            # Turned down first, so it's never heard for a moment at all of its volume.
+            player.set_share(MUSIC_SHARE)
+            self._let_play.append(session)
+            session.music.release()
 
     def _room_now(self) -> List["Session"]:
         """
@@ -1621,6 +1709,122 @@ class Session:
         self.satellite.stop_listening(feed)
         return None
 
+    def _open_wait(self) -> float:
+        """
+        Returns:
+            How long a turn of a conversation waits for him to start, in seconds: until the quiet spell
+            would end the conversation - not at all once that's due, or once the conversation has ended
+            meanwhile, when there's no spell left.
+        """
+        wait = self.brain.open_conversation.idle_in()
+        return max(0.0, wait) if math.isfinite(wait) else 0.0
+
+    # The gaps in a conversation, in which what goes off by itself is said
+
+    def _waited(self, quiet: float):
+        """
+        Notes one frame of a conversation's wait for his next turn, as its detector heard it, on the
+        session's own thread: the wait is a gap once it has heard no speech for GAP_QUIET, until he
+        speaks - and none at all once his turn has begun, however long he pauses in it.
+
+        Args:
+            quiet: How many seconds of audio in a row up to the frame have been no speech.
+
+        Raises:
+            _Announced: When an announcement's words have begun in the gap, none of which is to be
+                listened to - see _after_announcement. Once he has begun his turn they're heard with
+                it, rather than it being lost.
+        """
+        gap = not self._turn_begun and quiet >= GAP_QUIET
+        with self._gap:
+            if self._gap_words and not self._turn_begun:
+                self._in_gap = False
+                raise _Announced()
+            if gap != self._in_gap:
+                self._in_gap = gap
+                self._gap.notify_all()
+
+    def _begun(self, heard: Callable[[np.ndarray], None]) -> Callable[[np.ndarray], None]:
+        """
+        Args:
+            heard: What's given a turn of a conversation as it's recorded - speech-to-text's add.
+
+        Returns:
+            The same, which first ends the wait's gap for the rest of his turn: the recording gives it
+            nothing until he has started talking.
+        """
+        def begun(audio: np.ndarray):
+            if not self._turn_begun:
+                self._turn_begun = True
+                self._close_gap()
+            heard(audio)
+        return begun
+
+    def _close_gap(self):
+        """Ends a gap in a conversation here, as he begins his turn or the wait for it is over."""
+        with self._gap:
+            self._in_gap = False
+
+    def _after_announcement(self, feed: AudioFeed) -> int:
+        """
+        Waits, on the session's own thread, for an announcement's words which began in the gap it was
+        waiting in to end - listening to none of them, as what's left of them in what the satellite hears
+        could be taken for his turn.
+
+        Args:
+            feed: The wait's listen.
+
+        Returns:
+            Where in it the wait starts again: ANNOUNCED_TAIL after where it had got to as they ended.
+        """
+        self._announcement_over()
+        return feed.position + round(ANNOUNCED_TAIL * RATE)
+
+    def _announcement_over(self):
+        """
+        Waits, on the session's own thread, for an announcement said in a gap of the conversation here to
+        finish - so a reply or a sound is never played over it. Returns at once outside a conversation,
+        where none is said in a gap.
+        """
+        with self._gap:
+            while self._gap_taken:
+                # Getting on, as the announcement ends however its satellite answers - see _play_announcement.
+                self._moved()
+                self._gap.wait(GAP_CHECK)
+
+    def _take_gap(self, words: bool) -> bool:
+        """
+        Waits for a gap in a conversation here, and takes it for an announcement: until it's let go of
+        (see _let_gap_go), the session's thread says nothing, and with words listens to nothing. The
+        satellite is let play announcements again, which it silences as it hears the wake word that
+        starts the conversation.
+
+        Args:
+            words: Whether what's to be played is the announcement's words, rather than its sound - which
+                is listened through, as that's when he'd say "stop" to it.
+
+        Returns:
+            True once it's taken. False at once with no conversation on here, and once the conversation
+            has ended or the session is idle - when it waits its turn as outside one.
+        """
+        with self._gap:
+            while True:
+                if self._idle.is_set() or not self._conversation_here():
+                    return False
+                if self._in_gap:
+                    break
+                self._gap.wait(GAP_CHECK)
+            self._gap_taken, self._gap_words = True, words
+        self.speaker.allow("announcement")
+        return True
+
+    def _let_gap_go(self):
+        """Lets go of a gap an announcement took, if it took one, so the conversation can carry on."""
+        with self._gap:
+            if self._gap_taken:
+                self._gap_taken = self._gap_words = False
+                self._gap.notify_all()
+
     def _handle_interaction(self, feed, follow_up: bool = False, timeline: Optional[Timeline] = None,
                             pre_roll: Optional[int] = None, pressed: bool = False, open_turn: bool = False,
                             listen_from: Optional[int] = None) -> Optional[Dict]:
@@ -1673,10 +1877,7 @@ class Session:
             talk = self.brain.config.section("conversation")
             silence_duration = _number(talk.get("pause_seconds"), DEFAULT_PAUSE_SECONDS)
             timeout = _number(talk.get("longest_turn"), DEFAULT_LONGEST_TURN)
-            # Until the quiet spell would end the conversation - not at all once that's due,
-            # or once the conversation has ended meanwhile, when there's no spell left.
-            open_wait = self.brain.open_conversation.idle_in()
-            open_wait = max(0.0, open_wait) if math.isfinite(open_wait) else 0.0
+            open_wait = self._open_wait()
 
         self.activity = "listening"
         self.heard = ""
@@ -1719,11 +1920,15 @@ class Session:
         # sound then end it. An answer comes with nothing from before - and a turn of a
         # conversation with only what the recording keeps of its own wait.
         detector = self.speech_detector
+        heard = listening.add
         if open_turn:
             before = 0
             start = 0 if listen_from is None else listen_from
-            # Waiting for him to start can go on for minutes, during which the session is moving.
-            detector = _Moving(detector, self._moved)
+            # Waiting for him to start can go on for minutes, during which the session is moving - and
+            # is a gap whenever it has heard no speech for a while, until he begins (see _waited).
+            detector = _Moving(detector, self._moved, self._waited)
+            heard = self._begun(listening.add)
+            self._turn_begun = False
         elif follow_up:
             before = start = 0
         elif pre_roll is None:
@@ -1731,19 +1936,30 @@ class Session:
         else:
             before = start = pre_roll
         try:
-            audio_data = record_until_silence(
-                feed, detector, listen_from=start, keep_before=before / RATE,
-                silence_duration=silence_duration,
-                speech_timeout=speech_timeout,
-                timeout=timeout,
-                timeline=timeline, heard=listening.add, voice_drop=voice_drop,
-                words_quiet=words_quiet, no_words_after=no_words_after, report=report,
-                open_wait=open_wait)
+            while True:
+                try:
+                    audio_data = record_until_silence(
+                        feed, detector, listen_from=start, keep_before=before / RATE,
+                        silence_duration=silence_duration,
+                        speech_timeout=speech_timeout,
+                        timeout=timeout,
+                        timeline=timeline, heard=heard, voice_drop=voice_drop,
+                        words_quiet=words_quiet, no_words_after=no_words_after, report=report,
+                        open_wait=open_wait)
+                    break
+                except _Announced:
+                    # An announcement's words began in the wait's gap, and aren't his, so the wait starts
+                    # again once they're over. Nothing had been given to speech-to-text, as he hadn't begun.
+                    start = self._after_announcement(feed)
+                    open_wait = self._open_wait()
         except BaseException:
             # Otherwise it would wait on for the rest of a recording which isn't coming.
             listening.cancel()
             raise
         finally:
+            if open_turn:
+                # Whatever ended the wait, it's no gap now.
+                self._close_gap()
             # The user has stopped, or isn't going to start - so the satellite stops sending.
             self.satellite.stop_listening(feed)
         # A recording the satellite ended on a press of its key ended, as far as the recorder
@@ -2039,6 +2255,8 @@ class Session:
             except queue.Empty:
                 pass
 
+        # An announcement begun in a gap of a conversation here finishes first, rather than being talked over.
+        self._announcement_over()
         self._show(f"{self.assistant_name}: {message}")
         self.activity = "speaking"
         started = None
@@ -2325,6 +2543,8 @@ class Session:
         """
         if volume is None:
             volume = self.volume.get("general")
+        # Never over an announcement begun in a gap of a conversation here - see _say.
+        self._announcement_over()
         self._wait_for(self.speaker.play_file(str(self.brain.sounds_folder / name), volume=volume))
 
     def _wait_for(self, playback):
@@ -2391,7 +2611,9 @@ class Session:
         its alerts and Home Assistant's messages are said with.
 
         Played as an "announcement", which the wake word silences straight away -
-        see _answer().
+        see _answer(). It waits for the user to finish with Nova - or, in an open
+        conversation here, which could go on for half an hour, for a gap in it (see
+        _take_gap), its sound and then its words each taking one.
 
         Args:
             message: What to say. None plays just the sound, with no speech - an
@@ -2436,7 +2658,13 @@ class Session:
             sound = None
         try:
             with self._announcing:
-                return self._announce_in_turn(message, sound, boost, still_wanted, start, length, level, ringing)
+                try:
+                    return self._announce_in_turn(message, sound, boost, still_wanted, start, length, level,
+                                                  ringing)
+                finally:
+                    # However it ended, a gap of a conversation it took is let go of, so the conversation
+                    # carries on.
+                    self._let_gap_go()
         finally:
             # Let back a few seconds later rather than straight away, since a timer's
             # next round comes three seconds after this one.
@@ -2445,13 +2673,15 @@ class Session:
 
     def _announce_in_turn(self, message, sound, boost, still_wanted, start, length, level, ringing):
         """The body of announce, run once any other announcement has finished. Returns what it does."""
-        # Waits for any conversation to finish before making any announcements.
-        if not self._wait_for_turn(still_wanted):
+        # Waits for any conversation to finish before making any announcements - or for a gap in an
+        # open one here.
+        if not self._wait_for_turn(still_wanted, gap="sound"):
             return False
         # Noted as its sound starts, so a Stop during it is told apart from one in the
         # conversation it waited for - see below. Not over one which outlasted the wait,
-        # whose sound is refused, so a Stop then is that conversation's.
-        stops = self._stops if self._idle.is_set() else None
+        # whose sound is refused, so a Stop then is that conversation's. One in a gap
+        # has the satellite's leave, and the gap to itself.
+        stops = self._stops if self._idle.is_set() or self._gap_taken else None
 
         # Anything which goes off by itself uses the alarm volume, so it can stay
         # loud even when the assistant's voice is turned down - and once boosted,
@@ -2476,13 +2706,17 @@ class Session:
             # then wait for, is that conversation's.
             stopped = not ringing and stops is not None and self._stops != stops
 
+            # Its sound is over, so a reply he started over it in a conversation can be said.
+            self._let_gap_go()
             if not message:
                 return chimed
 
             # The sound lasts a few seconds, long enough for the user to start talking
             # to the assistant - or to dismiss this - before it's finished, so the
-            # message waits its turn again rather than talking over them.
-            if not self._wait_for_turn(still_wanted):
+            # message waits its turn again rather than talking over them: in a
+            # conversation, for a gap of its own, in which nothing is listened to until
+            # it's been said, as what's left of it reaching the microphone isn't him.
+            if not self._wait_for_turn(still_wanted, gap="words"):
                 return False
             # An alert or a battery warning has no still_wanted to stop its words, as what
             # the clock rings has, so a Stop during its sound does. The user heard it start
@@ -2498,8 +2732,8 @@ class Session:
             if self._idle.is_set():
                 self.activity = "speaking"
             # Gone ahead over a conversation which outlasted the wait, the words reach a
-            # satellite which still has announcements silenced - see _answer.
-            over_a_conversation = not self._idle.is_set()
+            # satellite which still has announcements silenced - see _answer. Not in a gap.
+            over_a_conversation = not self._idle.is_set() and not self._gap_taken
             tts = self.brain.tts
             words = self.speaker.play_stream(tts.stream(message), tts.sample_rate, volume=volume,
                                              kind="announcement")
@@ -2520,7 +2754,7 @@ class Session:
             logger.error(f"Announcement failed: {e}")
             return False
 
-    def _wait_for_turn(self, still_wanted=None):
+    def _wait_for_turn(self, still_wanted=None, gap: Optional[str] = None):
         """
         Waits for any conversation to finish, then checks the announcement waiting
         on it is still wanted.
@@ -2528,18 +2762,27 @@ class Session:
         Args:
             still_wanted: Optional check from the Clock - False once the timer or
                           alarm has been dismissed.
+            gap: For an announcement, what it's about to play - "sound" or "words" - which
+                in an open conversation here waits for the next gap in it and takes it (see
+                _take_gap), rather than for the conversation to end, which could be half an
+                hour. None waits for the conversation to end whatever it is, as a routine does.
 
         Returns:
             True if the announcement should go ahead.
         """
-        if not self._idle.wait(timeout=60):
-            logger.warning("Announcing over an unusually long interaction")
+        taken = gap is not None and self._take_gap(gap == "words")
+        if not taken and not self._idle.wait(timeout=60):
+            # One which became an open conversation meanwhile has gaps to wait for instead.
+            if gap is None or not self._take_gap(gap == "words"):
+                logger.warning("Announcing over an unusually long interaction")
 
         # Talking to the assistant is often how something ringing gets dismissed, so
         # by the time the conversation it was waiting on has finished, it may well
         # have been dealt with - and playing it again then would be wrong.
         if still_wanted is not None and not still_wanted():
             logger.info("Dismissed while waiting its turn, so it isn't announced")
+            # Nor does it keep a gap it took.
+            self._let_gap_go()
             return False
         return True
 
