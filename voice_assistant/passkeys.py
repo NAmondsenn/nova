@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Enough for a phone, a PC and a spare, so a lost one can be replaced without a locked-out moment.
 MOST_PASSKEYS = 3
-# Long enough for "Nathaniel's Pixel", short enough to fit a row of the settings page.
+# Long enough for "Phone" and a word or two more, short enough to fit a row of the settings page.
 LONGEST_NAME = 30
 
 
