@@ -389,6 +389,16 @@ def test_forget_approval_follows_the_first_set_up_rule_and_is_saved(tmp_path):
     assert "nowhere" not in json.loads((tmp_path / "satellite_rooms.json").read_text())
 
 
+def test_forget_approval_never_lets_a_pi_approve(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.seen("bedroom", False, machine="pi", approves=True)
+    rooms.set_can_approve("bedroom", True)
+    # Re-keyed with nothing set up, a Pi isn't let approve by the first set-up rule.
+    rooms.forget_approval("bedroom", guarded=False)
+    assert rooms.can_approve("bedroom") is False and _rooms(tmp_path).can_approve("bedroom") is False
+    assert json.loads((tmp_path / "satellite_rooms.json").read_text())["bedroom"]["can_approve"] is None
+
+
 def test_forget_approval_raises_when_it_cant_be_saved_but_is_off_in_memory(tmp_path, monkeypatch):
     rooms = _rooms(tmp_path)
     rooms.seen("pc", True, machine="pc", approves=True, guarded=False)

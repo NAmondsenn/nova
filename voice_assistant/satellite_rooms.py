@@ -218,7 +218,8 @@ class SatelliteRooms:
         switch, or anyone who could make one could connect a fake saying it's the PC
         and approves, and be asked, and answer, for itself. As seen's first time, it's
         on only if no way to approve is set up at that moment, else off until he
-        switches it on with an approval. A removed one forgets it entirely, so it's
+        switches it on with an approval - and only for a PC or Mac, as seen has it: any
+        other is left with none stored, a no. A removed one forgets it entirely, so it's
         stored afresh by its next hello. One nothing is known of is left alone - its
         hello stores it. Memory is changed before the file, so a satellite the file
         can't be written for is still not asked while the brain runs.
@@ -237,8 +238,11 @@ class SatelliteRooms:
                 return
             if guarded is None:
                 each.update(approves=False, can_approve=None)
-            else:
+            elif each.get("machine") in APPROVING_MACHINES:
                 each["can_approve"] = not guarded
+            else:
+                # Not a PC or Mac, so never on by the first set-up rule: none stored, a no.
+                each["can_approve"] = None
             logger.info(f"The {name} satellite {'may' if each['can_approve'] else 'may not'} approve "
                         f"until it's switched")
             save_json(self.path, self._known, indent=2)
