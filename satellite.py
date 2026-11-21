@@ -1863,13 +1863,9 @@ class Satellite:
         with self._mic_lock:
             if self._mic_until != until or self._mic_held_open:
                 return False
-            try:
-                muted = self.system_volume.microphone_muted()
-            except Exception as e:
-                # Once, rather than every 30 seconds; the hour runs out as it would have.
-                if not self._mic_look_failed:
-                    logger.warning(f"Couldn't look at whether Windows' microphone is muted ({type(e).__name__})")
-                    self._mic_look_failed = True
+            muted = self._look_at_microphone()
+            if muted is None:
+                # Logged once there, rather than every 30 seconds; the hour runs out as it would have.
                 return False
             changed = self._note_mic(muted)
             if muted:
