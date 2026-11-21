@@ -346,6 +346,31 @@ def test_a_backend_which_cant_be_made_is_logged_once_and_goes_quiet(caplog):
     assert "OSError" in _warnings(caplog)[0].getMessage()
 
 
+def test_a_backend_made_after_the_tray_gave_up_shows_nothing(monkeypatch, caplog):
+    # Windows made the icon's window only after the satellite stopped waiting: the tray has
+    # said there isn't one, so it's taken away without ever being shown.
+    caplog.set_level(logging.WARNING)
+    monkeypatch.setattr(tray_module, "SET_UP_WAIT", 0.05)
+    before = _tray_threads()
+    log = []
+    satellite = Satellite(log)
+    backend = FakeTray(log)
+    let_go = threading.Event()
+
+    def late():
+        let_go.wait(5)
+        return backend
+
+    tray = Tray(satellite.read_state, satellite.on_choice, satellite.on_shortcut, satellite.on_taken, ICONS,
+                backend=late)
+    assert tray.available is False
+    let_go.set()
+    assert _until(lambda: _tray_threads() == before)
+    assert backend.calls("show") == [] and log.count(("read_state", False)) == 0
+    assert backend.calls("destroy") == [("destroy",)]
+    assert len(_warnings(caplog)) == 1
+
+
 class FailingWait(FakeTray):
     """An icon whose messages Windows stops giving, once it has been shown."""
 

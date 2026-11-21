@@ -197,7 +197,10 @@ class Tray:
         self._backend = backend
         made.set()
         try:
-            self._serve(backend)
+            # Made after the satellite gave up waiting, the tray has already said there's no
+            # icon: it's taken away without ever being shown.
+            if not self._quiet:
+                self._serve(backend)
         except Exception as e:
             self._go_quiet(f"Nova's tray icon failed, so it's gone until the satellite restarts "
                            f"({type(e).__name__})")
@@ -701,15 +704,20 @@ class _Win32Tray:
         # change once the icon is lost (Explorer gone and not yet back) needs an add, and
         # an add which did go through needs a change.
         tries = (self.NIM_MODIFY, self.NIM_ADD) if added else (self.NIM_ADD, self.NIM_MODIFY)
-        if not any(self._shell32.Shell_NotifyIconW(what, byref(data)) for what in tries):
+        # The first which Windows says worked, or None; the rest aren't tried.
+        done = next((what for what in tries if self._shell32.Shell_NotifyIconW(what, byref(data))), None)
+        if done is None:
             error = ctypes.get_last_error()
             self._added = False
             if icon != self._icon:
                 user32.DestroyIcon(icon)
             raise ctypes.WinError(error, "Shell_NotifyIconW failed")
         self._added = True
-        if not added:
-            # The version is the icon's, so it is set again each time the icon is added.
+        # Added afresh: by the add, after a change failed as the icon was lost - or by an add
+        # Windows said failed, when the change after it worked.
+        if done == self.NIM_ADD or not added:
+            # The version is the icon's, so it is set again each time the icon is added;
+            # without it the icon's clicks come in the old form, which _clicks wouldn't know.
             data.uVersion = self.NOTIFYICON_VERSION_4
             version_4 = self._shell32.Shell_NotifyIconW(self.NIM_SETVERSION, byref(data))
             self._clicks = self._v4_clicks if version_4 else frozenset((self.WM_LBUTTONUP, self.WM_RBUTTONUP))
