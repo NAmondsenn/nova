@@ -2165,6 +2165,99 @@ def test_a_session_started_before_the_save_uses_the_new_value(brain, connect, ma
     assert durations == [1.2, 1.2]
 
 
+class QuietWordsTranscription(FakeTranscription):
+    """As FakeTranscription, for the real Nemotron's listener, which can say how long its words have been still."""
+
+    def quiet_words(self):
+        return None
+
+
+def _recordings(monkeypatch, ended_by="silence"):
+    """Replaces record_until_silence with a spy keeping what each recording was asked, and ending as given."""
+    asked = []
+
+    def record_until_silence(source, detector, heard=None, **kwargs):
+        asked.append(kwargs)
+        kwargs["report"]["ended_by"] = ended_by
+        return np.zeros(480, np.float32)
+
+    monkeypatch.setattr(session_module, "record_until_silence", record_until_silence)
+    return asked
+
+
+def _record(session, brain, listener):
+    brain.stt = SimpleNamespace(listen=lambda: listener)
+    session.conversation = ScriptedConversation(Reply())
+    timeline = FakeTimeline()
+    session._handle_interaction(AudioFeed(), timeline=timeline)
+    return timeline
+
+
+def test_a_push_to_talk_satellite_gets_both_rules(brain, connect, make_session, monkeypatch):
+    # The PC's microphone is close, so his voice is far louder than a game nearby and the
+    # words stopping are a better sign he has finished than the quiet - see recording.py.
+    asked = _recordings(monkeypatch)
+    satellite, _ = connect(name="pc", hostname="pc.local")
+    satellite.push_to_talk = True
+    listener = QuietWordsTranscription("What time is it?")
+    _record(make_session(satellite), brain, listener)
+
+    (kwargs,) = asked
+    assert kwargs["voice_drop"] == pytest.approx(0.126, abs=0.001)
+    assert kwargs["words_quiet"] == listener.quiet_words
+    assert kwargs["no_words_after"] == 1.5
+    assert kwargs["report"] == {"ended_by": "silence"}
+
+
+def test_a_saved_setting_is_used_by_the_next_recording(brain, connect, make_session, monkeypatch, tmp_path):
+    brain.config = Config(path=str(tmp_path / "config.yaml"))
+    asked = _recordings(monkeypatch)
+    satellite, _ = connect(name="pc", hostname="pc.local")
+    satellite.push_to_talk = True
+    session = make_session(satellite)
+    _record(session, brain, QuietWordsTranscription())
+    Brain.apply_settings(brain, {("thresholds", "press_voice_drop_db"): 12,
+                                 ("thresholds", "press_no_words_seconds"): 2.5})
+    _record(session, brain, QuietWordsTranscription())
+
+    # What config.yaml ships, then what was saved - neither a copy kept from the session's start.
+    assert [kwargs["voice_drop"] for kwargs in asked] == [pytest.approx(0.126, abs=0.001),
+                                                         pytest.approx(0.251, abs=0.001)]
+    assert [kwargs["no_words_after"] for kwargs in asked] == [1.5, 2.5]
+
+
+def test_a_wake_word_satellite_gets_neither_rule(brain, make_session, monkeypatch):
+    asked = _recordings(monkeypatch)
+    _record(make_session(), brain, QuietWordsTranscription("What time is it?"))
+
+    (kwargs,) = asked
+    assert kwargs["voice_drop"] is None
+    assert kwargs["words_quiet"] is None
+
+
+def test_a_listener_without_quiet_words_gets_only_the_voice_drop(brain, connect, make_session, monkeypatch):
+    # A listener which can't say how long its words have been still, as the stand-ins
+    # for it here can't - the recording then needs no word before the voice drop counts.
+    asked = _recordings(monkeypatch)
+    satellite, _ = connect(name="pc", hostname="pc.local")
+    satellite.push_to_talk = True
+    _record(make_session(satellite), brain, FakeTranscription("What time is it?"))
+
+    (kwargs,) = asked
+    assert kwargs["voice_drop"] == pytest.approx(0.126, abs=0.001)
+    assert kwargs["words_quiet"] is None
+
+
+def test_the_timeline_notes_what_ended_it(brain, connect, make_session, monkeypatch):
+    # Whichever kind of satellite it was, so latency.jsonl can be read for what ended each recording.
+    _recordings(monkeypatch, ended_by="voice drop")
+    satellite, _ = connect(name="pc", hostname="pc.local")
+    satellite.push_to_talk = True
+
+    assert _record(make_session(satellite), brain, QuietWordsTranscription()).notes["ended_by"] == "voice drop"
+    assert _record(make_session(), brain, QuietWordsTranscription()).notes["ended_by"] == "voice drop"
+
+
 # For a clock display - see docs/decisions/0013
 
 def test_a_hold_starts_a_conversation_like_a_wake(brain, connect, make_session):

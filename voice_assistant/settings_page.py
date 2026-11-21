@@ -148,6 +148,8 @@ EDITABLE = [
     ("ntfy", "quiet_from", "Quiet hours start at", "now"),
     ("ntfy", "quiet_until", "Quiet hours end at", "now"),
     ("thresholds", "silence_duration", "Seconds of quiet which end what you're saying", "now"),
+    ("thresholds", "press_voice_drop_db", "Quieter than your voice that counts as stopped, at a computer (dB)", "now"),
+    ("thresholds", "press_no_words_seconds", "Seconds without a new word that end it, at a computer", "now"),
     ("thresholds", "recording_timeout", "Longest request, in seconds", "now"),
     ("thresholds", "wake_word_confidence", "How sure Nova must be it heard its wake word", "now"),
     ("thresholds", "media_wake_word_confidence",

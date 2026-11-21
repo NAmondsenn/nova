@@ -56,6 +56,11 @@ logger = logging.getLogger(__name__)
 # as config.yaml starts them.
 DEFAULT_SCREEN_ORB = {"on": True, "place": "bottom centre", "size": "medium"}
 
+# What a recording at a computer ends on if config.yaml has been left without these two
+# settings, the same as config.yaml starts them.
+DEFAULT_PRESS_VOICE_DROP_DB = 18
+DEFAULT_PRESS_NO_WORDS_SECONDS = 1.5
+
 # How long a session waits for a wake word before checking its satellite is still
 # there, in seconds - the satellite's wakes never say it has gone.
 WAKE_CHECK = 0.5
@@ -1288,6 +1293,21 @@ class Session:
         # words while the user is still saying them - see speech_to_text.py.
         listening = self.brain.stt.listen()
 
+        # Two more ways to end a recording, for a computer only: its microphone is close, and
+        # a game or a video playing nearby can be taken for speech by the voice activity model
+        # for as long as it plays, so the quiet which ends a recording may never come. A wake
+        # word satellite's recordings go on as they always have.
+        voice_drop = words_quiet = None
+        if self.satellite.push_to_talk:
+            drop_db = _number(thresholds.get("press_voice_drop_db"), DEFAULT_PRESS_VOICE_DROP_DB)
+            voice_drop = 10 ** (-drop_db / 20)
+            # A listener which can't say how long its words have been still - a stand-in for
+            # Nemotron's in a test - leaves the rule about the words off.
+            words_quiet = getattr(listening, "quiet_words", None)
+        no_words_after = _number(thresholds.get("press_no_words_seconds"), DEFAULT_PRESS_NO_WORDS_SECONDS)
+        # Filled in as the recording ends, for what ended it and how loud the user was.
+        report: Dict = {}
+
         # Records audio until silence / a timeout occurs. For a fresh request, the
         # satellite sent the moment from before the wake word was detected first, since
         # "Hey Nova what time is it" said in one breath has often started on "what" by
@@ -1306,7 +1326,8 @@ class Session:
                 silence_duration=thresholds.get("silence_duration", 0.6),
                 speech_timeout=speech_timeout,
                 timeout=thresholds.get("recording_timeout", 15.0),
-                timeline=timeline, heard=listening.add)
+                timeline=timeline, heard=listening.add, voice_drop=voice_drop,
+                words_quiet=words_quiet, no_words_after=no_words_after, report=report)
         except BaseException:
             # Otherwise it would wait on for the rest of a recording which isn't coming.
             listening.cancel()
@@ -1314,6 +1335,8 @@ class Session:
         finally:
             # The user has stopped, or isn't going to start - so the satellite stops sending.
             self.satellite.stop_listening(feed)
+        # So the log of timings says which of the ways to end a recording did.
+        timeline.note(ended_by=report.get("ended_by"))
         # An answer the user ended with a press, having said nothing, is their changing
         # their mind, as one begun on a press is.
         pressed = pressed or feed.pressed

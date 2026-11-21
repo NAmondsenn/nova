@@ -74,6 +74,12 @@ LIMITS: Dict[Tuple[str, str], Limit] = {
     ("ntfy", "restarts"): Limit("topic"),
     ("ntfy", "alerts"): Limit("topics"),
     ("thresholds", "silence_duration"): Limit("number", 0.2, 3),
+    # Under 6 dB the dips between one word and the next would count as the voice dropping away, and over
+    # 40 dB hardly any sound is quiet enough to.
+    ("thresholds", "press_voice_drop_db"): Limit("number", 6, 40),
+    # Under 0.8 seconds an ordinary pause between two words would end the recording, and over 5 it would
+    # hardly ever end one before the quiet or the longest request had.
+    ("thresholds", "press_no_words_seconds"): Limit("number", 0.8, 5),
     ("thresholds", "recording_timeout"): Limit("number", 5, 30, False),
     # Below 0.3 almost anything wakes Nova, and above 0.95 hardly anything does.
     ("thresholds", "wake_word_confidence"): Limit("number", 0.3, 0.95),
