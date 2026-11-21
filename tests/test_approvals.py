@@ -104,7 +104,7 @@ def made():
 class World:
     """One service and what it talks to."""
 
-    def __init__(self, tmp_path, made, *, passkey=True, approvers=(), ntfy=True, settings=None):
+    def __init__(self, tmp_path, made, *, passkey=True, approvers=(), ntfy=True, settings=None, guards=lambda: False):
         self.tmp_path = tmp_path
         self.made = made
         self.clock = FakeClock()
@@ -113,6 +113,7 @@ class World:
         self.settings = settings or {"trust_minutes": 5, "wait_minutes": 2, "album_count": 3}
         self.store = PasskeyStore(str(tmp_path / "passkeys.json"))
         self.said = []
+        self.guards = guards
         self.auth = None
         if passkey:
             self.auth = self.add_passkey("Phone")
@@ -127,7 +128,7 @@ class World:
 
     def new_service(self):
         service = Approvals(lambda: self.settings, self.store, ntfy=self.ntfy, approvers=lambda: self.approvers,
-                            spoken=lambda name: "the PC",
+                            guards=lambda: self.guards(), spoken=lambda name: "the PC",
                             say=lambda satellite, message: self.said.append((satellite, message)),
                             log_path=str(self.tmp_path / "approvals.json"), now=self.clock.now, wall=self.clock.wall)
         self.made.append(service)
@@ -547,3 +548,33 @@ def test_an_approval_leaves_a_fresh_request_waiting(tmp_path, made):
     assert world.approve(other)["message"] == "Approved."
     assert other.outcome == "approved" and fresh.outcome is None
     assert world.approve(fresh)["message"] == "Approved."
+
+
+def test_guarded_is_any_way_set_up_reachable_now_or_not(tmp_path, made):
+    # Nothing set up: not guarded, so the first way can be set up free.
+    bare = World(tmp_path / "bare", made, passkey=False)
+    assert bare.service.guarded() is False and bare.service.ways() == []
+    # A passkey with the phone's topic blank can't be asked now, but is still set up.
+    blank = World(tmp_path / "blank", made, ntfy=False)
+    assert blank.service.ways() == [] and blank.service.guarded() is True
+    # Not counting the passkey being removed, it's only guarded by another.
+    only = b64url(blank.auth.credential_id)
+    assert blank.service.guarded(without=only) is False
+    blank.add_passkey("Spare")
+    assert blank.service.guarded(without=only) is True
+    # A satellite let approve, asleep, guards it too: no passkey, and none connected.
+    asleep = World(tmp_path / "asleep", made, passkey=False, guards=lambda: True)
+    assert asleep.service.ways() == [] and asleep.service.guarded() is True
+
+
+def test_guarded_fails_closed(tmp_path, made, caplog):
+    def broken():
+        raise OSError("disk")
+
+    world = World(tmp_path / "broken", made, passkey=False, guards=broken)
+    assert world.service.guarded() is True
+    # A passkeys file which can't be read counts as holding one, so the first is never free because of it.
+    world = World(tmp_path / "unreadable", made, passkey=False)
+    (tmp_path / "unreadable").mkdir(exist_ok=True)
+    (tmp_path / "unreadable" / "passkeys.json").write_text("{not json")
+    assert world.store.all() == [] and world.service.guarded() is True

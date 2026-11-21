@@ -3797,8 +3797,9 @@ function setUpSettings() {
     if (!changed.length) return;
     const changes = Object.fromEntries(
       changed.map((input) => [input.name, input.type === "checkbox" ? input.checked : input.value]));
-    // Raising an approval setting needs his OK, which the save waits for.
-    const raised = changed.some((input) => input.name.startsWith("approvals.") && Number(input.value) > Number(input.dataset.saved));
+    // Raising an approval setting, or changing where the phone's approvals go, needs his OK, which the save waits for.
+    const raised = changed.some((input) => (input.name.startsWith("approvals.") && Number(input.value) > Number(input.dataset.saved))
+      || input.name === "ntfy.phone" || input.name === "ntfy.url");
     const result = await whileAsking(document.getElementById("unsaved"), raised ? checkWords() : null,
       () => change("/api/settings", { changes }, load, raised ? approvalWithin() : CHANGE_WITHIN), countChanges);
     if (result.success) {

@@ -532,7 +532,8 @@ class Brain:
         # which ask it, and before any session, each of whose actions do.
         self.passkeys = PasskeyStore(os.path.join(paths.DATA_DIR, "passkeys.json"))
         self.approvals = Approvals(lambda: self.config.section("approvals"), self.passkeys, ntfy=self.ntfy,
-                                   approvers=self._approvers, spoken=self.spoken_name,
+                                   approvers=self._approvers, guards=self._approver_kept,
+                                   spoken=self.spoken_name,
                                    say=self._say_approval_outcome,
                                    log_path=os.path.join(paths.DATA_DIR, "approvals.json"))
         # Music fetched through SoulSync, each download said on the satellite which asked
@@ -1338,9 +1339,11 @@ class Brain:
         hello, password = admitted
         name = hello["name"]
         logger.info(f"The {name} satellite connected")
-        # Before its session is made, as that looks up its room, which is kept with this.
+        # Before its session is made, as that looks up its room, which is kept with this. Asked
+        # first, as the rooms are what it reads: a PC first saying it approves is only let while
+        # nothing else is set up to.
         self.rooms.seen(name, hello["push_to_talk"], hello["machine"], hello["saves_notes"],
-                        approves=hello["approves"])
+                        approves=hello["approves"], guarded=self.approvals.guarded())
         if hello["unclean"]:
             self._tell_restarted(name)
 
@@ -2005,6 +2008,14 @@ class Brain:
             except Exception:
                 logger.exception(f"Couldn't tell whether the {satellite.name} satellite may approve")
         return approvers
+
+    def _approver_kept(self) -> bool:
+        """
+        Whether any satellite which may connect is one he lets approve, connected or not:
+        a PC asleep is still a way to approve, so changing how approval works still needs
+        one. Raises if the satellites' file can't be read, which Approvals counts as yes.
+        """
+        return bool(self.rooms.approving(self.passwords.names()))
 
     def _say_approval_outcome(self, satellite: Optional[str], message: str) -> None:
         """

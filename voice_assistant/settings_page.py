@@ -56,7 +56,7 @@ import requests
 import yaml
 
 from voice_assistant import paths, satellite_names, storage, timeline
-from voice_assistant.approvals import DIDNT_CHECK, NO_SUCH
+from voice_assistant.approvals import CANT_ASK, DIDNT_CHECK, NO_SUCH
 from voice_assistant.batteries import HOME_FAILURES
 from voice_assistant.clock import format_duration
 from voice_assistant.computers import match_app, plain as plain_app
@@ -301,6 +301,11 @@ TOO_LONG = "Start again: that took too long."
 NOT_HTTPS = "Passkeys can only be added at the page's https address."
 DIDNT_CHECK_OUT = "That passkey didn't check out."
 ADDED_MEANWHILE = "Start again: another passkey was added meanwhile."
+# Said of a passkey begun free when a PC has since been let approve.
+GUARDED_MEANWHILE = "Start again: a way to approve was set up meanwhile."
+# The settings which say where the phone's approvals go: changing them could send his
+# requests somewhere he never sees, so they're guarded as the approval settings are.
+PHONE_ROUTE = (("ntfy", "phone"), ("ntfy", "url"))
 # How long a passkey's registration may take, from Add a passkey to the phone's answer.
 REGISTRATION_SECONDS = 120
 # The longest credential id WebAuthn allows.
@@ -483,12 +488,18 @@ def _attested_credential_id(authenticator_data: bytes) -> bytes:
     return authenticator_data[start:start + length]
 
 
+def _guarded_setting(key: Any) -> bool:
+    """Whether a setting's "section.name" is one of the approval settings, or where the phone's approvals go."""
+    key = str(key).strip().lower()
+    return key.startswith("approvals") or key in {f"{section}.{name}" for section, name in PHONE_ROUTE}
+
+
 def _names_approvals(body: Any) -> bool:
-    """Whether a save of settings sent by the page names any of the approval settings."""
+    """Whether a save of settings sent by the page names any of the approval settings, or the phone's ntfy route."""
     changes = body.get("changes") if isinstance(body, dict) else None
     if not isinstance(changes, (dict, list)):
         return False
-    return any(str(key).strip().lower().startswith("approvals") for key in changes)
+    return any(_guarded_setting(key) for key in changes)
 
 
 def page_version() -> str:
@@ -1331,8 +1342,9 @@ class SettingsPage:
         if unknown:
             return {"success": False, "message": f"The page can't change {', '.join(unknown)}."}
         # Asked before the save lock is taken, as the wait can be minutes.
-        if not self._approve_raises(changes, editable, who):
-            return {"success": False, "message": NEEDS_OK}
+        refused = self._approve_raises(changes, editable, who)
+        if refused:
+            return {"success": False, "message": refused}
         path = paths.CONFIG_FILE
         # The file read, written and the running settings changed under the one lock, so
         # two saves at once can't each leave the other out of either.
@@ -1413,23 +1425,32 @@ class SettingsPage:
         return {"success": True, "message": message, "restart_needed": restart_needed}
 
     def _approve_raises(self, changes: Dict[str, Any], editable: Dict[str, Tuple[str, str, str, str]],
-                        who: str) -> bool:
+                        who: str) -> Optional[str]:
         """
         Asks for approval of each approval setting raised above the one running - a
         longer trust window or wait, or more albums before a download is big - as each
-        loosens what approval guards. Lowering one tightens it, so is free; and so is
-        any change while there's no way to approve, or approvals could never be set up.
-        One the save would refuse anyway is left for it to refuse, without asking.
+        loosens what approval guards, and of a change to the phone's ntfy topic or
+        server, which could send his requests where he'd never see them. Lowering one
+        tightens it, so is free; and so is any change while no way to approve is set up,
+        or approvals could never be set up. With one set up but none reachable now, a
+        raise is refused; the phone's topic and server are still free then, as setting
+        them is how he gets a way back. One the save would refuse anyway is left for it
+        to refuse, without asking.
 
         Returns:
-            Whether the save may go ahead.
+            None if the save may go ahead, else why not.
         """
         approvals = getattr(self.brain, "approvals", None)
         if approvals is None:
-            return True
-        raised = []
+            return None
+        raised, rerouted = [], []
         for key, given in changes.items():
             section, name, label, _ = editable[key]
+            if (section, name) in PHONE_ROUTE:
+                running = self.running.section(section).get(name) if self.running is not None else None
+                if str(given if given is not None else "").strip() != str(running if running is not None else "").strip():
+                    rerouted.append(label)
+                continue
             if section != "approvals":
                 continue
             default = self.defaults[section][name]
@@ -1442,13 +1463,20 @@ class SettingsPage:
             running = self.running.section(section).get(name, default) if self.running is not None else default
             if _number(value) is not None and _number(running) is not None and _number(value) > _number(running):
                 raised.append((label, value))
-        if not raised or not approvals.ways():
-            return True
-        for label, value in raised:
-            if not approvals.ask(f"Change '{label}' to {value}", fresh=True):
-                logger.info(f"Settings page: {who} wasn't let raise {label}, without an approval")
-                return False
-        return True
+        if not (raised or rerouted) or not approvals.guarded():
+            return None
+        if not approvals.ways():
+            if raised:
+                logger.info(f"Settings page: {who} wasn't let raise {raised[0][0]}, as no way to approve could be asked")
+                return CANT_ASK
+            return None
+        for description in [f"Change '{label}' to {value}" for label, value in raised] + [
+                f"Change '{label}'" for label in rerouted]:
+            if not approvals.ask(description, fresh=True):
+                logger.info(f"Settings page: {who} wasn't let {description[0].lower()}{description[1:]}, "
+                            f"without an approval")
+                return NEEDS_OK
+        return None
 
     def _apply(self, changes: Dict[Tuple[str, str], Any]) -> List[Tuple[str, str]]:
         """
@@ -2589,6 +2617,34 @@ class SettingsPage:
         """The brain's approval service and passkeys - None for either on a brain without them."""
         return getattr(self.brain, "approvals", None), getattr(self.brain, "passkeys", None)
 
+    def _approve_change(self, approvals, description: str, who: str, without: Optional[str] = None) -> Optional[str]:
+        """
+        Asks a fresh approval of a change to how approval works, whenever a way to
+        approve is set up - a passkey, or a satellite let approve, reachable now or not.
+        With none set up the change is free, or approvals could never be set up; with
+        one set up but none reachable now it's refused, never let through.
+
+        Args:
+            approvals: The approval service.
+            description: What it will do, as he'll be shown it.
+            who: The Tailscale login asking, for the log.
+            without: A passkey id which mustn't count or answer, e.g. the one being removed.
+
+        Returns:
+            None if it may go ahead, else why not.
+        """
+        if not approvals.guarded(without):
+            return None
+        if not approvals.ways(without):
+            logger.info(f"Settings page: {who} wasn't let {description[0].lower()}{description[1:]}, "
+                        f"as no way to approve could be asked")
+            return CANT_ASK
+        if not approvals.ask(description, without=without, fresh=without is None):
+            logger.info(f"Settings page: {who} wasn't let {description[0].lower()}{description[1:]}, "
+                        f"without an approval")
+            return NEEDS_OK
+        return None
+
     def approvals_state(self) -> Dict:
         """
         The Approvals section: his passkeys (never their keys), each satellite which said
@@ -2697,10 +2753,12 @@ class SettingsPage:
         keys = passkeys.all()
         if len(keys) >= MOST_PASSKEYS:
             return {"success": False, "message": f"Nova keeps at most {MOST_PASSKEYS} passkeys."}
-        approved = bool(keys) and bool(approvals.ways())
-        if approved and not approvals.ask("Add a passkey", fresh=True):
-            logger.info(f"Settings page: {who} wasn't let add a passkey, without an approval")
-            return {"success": False, "message": NEEDS_OK}
+        # Free only while no way to approve is set up at all - no passkey, and no satellite
+        # let approve, asleep or not - so the first is never free once the PC approves.
+        approved = approvals.guarded()
+        refused = self._approve_change(approvals, "Add a passkey", who)
+        if refused:
+            return {"success": False, "message": refused}
         challenge = secrets.token_bytes(32)
         with self._registration_lock:
             self._registration = (challenge, self._now() + REGISTRATION_SECONDS, origin, approved,
@@ -2762,6 +2820,10 @@ class SettingsPage:
             if not approved and any(each.id not in there for each in passkeys.all()):
                 logger.info(f"Settings page: a passkey {who} was adding wasn't added, as another was added first")
                 return {"success": False, "message": ADDED_MEANWHILE}
+            if not approved and approvals.guarded():
+                logger.info(f"Settings page: a passkey {who} was adding wasn't added, as a way to approve "
+                            f"was set up first")
+                return {"success": False, "message": GUARDED_MEANWHILE}
             problem = passkeys.add(Passkey(id=b64url(made_id), name=name, public_key=b64url(public_key),
                                            algorithm=algorithm, counter=counter, origin=origin, added=time.time()))
         if problem:
@@ -2789,9 +2851,9 @@ class SettingsPage:
         passkey = passkeys.get(id)
         if passkey is None:
             return {"success": False, "message": "There's no such passkey."}
-        if approvals.ways(without=id) and not approvals.ask(f"Remove the passkey '{passkey.name}'", without=id):
-            logger.info(f"Settings page: {who} wasn't let remove the passkey {passkey.name}, without an approval")
-            return {"success": False, "message": NEEDS_OK}
+        refused = self._approve_change(approvals, f"Remove the passkey '{passkey.name}'", who, without=id)
+        if refused:
+            return {"success": False, "message": refused}
         if not passkeys.remove(id):
             return {"success": False, "message": "There's no such passkey."}
         logger.info(f"Settings page: {who} removed the passkey {passkey.name}")
@@ -2820,10 +2882,10 @@ class SettingsPage:
         rooms = self.brain.rooms
         if not rooms.approves(name):
             return {"success": False, "message": f"{name} can't approve."}
-        if on and not rooms.can_approve(name) and approvals.ways() and not approvals.ask(
-                f"Let {self.brain.spoken_name(name)} approve", fresh=True):
-            logger.info(f"Settings page: {who} wasn't let have the {name} satellite approve, without an approval")
-            return {"success": False, "message": NEEDS_OK}
+        if on and not rooms.can_approve(name):
+            refused = self._approve_change(approvals, f"Let {self.brain.spoken_name(name)} approve", who)
+            if refused:
+                return {"success": False, "message": refused}
         try:
             rooms.set_can_approve(name, on)
         except OSError as e:
@@ -3085,7 +3147,7 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == "/api/state":
             state = page.state(satellite)
             if self.server.route == "npm":
-                state["settings"] = [each for each in state["settings"] if not each["key"].startswith("approvals.")]
+                state["settings"] = [each for each in state["settings"] if not _guarded_setting(each["key"])]
             self._send_json(state)
         elif path == "/api/live":
             self._send_json(page.live(satellite))

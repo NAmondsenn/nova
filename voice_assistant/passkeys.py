@@ -80,6 +80,16 @@ class PasskeyStore:
         with self._lock:
             return self._read()
 
+    def unreadable(self) -> bool:
+        """Whether the file is there but can't be read, as it was at the last look.
+
+        The approval service counts a file like that as holding a passkey, so a broken
+        file never makes the first passkey free to add.
+        """
+        with self._lock:
+            self._read()
+            return self._warned
+
     def get(self, id: str) -> Optional[Passkey]:
         """Returns the passkey with this credential id, or None."""
         with self._lock:

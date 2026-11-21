@@ -4445,6 +4445,7 @@ def test_wrapped_files_served(wrapped_served):
 # Approvals: passkeys, the phone's approval page and the gated settings - at the Tailscale address only
 
 NEEDS_OK = "That needs your OK first, so nothing was changed."
+CANT_ASK = "Nova can't reach your phone or the PC to ask: set the phone's ntfy topic or wake the PC first."
 ONLY_TAILNET = "Approvals are only at the page's Tailscale address."
 REQUEST_ID = "0123456789abcdef0123456789abcdef"
 
@@ -4481,7 +4482,7 @@ class PhoneNtfy:
 class Approving:
     """A page over a brain with a real approval service, passkey store and satellite rooms."""
 
-    def __init__(self, files, tmp_path, passkeys=1):
+    def __init__(self, files, tmp_path, passkeys=1, approvers=()):
         (files / "config.yaml").write_text("ntfy:\n  url: http://ntfy.test\n")
         self.running = Config()
         self.clock = ApprovalClock()
@@ -4489,8 +4490,12 @@ class Approving:
         self.passkeys = PasskeyStore(str(tmp_path / "passkeys.json"))
         self.rooms = SatelliteRooms(str(tmp_path / "satellite_rooms.json"))
         self.rooms.seen("bedroom", False, "pi")
-        self.rooms.seen("pc", True, "pc", approves=True)
+        # The PC first, so it's let approve, as the first way set up.
+        self.rooms.seen("pc", True, "pc", approves=True, guarded=False)
+        self.approvers = list(approvers)
         self.approvals = Approvals(lambda: self.running.section("approvals"), self.passkeys, ntfy=self.ntfy,
+                                   approvers=lambda: self.approvers,
+                                   guards=lambda: bool(self.rooms.approving(["bedroom", "pc"])),
                                    now=self.clock.now, wall=self.clock.wall)
         self.page = _page(running=self.running, config=self.running, ntfy=Ntfy("http://ntfy.test"),
                           sessions={"bedroom": FakeSession()}, known=["bedroom", "pc"],
@@ -4648,9 +4653,11 @@ def _register(world, phone, name="Phone", origin=AUTH_ORIGIN, begun=None):
 
 @pytest.fixture
 def no_passkeys(files, tmp_path, monkeypatch):
+    """No way to approve set up at all: no passkey, and the PC not let approve."""
     monkeypatch.setattr(page_module, "STOP_CHECK", 0.02)
     monkeypatch.setattr(approvals_module, "CHECK_EVERY", 0.01)
     world = Approving(files, tmp_path, passkeys=0)
+    world.rooms.set_can_approve("pc", False)
     world.page.start()
     yield world
     world.approvals.stop()
@@ -4759,6 +4766,10 @@ def test_removing_the_only_way_needs_nothing_and_another_needs_an_approval(files
         said = world.asked("/api/passkeys/remove", {"id": b64url(spare.credential_id)}, world.approve_with(phone))
         assert said == (200, {"success": True, "message": "Removed Spare."})
         sent = len(world.ntfy.sent)
+        # The PC is still a way to approve, though asleep, so the last passkey isn't free while it is.
+        assert world.post("/api/passkeys/remove", {"id": b64url(phone.credential_id)}) == (
+            200, {"success": False, "message": CANT_ASK})
+        assert world.post("/api/approvals/can-approve", {"name": "pc", "on": False})[1]["success"]
         assert world.post("/api/passkeys/remove", {"id": b64url(phone.credential_id)}) == (
             200, {"success": True, "message": "Removed Phone."})
         assert len(world.ntfy.sent) == sent and world.passkeys.all() == []
@@ -4796,9 +4807,11 @@ def test_raising_the_trust_minutes_needs_an_approval_and_lowering_doesnt(approvi
     # One out of its limits is refused without asking.
     assert approving.post("/api/settings", {"changes": {"approvals.album_count": 99}})[1]["success"] is False
     assert len(approving.ntfy.sent) == sent
-    # With no way to approve, a raise is free - once the approval's trust window has closed, so it's that which lets it.
+    # With no way to approve set up, a raise is free - once the approval's trust window has closed, so it's that
+    # which lets it.
     approving.clock.move(2 * 60)
     approving.passkeys.remove(b64url(approving.phones[0].credential_id))
+    approving.rooms.set_can_approve("pc", False)
     assert approving.post("/api/settings", {"changes": {"approvals.album_count": 20}})[1]["success"]
     assert len(approving.ntfy.sent) == sent
 
@@ -4831,6 +4844,107 @@ def test_switching_can_approve_on_needs_an_approval_and_off_doesnt(approving):
     assert approving.rooms.can_approve("bedroom") is False
 
 
+class AnsweringPC:
+    """A connected PC which approves, answering each prompt as it's set to."""
+
+    name = "pc"
+
+    def __init__(self, answer):
+        self.answer = answer
+        self.asked = []
+
+    def ask_approval(self, id, description, wait):
+        self.asked.append(description)
+        return self.answer
+
+    def withdraw_approval(self, id):
+        return True
+
+
+def test_a_blank_phone_topic_never_makes_a_security_change_free(approving, files):
+    # The topic blanked and the PC asleep: nothing can be asked, but a way is still set up - so each is refused.
+    approving.ntfy.phone = ""
+    phone = approving.phones[0]
+    config = (files / "config.yaml").read_text()
+    for path, body in (("/api/passkeys/remove", {"id": b64url(phone.credential_id)}),
+                       ("/api/passkeys/begin", {}),
+                       ("/api/settings", {"changes": {"approvals.trust_minutes": 10}})):
+        assert approving.post(path, body) == (200, {"success": False, "message": CANT_ASK}), path
+    assert approving.post("/api/approvals/can-approve", {"name": "pc", "on": False})[1]["success"]
+    # A passkey guards them too, the PC switched off: removing the spare leaves the phone's.
+    spare = approving.add_passkey("Spare")
+    for path, body in (("/api/passkeys/remove", {"id": b64url(spare.credential_id)}),
+                       ("/api/passkeys/begin", {}),
+                       ("/api/settings", {"changes": {"approvals.album_count": 5}}),
+                       ("/api/approvals/can-approve", {"name": "pc", "on": True})):
+        assert approving.post(path, body) == (200, {"success": False, "message": CANT_ASK}), path
+    assert len(approving.passkeys.all()) == 2 and approving.rooms.can_approve("pc") is False
+    assert (files / "config.yaml").read_text() == config and approving.ntfy.sent == []
+
+
+def test_changing_where_the_phones_approvals_go_needs_an_approval(approving, files):
+    said = approving.asked("/api/settings", {"changes": {"ntfy.phone": "another-topic"}}, approving.refuse)
+    assert said == (200, {"success": False, "message": NEEDS_OK})
+    # Named, never with the topic, which is as good as a password to the phone's notifications.
+    assert approving.ntfy.sent[-1]["message"] == "Change 'Topic for sending things to your phone'"
+    assert "another-topic" not in (files / "config.yaml").read_text()
+    said = approving.asked("/api/settings", {"changes": {"ntfy.url": "http://elsewhere.test"}}, approving.refuse)
+    assert said == (200, {"success": False, "message": NEEDS_OK})
+    assert approving.ntfy.sent[-1]["message"] == "Change 'Your ntfy server'"
+    # A fresh approval each time, which the trust window never gives.
+    said = approving.asked("/api/settings", {"changes": {"ntfy.phone": "another-topic"}},
+                           approving.approve_with(approving.phones[0]))
+    assert said[1]["success"] and "another-topic" in (files / "config.yaml").read_text()
+    assert approving.approvals.trusted()
+    said = approving.asked("/api/settings", {"changes": {"ntfy.url": "http://elsewhere.test"}}, approving.refuse)
+    assert said == (200, {"success": False, "message": NEEDS_OK})
+
+
+def test_the_phones_topic_is_free_to_set_when_nothing_can_be_asked(approving, files):
+    # Setting it is how he gets a way to be asked back, so it's never refused for the lack of one.
+    approving.ntfy.phone = ""
+    assert approving.post("/api/settings", {"changes": {"ntfy.phone": "new-topic"}})[1]["success"]
+    assert "new-topic" in (files / "config.yaml").read_text() and approving.ntfy.sent == []
+
+
+def test_with_no_way_set_up_the_phones_topic_is_free(no_passkeys, files):
+    assert no_passkeys.post("/api/settings", {"changes": {"ntfy.phone": "new-topic"}})[1]["success"]
+    assert no_passkeys.ntfy.sent == []
+
+
+def test_the_first_passkey_needs_the_pcs_ok_once_it_approves(files, tmp_path, monkeypatch):
+    monkeypatch.setattr(page_module, "STOP_CHECK", 0.02)
+    monkeypatch.setattr(approvals_module, "CHECK_EVERY", 0.01)
+    pc = AnsweringPC(False)
+    world = Approving(files, tmp_path, passkeys=0, approvers=[pc])
+    world.page.start()
+    try:
+        assert world.post("/api/passkeys/begin", {}) == (200, {"success": False, "message": NEEDS_OK})
+        assert pc.asked == ["Add a passkey"]
+        pc.answer = True
+        status, begun = world.post("/api/passkeys/begin", {})
+        assert status == 200 and begun["success"]
+        assert _register(world, FakeAuthenticator(), begun=begun) == {"success": True, "message": "Added Phone."}
+        # The PC let approve but asleep is still set up: refused, as it can't be asked.
+        world.passkeys.remove(world.passkeys.all()[0].id)
+        world.approvers.clear()
+        assert world.post("/api/passkeys/begin", {}) == (200, {"success": False, "message": CANT_ASK})
+    finally:
+        world.approvals.stop()
+        world.page.stop()
+
+
+def test_a_passkey_begun_free_isnt_added_once_a_pc_may_approve(no_passkeys):
+    phone = FakeAuthenticator()
+    begun = no_passkeys.post("/api/passkeys/begin", {})[1]
+    assert begun["success"]
+    # Switched on free meanwhile, as nothing was set up: the passkey begun free is no longer the first way.
+    assert no_passkeys.post("/api/approvals/can-approve", {"name": "pc", "on": True})[1]["success"]
+    assert _register(no_passkeys, phone, begun=begun) == {
+        "success": False, "message": "Start again: a way to approve was set up meanwhile."}
+    assert no_passkeys.passkeys.all() == []
+
+
 def test_without_approvals_each_endpoint_says_so(served):
     assert json.loads(_ask(served, "/api/approvals")[2]) == {"passkeys": [], "satellites": [],
                                                               "trusted_until": None, "recent": []}
@@ -4861,6 +4975,9 @@ def test_approvals_are_refused_through_npm(files, tmp_path, monkeypatch):
                  ("/api/approvals/can-approve", {"name": "pc", "on": False}),
                  ("/api/settings", {"changes": {"approvals.trust_minutes": 1}}),
                  ("/api/settings", {"changes": {"ntfy.quiet_from": "22:00", "approvals.wait_minutes": 1}}),
+                 # Where the phone's approvals go is guarded as they are.
+                 ("/api/settings", {"changes": {"ntfy.phone": "another-topic"}}),
+                 ("/api/settings", {"changes": {"ntfy.url": "http://elsewhere.test"}}),
                  # A satellite's password lets a PC in, and a PC can approve.
                  ("/api/satellites/add", {"name": "laptop"}), ("/api/satellites/password", {"name": "pc"}),
                  ("/api/satellites/remove", {"name": "pc"}), ("/api/satellites/password?x=1", {"name": "pc"})]
@@ -4878,6 +4995,7 @@ def test_approvals_are_refused_through_npm(files, tmp_path, monkeypatch):
         keys_shown = [each["key"] for each in json.loads(body)["settings"]]
         assert status == 200 and "ntfy.quiet_from" in keys_shown
         assert not any(key.startswith("approvals.") for key in keys_shown)
+        assert "ntfy.phone" not in keys_shown and "ntfy.url" not in keys_shown
         assert any(key.startswith("approvals.") for key in (each["key"] for each in page.state()["settings"]))
         status, _, said = _through_npm(page, "/api/settings", {"changes": {"ntfy.quiet_from": "22:00"}},
                                        cookie=token, X_Nova="page")

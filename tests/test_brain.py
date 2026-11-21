@@ -55,7 +55,7 @@ from voice_assistant.music_device import MusicDevice
 from voice_assistant.navidrome import NavidromeLibrary, normalise
 from voice_assistant.new_music import NewMusicPlaylist
 from voice_assistant.ntfy import Alert
-from voice_assistant.passkeys import PasskeyStore
+from voice_assistant.passkeys import Passkey, PasskeyStore
 from voice_assistant.playlist_changes import PlaylistChanges
 from voice_assistant.recording import RATE
 from voice_assistant.remote import RemoteSatellite
@@ -4483,6 +4483,7 @@ def test_the_brain_makes_the_approvals_and_keeps_them_in_its_data(brain):
     assert brain.approvals._log_path == os.path.join(paths.DATA_DIR, "approvals.json")
     assert brain.approvals._passkeys is brain.passkeys and brain.approvals._ntfy is brain.ntfy
     assert brain.approvals._approvers == brain._approvers and brain.approvals._say == brain._say_approval_outcome
+    assert brain.approvals._guards == brain._approver_kept
     assert brain.approvals._spoken == brain.spoken_name
 
 
@@ -4523,6 +4524,25 @@ def test_only_a_connected_satellite_that_approves_and_may_is_asked(brain, connec
     assert brain._approvers() == [kitchen.satellite]
     # Put in by hand, so not let go as the brain stops.
     del brain.sessions["study"], brain.sessions["office"]
+
+
+def test_a_pc_first_seen_once_a_way_to_approve_is_set_up_isnt_let_approve(brain, connect, passwords):
+    serving(brain)
+    # A passkey is set up first, so a satellite saying it's the PC and approves isn't let approve by that alone.
+    brain.passkeys.add(Passkey(id="made-up-credential", name="Phone", public_key="key", algorithm=-7, counter=0,
+                               origin="https://nova.example.ts.net", added=1.0))
+    connect(brain, "bedroom", BEDROOM, machine="pc", approves=True)
+    connected(brain, "bedroom")
+    assert brain.rooms.approves("bedroom") is True and brain.rooms.can_approve("bedroom") is False
+    assert brain._approvers() == []
+
+
+def test_a_kept_approving_satellite_guards_while_away(brain):
+    # The brain's guard reads the rooms, connected or not: a PC asleep is still a way to approve.
+    brain.rooms.seen("bedroom", False, "pc", approves=True, guarded=False)
+    assert brain.approvals.guarded() is True
+    brain.rooms.set_can_approve("bedroom", False)
+    assert brain.approvals.guarded() is False
 
 
 def test_a_satellite_whose_switch_cant_be_read_isnt_asked(brain, monkeypatch, caplog):

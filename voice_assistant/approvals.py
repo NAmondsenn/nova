@@ -39,6 +39,10 @@ logger = logging.getLogger(__name__)
 # What's said, and shown on the approval page.
 NO_WAY = ("That needs your OK, but there's no way to give it yet. "
           "Add a passkey on Nova's settings page.")
+# Said of a change to how approval works when a way to approve is set up but none can be
+# asked now - the phone's topic blank and the PC asleep, say: refused, never let through.
+CANT_ASK = ("Nova can't reach your phone or the PC to ask: set the phone's ntfy topic or "
+            "wake the PC first.")
 REFUSED_SAID = "Okay, I won't."
 TIMED_OUT_SAID = "No answer, so I haven't."
 FAILED_SAID = "That didn't work."
@@ -130,6 +134,7 @@ class Approvals:
 
     def __init__(self, settings: Callable[[], Dict], passkeys: PasskeyStore, ntfy=None,
                  approvers: Callable[[], List] = lambda: [],
+                 guards: Callable[[], bool] = lambda: False,
                  spoken: Callable[[str], str] = lambda name: name,
                  say: Callable[[Optional[str], str], None] = lambda satellite, message: None,
                  log_path: Optional[str] = None, now=time.monotonic, wall=time.time):
@@ -141,6 +146,8 @@ class Approvals:
             approvers: Gives the satellites which may approve now. Each has a `name`,
                 `ask_approval(id, description, wait)` giving True, False, or None for no
                 answer, and `withdraw_approval(id)`.
+            guards: Whether any satellite he has let approve is kept, connected or not -
+                see guarded.
             spoken: How a satellite is named when it's said, e.g. "the PC".
             say: Says something to a satellite (None for wherever suits).
             log_path: Where the recent approvals are kept; None keeps them in memory only.
@@ -151,6 +158,7 @@ class Approvals:
         self._passkeys = passkeys
         self._ntfy = ntfy
         self._approvers = approvers
+        self._guards = guards
         self._spoken = spoken
         self._say = say
         self._log_path = log_path
@@ -228,6 +236,27 @@ class Approvals:
         """
         ways = [PHONE] if self._phone_keys(without) else []
         return ways + [self._spoken(each.name) for each in self._approvers_now()]
+
+    def guarded(self, without: Optional[str] = None) -> bool:
+        """Whether a way to approve is set up, reachable now or not: a passkey, or a satellite let approve.
+
+        This, not ways, says whether a change to how approval works needs an approval:
+        ways is only who can be asked now, so a blank phone topic or a sleeping PC would
+        otherwise make loosening the guard free. A satellite list which can't be read
+        counts as guarded, so a fault never opens it.
+
+        Args:
+            without: A passkey id which mustn't count, e.g. the one being removed.
+        """
+        if any(each.id != without for each in self._passkeys.all()):
+            return True
+        try:
+            if self._passkeys.unreadable():
+                return True
+            return bool(self._guards())
+        except Exception as e:
+            logger.error(f"Could not tell whether a satellite may approve, so taken as one may ({type(e).__name__})")
+            return True
 
     def request(self, description: str, without: Optional[str] = None, fresh: bool = False) -> Request:
         """Asks for approval of a big action, every way at once, without waiting for it.
