@@ -4968,7 +4968,8 @@ def test_approvals_are_refused_through_npm(files, tmp_path, monkeypatch):
         request = world.approvals.request("Remove 'Dentist'")
         config, keys = (files / "config.yaml").read_text(), world.passkeys.all()
         phone = world.phones[0]
-        gets = [f"/approve/{request.id}", "/approve.js", "/api/approvals", f"/api/approvals/request?id={request.id}"]
+        gets = [f"/approve/{request.id}", "/approve.js", "/approve.js?v=1", "/api/approvals",
+                f"/api/approvals/request?id={request.id}"]
         posts = [("/api/approvals/answer", {"id": request.id}), ("/api/approvals/refuse", {"id": request.id}),
                  ("/api/passkeys/begin", {}), ("/api/passkeys/finish", {"name": "Phone"}),
                  ("/api/passkeys/remove", {"id": b64url(phone.credential_id)}),
@@ -4996,6 +4997,9 @@ def test_approvals_are_refused_through_npm(files, tmp_path, monkeypatch):
         assert status == 200 and "ntfy.quiet_from" in keys_shown
         assert not any(key.startswith("approvals.") for key in keys_shown)
         assert "ntfy.phone" not in keys_shown and "ntfy.url" not in keys_shown
+        # A path which only begins as the approval page's does is no approval path: it's answered as any other.
+        status, _, body = _through_npm(page, "/approvement", cookie=token)
+        assert status != 403
         assert any(key.startswith("approvals.") for key in (each["key"] for each in page.state()["settings"]))
         status, _, said = _through_npm(page, "/api/settings", {"changes": {"ntfy.quiet_from": "22:00"}},
                                        cookie=token, X_Nova="page")

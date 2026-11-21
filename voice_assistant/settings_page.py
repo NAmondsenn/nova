@@ -287,7 +287,9 @@ LONGEST_APP_NAME = 40
 # Approvals - see approvals.py. Everything to do with them is at the page's Tailscale
 # address only: through NPM, a password stands between the internet and the page, but
 # approving a big action, or changing how one is approved, needs more than a password.
-APPROVAL_PATHS = ("/approve", "/api/approvals", "/api/passkeys")
+APPROVAL_PATHS = ("/approve/", "/api/approvals", "/api/passkeys")
+# The phone's page's own script, matched exactly, as "/approve" alone would catch any path beginning so.
+APPROVE_SCRIPT = "/approve.js"
 # Nor is a satellite made, given a new password or removed there: a satellite's password
 # lets a PC in, and a PC can be one which approves.
 SATELLITE_KEYS = ("/api/satellites/add", "/api/satellites/password", "/api/satellites/remove")
@@ -3243,7 +3245,8 @@ class _Handler(BaseHTTPRequestHandler):
         """
         if self.server.route != "npm" or path is None:
             return False
-        if not path.startswith(APPROVAL_PATHS) and path.split("?")[0] not in SATELLITE_KEYS:
+        bare = path.split("?")[0]
+        if not bare.startswith(APPROVAL_PATHS) and bare != APPROVE_SCRIPT and bare not in SATELLITE_KEYS:
             return False
         self._send_json({"success": False, "message": ONLY_TAILNET}, 403)
         return True
