@@ -167,6 +167,20 @@ computer:
   # Used straight away.
   screen_orb_size: medium
 
+# Big actions (removing a calendar event, a big music download, and changing these
+# settings upwards) need his OK first, from a passkey on his phone or Windows Hello at
+# the PC. Lowering any of these needs no OK. All of it is used straight away.
+approvals:
+  # Minutes one approval lasts: anything big asked in this time goes ahead without asking
+  # again. A whole number from 0 to 60; 0 asks every time.
+  trust_minutes: 5
+  # Minutes to wait for an answer before saying "No answer, so I haven't." A whole number
+  # from 1 to 10.
+  wait_minutes: 2
+  # Albums that make a download need approval: the one which makes this many asked for
+  # within the minutes one approval lasts. A whole number from 2 to 20.
+  album_count: 3
+
 # Web search is only used when the query explicitly asks for it
 # (e.g. "search for..."), so normal replies stay fast and free.
 # Each search is billed by Anthropic on top of token costs.
@@ -202,6 +216,17 @@ thresholds:
   # waited out before Nova can answer, but too short and a pause mid-sentence ends it -
   # raise it if Nova cuts you off.
   silence_duration: 0.6
+  # At a computer, where the microphone is close, a game or a video playing nearby can sound
+  # like speech to the voice activity model and keep a recording going long after you've
+  # stopped. So it also ends when what you say drops this far below your own voice, in
+  # decibels (dB), once Nova has heard a word: 18 is about an eighth of the volume. Raise it if
+  # recordings end part way through a quiet sentence; lower it if they don't end.
+  press_voice_drop_db: 18
+  # The same at a computer when the words stop: the seconds without a new word which end
+  # the recording once what the microphone hears is well below your voice, from 1.2 to 5.
+  # Raise it if Nova cuts you off when you pause to think; lower it if it keeps listening
+  # after you've finished.
+  press_no_words_seconds: 1.5
   # How sure the voice activity model has to be that it's hearing speech, from 0 to 1.
   # Raise it if background noise keeps recordings going; lower it if quiet speech is missed.
   vad_threshold: 0.5

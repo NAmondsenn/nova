@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import numpy as np
 
 from voice_assistant import logging_setup, paths, protocol, satellite_names, storage, watchdog
+from voice_assistant.approvals import Approvals
 from voice_assistant.batteries import HOME_FAILURES, BatteryChoices, BatteryWatcher
 from voice_assistant.choices import ChoiceStore
 from voice_assistant.clean_check import CleanCheck
@@ -37,6 +38,7 @@ from voice_assistant.clean_store import CleanStore
 from voice_assistant.clean_swap import Ears, Swapper, listening_library
 from voice_assistant.clock import Clock, spoken_clock_time
 from voice_assistant.computers import Computers
+from voice_assistant.devices import RangLately
 from voice_assistant.display_feed import DisplayFeed
 from voice_assistant.display_server import DisplayServer
 from voice_assistant.displays import Displays
@@ -60,6 +62,7 @@ from voice_assistant.music_folder import MusicFolder
 from voice_assistant.new_music import NewMusicPlaylist
 from voice_assistant.notes import NO_NOTES
 from voice_assistant.ntfy import RETOPIC, Ntfy
+from voice_assistant.passkeys import PasskeyStore
 from voice_assistant.pc import PCPower
 from voice_assistant.playlist_changes import PlaylistChanges
 from voice_assistant.protocol import ProtocolError, Refused, admit
@@ -452,6 +455,9 @@ class Brain:
         # What "undo that" takes back, one for the whole house: the last playlist or calendar change by voice
         # at any satellite, which anything else done at any other satellite since leaves as it is.
         self.last_change = LastChange()
+        # What was rung through Google's Find My lately, one for the whole house, so a phone rung at one
+        # satellite stops at "found it" said at another - see devices.RangLately.
+        self.find_my_rang = RangLately()
         # The brain's second device in Home Assistant, showing that snapshot - or None with no MQTT
         # broker set. Made here as it needs the listening stats. Started by run().
         self.music_device = MusicDevice.from_config(config, os.getenv("MQTT_PASSWORD"), self.listening)
@@ -521,11 +527,21 @@ class Brain:
         self.clean_schedule = CleanSchedule(self.clean_check, self.clean_store, self.ntfy,
                                             lambda: self.config.section("clean_check"),
                                             lambda: self.config.section("wrapped").get("link") or "")
+        # His OK for big actions - removing calendar events, a big download, raising an
+        # approval setting - asked of his phone, through a passkey, and of each connected
+        # PC which may, through Windows Hello - see approvals.py. Made before the downloads,
+        # which ask it, and before any session, each of whose actions do.
+        self.passkeys = PasskeyStore(os.path.join(paths.DATA_DIR, "passkeys.json"))
+        self.approvals = Approvals(lambda: self.config.section("approvals"), self.passkeys, ntfy=self.ntfy,
+                                   approvers=self._approvers, guards=self._approver_kept,
+                                   spoken=self.spoken_name,
+                                   say=self._say_approval_outcome,
+                                   log_path=os.path.join(paths.DATA_DIR, "approvals.json"))
         # Music fetched through SoulSync, each download said on the satellite which asked
         # for it - see downloads.py. One for every satellite, so the same song asked for
         # on two is only requested once.
         self.downloads = Downloads(config, say=self._say_download, ears=self.ears, swapper=self.swapper,
-                                   store=self.clean_store)
+                                   store=self.clean_store, approvals=self.approvals)
 
         # One Piper, and one Nemotron, which every session shares.
         self.tts = TextToSpeech(config)
@@ -757,6 +773,10 @@ class Brain:
         problem = name_problem(name)
         if problem:
             raise ValueError(problem)
+        if name in self.passwords.names():
+            raise ValueError(f"There is already a satellite called {name}")
+        # One added under a name kept from before mustn't inherit its "Can approve".
+        self.rooms.forget_approval(name, self.approvals.guarded())
         return self.passwords.add(name)
 
     def renew_password(self, name: str) -> str:
@@ -774,6 +794,11 @@ class Brain:
         Raises:
             ValueError: If there's no such satellite.
         """
+        if name not in self.passwords.names():
+            raise ValueError(f"There is no satellite called {name}")
+        # Before the new password exists, so a satellite made with it is never let
+        # approve by the old one's switch - see SatelliteRooms.forget_approval.
+        self.rooms.forget_approval(name, self.approvals.guarded())
         password = self.passwords.renew(name)
         # After it's saved, never before - see _start_session, which lets go of one
         # whose session is made after this looks.
@@ -1324,8 +1349,11 @@ class Brain:
         hello, password = admitted
         name = hello["name"]
         logger.info(f"The {name} satellite connected")
-        # Before its session is made, as that looks up its room, which is kept with this.
-        self.rooms.seen(name, hello["push_to_talk"], hello["machine"], hello["saves_notes"])
+        # Before its session is made, as that looks up its room, which is kept with this. Asked
+        # first, as the rooms are what it reads: a PC first saying it approves is only let while
+        # nothing else is set up to.
+        self.rooms.seen(name, hello["push_to_talk"], hello["machine"], hello["saves_notes"],
+                        approves=hello["approves"], guarded=self.approvals.guarded())
         if hello["unclean"]:
             self._tell_restarted(name)
 
@@ -1513,6 +1541,12 @@ class Brain:
             self._satellites_changed()
         # Its apps too, connected or not, so it's never "the only computer" things open on.
         self.computers.forget(name)
+        # And whether it may approve, so one added again by its name is stored afresh.
+        try:
+            self.rooms.forget_approval(name, None)
+        except OSError as e:
+            # Forgotten in memory all the same; adding it again forgets it once more.
+            logger.error(f"Could not save that the removed {name} satellite may not approve: {e}")
         with self._lock:
             self._emptied[name] = emptied
         if not emptied:
@@ -1970,6 +2004,70 @@ class Brain:
             # download's watch with a traceback instead.
             logger.exception(f"A download message couldn't be sent to the phone: {message}")
 
+    def _approvers(self) -> List[RemoteSatellite]:
+        """
+        The satellites asked to approve a big action now: each connected one whose hello
+        said it can ask (a PC with Windows Hello) and which may, as the settings page has it.
+        All three are needed, so a Pi saying it approves is never asked unless he switched
+        it on, and one switched on is never asked unless it says it can. One whose switch
+        can't be read isn't asked - the phone still is.
+        """
+        with self._lock:
+            satellites = [session.satellite for session in self.sessions.values()]
+        approvers = []
+        for satellite in satellites:
+            if not satellite.connected or getattr(satellite, "approves", False) is not True:
+                continue
+            try:
+                if self.rooms.can_approve(satellite.name):
+                    approvers.append(satellite)
+            except Exception:
+                logger.exception(f"Couldn't tell whether the {satellite.name} satellite may approve")
+        return approvers
+
+    def _approver_kept(self) -> bool:
+        """
+        Whether any satellite which may connect is one he lets approve, connected or not:
+        a PC asleep is still a way to approve, so changing how approval works still needs
+        one. Raises if the satellites' file can't be read, which Approvals counts as yes.
+        """
+        return bool(self.rooms.approving(self.passwords.names()))
+
+    def _say_approval_outcome(self, satellite: Optional[str], message: str) -> None:
+        """
+        Says how a big action waiting for approval went - done, refused or not answered -
+        on the satellite which asked for it, as _say_download has a download said, at any
+        hour, as he's waiting for it. Approvals calls it from the request's own thread,
+        never a conversation's, so the announcement waits its turn rather than holding one
+        up. With that satellite away, or the message not said, it goes to his phone.
+        Never raises, and never logs the message, which can name what was removed.
+
+        Args:
+            satellite: The satellite which asked, or None for the default one.
+            message: What to say, e.g. "Okay, I won't."
+        """
+        where = f"the {satellite} satellite" if satellite else "the default satellite"
+        try:
+            session = self.session_for(satellite)
+            if session is None:
+                logger.warning(f"An approval's outcome wasn't said, as {where} isn't connected")
+            elif session.announce(message):
+                return
+            else:
+                logger.warning(f"An approval's outcome wasn't said on {where}")
+        except Exception:
+            # The satellite going away mid-sentence, most likely.
+            logger.exception(f"An approval's outcome couldn't be said on {where}")
+        # Read once, so a topic cleared on the settings page meanwhile is never sent to as "".
+        phone = self.ntfy.phone if self.ntfy else ""
+        if not phone:
+            logger.warning("An approval's outcome had nowhere to go, with no phone topic for ntfy")
+            return
+        try:
+            self.ntfy.send_soon(phone, message, title="Nova")
+        except Exception:
+            logger.exception("An approval's outcome couldn't be sent to the phone")
+
     def _say_journey(self, satellite: Optional[str], message: str) -> None:
         """
         Says a change to when to leave on the satellite which set the reminder, as _say_download has
@@ -2299,7 +2397,7 @@ class Brain:
     def _clean_up(self):
         """
         Closes everything down in order - the clock, so nothing else starts ringing,
-        the nightly schedule and the library check, and the downloads, so nothing more is said of them, and the worker songs are
+        the approvals, so nothing waiting for one runs, the nightly schedule and the library check, and the downloads, so nothing more is said of them, and the worker songs are
         heard in, then the batteries, the football
         watcher, the listening stats, what's playing, the usage device, ntfy, the settings page and the clock
         displays' server and feed, then every satellite's session, so its device in Home
@@ -2308,6 +2406,9 @@ class Brain:
         """
         self.running = False
         self.clock.stop()
+        # Everything waiting for approval refused, so nothing big runs as the rest - the
+        # downloads, the sessions - closes beneath it.
+        self.approvals.stop()
         # First, so no night's look starts the check as it closes.
         self.clean_schedule.stop()
         # Before the downloads stop the Swapper, so the check never starts a swap which would

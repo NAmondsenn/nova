@@ -1265,3 +1265,176 @@ def test_ask_computer_for_a_satellite_which_has_gone_isnt_waited_for(pair):
     assert satellite.ask_computer("close_front", wait=30) is None
     assert time.monotonic() - started < 2
     assert fake.messages("computer") == []
+
+
+def _ask_approval_on_thread(satellite, id="a1", description="Remove the dentist", wait=5):
+    """Asks for an approval on a thread of its own, returning the thread and the list its result goes in."""
+    results = []
+    thread = threading.Thread(target=lambda: results.append(satellite.ask_approval(id, description, wait)))
+    thread.start()
+    return thread, results
+
+
+def test_the_satellite_says_it_approves():
+    made = connect(approves=True)
+    try:
+        assert made[0].approves is True
+    finally:
+        disconnect(*made)
+    made = connect()
+    try:
+        assert made[0].approves is False
+    finally:
+        disconnect(*made)
+
+
+@pytest.mark.parametrize("approved", [True, False])
+def test_ask_approval_sends_the_description_and_gives_the_answer(pair, approved):
+    satellite, fake, serving = pair
+    thread, results = _ask_approval_on_thread(satellite)
+    assert wait_for(lambda: fake.messages("approval"))
+
+    (message,) = fake.messages("approval")
+    assert message["id"] == "approval-a1" and message["description"] == "Remove the dentist"
+    fake.say("approval_answer", id="approval-a1", approved=approved)
+    thread.join(5)
+
+    assert results == [approved]
+    assert satellite._note_waits == {}
+
+
+def test_an_answer_for_an_id_never_asked_is_dropped(pair, caplog):
+    satellite, fake, serving = pair
+    thread, results = _ask_approval_on_thread(satellite, wait=0.3)
+    assert wait_for(lambda: fake.messages("approval"))
+    with caplog.at_level(logging.WARNING):
+        fake.say("approval_answer", id="approval-other", approved=True)
+        # A note's or computer's id isn't an approval's either.
+        fake.say("approval_answer", id="note-1", approved=True)
+        thread.join(5)
+        fake.say("ping")
+        assert wait_for(lambda: fake.messages("pong"))
+    assert results == [None]
+    assert len([r for r in caplog.records if "approval" in r.getMessage()]) == 2
+
+
+def test_an_answer_counts_once(pair, caplog):
+    satellite, fake, serving = pair
+    thread, results = _ask_approval_on_thread(satellite)
+    assert wait_for(lambda: fake.messages("approval"))
+    fake.say("approval_answer", id="approval-a1", approved=True)
+    thread.join(5)
+    with caplog.at_level(logging.WARNING):
+        fake.say("approval_answer", id="approval-a1", approved=False)
+        fake.say("ping")
+        assert wait_for(lambda: fake.messages("pong"))
+    assert results == [True]
+    assert len([r for r in caplog.records if "approval" in r.getMessage()]) == 1
+
+
+def test_a_withdrawal_ends_the_wait_at_once(pair, caplog):
+    satellite, fake, serving = pair
+    started = time.monotonic()
+    thread, results = _ask_approval_on_thread(satellite, wait=30)
+    assert wait_for(lambda: fake.messages("approval"))
+
+    satellite.withdraw_approval("a1")
+    thread.join(5)
+
+    assert results == [None] and time.monotonic() - started < 1
+    assert satellite._note_waits == {}
+    with caplog.at_level(logging.WARNING):
+        fake.say("approval_answer", id="approval-a1", approved=True)
+        fake.say("ping")
+        assert wait_for(lambda: fake.messages("pong"))
+    assert len([r for r in caplog.records if "approval" in r.getMessage()]) == 1
+
+
+def test_no_answer_in_time_or_gone_gives_none(pair):
+    satellite, fake, serving = pair
+    started = time.monotonic()
+    assert satellite.ask_approval("a1", "Remove it", 0.2) is None
+    assert 0.2 <= time.monotonic() - started < 2
+
+    thread, results = _ask_approval_on_thread(satellite, id="a2", wait=30)
+    assert wait_for(lambda: len(fake.messages("approval")) == 2)
+    satellite.close()
+    thread.join(5)
+    assert results == [None]
+    assert time.monotonic() - started < 5
+    assert satellite._note_waits == {}
+
+
+def test_withdraw_sends_the_id(pair):
+    satellite, fake, serving = pair
+    assert satellite.withdraw_approval("a1") is True
+    assert wait_for(lambda: fake.messages("approval_withdraw"))
+    assert fake.messages("approval_withdraw") == [{"type": "approval_withdraw", "id": "approval-a1"}]
+
+
+def test_withdraw_never_waits(pair):
+    satellite, fake, serving = pair
+    started = time.monotonic()
+    satellite.withdraw_approval("a1")
+    assert time.monotonic() - started < 1
+
+
+def test_an_approval_already_withdrawn_isnt_sent(pair):
+    satellite, fake, serving = pair
+    satellite.withdraw_approval("a1")
+    started = time.monotonic()
+
+    assert satellite.ask_approval("a1", "Remove it", 30) is None
+
+    assert time.monotonic() - started < 2
+    assert fake.messages("approval") == []
+
+
+def test_only_the_last_fifty_withdrawn_are_remembered(pair):
+    satellite, fake, serving = pair
+    for number in range(60):
+        satellite.withdraw_approval(f"w{number}")
+    assert len(satellite._withdrawn) == 50
+    # The oldest is forgotten, so is asked again; the newest isn't.
+    assert satellite.ask_approval("w0", "x", 0.05) is None
+    assert len(fake.messages("approval")) == 1
+    assert satellite.ask_approval("w59", "x", 0.05) is None
+    assert len(fake.messages("approval")) == 1
+
+
+@pytest.mark.parametrize("approved", ["yes", 1, 0, None])
+def test_an_answer_which_isnt_true_or_false_is_dropped(pair, caplog, approved):
+    satellite, fake, serving = pair
+    thread, results = _ask_approval_on_thread(satellite, wait=0.3)
+    assert wait_for(lambda: fake.messages("approval"))
+    with caplog.at_level(logging.WARNING):
+        fake.say("approval_answer", id="approval-a1", approved=approved)
+        thread.join(5)
+    assert results == [None]
+    assert "approval" in caplog.text
+
+
+def test_a_pc_prompt_left_at_a_timeout_is_withdrawn(pair, tmp_path):
+    """
+    End to end, with the real clock: the PC's own wait and the service's waiter both end at
+    the request's expiry, and when the PC's ends first no settle withdraws its prompt - so the
+    prompt's own thread does. Nothing waits on the request here until after, so it's always so.
+    """
+    from voice_assistant.approvals import Approvals
+    from voice_assistant.passkeys import PasskeyStore
+
+    satellite, fake, serving = pair
+    service = Approvals(lambda: {}, PasskeyStore(str(tmp_path / "passkeys.json")), approvers=lambda: [satellite])
+    # A wait of under a second, not the settings' whole minutes.
+    service._minutes = lambda name, default: 0.01 if name == "wait_minutes" else default
+    try:
+        request = service.request("Remove 'Dentist'")
+        assert request.asked == ("bedroom",)
+        assert wait_for(lambda: fake.messages("approval"))
+        [asked] = fake.messages("approval")
+        assert wait_for(lambda: fake.messages("approval_withdraw"))
+        assert [each["id"] for each in fake.messages("approval_withdraw")] == [asked["id"]]
+        assert request.outcome is None
+        assert service.wait(request) == "timeout"
+    finally:
+        service.stop()

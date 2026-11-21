@@ -19,7 +19,7 @@ const HTML = web("settings.html");
 
 const BLOCKS = [...HTML.matchAll(/<div class="settings-of" data-settings="([a-z]+)"/g)].map((one) => one[1]);
 const SECTION_IDS = ["status", "music", "clock", "devices", "batteries", "displays", "journeys", "football",
-                     "calendars", "routines", "satellites", "sound", "claude", "notifications", "memory", "keys",
+                     "calendars", "routines", "satellites", "approvals", "sound", "claude", "notifications", "memory", "keys",
                      "else"];
 
 // What has the focus, and the top-level nodes of the page now being tested - which is what a node
@@ -742,7 +742,7 @@ test("a search with no match says so, and one of pattern characters throws nothi
   shown.type("[a-");
   assert.equal(shown.node("rows").children[0].textContent, "Nothing on Nova's page matches that.");
   shown.type("");
-  assert.equal(shown.rows().length, 17);
+  assert.equal(shown.rows().length, SECTION_IDS.length);
 });
 
 test("a search reads each section's own words from the page: headings, labels, buttons and placeholders", async () => {

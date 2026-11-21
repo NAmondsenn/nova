@@ -198,6 +198,18 @@ def test_the_real_config_yaml_reads(tmp_path):
     assert config.section("music")["player"] in ("navidrome", "spotify")
 
 
+def test_a_computers_two_ends_for_a_recording_are_set_to_18_db_and_1_5_seconds(tmp_path):
+    thresholds = Config(path=str(tmp_path / "none.yaml")).section("thresholds")
+    assert thresholds["press_voice_drop_db"] == 18
+    assert thresholds["press_no_words_seconds"] == 1.5
+    for value in (5, 41):
+        assert limit_problem("thresholds", "press_voice_drop_db", value) == "should be from 6 to 40"
+    # Not under 1.2: Nemotron's words only move once each 0.56s of audio it works through, so at 0.8 a
+    # single stretch without a new word could end it.
+    for value in (0.8, 1.19, 6):
+        assert limit_problem("thresholds", "press_no_words_seconds", value) == "should be from 1.2 to 5"
+
+
 def test_the_batteries_defaults_are_checked(tmp_path):
     config = Config(path=str(tmp_path / "none.yaml"))
     batteries = config.section("batteries")
@@ -302,6 +314,8 @@ IN_AND_OUT = {
     ("ntfy", "restarts"): (["home-lab_1", ""], ["home lab", "a/b"]),
     ("ntfy", "alerts"): ([["home-lab_1", "b"], []], [["home lab"], ["a/b"], [""], "homelab"]),
     ("thresholds", "silence_duration"): ([0.2, 3, 1], [0.19, 3.1, True]),
+    ("thresholds", "press_voice_drop_db"): ([6, 40, 18, 12.5], [5, 41, 5.9, True, 0]),
+    ("thresholds", "press_no_words_seconds"): ([1.2, 5, 1.5, 2], [0.8, 1.19, 6, 5.1, True, 0]),
     ("thresholds", "recording_timeout"): ([5, 30, 15, 7.5], [4, 30.1, True, 0, -1]),
     ("thresholds", "wake_word_confidence"): ([0.3, 0.95, 0.5], [0.2, 0.29, 0.97, 1, True, 0]),
     ("thresholds", "media_wake_word_confidence"): ([0.3, 0.95, 0.75], [0.2, 0.29, 0.97, 1, True, 0]),
@@ -320,6 +334,10 @@ IN_AND_OUT = {
     ("football", "stale_after"): ([120, 300], [119, 301, 200.5, True]),
     ("football", "kickoff_minutes"): ([2, 15, 120], [1, 121, 15.5, True]),
     ("computer", "mic_mute_minutes"): ([1, 60, 1440], [0, 1441, 30.5, True]),
+    # 0 minutes is asking every time; a wait under a minute can't be answered.
+    ("approvals", "trust_minutes"): ([0, 5, 60], [-1, 61, 2.5, True]),
+    ("approvals", "wait_minutes"): ([1, 2, 10], [0, 11, 1.5, True]),
+    ("approvals", "album_count"): ([2, 3, 20], [1, 21, 2.5, True]),
     # 0 is no buffer, no heads-up, no percentage and no asking Google at all.
     ("journeys", "buffer_minutes"): ([0, 10, 60], [-1, 61, 10.5, True]),
     ("journeys", "reminder_minutes"): ([0, 5, 30], [-1, 31, 5.5, True]),

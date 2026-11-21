@@ -79,6 +79,11 @@ JOURNEY_BY = r"(?:by (?:bus|train|public transport)|on public transport)"
 BATTERY_DEVICE = "mac|phone|tablet|laptop|computer"
 # And the devices found or rung by - those the Home Assistant app is on.
 FOUND_DEVICE = "phone|tablet|mac|laptop"
+# A device of Google's Find My, or one of the above, said by up to four words of its name -
+# "wallet", "galaxy s25 ultra" - taken only when they are its name's (see _names_a_device),
+# so "ring my mum" and "where's my phone charger" are left alone. As few words as will do,
+# so "stop my phone ringing" is the phone.
+NAMED_DEVICE = r"(?P<device>[a-z0-9']+(?: [a-z0-9']+){0,3}?)"
 # The PC, as ha_guard.PC_LOCK has it - see pc.py.
 PC = r"(?:my |the )?(?:pc|computer)"
 
@@ -318,6 +323,11 @@ def _plain(text: str) -> str:
     return "".join(char for char in decomposed if not unicodedata.combining(char)).translate(_UNACCENTED)
 
 
+def _device_words(name: str) -> List[str]:
+    """A device's name as words, lower case, with any "'s" taken off - "Sam's Wallet" is ["sam", "wallet"]."""
+    return re.findall(r"[a-z0-9]+", re.sub(r"['\u2019]s\b", "", name.lower()))
+
+
 def _turned_off(found) -> bool:
     """
     Whether a mute rule's words turn something off - "mute", "turn the sound off", "stop
@@ -340,7 +350,9 @@ class LocalIntents:
 
     def __init__(self, clock=None, ntfy=None, home=None, activities: Optional[Callable[[], Dict[str, str]]] = None,
                  wake_word: str = DEFAULT_WAKE_WORD, football: Optional[Callable[[], List[str]]] = None,
-                 names_satellite: Optional[Callable[[str], bool]] = None, computer: Optional[ComputerHooks] = None):
+                 names_satellite: Optional[Callable[[str], bool]] = None, computer: Optional[ComputerHooks] = None,
+                 find_my_names: Optional[Callable[[], List[str]]] = None,
+                 rang_lately: Optional[Callable[[], bool]] = None):
         """
         Args:
             clock: The Clock, to check there's exactly one timer before cancelling
@@ -367,6 +379,13 @@ class LocalIntents:
             computer: Says which requests are a computer's to open, close or search, and whether
                 this is a PC, whose bare power words are its own - see ComputerHooks. Without
                 it, those are left to the rules after, or Claude.
+            find_my_names: Gives the names of Google Find My's devices, e.g. ["Sam's Wallet"] -
+                HomeAssistant.find_my_names. Asked at each match, so a tag added in Google is
+                heard by its name once Home Assistant has it. Without it, only FOUND_DEVICE's
+                words are found, rung or stopped.
+            rang_lately: Says whether anything was rung through Find My lately - see
+                devices.RangLately - so a bare "stop ringing" or "found it" is only taken
+                then, and otherwise left to Claude. Without it, never.
         """
         self.clock = clock
         self.ntfy = ntfy
@@ -375,6 +394,10 @@ class LocalIntents:
         self.football = football
         self.names_satellite = names_satellite
         self.computer = computer
+        self.find_my_names = find_my_names
+        self.rang_lately = rang_lately
+        # Whether reading Find My's names last failed, so it's logged once until it works again.
+        self._find_my_failing = False
         # How the wake word's last word starts a lone word it's been run into - and, for
         # "Nova", how Nemotron heard it so: "Nova, pause." said in one breath was "Novopause.".
         ending = (wake_word.split() or [""])[-1].lower()
@@ -508,6 +531,14 @@ class LocalIntents:
             # battery, so "where's my phone charger?" is Claude's.
             (rf"where(?:'s| is) (?:my |the )(?P<device>{FOUND_DEVICE})", self._find_device(False)),
             (rf"(?:find|ring) (?:my |the )(?P<device>{FOUND_DEVICE})", self._find_device(True)),
+            # Anything else of Google Find My's, by its name - "where's my wallet", "ring my keys".
+            (rf"where(?:'s| is) (?:my |the ){NAMED_DEVICE}", self._find_named_device(False)),
+            (rf"(?:find|ring) (?:my |the ){NAMED_DEVICE}", self._find_named_device(True)),
+            # Stopping what was rung through Find My - only as the whole request, and never a bare
+            # "stop", which is the stop word for alarms and the music, taken further up.
+            (rf"stop ringing(?: (?:my |the )?{NAMED_DEVICE})?", self._stop_finding),
+            (rf"stop (?:the |my )?{NAMED_DEVICE}(?: ringing)?", self._stop_finding),
+            (rf"(?:(?:i've|i have) )?found (?:it|my {NAMED_DEVICE})", self._stop_finding),
             # The music, moved to a satellite he names - before the sending of a reply to a device
             # below, whose "put it on my Mac" is the Mac's, not a satellite's.
             (rf"{MOVE_TO} {MOVE_WHERE}", self._move_music),
@@ -907,6 +938,45 @@ class LocalIntents:
 
     def _find_device(self, ring: bool):
         return lambda found: self._result("Okay.", [Action("find_device", {"device": found["device"], "ring": ring})])
+
+    def _names_a_device(self, said: str) -> bool:
+        """
+        Whether some words name a device to find, ring or stop: one of FOUND_DEVICE's, or
+        only words of one of Find My's devices' names - "wallet" or "sam's wallet" for
+        "Sam's Wallet" - with any "'s" on either taken off.
+        """
+        if re.fullmatch(FOUND_DEVICE, said):
+            return True
+        words = set(_device_words(said))
+        names = []
+        if self.find_my_names is not None:
+            try:
+                names = self.find_my_names()
+                self._find_my_failing = False
+            except Exception as e:
+                # A rule must never lose the request: without the names, only FOUND_DEVICE's are known.
+                if not self._find_my_failing:
+                    logger.warning(f"Couldn't read Find My's devices' names ({type(e).__name__}): {e}")
+                self._find_my_failing = True
+        return bool(words) and any(words <= set(_device_words(name)) for name in names)
+
+    def _find_named_device(self, ring: bool):
+        def handle(found) -> Optional[Dict]:
+            if not self._names_a_device(found["device"]):
+                return None
+            return self._result("Okay.", [Action("find_device", {"device": found["device"], "ring": ring})])
+        return handle
+
+    def _stop_finding(self, found) -> Optional[Dict]:
+        device = found.groupdict().get("device")
+        if device:
+            if not self._names_a_device(device):
+                return None
+            return self._result("Okay.", [Action("stop_finding", {"device": device})])
+        # "Found it" means nothing to Nova unless it rang something - over a timer, it's the timer's.
+        if self.rang_lately is None or not self.rang_lately():
+            return None
+        return self._result("Okay.", [Action("stop_finding")])
 
     def _notifications(self, found) -> Optional[Dict]:
         return self._result("Okay.", [Action("read_notifications")]) if self.ntfy else None

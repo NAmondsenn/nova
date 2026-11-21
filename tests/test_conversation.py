@@ -10,12 +10,15 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.fake_approvals import FakeApprovals
 from voice_assistant import network
 from voice_assistant.actions import Action, ActionExecutor, ActionResult
+from voice_assistant.approvals import pending_said
 from voice_assistant.choices import ChoiceStore
 from voice_assistant.clock import Clock
 from voice_assistant.conversation import LIGHTS_TIMEOUT, Conversation, Reply
 from voice_assistant.downloads import NOT_SET_UP, ON_ITS_WAY, Downloads
+from voice_assistant.google_calendar import Removal
 from voice_assistant.ha_registry import Entry, Snapshot
 from voice_assistant.intents import LocalIntents
 from voice_assistant.llm import LLMHandler
@@ -797,6 +800,26 @@ def test_a_routines_steps_are_each_done_as_if_said_and_their_answers_said_togeth
     assert reply.say == "It's sunny." and reply.sounds == [("success_chime.wav", "general")]
 
 
+def test_a_routine_step_removing_an_event_asks_first():
+    # A routine is run for him, but a step which removes an event still waits for his OK.
+    class RemovingCalendar(FakeCalendar):
+        removed = []
+
+        def find_removal(self, search, day=None, at=None, following=False, calendar=None, today=None, now=None):
+            return Removal("Remove 'Gym', Mon 23 Nov 08:00", lambda: self.removed.append(search) or {
+                "success": True, "message": "Removed Gym, Monday at 8 AM."})
+
+    calendar = RemovingCalendar()
+    approvals = FakeApprovals("wait")
+    actions = ActionExecutor(calendar=calendar, approvals=approvals, satellite="kitchen")
+    llm = FakeLLM(_answer("Okay.", Action("remove_from_calendar", {"search": "gym"}, from_model=True)))
+    routine = {"name": "Rest day", "phrases": ["rest day"], "steps": ["cancel the gym"]}
+    reply = _conversation(llm=llm, actions=actions, routines=FakeRoutines(routine)).handle("rest day")
+    assert approvals.asked == [("Remove 'Gym', Mon 23 Nov 08:00", "kitchen")]
+    assert calendar.removed == []
+    assert pending_said(["your phone"]) in reply.say + reply.shown
+
+
 def test_a_long_turn_says_its_getting_on_after_each_of_claudes_replies_and_each_step():
     # A routine of slow steps could outlast the watchdog's allowance, though every one
     # of them was getting on - see Session.moved_at. Once for each, and never while waiting.
@@ -897,59 +920,29 @@ def _pc_conversation(tmp_path, *replies):
     return _conversation(intents=LocalIntents(), llm=llm, actions=actions), home, llm
 
 
-def test_shutting_down_asks_first_and_only_a_yes_does_it(tmp_path):
+def test_shut_down_the_pc_just_chimes(tmp_path):
     conversation, home, llm = _pc_conversation(tmp_path)
     reply = conversation.handle("Shut down the PC.")
-    assert (reply.say, reply.listen_again) == ("Shut down the PC?", True)
-    assert home.pressed == []
-    # Read before the follow-up window would send it to Claude.
-    assert conversation.handle("yes", follow_up=True).say == "Shutting down the PC."
+    assert reply.say == "" and reply.sounds == [("success_chime.wav", "general")]
+    assert not reply.listen_again
     assert home.pressed == ["button.desk_off"] and llm.asked == []
 
-    conversation, home, llm = _pc_conversation(tmp_path)
-    conversation.handle("Shut down the PC.")
-    assert conversation.handle("no", follow_up=True).say == "Okay, I'll leave it."
-    # And once answered, a later yes is nobody's.
-    conversation.handle("Restart the PC.")
-    assert conversation.handle("leave it", follow_up=True).say == "Okay, I'll leave it."
-    assert home.pressed == []
 
-    # Anything else drops it, and is a fresh request - so a yes after that is Claude's.
-    conversation, home, llm = _pc_conversation(tmp_path, _answer("It's sunny. Anything else?"), _answer("Okay."))
-    conversation.handle("Shut down the PC.")
-    assert conversation.handle("what's the weather", follow_up=True).say == "It's sunny. Anything else?"
-    conversation.handle("yes", follow_up=True)
-    assert home.pressed == [] and llm.asked == ["what's the weather", "yes"]
-
-
-def test_claudes_shutdown_asks_first_too(tmp_path):
+def test_claudes_restart_just_chimes_too(tmp_path):
     conversation, home, llm = _pc_conversation(
         tmp_path, _answer("Okay.", Action("pc_power", {"action": "restart"}, from_model=True)))
-    assert conversation.handle("could you reboot the thing on my desk").say == "Restart the PC?"
-    assert home.pressed == []
-    assert conversation.handle("go on", follow_up=True).say == "Restarting the PC."
+    reply = conversation.handle("could you reboot the thing on my desk")
+    assert reply.say == "" and reply.sounds == [("success_chime.wav", "general")]
     assert home.pressed == ["button.desk_again"]
 
 
-def test_a_yes_in_a_new_conversation_presses_nothing(tmp_path):
-    conversation, home, llm = _pc_conversation(tmp_path, _answer("Okay."), _answer("Okay."))
-    conversation.handle("Shut down the PC.")
-    conversation.start()
-    conversation.handle("yes")
-    assert home.pressed == [] and llm.asked == ["yes"]
-
-    # Nor does a yes said to any other question.
-    conversation, home, llm = _pc_conversation(tmp_path, _answer("Shall I play some music?"), _answer("Okay."))
-    conversation.handle("I'm bored")
-    conversation.handle("yes", follow_up=True)
-    assert home.pressed == []
-
-    # Nor one said with no question listened for - the follow-ups had run out.
-    conversation, home, llm = _pc_conversation(tmp_path, _answer("Okay."))
-    conversation.follow_ups = conversation.max_follow_ups
-    assert not conversation.handle("Shut down the PC.").listen_again
-    conversation.handle("yes")
-    assert home.pressed == []
+def test_with_the_chime_off_it_says_shutting_down(tmp_path):
+    home = FakePCHome()
+    actions = AskingActions(home=home, pc=PCPower(home, ChoiceStore(str(tmp_path / "pcs.json"), {"wake": {}})))
+    conversation = _conversation(intents=LocalIntents(), llm=FakeLLM(), actions=actions, chime_enabled=False)
+    reply = conversation.handle("Shut down the PC.")
+    assert (reply.say, reply.sounds) == ("Shutting down the PC.", [])
+    assert home.pressed == ["button.desk_off"]
 
 
 # Asking whether to set the reminder to leave
@@ -997,54 +990,6 @@ def test_a_no_to_want_a_reminder_leaves_it():
     assert journeys.reminded == [] and len(llm.asked) == 1
 
 
-@pytest.mark.parametrize("answer", ["yes", "Yes please.", "Nova, yeah.", "yep", "go ahead", "Go on.", "sure",
-                                    "Do it.", "Okay, do it.", "ok do it please", "Yes.", "'yes'",
-                                    "\u2018yes\u2019"])
-def test_only_a_plain_yes_shuts_the_pc_down(tmp_path, answer):
-    conversation, home, llm = _pc_conversation(tmp_path)
-    conversation.handle("Shut down the PC.")
-    assert conversation.handle(answer, follow_up=True).say == "Shutting down the PC."
-    assert home.pressed == ["button.desk_off"]
-
-
-@pytest.mark.parametrize("answer, said", [
-    # Backing out - "stop" and "cancel" most of all, which a reminder's offer takes for a yes.
-    ("stop", "Okay, I'll leave it."), ("Cancel.", "Okay, I'll leave it."), ("no thanks", "Okay, I'll leave it."),
-    ("Never mind.", "Okay, I'll leave it."), ("don't", "Okay, I'll leave it."), ("Nope.", "Okay, I'll leave it."),
-    ("leave it", "Okay, I'll leave it."),
-    # Neither, so a fresh request, Claude's - nor a yes with more said after it.
-    ("shut up", "Okay."), ("thanks", "Okay."), ("fine", "Okay."), ("okay thanks", "Okay."),
-    ("yes, play music", "Okay."), ("yes in a minute", "Okay."), ("absolutely", "Okay."),
-    # Digits and other scripts are words too - "Yes, 10." most likely means in ten minutes.
-    ("Yes, 10.", "Okay."), ("Yes. 10:30", "Okay."), ("yes 10", "Okay."), ("yes \u4e0d\u8981", "Okay."),
-])
-def test_no_or_anything_else_said_back_presses_nothing(tmp_path, answer, said):
-    conversation, home, llm = _pc_conversation(tmp_path, _answer("Okay."), _answer("Okay."))
-    conversation.handle("Shut down the PC.")
-    assert conversation.handle(answer, follow_up=True).say == said
-    assert home.pressed == []
-    assert llm.asked == ([] if said.startswith("Okay, I'll") else [answer])
-    # Either way, it's gone.
-    conversation.handle("yes", follow_up=True)
-    assert home.pressed == []
-
-
-@pytest.mark.parametrize("actions", [
-    # The PC's question isn't the whole reply...
-    [Action("pc_power", {"action": "off"}, from_model=True), Action("dim_lights", {}, from_model=True)],
-    [Action("dim_lights", {}, from_model=True), Action("pc_power", {"action": "off"}, from_model=True)],
-    # ...or there are two to answer.
-    [Action("pc_power", {"action": "off"}, from_model=True),
-     Action("pc_power", {"action": "restart"}, from_model=True)],
-])
-def test_a_yes_to_more_than_the_pcs_question_presses_nothing(tmp_path, actions):
-    conversation, home, llm = _pc_conversation(tmp_path, _answer("Okay.", *actions), _answer("Okay."))
-    reply = conversation.handle("shut it all down")
-    assert reply.listen_again and reply.say.count("?") == 2
-    conversation.handle("yes", follow_up=True)
-    assert home.pressed == [] and llm.asked == ["shut it all down", "yes"]
-
-
 # Asking before downloading - see downloads.py
 
 class NotInNavidrome:
@@ -1088,7 +1033,10 @@ class AskedDownloads(Downloads):
         self.requested.append((query, search_type, satellite))
         return super().request(query, search_type, satellite)
 
-    def start(self, wanted, satellite):
+    def start(self, wanted, satellite, unless_large=False):
+        with self._lock:
+            if unless_large and wanted.kind == "album" and self._albums_lately() + 1 >= self._album_count():
+                return None
         self.started.append((wanted.name, satellite))
         return True
 
@@ -1168,6 +1116,73 @@ def test_an_offer_left_unanswered_requests_nothing(downloading):
     assert downloads.requested == [] and llm.asked == ["play Gooba by 6ix9ine", "yes"]
 
 
+@pytest.mark.parametrize("answer", ["yes", "Yes please.", "Nova, yeah.", "yep", "go ahead", "Go on.", "sure",
+                                    "Do it.", "Okay, do it.", "ok do it please", "Yes.", "'yes'",
+                                    "\u2018yes\u2019"])
+def test_only_a_plain_yes_requests_the_download(downloading, answer):
+    conversation, downloads, llm = downloading()
+    conversation.handle("play Gooba by 6ix9ine")
+    conversation.handle(answer, follow_up=True)
+    assert downloads.requested == [("Gooba by 6ix9ine", "track", "kitchen")]
+    assert llm.asked == ["play Gooba by 6ix9ine"]
+
+
+@pytest.mark.parametrize("answer, said", [
+    # Backing out - "stop" and "cancel" most of all, which a reminder's offer takes for a yes.
+    ("stop", "Okay, I'll leave it."), ("Cancel.", "Okay, I'll leave it."), ("no thanks", "Okay, I'll leave it."),
+    ("Never mind.", "Okay, I'll leave it."), ("don't", "Okay, I'll leave it."), ("Nope.", "Okay, I'll leave it."),
+    ("leave it", "Okay, I'll leave it."),
+    # Neither, so a fresh request, Claude's - nor a yes with more said after it.
+    ("shut up", "Okay."), ("thanks", "Okay."), ("fine", "Okay."), ("okay thanks", "Okay."),
+    ("yes, play music", "Okay."), ("yes in a minute", "Okay."), ("absolutely", "Okay."),
+    # Digits and other scripts are words too - "Yes, 10." most likely means in ten minutes.
+    ("Yes, 10.", "Okay."), ("Yes. 10:30", "Okay."), ("yes 10", "Okay."), ("yes \u4e0d\u8981", "Okay."),
+])
+def test_no_or_anything_else_said_back_requests_nothing(downloading, answer, said):
+    conversation, downloads, llm = downloading(_answer("Okay."), _answer("Okay."))
+    conversation.handle("play Gooba by 6ix9ine")
+    assert conversation.handle(answer, follow_up=True).say == said
+    assert downloads.requested == []
+    assert llm.asked == ["play Gooba by 6ix9ine"] + ([] if said.startswith("Okay, I'll") else [answer])
+    # Either way, it's gone.
+    conversation.handle("yes", follow_up=True)
+    assert downloads.requested == []
+
+
+def test_a_yes_to_more_than_the_offer_requests_nothing(download_settings):
+    play = Action("play_music", {"query": "Gooba by 6ix9ine", "search_type": "track"}, from_model=True)
+    for actions in ([play, Action("dim_lights", {}, from_model=True)],
+                    [Action("dim_lights", {}, from_model=True), play],
+                    [play, Action("play_music", {"query": "Kids by 6ix9ine", "search_type": "track"},
+                                  from_model=True)]):
+        downloads = AskedDownloads(download_settings)
+        executor = AskingActions(music=NotInNavidrome(), downloads=downloads, satellite="kitchen")
+        llm = FakeLLM(_answer("Okay.", *actions), _answer("Okay."))
+        conversation = _conversation(llm=llm, actions=executor)
+        reply = conversation.handle("get me those")
+        assert reply.listen_again and reply.say.count("?") == 2
+        conversation.handle("yes", follow_up=True)
+        assert downloads.requested == [] and llm.asked == ["get me those", "yes"]
+
+
+def test_a_yes_to_another_question_or_with_no_question_listened_for_requests_nothing(downloading, download_settings):
+    # Nor does a yes said to any other question, with an offer made earlier and since dropped.
+    downloads = AskedDownloads(download_settings)
+    actions = ActionExecutor(music=NotInNavidrome(), downloads=downloads, satellite="kitchen")
+    llm = FakeLLM(_answer("Shall I play some music?"), _answer("Okay."))
+    conversation = _conversation(llm=llm, actions=actions)
+    conversation.handle("I'm bored")
+    conversation.handle("yes", follow_up=True)
+    assert downloads.requested == [] and llm.asked == ["I'm bored", "yes"]
+
+    # Nor one said with no question listened for - the follow-ups had run out.
+    conversation, downloads, llm = downloading(_answer("Okay."))
+    conversation.follow_ups = conversation.max_follow_ups
+    assert not conversation.handle("play Gooba by 6ix9ine").listen_again
+    conversation.handle("yes")
+    assert downloads.requested == []
+
+
 class FakeClaude:
     """
     Stands in for the Anthropic client, so the real LLMHandler's rules are used: each
@@ -1210,6 +1225,24 @@ def downloading_with_claude(download_settings, monkeypatch):
         return _conversation(llm=llm, actions=actions), downloads, llm
 
     return make
+
+
+def test_a_yes_to_a_third_album_offer_asks_for_approval(download_settings):
+    fake = FakeApprovals("wait")
+    downloads = AskedDownloads(download_settings)
+    downloads._approvals = fake
+    for _ in range(2):
+        downloads._album_starts.append(downloads._now())
+    actions = ActionExecutor(music=NotInNavidrome(), downloads=downloads, satellite="kitchen")
+    llm = FakeLLM(_answer("Okay.", Action("play_music", {"query": "Rumours by Fleetwood Mac", "search_type": "album"},
+                                          from_model=True)))
+    conversation = _conversation(llm=llm, actions=actions)
+    assert conversation.handle("play Rumours by Fleetwood Mac").listen_again
+
+    conversation.handle("yes please", follow_up=True)
+
+    assert fake.asked == [("Download the album Rumours by Fleetwood Mac (3 albums in 5 minutes)", "kitchen")]
+    assert downloads.started == []
 
 
 @pytest.mark.parametrize("answer", ["okay", "go on then", "fine"])

@@ -74,6 +74,13 @@ LIMITS: Dict[Tuple[str, str], Limit] = {
     ("ntfy", "restarts"): Limit("topic"),
     ("ntfy", "alerts"): Limit("topics"),
     ("thresholds", "silence_duration"): Limit("number", 0.2, 3),
+    # Under 6 dB the dips between one word and the next would count as the voice dropping away, and over
+    # 40 dB hardly any sound is quiet enough to.
+    ("thresholds", "press_voice_drop_db"): Limit("number", 6, 40),
+    # Nemotron's words only move once each 0.56 seconds of audio it works through, so under 1.2 a single
+    # stretch of its work without a new word - an ordinary pause between two words - could end the
+    # recording, and over 5 it would hardly ever end one before the quiet or the longest request had.
+    ("thresholds", "press_no_words_seconds"): Limit("number", 1.2, 5),
     ("thresholds", "recording_timeout"): Limit("number", 5, 30, False),
     # Below 0.3 almost anything wakes Nova, and above 0.95 hardly anything does.
     ("thresholds", "wake_word_confidence"): Limit("number", 0.3, 0.95),
@@ -100,6 +107,13 @@ LIMITS: Dict[Tuple[str, str], Limit] = {
     # The PC's own microphone, muted by Nova, comes back on by itself after this - at least a
     # minute, and at most a day, past which it's a microphone forgotten about.
     ("computer", "mic_mute_minutes"): Limit("number", 1, 1440, True),
+    # Approvals. One approval may cover what he asks for up to an hour after it, and 0 asks every time; a
+    # longer window is a door left open. A wait under a minute is too short to find the phone, and one over
+    # ten minutes leaves the action hanging long after he has moved on. A download of 1 album needing
+    # approval would make every album ask; over 20 is one which never would.
+    ("approvals", "trust_minutes"): Limit("number", 0, 60, True),
+    ("approvals", "wait_minutes"): Limit("number", 1, 10, True),
+    ("approvals", "album_count"): Limit("number", 2, 20, True),
     # Journeys. A buffer of over an hour, or a reminder over half an hour ahead, is a slip. A look every minute
     # would spend the month's requests in days, and one over half an hour would miss the traffic changing. A
     # watch under 10 minutes would hardly look before the time to leave, and over 2 hours would ask Google about

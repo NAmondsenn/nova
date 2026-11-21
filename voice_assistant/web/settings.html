@@ -9,6 +9,8 @@
   <link rel="preload" href="Outfit.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="settings.css">
   <script src="settings_list.js" defer></script>
+  <script src="base64url.js" defer></script>
+  <script src="sky.js" defer></script>
   <script src="settings.js" defer></script>
 </head>
 <!-- Locked until settings.js knows the page may be shown - through NPM, not before a login. -->
@@ -343,6 +345,32 @@
             </li>
           </ul>
           <div class="settings-of" data-settings="satellites" hidden></div>
+        </section>
+
+        <!-- How big actions are approved: his passkeys, the satellites which can approve, the
+             approval settings and the recent approvals. At the Tailscale address only - through
+             NPM Nova refuses all of it, so only that is said. -->
+        <section id="section-approvals" data-section="approvals" aria-labelledby="approvals-title">
+          <h2 class="heading" id="approvals-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-key"></use></svg>Approvals</h2>
+          <p class="panel note" id="approvals-npm" hidden>Only at the page's Tailscale address.</p>
+          <div id="approvals-body">
+            <h3 class="subheading first" id="passkeys-title">Passkeys</h3>
+            <ul class="list passkeys" id="passkeys" aria-labelledby="passkeys-title"></ul>
+            <!-- A name for the new passkey, then the phone's own prompt for its fingerprint, face or PIN. -->
+            <form class="panel ask" id="add-passkey">
+              <label class="visually-hidden" for="passkey-name">The new passkey's name</label>
+              <input type="text" id="passkey-name" placeholder="Its name, e.g. Phone" autocomplete="off" maxlength="30">
+              <button type="submit" class="button quiet" id="add-passkey-go">Add a passkey</button>
+            </form>
+            <p class="hint" id="approvals-asking" role="status" hidden></p>
+            <!-- Each satellite which said it can approve, with Windows Hello, say. -->
+            <h3 class="subheading" id="approvers-title" hidden>Satellites</h3>
+            <ul class="list approvers" id="approvers" aria-labelledby="approvers-title" hidden></ul>
+            <h3 class="subheading" id="recent-approvals-title">Recent approvals</h3>
+            <ul class="list recent-approvals" id="recent-approvals" aria-labelledby="recent-approvals-title"></ul>
+            <p class="hint">A big action - removing events, a big download - waits for your OK from a passkey or a satellite which can approve. One approval lets the others through for a few minutes.</p>
+          </div>
+          <div class="settings-of" data-settings="approvals" hidden></div>
         </section>
 
         <section id="section-sound" data-section="sound" aria-labelledby="sound-title">

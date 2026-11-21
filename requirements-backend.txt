@@ -23,6 +23,10 @@ certifi==2026.10.18
 cffi==2.1.0
 charset-normalizer==3.4.9
 cloudpickle==3.1.2
+# cryptography checks the passkey signatures for approving big actions (voice_assistant/
+# webauthn.py), on the brain only. The newest release at least two weeks old on
+# 20 November 2026 (50.0.2, of 30 September); its cffi and pycparser are above.
+cryptography==50.0.2
 distro==1.9.0
 docstring_parser==0.18.0
 flatbuffers==25.12.19

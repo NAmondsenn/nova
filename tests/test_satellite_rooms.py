@@ -299,6 +299,131 @@ def test_a_file_from_before_opens_things_and_odd_values_are_read_as_the_defaults
     assert rooms.opens_things("mac") is True and rooms.app_names("mac") == {} and rooms.pc_device("mac") is None
 
 
+def test_can_approve_is_on_only_for_a_pc_or_mac_set_up_first(tmp_path):
+    rooms = _rooms(tmp_path)
+    # Saying it approves, with nothing else set up to: the first way, so on.
+    for name, machine in (("pc", "pc"), ("mac", "mac"), ("pi", "pi"), ("bare", None)):
+        rooms.seen(name, True, machine=machine, approves=True, guarded=False)
+    assert [rooms.can_approve(n) for n in ("pc", "mac", "pi", "bare")] == [True, True, False, False]
+    assert rooms.can_approve("ghost") is False
+    # Stored, not worked out from the machine, so it outlasts a restart as it was.
+    assert _rooms(tmp_path).can_approve("pc") is True
+    # A PC which never said it approves has no switch on.
+    rooms.seen("older", True, machine="pc")
+    assert rooms.can_approve("older") is False
+
+
+def test_a_pc_first_saying_it_approves_once_a_way_is_set_up_is_off(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.seen("pc", True, machine="pc", approves=True, guarded=True)
+    assert rooms.can_approve("pc") is False and _rooms(tmp_path).can_approve("pc") is False
+    # Unless told, it's taken as guarded: never on by mistake.
+    rooms.seen("mac", True, machine="mac", approves=True)
+    assert rooms.can_approve("mac") is False
+    # Once stored, a later hello leaves it as it was, either way.
+    rooms.set_can_approve("pc", True)
+    rooms.seen("pc", True, machine="pc", approves=True, guarded=True)
+    assert rooms.can_approve("pc") is True
+    rooms.seen("mac", True, machine="mac", approves=True, guarded=False)
+    assert rooms.can_approve("mac") is False
+
+
+def test_a_satellite_which_becomes_a_pc_is_stored_afresh(tmp_path):
+    rooms = _rooms(tmp_path)
+    # A Pi he switched on, whose hello now says it's a PC: anything with its password could say so.
+    rooms.seen("study", True, machine="pi", approves=True, guarded=False)
+    rooms.set_can_approve("study", True)
+    rooms.seen("study", True, machine="pc", approves=True, guarded=True)
+    assert rooms.can_approve("study") is False
+    # The same, with nothing set up yet, is the first way, so on.
+    rooms.seen("den", True, machine="linux", approves=True, guarded=False)
+    rooms.seen("den", True, machine="mac", approves=True, guarded=False)
+    assert rooms.can_approve("den") is True
+
+
+def test_approving_is_each_kept_satellite_which_approves_and_may(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.seen("pc", True, machine="pc", approves=True, guarded=False)
+    rooms.seen("mac", True, machine="mac", approves=True, guarded=True)
+    rooms.seen("pi", True, machine="pi")
+    rooms.set_can_approve("pi", True)
+    assert rooms.approving(["pc", "mac", "pi", "ghost"]) == ["pc"]
+    # Only those which may connect are looked at.
+    assert rooms.approving(["mac", "pi"]) == []
+
+
+def test_can_approve_switch_outlasts_a_restart(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.seen("pc", True, machine="pc", approves=True, guarded=False)
+    rooms.seen("pi", True, machine="pi")
+    rooms.set_can_approve("pc", False)
+    rooms.set_can_approve("pi", True)
+    again = _rooms(tmp_path)
+    assert again.can_approve("pc") is False and again.can_approve("pi") is True
+
+
+def test_approves_is_what_it_last_said(tmp_path):
+    rooms = _rooms(tmp_path)
+    assert rooms.approves("pc") is False
+    rooms.seen("pc", True, machine="pc", approves=True)
+    assert rooms.approves("pc") is True and _rooms(tmp_path).approves("pc") is True
+    rooms.seen("pc", True, machine="pc")
+    assert rooms.approves("pc") is False
+
+
+def test_forget_approval_follows_the_first_set_up_rule_and_is_saved(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.seen("pc", True, machine="pc", approves=True, guarded=False)
+    rooms.forget_approval("pc", guarded=True)
+    assert rooms.can_approve("pc") is False and _rooms(tmp_path).can_approve("pc") is False
+    rooms.forget_approval("pc", guarded=False)
+    assert rooms.can_approve("pc") is True and _rooms(tmp_path).can_approve("pc") is True
+    # Removed, it's forgotten entirely, so its next hello stores it afresh.
+    rooms.forget_approval("pc", None)
+    again = _rooms(tmp_path)
+    assert again.approves("pc") is False and again.can_approve("pc") is False
+    again.seen("pc", True, machine="pc", approves=True, guarded=True)
+    assert again.can_approve("pc") is False
+    # One never seen is left for its hello.
+    rooms.forget_approval("nowhere", guarded=False)
+    assert "nowhere" not in json.loads((tmp_path / "satellite_rooms.json").read_text())
+
+
+def test_forget_approval_never_lets_a_pi_approve(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.seen("bedroom", False, machine="pi", approves=True)
+    rooms.set_can_approve("bedroom", True)
+    # Re-keyed with nothing set up, a Pi isn't let approve by the first set-up rule.
+    rooms.forget_approval("bedroom", guarded=False)
+    assert rooms.can_approve("bedroom") is False and _rooms(tmp_path).can_approve("bedroom") is False
+    assert json.loads((tmp_path / "satellite_rooms.json").read_text())["bedroom"]["can_approve"] is None
+
+
+def test_forget_approval_raises_when_it_cant_be_saved_but_is_off_in_memory(tmp_path, monkeypatch):
+    rooms = _rooms(tmp_path)
+    rooms.seen("pc", True, machine="pc", approves=True, guarded=False)
+
+    def refuse(path, data, indent=None):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("voice_assistant.satellite_rooms.save_json", refuse)
+    with pytest.raises(OSError):
+        rooms.forget_approval("pc", guarded=True)
+    assert rooms.can_approve("pc") is False
+
+
+def test_an_older_file_reads_with_no_switch(tmp_path):
+    (tmp_path / "satellite_rooms.json").write_text(json.dumps({
+        "pc": {"push_to_talk": True, "area": None, "machine": "pc"},
+        "odd": {"push_to_talk": True, "area": None, "machine": "pi", "approves": "yes", "can_approve": "no"}}))
+    rooms = _rooms(tmp_path)
+    # No switch stored is no, until its hello stores one.
+    assert rooms.approves("pc") is False and rooms.can_approve("pc") is False
+    assert rooms.approves("odd") is False and rooms.can_approve("odd") is False
+    rooms.seen("pc", True, machine="pc", approves=True, guarded=False)
+    assert rooms.can_approve("pc") is True
+
+
 def test_a_shortcut_is_the_default_until_saved(tmp_path):
     rooms = _rooms(tmp_path)
     rooms.seen("pc", True, "pc", True)

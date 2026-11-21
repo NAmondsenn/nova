@@ -102,28 +102,48 @@ def test_the_pc_is_found_by_its_device_not_its_name():
     assert [pc.on for pc in find_pcs(states, snapshot, {})] == [True]
 
 
-def test_sleep_screen_off_and_lock_dont_ask(tmp_path):
-    power, home = _power(tmp_path, _snapshot(_pc()))
-    assert power.act("sleep") == {"success": True, "message": "Putting your PC to sleep."}
-    assert power.act("screen_off") == {"success": True, "message": "Turning your PC's screen off."}
-    assert power.act("lock") == {"success": True, "message": "Locking your PC."}
-    assert home.pressed == ["button.desk_nap", "button.desk_dark", "button.desk_locked"]
-
+def test_every_power_command_confirms_with_the_chime(tmp_path):
+    # His words, 21 Nov: the beep, not words - the words are kept for the log, and said if the chime's off.
     power, home = _power(tmp_path, _snapshot(_pc()), on=False)
+    assert power.act("on") == {"success": True, "message": "Turning your PC on.", "chime": True}
+    power, home = _power(tmp_path, _snapshot(_pc()))
+    for action, said in (("off", "Shutting down the PC."), ("restart", "Restarting the PC."),
+                         ("sleep", "Putting your PC to sleep."), ("screen_off", "Turning your PC's screen off."),
+                         ("lock", "Locking your PC.")):
+        assert power.act(action) == {"success": True, "message": said, "chime": True}
+    assert home.pressed == ["button.desk_off", "button.desk_again", "button.desk_nap", "button.desk_dark",
+                            "button.desk_locked"]
+
+
+def test_failures_still_speak(tmp_path):
+    power, home = _power(tmp_path, _snapshot(_pc()), on=False)
+    for action in ("off", "restart"):
+        assert power.act(action) == {"success": False, "message": "Your PC's already off."}
     for action in ("sleep", "screen_off", "lock"):
         assert power.act(action) == {"success": False, "message": "Your PC's off."}
+    assert power.act("status") == {"success": True, "message": "Your PC's off."}
     assert home.pressed == []
 
+    stripped = {kind: entity for kind, entity in DESK_BUTTONS.items() if kind != "Shutdown"}
+    power, home = _power(tmp_path, _snapshot(_pc(buttons=stripped)))
+    result = power.act("off")
+    assert result["success"] is False and "chime" not in result and home.pressed == []
 
-def test_sleep_at_pc_pressed_after_reply(tmp_path):
-    # Checked and answered now, pressed only when the reply has been said.
+    power, home = _power(tmp_path, None)
+    assert "chime" not in power.act("off") and home.pressed == []
+
+
+def test_at_the_pc_the_chime_comes_before_the_press(tmp_path):
+    # Checked and answered now, pressed only when the chime has played.
     power, home = _power(tmp_path, _snapshot(_pc()))
     pressed = []
-    for action, said, button in (("sleep", "Putting your PC to sleep.", "button.desk_nap"),
+    for action, said, button in (("off", "Shutting down the PC.", "button.desk_off"),
+                                 ("restart", "Restarting the PC.", "button.desk_again"),
+                                 ("sleep", "Putting your PC to sleep.", "button.desk_nap"),
                                  ("screen_off", "Turning your PC's screen off.", "button.desk_dark"),
                                  ("lock", "Locking your PC.", "button.desk_locked")):
         result = power.act(action, defer=True)
-        assert (result["success"], result["message"]) == (True, said)
+        assert (result["success"], result["message"], result["chime"]) == (True, said, True)
         assert home.pressed == pressed
         assert result["after_said"]() == {"success": True, "message": said}
         pressed.append(button)
@@ -142,34 +162,23 @@ def test_sleep_at_pc_is_still_checked_before_replying(tmp_path):
 
 def test_sleep_from_pi_pressed_at_once(tmp_path):
     power, home = _power(tmp_path, _snapshot(_pc()))
-    assert power.act("sleep", defer=False) == {"success": True, "message": "Putting your PC to sleep."}
+    assert power.act("sleep", defer=False) == {"success": True, "message": "Putting your PC to sleep.",
+                                               "chime": True}
     assert home.pressed == ["button.desk_nap"]
 
 
-def test_shutting_down_and_restarting_ask_first_and_press_once_agreed(tmp_path):
+def test_shutting_down_and_restarting_press_straight_away_with_the_chime(tmp_path):
     power, home = _power(tmp_path, _snapshot(_pc()))
-    asked = power.act("off")
-    assert (asked["success"], asked["message"]) == (True, "Shut down the PC?")
-    assert (asked["ask_first"].tool, asked["ask_first"].params) == ("press_pc_button", {"action": "off", "name": None})
-    assert power.act("restart")["message"] == "Restart the PC?"
-    assert home.pressed == []
-
-    assert power.press("off") == {"success": True, "message": "Shutting down the PC."}
-    assert power.press("restart") == {"success": True, "message": "Restarting the PC."}
-    assert home.pressed == ["button.desk_off", "button.desk_again"]
-    # Nothing else is pressed by the yes.
-    assert power.press("sleep")["success"] is False and len(home.pressed) == 2
-
-    power, home = _power(tmp_path, _snapshot(_pc()), on=False)
-    assert power.act("off") == {"success": False, "message": "Your PC's already off."}
-    assert power.act("restart") == {"success": False, "message": "Your PC's already off."}
-    assert power.press("off") == {"success": False, "message": "Your PC's already off."}
-    assert home.pressed == []
+    shut = power.act("off")
+    assert shut == {"success": True, "message": "Shutting down the PC.", "chime": True}
+    assert home.pressed == ["button.desk_off"]
+    assert power.act("restart")["chime"] is True and home.pressed == ["button.desk_off", "button.desk_again"]
+    assert not hasattr(power, "press")
 
 
 def test_turning_on_presses_wake_on_lan(tmp_path):
     power, home = _power(tmp_path, _snapshot(_pc()), on=False)
-    assert power.act("on") == {"success": True, "message": "Turning your PC on."}
+    assert power.act("on") == {"success": True, "message": "Turning your PC on.", "chime": True}
     assert home.pressed == ["button.wake_desk_pc"]
 
     power, home = _power(tmp_path, _snapshot(_pc()))
@@ -191,7 +200,7 @@ def test_with_several_wake_buttons_the_chosen_one_is_pressed(tmp_path):
     assert home.pressed == []
 
     power.choices.change(lambda state: state["wake"].update(desk="button.wake_desk_pc"))
-    assert power.act("on") == {"success": True, "message": "Turning your PC on."}
+    assert power.act("on") == {"success": True, "message": "Turning your PC on.", "chime": True}
     assert home.pressed == ["button.wake_desk_pc"]
 
     # A chosen button that's gone from Home Assistant isn't pressed.
@@ -208,7 +217,6 @@ def test_whether_the_pc_is_on_is_said(tmp_path):
 def test_without_a_snapshot_or_a_pc_nothing_is_pressed(tmp_path):
     power, home = _power(tmp_path, None)
     assert power.act("lock") == {"success": False, "message": "I can't check your PC's buttons just now."}
-    assert power.press("off") == {"success": False, "message": "I can't check your PC's buttons just now."}
 
     power, home = _power(tmp_path, _snapshot())
     assert power.act("status") == {"success": False, "message": "I can't find your PC in Home Assistant."}
@@ -220,9 +228,8 @@ def test_with_several_pcs_the_one_named_is_used(tmp_path):
     snapshot = _snapshot(_pc(), _pc("gaming", "Gaming PC", gaming, "sensor.gaming_cpu"))
     power, home = _power(tmp_path, snapshot)
     assert power.act("lock") == {"success": False, "message": "Which PC, Desk PC or Gaming PC?"}
-    assert power.act("lock", "the gaming PC") == {"success": True, "message": "Locking your PC."}
-    assert power.act("off", "gaming")["ask_first"].params == {"action": "off", "name": "gaming"}
-    assert power.press("off", "gaming")["success"]
+    assert power.act("lock", "the gaming PC") == {"success": True, "message": "Locking your PC.", "chime": True}
+    assert power.act("off", "gaming")["success"]
     assert home.pressed == ["button.gaming_locked", "button.gaming_off"]
 
 
@@ -239,7 +246,7 @@ def test_only_hass_agents_own_entities_say_whether_the_pc_is_on(tmp_path):
     assert [(pc.on, pc.wake) for pc in pcs] == [(False, "button.wake_desk_pc")]
     power, home = _power(tmp_path, snapshot)
     home.state_list = states
-    assert power.act("on") == {"success": True, "message": "Turning your PC on."}
+    assert power.act("on") == {"success": True, "message": "Turning your PC on.", "chime": True}
     assert power.act("off") == {"success": False, "message": "Your PC's already off."}
 
 
@@ -250,11 +257,11 @@ def test_the_hass_agent_integrations_own_device_isnt_a_second_pc(tmp_path):
     snapshot = _snapshot(_pc(), ([player], {"desk_player": {"name": "Desk PC", **AGENT}}))
     assert [pc.device for pc in find_pcs(_states(snapshot), snapshot, {})] == ["desk"]
     power, home = _power(tmp_path, snapshot)
-    assert power.act("lock") == {"success": True, "message": "Locking your PC."}
+    assert power.act("lock") == {"success": True, "message": "Locking your PC.", "chime": True}
 
     # Nor does it leave the only Wake-on-LAN button needing to be chosen.
     power, home = _power(tmp_path, snapshot, on=False)
-    assert power.act("on") == {"success": True, "message": "Turning your PC on."}
+    assert power.act("on") == {"success": True, "message": "Turning your PC on.", "chime": True}
     assert home.pressed == ["button.wake_desk_pc"]
 
 
@@ -292,7 +299,7 @@ def test_the_pcs_choice_is_only_offered_with_more_than_one_of_either(tmp_path):
     power.choose_wake("desk", "button.wake_desk_pc")
     assert power.choices.get("wake") == {"desk": "button.wake_desk_pc"}
     # It is used at the next "turn on the desk PC".
-    assert power.act("on", "desk") == {"success": True, "message": "Turning your PC on."}
+    assert power.act("on", "desk") == {"success": True, "message": "Turning your PC on.", "chime": True}
     assert home.pressed == ["button.wake_desk_pc"]
     assert [pc["wake"] for pc in power.overview()["pcs"]] == ["button.wake_desk_pc", None]
 
@@ -332,7 +339,7 @@ def test_a_button_chosen_for_one_pc_is_taken_off_any_other(tmp_path):
     assert power.choose_wake("study", "button.wake_study_pc") == []
     assert power.choices.get("wake") == {"desk": "button.wake_desk_pc", "study": "button.wake_study_pc"}
 
-    assert power.act("on", "study") == {"success": True, "message": "Turning your PC on."}
+    assert power.act("on", "study") == {"success": True, "message": "Turning your PC on.", "chime": True}
     assert home.pressed == ["button.wake_study_pc"]
 
 
@@ -353,7 +360,7 @@ def test_a_hand_edited_pcs_file_is_taken_as_no_choices(tmp_path, edited):
 
     assert power.choose_wake("desk", "button.wake_desk_pc") == []
     assert power.choices.get("wake") == {"desk": "button.wake_desk_pc"}
-    assert power.act("on", "desk") == {"success": True, "message": "Turning your PC on."}
+    assert power.act("on", "desk") == {"success": True, "message": "Turning your PC on.", "chime": True}
 
 
 def test_a_button_chosen_from_a_stale_read_and_gone_since_is_never_pressed(tmp_path):

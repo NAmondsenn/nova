@@ -28,4 +28,4 @@
 
 **Setting it up (his named jobs).** Merge `pc-satellite` and deploy the brain; `add-satellite pc` on the brain, its password into the PC's `%LOCALAPPDATA%\nova\config\.env` as `NOVA_BACKEND_TOKEN`; `scripts/deploy_pc.sh`; the Bedroom area for the `nova_nathanspc` device in Home Assistant; `flow100.ahk`'s Numpad 3 changed to send the press; then his checks on the PC: a question, music, volume, a light, a timer (which should ring on the Pi), pressing 3 to stop listening and to stop a reply, the PC going to sleep and coming back, and the brain being restarted.
 
-**Since.** [0036](0036-nova-on-the-computer-as-an-app.md) gives the PC a shortcut of its own beside Numpad 3, Ctrl+Alt+N until he changes it on the settings page, and a tray icon with a menu. Numpad 3 is unchanged.
+**Since.** [0038](0038-nova-on-the-computer-as-an-app.md) gives the PC a shortcut of its own beside Numpad 3, Ctrl+Alt+N until he changes it on the settings page, and a tray icon with a menu. Numpad 3 is unchanged.

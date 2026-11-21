@@ -56,16 +56,30 @@ class Nemotron:
         stream.accept_waveform(RATE, np.zeros(int(LEAD_IN * RATE), dtype=np.float32))
         return stream
 
-    def add(self, stream, audio: np.ndarray):
+    def add(self, stream, audio: np.ndarray) -> bool:
         """
-        More of the recording, worked on straight away.
+        More of the recording, worked on straight away - as much of it as there's enough of,
+        since the model works through a recording a chunk (0.56s) at a time.
 
         Args:
             stream: From start.
             audio: float32 samples at 16kHz, carrying on from the last.
+
+        Returns:
+            Whether it worked on any of the recording - its words can only have changed if so.
         """
         stream.accept_waveform(RATE, audio)
-        self._work(stream)
+        return self._work(stream)
+
+    def words(self, stream) -> str:
+        """
+        The words heard so far in a recording which isn't over, which can still change as
+        more of it is heard - the last of them especially.
+
+        Args:
+            stream: From start.
+        """
+        return str(self.recognizer.get_result(stream)).strip()
 
     def finish(self, stream) -> str:
         """
@@ -79,7 +93,10 @@ class Nemotron:
         self._work(stream)
         return self.recognizer.get_result(stream)
 
-    def _work(self, stream):
-        """Works through as much of the recording as there's enough of."""
+    def _work(self, stream) -> bool:
+        """Works through as much of the recording as there's enough of, and says whether there was any."""
+        worked = False
         while self.recognizer.is_ready(stream):
             self.recognizer.decode_stream(stream)
+            worked = True
+        return worked

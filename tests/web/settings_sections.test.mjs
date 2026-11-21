@@ -104,7 +104,7 @@ function descendants(node) {
 }
 
 const SECTION_IDS = ["status", "music", "clock", "devices", "batteries", "displays", "journeys", "football",
-                     "calendars", "routines", "satellites", "sound", "claude", "notifications", "memory", "keys",
+                     "calendars", "routines", "satellites", "approvals", "sound", "claude", "notifications", "memory", "keys",
                      "else"];
 
 // What /api/state says, with nothing in it.
@@ -115,12 +115,21 @@ const STATE = {
   displays: { port: 0, list: [] }, keys: [], settings: [], settings_problem: "", restart_needed: false, page: "one",
 };
 
+// What /api/approvals says: one passkey, the PC which can approve, and one approval.
+const APPROVALS = {
+  passkeys: [{ id: "AQID", name: "Phone", added: 1700000000 }],
+  satellites: [{ name: "pc", spoken: "the PC", connected: true, can_approve: true }],
+  trusted_until: null,
+  recent: [{ at: 1700000600, description: "Remove 'Dentist'", by: "Phone", outcome: "approved" }],
+};
+
 // The page's scripts over a stand-in page, at the address `hash` (whose history entry has the
 // state `entry`, as a reloaded one does) and logged in or, with `loggedIn` false, through NPM
 // and not yet; on a wide screen if `wide`. `before` are the history's entries under this one,
 // each { state, hash }, which belong to another load of a document - going back to one is a
 // whole new load, not a popstate. `state` is what Nova says of itself.
-function page({ hash = "", entry = null, before = [], loggedIn = true, wide = false, state = STATE } = {}) {
+function page({ hash = "", entry = null, before = [], loggedIn = true, wide = false, state = STATE, route = null,
+                approvals = APPROVALS, post = null } = {}) {
   const nodes = new Map();
   const document = {
     hidden: false,
@@ -178,8 +187,10 @@ function page({ hash = "", entry = null, before = [], loggedIn = true, wide = fa
       windowListeners[kind] = (windowListeners[kind] || []).filter((one) => one !== listener);
     },
   };
-  const login = { route: loggedIn ? "direct" : "npm", logged_in: loggedIn, password_set: true, page: "one" };
-  const answers = { state };
+  const login = { route: route || (loggedIn ? "direct" : "npm"), logged_in: loggedIn, password_set: true, page: "one" };
+  const answers = { state, approvals };
+  // Each path the page asked Nova for, in order.
+  const asked = [];
   const answer = (body) => ({ ok: true, status: 200, json: async () => body, text: async () => "" });
   const context = vm.createContext({
     document,
@@ -197,9 +208,13 @@ function page({ hash = "", entry = null, before = [], loggedIn = true, wide = fa
         this.value = value;
       }
     },
-    async fetch(path) {
+    async fetch(path, options = {}) {
+      asked.push(path);
+      // A change, answered by the test's own `post` where it has one.
+      if (options.method === "POST" && post) return post(path, options, answer);
       if (path === "/api/login-state") return answer(login);
       if (path === "/api/state") return answer(answers.state);
+      if (path === "/api/approvals") return answer(answers.approvals);
       return answer({});
     },
   });
@@ -216,6 +231,7 @@ function page({ hash = "", entry = null, before = [], loggedIn = true, wide = fa
     scrolls,
     login,
     answers,
+    asked,
     // The row of a section in the list.
     row: (id) => descendants(node("rows")).find((one) => one.dataset.open === id),
     // Whether the focus is on the node of that id, or on a row.
@@ -540,4 +556,85 @@ test("every id the script asks the page for by name is in the page, exactly once
   assert.equal(asked.size > 50, true);
   const wrong = [...asked].filter((id) => HTML.split(`id="${id}"`).length - 1 !== 1);
   assert.equal(wrong.join(","), "");
+});
+
+test("the approvals section is hidden through npm", async () => {
+  const shown = page({ route: "npm" });
+  await arrived(shown);
+  await shown.context.loadApprovals();
+  assert.equal(shown.node("approvals-body").hidden, true);
+  assert.equal(shown.node("approvals-npm").hidden, false);
+  assert.equal(HTML.includes(`<p class="panel note" id="approvals-npm" hidden>Only at the page's Tailscale address.</p>`), true);
+  assert.equal(shown.node("line-approvals").textContent, "Only at the page's Tailscale address");
+  // Nor is Nova asked, which would refuse it.
+  assert.equal(shown.asked.includes("/api/approvals"), false);
+  // At the Tailscale address it's shown, with the passkeys, who can approve and what was approved.
+  const tailnet = page();
+  await arrived(tailnet);
+  await tailnet.context.loadApprovals();
+  assert.equal(tailnet.node("approvals-body").hidden, false);
+  assert.equal(tailnet.node("approvals-npm").hidden, true);
+  assert.equal(tailnet.node("line-approvals").textContent, "1 passkey, the PC");
+  assert.equal(tailnet.node("passkeys").textContent.includes("Phone"), true);
+  assert.equal(tailnet.node("approvers").textContent.includes("Can approve"), true);
+  assert.equal(tailnet.node("recent-approvals").textContent.includes("Remove 'Dentist'"), true);
+});
+
+// A change Nova answers only once he approves, `after` milliseconds of the page's time on - or
+// never, if the page gives up first, as fetch does when its signal aborts.
+const waitsForOk = (after, message) => (path, options, answer) => new Promise((resolve, reject) => {
+  options.signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+  setTimeout(() => resolve(answer({ success: true, message })), after);
+});
+
+// Lets the page's promises settle, with no time passing.
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+test("a change which waits for his OK is given as long as Nova waits, the control saying where to give it", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const off = { ...APPROVALS, satellites: [{ ...APPROVALS.satellites[0], can_approve: false }] };
+  const run = async (state, after) => {
+    const shown = page({ state, approvals: off, post: waitsForOk(after, "pc can approve now.") });
+    await arrived(shown);
+    await shown.context.loadApprovals();
+    const box = descendants(shown.node("approvers")).find((one) => one.getAttribute("role") === "switch");
+    const words = descendants(shown.node("approvers")).find((one) => one.text === "Can approve" || one.text.startsWith("Check"));
+    box.checked = true;
+    const done = Promise.all(box.listeners.change.map((listener) => listener()));
+    await settle();
+    // Waiting: the switch is off and its words say where to approve.
+    assert.equal(words.text, "Check your phone.");
+    assert.equal(box.disabled, true);
+    return { shown, box, words, done };
+  };
+  // With Nova's wait not known, it's given the longest Nova waits: well past a change's usual 60 seconds.
+  const unknown = await run(STATE, 90000);
+  t.mock.timers.tick(61000);
+  await settle();
+  assert.equal(unknown.words.text, "Check your phone.");
+  t.mock.timers.tick(30000);
+  await unknown.done;
+  assert.equal(unknown.shown.node("toast").textContent, "pc can approve now.");
+  assert.equal(unknown.words.text, "Can approve");
+  assert.equal(unknown.box.disabled, false);
+  // With it known, 2 minutes and 15 seconds - and no longer.
+  const wait = { key: "approvals.wait_minutes", label: "Minutes to wait for an answer", kind: "number", value: 2,
+                 used: "Used straight away", form: "number", min: 1, max: 10, whole: true };
+  const known = await run({ ...STATE, settings: [wait] }, 200000);
+  t.mock.timers.tick(134000);
+  await settle();
+  assert.equal(known.words.text, "Check your phone.");
+  t.mock.timers.tick(2000);
+  await known.done;
+  assert.equal(known.shown.node("toast").textContent, "Nova didn't answer in time, so that may or may not have worked.");
+  assert.equal(known.box.disabled, false);
+});
+
+test("a satellite which can approve is named as it's said, with its machine name under it", async () => {
+  const shown = page();
+  await arrived(shown);
+  await shown.context.loadApprovals();
+  const texts = descendants(shown.node("approvers")).map((one) => one.text).filter(Boolean);
+  assert.equal(texts.includes("The PC"), true);
+  assert.equal(texts.includes("pc · Connected"), true);
 });

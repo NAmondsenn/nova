@@ -4,6 +4,7 @@ Tests how actions are dispatched, using the real VolumeControl (saving into a
 temporary folder) and a fake Spotify controller, so nothing plays or goes online.
 """
 
+import threading
 import time
 from datetime import date
 from types import SimpleNamespace
@@ -11,11 +12,15 @@ from types import SimpleNamespace
 import pytest
 import requests
 
+from tests.fake_approvals import FakeApprovals
 from voice_assistant import volume as volume_module
 from voice_assistant.actions import NOT_A_COMMAND, ON_A_COMPUTER, Action, ActionExecutor, ActionResult, confirm
 from voice_assistant.batteries import Battery
 from voice_assistant.computers import ComputerControl
+from voice_assistant.approvals import NO_WAY, pending_said
 from voice_assistant.downloads import ON_ITS_WAY, Downloads, Wanted
+from voice_assistant.home_assistant import NotAllowed
+from voice_assistant.google_calendar import Removal
 from voice_assistant.undo import (NOTHING_TO_UNDO, SOMETHING_ELSE_SINCE, TOO_LATE, UNDO_CHANGE_KEPT,
                                    LastChange)
 from voice_assistant.volume import VolumeControl
@@ -1124,18 +1129,31 @@ def test_add_to_calendar_passes_a_repeat_on_and_only_when_it_is_given():
 # Removing, moving and renaming calendar events
 
 class RecordingChangeCalendar:
-    """A calendar which records what remove and change were asked, and answers with an undo."""
+    """
+    A calendar which records what remove and change were asked, and answers with an undo - a
+    removal found first, as find_removal gives it, and only removed once it's run.
+    """
 
-    def __init__(self):
+    def __init__(self, found="Dentist"):
         self.asked = []
+        self.removed = []
         self.undone = 0
+        # The event find_removal finds, or what it says instead for none - "which one?" or no match.
+        self.found = found
 
     def activity_calendars(self):
         return {}
 
-    def remove(self, search, day=None, at=None, following=False, calendar=None, today=None, now=None):
+    def find_removal(self, search, day=None, at=None, following=False, calendar=None, today=None, now=None):
         self.asked.append(("remove", search, day, at, following, calendar))
-        return {"success": True, "message": "Removed Dentist.", "undo": self._undo}
+        if isinstance(self.found, dict):
+            return self.found
+        name = self.found
+
+        def run():
+            self.removed.append(name)
+            return {"success": True, "message": f"Removed {name}.", "undo": self._undo}
+        return Removal(f"Remove '{name}', Thu 26 Nov 15:00", run)
 
     def change(self, search, day=None, at=None, start=None, end=None, summary=None, following=False, calendar=None,
                today=None, now=None):
@@ -1149,7 +1167,7 @@ class RecordingChangeCalendar:
 
 def test_remove_from_calendar_passes_the_day_time_and_from_this_one_on():
     calendar = RecordingChangeCalendar()
-    executor = ActionExecutor(calendar=calendar)
+    executor = ActionExecutor(calendar=calendar, approvals=FakeApprovals("approve"))
     offered = {schema["name"]: schema for schema in executor.tool_schemas()}
     assert offered["remove_from_calendar"]["input_schema"]["required"] == ["search"]
     assert set(offered["remove_from_calendar"]["input_schema"]["properties"]) == {
@@ -1225,7 +1243,7 @@ def test_an_unreadable_day_is_said():
 
 def test_a_calendar_change_is_kept_for_undo():
     calendar = RecordingChangeCalendar()
-    executor = ActionExecutor(calendar=calendar)
+    executor = ActionExecutor(calendar=calendar, approvals=FakeApprovals("approve"))
     assert executor.execute(Action("remove_from_calendar", {"search": "dentist"}, from_model=True)).ok
     assert calendar.undone == 0
     assert executor.execute(Action("undo_last_change")).say == "Undone."
@@ -1235,6 +1253,102 @@ def test_a_calendar_change_is_kept_for_undo():
                                    from_model=True)).ok
     assert executor.execute(Action("undo_last_change")).say == "Undone."
     assert calendar.undone == 2
+
+
+# Removing needs his OK - see approvals.py
+
+CANCEL_DENTIST = Action("remove_from_calendar", {"search": "dentist", "day": "2026-11-26"}, from_model=True)
+
+
+def test_removing_an_event_asks_first_with_what_it_found():
+    calendar = RecordingChangeCalendar()
+    approvals = FakeApprovals("wait")
+    executor = ActionExecutor(calendar=calendar, approvals=approvals, satellite="kitchen")
+    result = executor.execute(CANCEL_DENTIST)
+    # Asked after the lookup, naming the real event, and said where the outcome is to be told.
+    assert calendar.asked == [("remove", "dentist", date(2026, 11, 26), None, False, None)]
+    assert approvals.asked == [("Remove 'Dentist', Thu 26 Nov 15:00", "kitchen")]
+    assert (result.ok, result.say) == (True, pending_said(["your phone"]))
+    # Nothing is removed while it waits.
+    assert calendar.removed == []
+    assert [reply["message"] for reply in approvals.approve_waiting()] == ["Removed Dentist."]
+    assert calendar.removed == ["Dentist"]
+
+
+def test_no_match_is_said_without_asking():
+    for said in ("I can't find the optician on your calendar.",
+                 "I found 2: Dentist on Monday, at 9 AM; and Dentist on Thursday, at 3 PM. Which one?"):
+        calendar = RecordingChangeCalendar(found={"success": False, "message": said})
+        approvals = FakeApprovals("wait")
+        result = ActionExecutor(calendar=calendar, approvals=approvals).execute(CANCEL_DENTIST)
+        assert (result.ok, result.say) == (False, said)
+        assert approvals.asked == [] and calendar.removed == []
+
+
+def test_with_no_approvals_nothing_is_removed():
+    # No Approvals at all, or none with a way to approve: refused, never done.
+    for approvals in (None, FakeApprovals("none")):
+        calendar = RecordingChangeCalendar()
+        result = ActionExecutor(calendar=calendar, approvals=approvals).execute(CANCEL_DENTIST)
+        assert (result.ok, result.say) == (False, NO_WAY)
+        assert calendar.removed == []
+
+
+def test_the_model_cant_skip_the_approval():
+    # Claude's own call goes through the same gate as a local one - there's no parameter to skip it.
+    calendar = RecordingChangeCalendar()
+    approvals = FakeApprovals("wait")
+    executor = ActionExecutor(calendar=calendar, approvals=approvals)
+    executor.execute(Action("remove_from_calendar", {"search": "dentist", "approved": True, "skip": True},
+                            from_model=True))
+    assert len(approvals.asked) == 1 and calendar.removed == []
+    assert "approv" not in str(ActionExecutor.tools()["remove_from_calendar"].tool["parameters"])
+
+
+def test_two_removals_in_one_turn_each_ask():
+    calendar = RecordingChangeCalendar()
+    approvals = FakeApprovals("wait")
+    executor = ActionExecutor(calendar=calendar, approvals=approvals)
+    executor.execute(CANCEL_DENTIST)
+    calendar.found = "Gym"
+    executor.execute(Action("remove_from_calendar", {"search": "gym"}, from_model=True))
+    assert [description for description, _ in approvals.asked] == [
+        "Remove 'Dentist', Thu 26 Nov 15:00", "Remove 'Gym', Thu 26 Nov 15:00"]
+    assert calendar.removed == []
+    approvals.approve_waiting()
+    assert calendar.removed == ["Dentist", "Gym"]
+
+
+def test_a_change_made_while_a_removal_waits_leaves_the_approved_removal_as_that():
+    # The removal is approved and kept on the approval's own thread, after a change made meanwhile:
+    # it's the last thing done, so "undo that" takes it back, and only it.
+    calendar = RecordingChangeCalendar()
+    approvals = FakeApprovals("wait")
+    executor = ActionExecutor(calendar=calendar, approvals=approvals)
+    executor.execute(CANCEL_DENTIST)
+    undone = []
+    assert executor.execute(Action("change_calendar_event", {"search": "gym", "new_start": "2026-11-26 18:00"})).ok
+    calendar._undo = lambda: undone.append("removal") or {"success": True, "message": "Put Dentist back."}
+    approving = threading.Thread(target=approvals.approve_waiting)
+    approving.start()
+    approving.join(5)
+    assert calendar.removed == ["Dentist"]
+    result = executor.execute(UNDO_THAT)
+    assert (result.ok, result.say) == (True, "Put Dentist back.") and undone == ["removal"]
+    assert executor.execute(UNDO_THAT).say == NOTHING_TO_UNDO
+
+
+def test_a_routine_and_a_local_command_ask_too():
+    # A local command - or a routine's step a local rule caught - comes without from_model, and a
+    # routine's step Claude answered with it; both are asked about, as the gate is in the tool itself.
+    # The routine itself, through a Conversation, is in test_conversation.
+    calendar = RecordingChangeCalendar()
+    approvals = FakeApprovals("wait")
+    executor = ActionExecutor(calendar=calendar, approvals=approvals)
+    for from_model in (False, True):
+        result = executor.execute(Action("remove_from_calendar", {"search": "dentist"}, from_model=from_model))
+        assert result.say == pending_said(["your phone"]), from_model
+    assert len(approvals.asked) == 2 and calendar.removed == []
 
 
 def test_the_calendar_change_tools_say_so_when_the_calendar_isnt_set_up():
@@ -1843,16 +1957,33 @@ def test_batteries_are_only_offered_with_home_assistant():
 # Where the phone is, and ringing it - see devices.py
 
 class FakeAppHome:
-    """Stands in for Home Assistant: the app's devices, and the notifications it was asked to send."""
+    """
+    Stands in for Home Assistant: the app's devices, Find My's - none unless a test gives
+    some - and the notifications it was asked to send, and the buttons it was asked to press.
+    """
 
-    def __init__(self, devices, notify_fails=None):
+    def __init__(self, devices, notify_fails=None, find_mys=(), press_fails=None):
         self.devices = devices
         self.notify_fails = notify_fails
+        self.find_mys = list(find_mys)
+        self.press_fails = press_fails
         self.sent = []
         self.titles = []
+        self.pressed = []
 
     def app_devices(self):
         return self.devices
+
+    def find_my_devices(self):
+        return self.find_mys
+
+    def find_my_names(self):
+        return [found["name"] for found in self.find_mys]
+
+    def press(self, entity_id):
+        if self.press_fails is not None:
+            raise self.press_fails
+        self.pressed.append(entity_id)
 
     def notify(self, service, message, title=None, data=None):
         if self.notify_fails is not None:
@@ -1928,16 +2059,166 @@ def test_find_device_with_home_assistant_down_says_so(failure):
 
 
 def test_find_device_is_offered_with_home_assistant():
+    described = ("Say where one of the user's devices is - their phone, tablet or Mac, or anything in Home "
+                 "Assistant's Find My, such as a tracker tag - and ring it if asked ('find my phone', 'make my "
+                 "tablet ring', 'where's my wallet'). What's found is said for you, so just reply 'Okay.'")
+    schemas = {s["name"]: s for s in ActionExecutor(home=FakeAppHome([])).tool_schemas()}
+    assert schemas["find_device"]["description"] == described
+    # Stopping it is offered with it.
+    assert "stop_finding" in schemas
+    # What Find My has is told, by the names said aloud, in order - and a Home Assistant which can't say isn't
+    # the turn lost.
+    home = FakeAppHome([], find_mys=[_find_my("Sam's Wallet", "w"), _find_my("Galaxy Phone 9", "p"),
+                                     _find_my("Keys tag", "k")])
+    schema = {s["name"]: s for s in ActionExecutor(home=home).tool_schemas()}["find_device"]
+    assert schema["description"] == described + " Home Assistant's Find My has: Galaxy Phone 9, Keys tag and Wallet."
     schema = {s["name"]: s for s in ActionExecutor(home=object()).tool_schemas()}["find_device"]
-    assert schema["description"] == (
-        "Say where one of the user's devices is - their phone, tablet or Mac - and ring it if asked ('find my "
-        "phone', 'make my tablet ring'). What's found is said for you, so just reply 'Okay.'")
+    assert schema["description"] == described
     assert "find_device" not in {s["name"] for s in ActionExecutor().tool_schemas()}
     assert ActionExecutor().execute(Action("find_device", {"device": "phone"})).say == "Home Assistant isn't set up yet."
     # Its answers are the user's alone - see Conversation.handle.
     assert ActionExecutor.private_tools() == ["find_device"]
     # What it finds is said, never read back to Claude.
     assert "find_device" not in ActionExecutor().read_tools()
+
+
+def _find_my(name="Galaxy Phone 9", key="phone", stop=True, tracker="home", ready=True):
+    """One of HomeAssistant.find_my_devices()'s dicts."""
+    return {"device": f"fm_{key}", "name": name, "play": f"button.{key}_play_sound",
+            "stop": f"button.{key}_stop_sound" if stop else None,
+            "tracker": {"state": tracker, "reported": time.time() - 600}, "ready": ready}
+
+
+# The phone, as the app has it ("phone 9", from "phone-9"), and as Find My does ("Galaxy Phone 9") - the same phone.
+def _phone_both_ways(**more):
+    return FakeAppHome([_app_device("phone-9", tracker="home", notify="mobile_app_phone_9"),
+                        _app_device("macbook-pro", "Apple", "Mac16,8", notify="mobile_app_macbook_pro",
+                                    tracker="home")],
+                       find_mys=[_find_my(), _find_my("Sam's Wallet", "wallet", tracker="not_home")], **more)
+
+
+def test_phone_rings_through_find_my():
+    home = _phone_both_ways()
+    result = ActionExecutor(home=home).execute(Action("find_device", {"device": "phone", "ring": True}))
+    assert (result.ok, result.say, result.private) == (True, "Your phone's at home. Ringing your phone.", True)
+    assert home.pressed == ["button.phone_play_sound"] and home.sent == []
+
+
+@pytest.mark.parametrize("failure", [requests.HTTPError("500", response=SimpleNamespace(status_code=500)),
+                                     requests.ConnectionError("down"), NotAllowed("button.press")])
+def test_falls_back_to_the_app_notification_when_find_my_fails(failure, caplog):
+    # A 500 is Home Assistant failing to reach Google, too.
+    home = _phone_both_ways(press_fails=failure)
+    with caplog.at_level("INFO"):
+        result = ActionExecutor(home=home).execute(Action("find_device", {"device": "phone", "ring": True}))
+    assert (result.ok, result.say) == (True, "Your phone's at home. Ringing your phone.")
+    assert [(service, message) for service, message, _ in home.sent] == [("mobile_app_phone_9", "TTS")]
+    assert "Couldn't ring the Galaxy Phone 9 through Find My" in caplog.text
+    assert "by the app's notification" in caplog.text
+    # And with Find My having no such device, or unreadable, it's the notification as before.
+    for found in ([], requests.ConnectionError("down")):
+        home = _phone_both_ways()
+        if isinstance(found, list):
+            home.find_mys = found
+        else:
+            def unreadable():
+                raise found
+            home.find_my_devices = unreadable
+        result = ActionExecutor(home=home).execute(Action("find_device", {"device": "phone", "ring": True}))
+        assert result.say == "Your phone's at home. Ringing your phone."
+        assert home.pressed == [] and [service for service, _, _ in home.sent] == ["mobile_app_phone_9"]
+
+
+def test_an_unavailable_play_sound_falls_back_to_the_app_notification(caplog):
+    # While Google can't be reached the button is unavailable: pressed, it would do nothing, yet HA says it did.
+    home = _phone_both_ways()
+    home.find_mys[0]["ready"] = False
+    executor = ActionExecutor(home=home)
+    with caplog.at_level("INFO"):
+        result = executor.execute(Action("find_device", {"device": "phone", "ring": True}))
+    assert (result.ok, result.say) == (True, "Your phone's at home. Ringing your phone.")
+    assert home.pressed == [] and [service for service, _, _ in home.sent] == ["mobile_app_phone_9"]
+    assert "Play sound is unavailable - ringing it by the app's notification" in caplog.text
+    # Nothing rang through Find My, so there's nothing for "found it" to stop.
+    assert executor.rang.lately() == []
+    # A tag has no other way to ring.
+    home.find_mys[1]["ready"] = False
+    result = executor.execute(Action("find_device", {"device": "wallet", "ring": True}))
+    assert (result.ok, result.say) == (False, "Your Wallet's away from home, as of 10 minutes ago. "
+                                              "I couldn't ring your Wallet.")
+    assert home.pressed == [] and executor.rang.lately() == []
+
+
+def test_mac_still_rings_by_notification():
+    # Even with a Find My device whose name has every word of the Mac's.
+    home = _phone_both_ways()
+    home.find_mys.append(_find_my("MacBook Pro", "mac"))
+    result = ActionExecutor(home=home).execute(Action("find_device", {"device": "mac", "ring": True}))
+    assert result.say == "Your Mac's at home. Ringing your Mac."
+    assert home.pressed == [] and [service for service, _, _ in home.sent] == ["mobile_app_macbook_pro"]
+
+
+def test_wallet_found_and_rung_by_its_name():
+    home = _phone_both_ways()
+    executor = ActionExecutor(home=home)
+    result = executor.execute(Action("find_device", {"device": "wallet", "ring": True}))
+    assert (result.ok, result.private) == (True, True)
+    assert result.say == "Your Wallet's away from home, as of 10 minutes ago. Ringing your Wallet."
+    assert home.pressed == ["button.wallet_play_sound"] and home.sent == []
+    # Its owner's name is a word of its name too, and a Find My device with no app's is never rung another way.
+    home.press_fails = requests.ConnectionError("down")
+    result = executor.execute(Action("find_device", {"device": "sam's wallet", "ring": True}))
+    assert (result.ok, result.say) == (False, "Your Wallet's away from home, as of 10 minutes ago. "
+                                              "I couldn't ring your Wallet.")
+    # Several which fit are asked about.
+    home.find_mys.append(_find_my("Wallet tag", "tag"))
+    result = executor.execute(Action("find_device", {"device": "wallet", "ring": True}))
+    assert (result.ok, result.say, result.private) == (False, "Which one: Wallet or Wallet tag?", True)
+
+
+def test_where_is_my_wallet_is_private(caplog):
+    home = _phone_both_ways()
+    home.find_mys[1]["tracker"] = {"state": "Gym", "reported": time.time()}
+    with caplog.at_level("DEBUG"):
+        result = ActionExecutor(home=home).execute(Action("find_device", {"device": "wallet"}))
+    assert (result.ok, result.say, result.private) == (True, "Your Wallet's at Gym.", True)
+    assert home.pressed == []
+    assert "Gym" not in caplog.text and "Said where the Sam's Wallet is" in caplog.text
+
+
+def test_stop_presses_stop_sound_for_what_was_rung():
+    home = _phone_both_ways()
+    executor = ActionExecutor(home=home)
+    executor.execute(Action("find_device", {"device": "phone", "ring": True}))
+    executor.execute(Action("find_device", {"device": "wallet", "ring": True}))
+    home.pressed.clear()
+    # Rung at one satellite, stopped at another: the brain's record is shared.
+    elsewhere = ActionExecutor(home=home, rang=executor.rang)
+    result = elsewhere.execute(Action("stop_finding"))
+    assert (result.ok, result.say) == (True, "Stopped.")
+    assert home.pressed == ["button.phone_stop_sound", "button.wallet_stop_sound"]
+    # Nothing's left ringing, so a second says so.
+    assert elsewhere.execute(Action("stop_finding")).say == "I haven't rung anything lately."
+    # One named is stopped whether or not Nova rang it.
+    home.pressed.clear()
+    assert elsewhere.execute(Action("stop_finding", {"device": "phone"})).say == "Stopped."
+    assert home.pressed == ["button.phone_stop_sound"]
+    # The Mac rings by notification, which can't be stopped.
+    assert elsewhere.execute(Action("stop_finding", {"device": "mac"})).say == \
+        "I can't stop your Mac ringing from here."
+    home.press_fails = requests.ConnectionError("down")
+    result = elsewhere.execute(Action("stop_finding", {"device": "wallet"}))
+    assert (result.ok, result.say) == (False, "I couldn't stop your Wallet ringing.")
+
+
+def test_what_was_rung_is_forgotten_after_ten_minutes():
+    home = _phone_both_ways()
+    executor = ActionExecutor(home=home)
+    now = [1000.0]
+    executor.rang._clock = lambda: now[0]
+    executor.execute(Action("find_device", {"device": "phone", "ring": True}))
+    now[0] += 601
+    assert executor.execute(Action("stop_finding")).say == "I haven't rung anything lately."
 
 
 # Sending to the Mac or the tablet - see devices.py
@@ -2619,21 +2900,14 @@ def test_an_assist_error_after_sending_is_said_not_done_again(make_lists_executo
 # The PC - see pc.py
 
 class FakePC:
-    """Stands in for PCPower, noting what it's asked and asking first for a shutdown."""
+    """Stands in for PCPower, noting what it's asked and confirming with the chime."""
 
     def __init__(self):
         self.asked = []
 
     def act(self, action, name=None, defer=False):
         self.asked.append(("act", action, name))
-        if action == "off":
-            return {"success": True, "message": "Shut down the PC?",
-                    "ask_first": Action("press_pc_button", {"action": "off", "name": name})}
-        return {"success": True, "message": "Locking your PC."}
-
-    def press(self, action, name=None):
-        self.asked.append(("press", action, name))
-        return {"success": True, "message": "Shutting down the PC."}
+        return {"success": True, "message": "Locking your PC.", "chime": True}
 
 
 def test_the_pcs_power_words_are_deferred_only_at_a_pc():
@@ -2653,28 +2927,21 @@ def test_a_power_word_at_one_of_two_pcs_is_that_ones():
     at_desk.execute(Action("pc_power", {"action": "lock", "name": "Desk PC"}))
     ActionExecutor(pc=pc, pc_name=lambda: "Gaming PC").execute(Action("pc_power", {"action": "lock"}))
     assert pc.asked == [("act", "lock", "Gaming PC"), ("act", "lock", "Desk PC"), ("act", "lock", None)]
-    # Asked to shut down, the yes presses that PC's button too.
+    # Shutting down is the same: that PC's, with no question.
     result = at_desk.execute(Action("pc_power", {"action": "off"}))
-    assert result.ask_first.params == {"action": "off", "name": "Gaming PC"}
+    assert (result.ask_first, result.confirm) == (None, "chime")
+    assert pc.asked[-1] == ("act", "off", "Gaming PC")
 
 
-def test_claude_cant_press_the_pcs_button_itself():
+def test_pc_power_never_asks_and_press_pc_button_is_gone():
+    assert "press_pc_button" not in ActionExecutor.tools()
     pc = FakePC()
     executor = ActionExecutor(pc=pc)
-    offered = {schema["name"] for schema in executor.tool_schemas()}
-    assert "pc_power" in offered and "press_pc_button" not in offered
-    result = executor.execute(Action("press_pc_button", {"action": "off"}, from_model=True))
-    assert (result.ok, result.say) == (False, "Sorry, I can't do that.")
-    assert pc.asked == []
-
-    # Claude's own pc_power only asks.
+    assert "press_pc_button" not in {schema["name"] for schema in executor.tool_schemas()}
+    assert executor.execute(Action("press_pc_button", {"action": "off"})).ok is False
     result = executor.execute(Action("pc_power", {"action": "off"}, from_model=True))
-    assert (result.ok, result.say) == (True, "Shut down the PC?")
-    assert (result.ask_first.tool, result.ask_first.params) == ("press_pc_button", {"action": "off", "name": None})
-    assert executor.execute(Action("pc_power", {"action": "lock"})).ask_first is None
-    # The yes, which only the conversation gives.
-    assert executor.execute(Action("press_pc_button", {"action": "off"})).say == "Shutting down the PC."
-    assert pc.asked == [("act", "off", None), ("act", "lock", None), ("press", "off", None)]
+    assert (result.ok, result.ask_first, result.confirm) == (True, None, "chime")
+    assert pc.asked == [("act", "off", None)]
 
 
 def test_the_pc_needs_home_assistant():
@@ -2725,7 +2992,7 @@ def downloads(make_config, monkeypatch):
                          navidrome={"url": "http://navidrome.local:4533", "username": "nova"})
     made = Downloads(config, lambda satellite, message: None, soulsync=lambda: None, library=EmptyLibrary)
     made.started = []
-    made.start = lambda wanted, satellite: made.started.append((wanted, satellite)) or True
+    made.start = lambda wanted, satellite, unless_large=False: made.started.append((wanted, satellite)) or True
     return made
 
 

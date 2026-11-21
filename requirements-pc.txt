@@ -9,7 +9,10 @@
 # PC's alone, at the versions installed there on 19 November 2026. So is comtypes, for
 # Windows' own volume through Core Audio (voice_assistant/pc_volume.py): pure Python with
 # no dependencies, pinned on 20 November 2026 at 1.4.17, the newest release then at least
-# two weeks old (1.5.0 came out on 9 November).
+# two weeks old (1.5.0 came out on 9 November). winrt-Windows.Security.Credentials.UI,
+# for asking Windows Hello for the user's OK to a big action (voice_assistant/windows_hello.py),
+# added on 21 November 2026 at the winrt version family above; it needs only
+# winrt-runtime, Foundation and Storage.Streams, already listed.
 cffi==2.1.0
 comtypes==1.4.17
 numpy==2.4.6
@@ -25,4 +28,5 @@ winrt-Windows.Foundation==4!10.0.28000.2957
 winrt-Windows.Foundation.Collections==4!10.0.28000.2957
 winrt-Windows.Media==4!10.0.28000.2957
 winrt-Windows.Media.Playback==4!10.0.28000.2957
+winrt-Windows.Security.Credentials.UI==4!10.0.28000.2957
 winrt-Windows.Storage.Streams==4!10.0.28000.2957
