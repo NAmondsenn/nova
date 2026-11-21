@@ -102,7 +102,7 @@ SOUND = r"(?:sound|audio|volume|music)"
 MIC = r"(?:the |my )?(?:mic|microphone)"
 # Words which stand for something said before, so are never searched for, or closed, as they are.
 PRONOUNS = {"it", "that", "this"}
-# The window in front, as "close this" says it.
+# The window in front, as "close this" and "hide this" say it.
 FRONT_WINDOW = r"this|that|this window|the window|it"
 
 # A thing of Home Assistant's for Assist - "the TV", "AdGuard protection", "movie
@@ -364,7 +364,7 @@ class LocalIntents:
             names_satellite: Says whether some words name a satellite - Brain.names_satellite.
                 Without it, "play it on my Pi" and the like are left to Claude, as there's no
                 telling "the PC" from "the next song".
-            computer: Says which requests are a computer's to open, close or search, and whether
+            computer: Says which requests are a computer's to open, close, hide or search, and whether
                 this is a PC, whose bare power words are its own - see ComputerHooks. Without
                 it, those are left to the rules after, or Claude.
         """
@@ -534,7 +534,7 @@ class LocalIntents:
             (r"(?:turn )?(?:off )?the screen off|screen off|turn off the screen", self._at_pc("screen_off")),
             (r"shut down|shut it down|power off", self._at_pc("off")),
             (r"restart|reboot", self._at_pc("restart")),
-            # Opening, closing and searching on a computer - see computers.py. Each is only a
+            # Opening, closing, hiding and searching on a computer - see computers.py. Each is only a
             # computer's when the hooks say so, so "open the garage" and "close the blinds" go on to
             # Assist, below, and "start a timer" was a timer above. A web address first, so an app
             # of its name wins over it, then "close this" before any program called "this".
@@ -546,6 +546,9 @@ class LocalIntents:
             # Only "close" for the window in front: "quit it" or "exit that" is about something said before.
             (rf"close (?:{FRONT_WINDOW}){ON_WHERE}", self._close_this),
             (rf"(?:close|quit|exit) (?P<app>.+?){ON_WHERE}", self._close_app),
+            # Hiding is minimising to the taskbar, and takes the same words for the window in front as close.
+            (rf"(?:hide|minimi[sz]e) (?:{FRONT_WINDOW}){ON_WHERE}", self._hide_this),
+            (rf"(?:hide|minimi[sz]e) (?P<app>.+?){ON_WHERE}", self._hide_app),
             # A plain "search for" is the computer's only at one, or with one named: at the Pi it's
             # Claude's own web search, as it was. With Google said, it's the computer's anywhere.
             (rf"search for (?P<words>.+?){ON_WHERE}", self._search(site_said=False)),
@@ -982,7 +985,19 @@ class LocalIntents:
         return handle
 
     def _close_this(self, found) -> Optional[Dict]:
-        # The window in front: the PC's when said at it, or a computer's when it's named.
+        return self._window_in_front("close_on_computer", found)
+
+    def _close_app(self, found) -> Optional[Dict]:
+        return self._window_of("close_on_computer", found)
+
+    def _hide_this(self, found) -> Optional[Dict]:
+        return self._window_in_front("hide_on_computer", found)
+
+    def _hide_app(self, found) -> Optional[Dict]:
+        return self._window_of("hide_on_computer", found)
+
+    def _window_in_front(self, tool: str, found) -> Optional[Dict]:
+        """The action on the window in front, as the PC's when said at it, or a computer's when it's named."""
         if self.computer is None:
             return None
         where = found["where"]
@@ -991,16 +1006,18 @@ class LocalIntents:
                 return None
         elif not self.computer.at_pc():
             return None
-        return self._computer_action("close_on_computer", {"name": "this"}, where)
+        return self._computer_action(tool, {"name": "this"}, where)
 
-    def _close_app(self, found) -> Optional[Dict]:
+    def _window_of(self, tool: str, found) -> Optional[Dict]:
+        """The action on a program's windows, when one is open which the words name."""
         if self.computer is None:
             return None
         app, where = self._computer_words(found, "app")
-        # "Quit it" or "exit the window" isn't a program called that.
+        # "Quit it" or "exit the window" isn't a program called that - nor, as only "close" and "hide" take
+        # them for the window in front, the window in front.
         if re.fullmatch(FRONT_WINDOW, app.strip()):
             return None
-        return self._computer_action("close_on_computer", {"name": app}, where) \
+        return self._computer_action(tool, {"name": app}, where) \
             if self.computer.names_window(app, where) else None
 
     def _search(self, site_said: bool):

@@ -3683,8 +3683,12 @@ class FakeComputerControl:
     def close(self, name, where=None):
         return self._did("close", name, where)
 
+    def hide(self, name, where=None):
+        return self._did("hide", name, where)
 
-COMPUTER_TOOLS = {"open_on_computer", "open_web_page", "search_on_computer", "close_on_computer"}
+
+COMPUTER_TOOLS = {"open_on_computer", "open_web_page", "search_on_computer", "close_on_computer",
+                  "hide_on_computer"}
 
 
 def test_tools_offered_only_when_known():
@@ -3694,7 +3698,7 @@ def test_tools_offered_only_when_known():
     assert not COMPUTER_TOOLS & offered(ActionExecutor(clock=object()))
     computer = FakeComputerControl(offered=False)
     assert not COMPUTER_TOOLS & offered(ActionExecutor(computer=computer))
-    # Once a computer which opens things has been seen - connected or not - all four are.
+    # Once a computer which opens things has been seen - connected or not - all five are.
     computer.is_offered = True
     schemas = {tool["name"]: tool for tool in ActionExecutor(computer=computer).tool_schemas()}
     assert COMPUTER_TOOLS <= set(schemas)
@@ -3716,14 +3720,16 @@ def test_computer_tools_pass_what_was_said():
     executor.execute(Action("open_web_page", {"url": "bbc.co.uk"}, from_model=True))
     executor.execute(Action("search_on_computer", {"words": "rocket league", "where": ""}, from_model=True))
     executor.execute(Action("close_on_computer", {"name": "this"}, from_model=True))
+    executor.execute(Action("hide_on_computer", {"name": "this"}, from_model=True))
     assert computer.asked == [("open", "Fortnite", "my PC"), ("open_url", "bbc.co.uk", None),
-                              ("search", "rocket league", None), ("close", "this", None)]
+                              ("search", "rocket league", None), ("close", "this", None), ("hide", "this", None)]
     # Nothing to open, or a name that isn't words, asks no computer.
     for tool, params in (("open_on_computer", {"name": " "}), ("open_web_page", {"url": 5}),
-                         ("search_on_computer", {}), ("close_on_computer", {"name": None})):
+                         ("search_on_computer", {}), ("close_on_computer", {"name": None}),
+                         ("hide_on_computer", {"name": " "})):
         result = executor.execute(Action(tool, params, from_model=True))
         assert result.ok is False and result.say
-    assert len(computer.asked) == 4
+    assert len(computer.asked) == 5
 
 
 def test_a_failed_mute_of_the_sound_still_speaks(pc_and_pi):

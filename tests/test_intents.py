@@ -1112,6 +1112,28 @@ def test_quit_or_exit_it_never_closes_the_window_in_front(text):
     assert _not_computers(_computer(text, at_pc=False))
 
 
+@pytest.mark.parametrize("text", ["Hide this.", "Minimise this.", "Minimize that.", "Hide this window.",
+                                  "Hide the window.", "Minimise it."])
+def test_hide_this_at_pc_only(text):
+    assert _computer(text) == [Action("hide_on_computer", {"name": "this"})]
+    # At the Pi, with no computer named, it isn't the PC's front window.
+    actions = _computer(text, at_pc=False)
+    assert actions is None or all(action.tool != "hide_on_computer" for action in actions)
+    assert _computer("Hide this on the PC.", at_pc=False) == [
+        Action("hide_on_computer", {"name": "this", "where": "the pc"})]
+
+
+def test_hide_open_window():
+    assert _computer("Hide Discord.") == [Action("hide_on_computer", {"name": "discord"})]
+    assert _computer("Minimise Firefox.") == [Action("hide_on_computer", {"name": "firefox"})]
+    assert _computer("Minimize Steam on the PC.", at_pc=False) == [
+        Action("hide_on_computer", {"name": "steam", "where": "the pc"})]
+    # Whole name anywhere, as close has it.
+    assert _computer("Hide Discord.", at_pc=False) == [Action("hide_on_computer", {"name": "discord"})]
+    # Not open: nothing of the computer's.
+    assert _not_computers(_computer("Hide Steam."))
+
+
 def test_close_open_window():
     assert _computer("Close Discord.") == [Action("close_on_computer", {"name": "discord"})]
     assert _computer("Quit Firefox.") == [Action("close_on_computer", {"name": "firefox"})]

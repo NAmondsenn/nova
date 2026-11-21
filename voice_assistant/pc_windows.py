@@ -1,14 +1,14 @@
 """
 PC Windows Module.
 
-The PC satellite's windows: which programs have one open, closing a program's windows
-or the one in front, and opening something and bringing it to the front - see
+The PC satellite's windows: which programs have one open, closing or minimising a
+program's windows or the one in front, and opening something and bringing it to the front - see
 docs/superpowers/specs/2026-11-19-pc-open-close-and-commands-design.md.
 
 A window is closed only as its own X closes it, with WM_CLOSE, so the program can ask
 about unsaved work: nothing is ever terminated. Nova's own process and Windows' shell
 (Explorer, the Start menu, search, the desktop and the taskbar) are never closed, and
-never count as open.
+never count as open. Minimising to the taskbar loses nothing, but leaves the same ones alone.
 
 Windows itself is reached through _Win32, made by load() only on Windows; tests give
 this module a fake of it instead, so it imports anywhere and the tests run on the Pi.
@@ -185,6 +185,45 @@ def close_front() -> Optional[str]:
     return program["name"]
 
 
+def hide(name: str) -> Optional[str]:
+    """
+    Minimises every window of a program to the taskbar, as its minimise button would.
+    One already minimised still counts, so asking twice answers the same.
+
+    Args:
+        name: The program, as open_windows names it - or its own name, or its exe's.
+
+    Returns:
+        The program's name, or None if none of its windows is open.
+    """
+    wanted, hidden = plain(name), None
+    for hwnd in _api.windows():
+        program = _program(hwnd)
+        if program is None or wanted not in (plain(program["name"]), plain(program["own"]),
+                                             plain(ntpath.splitext(program["exe"])[0])):
+            continue
+        if _api.minimise(hwnd):
+            hidden = program["name"]
+    return hidden
+
+
+def hide_front() -> Optional[str]:
+    """
+    Minimises the window in front to the taskbar, as its minimise button would.
+
+    Returns:
+        Its program's name, or None if what's in front is nothing, the desktop, the
+        taskbar, Nova or Windows' shell.
+    """
+    hwnd = _api.foreground()
+    if not hwnd:
+        return None
+    program = _program(hwnd)
+    if program is None or not _api.minimise(hwnd):
+        return None
+    return program["name"]
+
+
 def ready_to_open() -> FrozenSet[int]:
     """
     Gets ready to open something: lets whatever starts take the front itself, and notes
@@ -285,6 +324,7 @@ class _Win32:
     GW_OWNER = 4
     DWMWA_CLOAKED = 14
     WM_CLOSE = 0x0010
+    SW_MINIMIZE = 6
     SW_RESTORE = 9
     ASFW_ANY = 0xFFFFFFFF
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -447,6 +487,11 @@ class _Win32:
 
     def post_close(self, hwnd) -> bool:
         return bool(self._user32.PostMessageW(hwnd, self.WM_CLOSE, 0, 0))
+
+    def minimise(self, hwnd) -> bool:
+        # ShowWindow answers whether the window was shown before, not whether it worked: true
+        # for one already minimised too, which is still shown, and windows() lists only shown ones.
+        return bool(self._user32.ShowWindow(hwnd, self.SW_MINIMIZE))
 
     def allow_foreground(self):
         self._user32.AllowSetForegroundWindow(self.ASFW_ANY)

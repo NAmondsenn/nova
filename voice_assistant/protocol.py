@@ -60,7 +60,8 @@ and what the brain sends a satellite:
         satellite which said it has Windows' media controls, sent when it changes;
         cover: true with the new cover as the payload, false for none now, left out
         when the cover is as it was - see docs/decisions/0031)
-    computer  {"id": ..., "action": "open"|"open_url"|"close"|"close_front"|"volume"|"mic",
+    computer  {"id": ..., "action": "open"|"open_url"|"close"|"close_front"|"hide"|"hide_front"|"volume"|
+        "mic",
         "item"?: ..., "url"?: ..., "name"?: ..., "direction"?: ..., "step"?: ..., "level"?: ...,
         "mute"?: ...}  (something to do on the computer itself, answered by computer_done; "mic"
         mutes or unmutes Windows' own microphone, sent only to a satellite which said system_volume)
@@ -101,7 +102,7 @@ MAX_SPEAKER = 64
 MEDIA_ACTIONS = ("play", "pause", "next", "previous")
 
 # The things a satellite can be told to do on its computer, as computer's action.
-COMPUTER_ACTIONS = ("open", "open_url", "close", "close_front", "volume", "mic")
+COMPUTER_ACTIONS = ("open", "open_url", "close", "close_front", "hide", "hide_front", "volume", "mic")
 
 # The kinds of thing a satellite can open, as the kind of each entry in its apps.
 APP_KINDS = ("app", "epic", "steam")
