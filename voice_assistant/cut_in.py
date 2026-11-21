@@ -37,6 +37,12 @@ CUT_IN_WAIT = 1.0
 LISTENING_NOISES = frozenset({"yeah", "yes", "yep", "mm", "mhm", "mm hm", "uh huh", "okay", "ok", "right",
                               "sure", "i see", "got it"})
 
+# The fewest letters of a word at the edge of what's heard - the last, as the start of the
+# reply's word, or the first, as the end of it - for it to match: speech-to-text hasn't
+# finished the last word it has so far, and a run may begin part way through a word. Two
+# swallowed a one-word "no" or "so" into "north" or "also"; three still takes "tod" and "rature".
+EDGE_FRAGMENT = 3
+
 # The word which always stops a reply, even when the reply itself says it.
 STOP_WORD = "stop"
 
@@ -75,7 +81,7 @@ def _is_own(heard: List[str], saying: List[str]) -> bool:
             # Speech-to-text hasn't finished the last word it has so far, and a run may begin
             # part way through a word, so those two edges match a piece of the reply's word
             # without counting as wrong.
-            if len(was) >= 2 and ((position == length - 1 and said.startswith(was))
+            if len(was) >= EDGE_FRAGMENT and ((position == length - 1 and said.startswith(was))
                                   or (position == 0 and said.endswith(was))):
                 continue
             wrong += 1
@@ -86,10 +92,9 @@ def _is_own(heard: List[str], saying: List[str]) -> bool:
 
 def own_words(heard: str, saying: str) -> bool:
     """
-    The allowance is for speech-to-text mishearing a word in a longer run. It doesn't match
-    a number heard as digits against the reply's spoken one ("12" against "twelve"), nor a
-    contraction written another way: those change which words there are, and so aren't
-    matched.
+    The allowance is for speech-to-text mishearing a word in a longer run. Digits and
+    contractions aren't normalised: a number heard as digits ("12" against "twelve") is just
+    a wrong word, which a run of four or more words can absorb but a short run can't.
 
     Args:
         heard: The words speech-to-text heard.
@@ -99,7 +104,7 @@ def own_words(heard: str, saying: str) -> bool:
         Whether the words heard are a run of consecutive words of the reply, with up to
         one wrong in every four of them (a substitution at its position) - none when
         there are one or two. The last word heard also matches if it is the start of the
-        reply's word there, and the first if it is the end of it (each at least two
+        reply's word there, and the first if it is the end of it (each at least EDGE_FRAGMENT
         letters), as speech-to-text hasn't finished the last word, and a run may begin
         part way through one; those aren't counted as wrong. False if nothing was heard.
     """
@@ -144,7 +149,6 @@ class CutIn:
                 the reply back.
         """
         self.detector = detector
-        self.saying = saying
         # Tidied once here, not for every frame.
         self._saying_words = _tidy(saying)
         self.threshold = detector.threshold if threshold is None else threshold

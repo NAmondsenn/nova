@@ -260,6 +260,28 @@ def test_a_single_fragment_is_the_replys_own_from_either_end():
     assert not own_words("e", REPLY)
 
 
+def test_a_two_letter_fragment_isnt_the_replys_own():
+    # "no" starts "north", "now" and "not", and "so" starts "some" and ends "also": a short
+    # interruption mustn't be taken for the reply's own voice because of that.
+    reply = "It's now not very far to the north, and also some way on"
+    assert not own_words("no", reply)
+    assert not own_words("so", reply)
+    assert not own_words("no", "It is not far to the north")
+    assert not own_words("so far", "It is also far")
+    assert dipped(reply).hear(loud(), "no") == "stop"
+    assert dipped(reply).hear(loud(), "so") == "stop"
+    # Three letters are still a piece of a word.
+    assert own_words("nor", "it is north of here")
+
+
+def test_digits_and_contractions_are_not_normalised():
+    said = "The temperature today is 12 degrees"
+    # A longer run absorbs one such word as its one wrong in four, a shorter one can't.
+    assert own_words("today is twelve degrees", said)
+    assert not own_words("is twelve", said)
+    assert not own_words("it is", "It's twelve")
+
+
 def test_a_fragment_must_be_at_the_reply_words_own_end():
     # "ratu" is neither the start nor the end of "temperature", and a start isn't wanted at the front.
     assert not own_words("ratu today is", REPLY)
