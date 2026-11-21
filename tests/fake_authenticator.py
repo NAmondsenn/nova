@@ -43,15 +43,22 @@ class FakeAuthenticator:
         )
         self.counter = 0
 
-    def _client_data(self, type_, challenge, origin):
+    def _client_data(self, type_, challenge, origin, cross_origin=False):
         return json.dumps(
             {
                 "type": type_,
                 "challenge": b64url(challenge),
                 "origin": origin or self.origin,
-                "crossOrigin": False,
+                "crossOrigin": cross_origin,
             }
         ).encode()
+
+    def sign(self, authenticator_data, client_data_json):
+        """Signs these, as `assert_` does, so a test can bend either and still have it signed."""
+        signed = authenticator_data + hashlib.sha256(client_data_json).digest()
+        if self.algorithm == ES256:
+            return self._key.sign(signed, ec.ECDSA(hashes.SHA256()))
+        return self._key.sign(signed, padding.PKCS1v15(), hashes.SHA256())
 
     def _authenticator_data(self, rp, flags, counter):
         rp = rp or urlsplit(self.origin).hostname
@@ -78,7 +85,8 @@ class FakeAuthenticator:
             "credential_id": self.credential_id,
         }
 
-    def assert_(self, challenge, *, origin=None, type="webauthn.get", rp=None, flags=0x05, counter_step=1):
+    def assert_(self, challenge, *, origin=None, type="webauthn.get", rp=None, flags=0x05, counter_step=1,
+                cross_origin=False):
         """What `navigator.credentials.get` hands the page: a signed assertion.
 
         The counter goes up by `counter_step` first (0 for an authenticator which keeps
@@ -86,13 +94,9 @@ class FakeAuthenticator:
         followed by the SHA-256 of the client data, as the WebAuthn spec has it.
         """
         self.counter += counter_step
-        client_data_json = self._client_data(type, challenge, origin)
+        client_data_json = self._client_data(type, challenge, origin, cross_origin)
         authenticator_data = self._authenticator_data(rp, flags, self.counter)
-        signed = authenticator_data + hashlib.sha256(client_data_json).digest()
-        if self.algorithm == ES256:
-            signature = self._key.sign(signed, ec.ECDSA(hashes.SHA256()))
-        else:
-            signature = self._key.sign(signed, padding.PKCS1v15(), hashes.SHA256())
+        signature = self.sign(authenticator_data, client_data_json)
         return {
             "client_data_json": client_data_json,
             "authenticator_data": authenticator_data,

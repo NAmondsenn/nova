@@ -83,11 +83,10 @@ def test_another_origin_is_refused():
 def test_a_cross_origin_assertion_is_refused():
     """A page from another site framing ours says so in crossOrigin, and isn't trusted."""
     fake = FakeAuthenticator()
-    answer = fake.assert_(CHALLENGE)
-    data = json.loads(answer["client_data_json"])
-    data["crossOrigin"] = True
-    answer["client_data_json"] = json.dumps(data).encode()
-    with pytest.raises(NotVerified):
+    # Signed as it is, so it's the crossOrigin check alone which refuses it.
+    answer = fake.assert_(CHALLENGE, cross_origin=True)
+    assert json.loads(answer["client_data_json"])["crossOrigin"] is True
+    with pytest.raises(NotVerified, match="wrong origin"):
         _check(fake, answer)
 
 
@@ -140,8 +139,10 @@ def test_a_signature_from_another_key_is_refused():
 def test_a_short_or_odd_authenticator_data_is_refused():
     fake = FakeAuthenticator()
     answer = fake.assert_(CHALLENGE)
+    # Cut to 36 bytes and signed so, it's the length alone which refuses it.
     answer["authenticator_data"] = answer["authenticator_data"][:36]
-    with pytest.raises(NotVerified):
+    answer["signature"] = fake.sign(answer["authenticator_data"], answer["client_data_json"])
+    with pytest.raises(NotVerified, match="too short"):
         _check(fake, answer)
     for client_data_json in (b"not json", b"[1, 2]", b'{"type": 5}', b"\xff\xfe", b'{"type": "webauthn.get"}'):
         answer = fake.assert_(CHALLENGE)
@@ -155,6 +156,27 @@ def test_a_short_or_odd_authenticator_data_is_refused():
     with pytest.raises(NotVerified):
         check_assertion(CHALLENGE, ORIGIN, fake.public_key_der, 12345, 0, answer["client_data_json"],
                         answer["authenticator_data"], answer["signature"])
+
+
+def test_client_data_nested_too_deep_is_refused():
+    fake = FakeAuthenticator()
+    answer = fake.assert_(CHALLENGE)
+    answer["client_data_json"] = b"[" * 100_000 + b"]" * 100_000
+    with pytest.raises(NotVerified, match="isn't JSON"):
+        _check(fake, answer)
+    answer = fake.register(CHALLENGE)
+    answer["client_data_json"] = b'{"a":' * 100_000 + b"1" + b"}" * 100_000
+    with pytest.raises(NotVerified, match="isn't JSON"):
+        _register(answer)
+
+
+def test_client_data_as_text_is_refused():
+    """Only the bytes the browser sent were signed: text, even of the same JSON, isn't checked."""
+    fake = FakeAuthenticator()
+    answer = fake.register(CHALLENGE)
+    answer["client_data_json"] = answer["client_data_json"].decode()
+    with pytest.raises(NotVerified, match="isn't bytes"):
+        _register(answer)
 
 
 def test_registration_checks_type_challenge_origin_and_flags():

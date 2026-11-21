@@ -119,9 +119,13 @@ def _check_client_data(expected_type: str, challenge: bytes, origin: str, client
     """Checks the browser's client data is of this type, for this challenge and origin."""
     if not isinstance(challenge, bytes) or len(challenge) < _MIN_CHALLENGE:
         raise NotVerified("no challenge")
+    # Bytes only, as the browser sends them: json would take text too, which then isn't what was signed.
+    if not isinstance(client_data_json, bytes):
+        raise NotVerified("client data isn't bytes")
     try:
         data = json.loads(client_data_json)
-    except (TypeError, ValueError):
+    # RecursionError is JSON nested deeper than Python goes, which no browser sends.
+    except (TypeError, ValueError, RecursionError):
         raise NotVerified("client data isn't JSON") from None
     if not isinstance(data, dict):
         raise NotVerified("client data isn't an object")
