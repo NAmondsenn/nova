@@ -5093,11 +5093,16 @@ def test_turning_it_on_while_conversations_are_off_says_so(brain, connect, make_
     assert brain.open_conversation.satellite is None and pi.messages("listen") == []
 
 
-def test_the_switch_is_only_there_with_conversations(brain, make_session):
+def test_the_switch_is_only_there_with_conversations(brain, connect, make_session):
     # The fixture's brain has none.
-    controls = make_session()._device_controls()
+    satellite, pi = connect()
+    session = make_session(satellite)
+    controls = session._device_controls()
     assert controls.conversations() is False and controls.in_conversation() is False
+    # Off with none on does nothing: nothing said, played or queued, and no end noted.
     controls.set_conversation(False)
+    assert brain.tts.said == [] and pi.messages("play_sound") == [] and pi.messages("play_stream") == []
+    assert session._typed.empty() and session._ended_by is None
 
 
 def test_turning_it_on_where_one_is_already_running_starts_nothing_more(brain, connect, make_session):
@@ -5116,6 +5121,87 @@ def test_turning_it_on_is_never_taken_for_the_answer_to_a_typed_question(brain, 
 
     wake = session._next_typed()
     assert wake["typed"] == "let's talk" and wake["follow_up"] is False
+
+
+def _busy(session):
+    """Has the session busy, as an announcement being said or a timer ringing does: no typed request is taken."""
+    assert session._announcing.acquire(timeout=1)
+    return session._announcing.release
+
+
+def test_two_taps_on_the_switch_while_the_session_is_busy_start_one_conversation(brain, connect, make_session):
+    session, pi = _a_session_with_conversations(brain, connect, make_session)
+    _sending_quiet(pi)
+    free = _busy(session)
+    controls = session._device_controls()
+    # Home Assistant shows the switch off until the start is taken, so it's tapped again.
+    controls.set_conversation(True)
+    controls.set_conversation(True)
+    assert session._typed.qsize() == 1
+    running(session)
+    time.sleep(3 * session_module.WAKE_CHECK)
+    assert brain.tts.said == []
+
+    free()
+
+    assert wait_for(lambda: pi.messages("listen"))
+    time.sleep(3 * session_module.WAKE_CHECK)
+    # One "Go ahead.", and the listening sound for the start, after the open listen - not lost to a second start.
+    assert brain.tts.said == ["Go ahead."] and _sounds(pi) == ["listening.wav"]
+    kinds = [message["type"] for message, _ in pi.received if message["type"] in ("play_stream", "play_sound", "listen")]
+    assert kinds == ["play_stream", "listen", "play_sound"]
+    assert session._typed.empty() and brain.open_conversation.on_at(session.satellite.name)
+    _ended(session)
+
+
+def test_turning_it_off_cancels_a_start_still_waiting(brain, connect, make_session):
+    session, pi = _a_session_with_conversations(brain, connect, make_session)
+    free = _busy(session)
+    controls = session._device_controls()
+    controls.set_conversation(True)
+    controls.set_conversation(False)
+    running(session)
+
+    free()
+
+    # Taken, and dropped: nothing said, played, listened for or started, and "a conversation never starts by itself".
+    assert wait_for(lambda: session._typed.empty())
+    time.sleep(3 * session_module.WAKE_CHECK)
+    assert brain.tts.said == [] and _sounds(pi) == [] and pi.messages("listen") == []
+    assert brain.open_conversation.satellite is None
+    # And the switch works again afterwards.
+    controls.set_conversation(True)
+    assert wait_for(lambda: brain.tts.said == ["Go ahead."])
+    _ended(session)
+
+
+def test_a_start_waiting_is_dropped_if_a_conversation_began_here_meanwhile(brain, connect, make_session):
+    session, pi = _a_session_with_conversations(brain, connect, make_session)
+    session._device_controls().set_conversation(True)
+    assert brain.open_conversation.start(session.satellite.name) == "started"
+    assert session._next_typed() is None
+    assert session._typed.empty() and brain.tts.said == []
+
+
+def test_a_start_waiting_when_conversations_are_switched_off_is_refused_not_sent_to_claude(brain, connect,
+                                                                                         make_session, monkeypatch):
+    settings = {"enabled": True}
+    brain.open_conversation = OpenConversation(lambda: settings)
+    satellite, pi = connect(conversations=True)
+    session = make_session(satellite)
+    asked = []
+    monkeypatch.setattr(session.llm, "process_query", lambda text, **kwargs: asked.append(text) or {
+        "response": "Sorry.", "actions": [], "success": True})
+    free = _busy(session)
+    session._device_controls().set_conversation(True)
+    settings["enabled"] = False
+    running(session)
+
+    free()
+
+    assert wait_for(lambda: brain.tts.said)
+    assert brain.tts.said == ["Conversations are switched off."]
+    assert asked == [] and brain.open_conversation.satellite is None and pi.messages("listen") == []
 
 
 # What goes off by itself during a conversation

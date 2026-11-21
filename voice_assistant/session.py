@@ -23,7 +23,7 @@ import re
 import threading
 import time
 from datetime import datetime
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -98,6 +98,10 @@ UNASKED_ENDS = ("idle", "not for nova", "failed")
 # the one piece of code which starts one for the phrase - with its refusals, its words and its
 # sound - rather than a second copy of them.
 START_PHRASE = "let's talk"
+# What the switch's request is kept as in the typed queue, rather than as its words: nothing the user
+# types can be it, so what's taken is known to be the switch's and can be judged when it is taken -
+# see _switch_start_taken.
+SWITCH_START = object()
 
 # How long a conversation's wait for his next turn must have heard no speech before it's a gap, in
 # which what goes off by itself is said, in seconds - so not as he's just starting, and not straight
@@ -357,7 +361,11 @@ class Session:
         # its own, as one put with the satellite's wakes would be taken for a wake word said
         # over the reply before it, and stop it. Each is kept with when it arrived, by
         # time.monotonic(), so it can be told whether it answers a typed question. See ask.
-        self._typed: "queue.Queue[Tuple[str, float]]" = queue.Queue()
+        self._typed: "queue.Queue[Tuple[Any, float]]" = queue.Queue()
+        # Whether Home Assistant's Conversation switch has a start waiting in the queue, under
+        # _typed_lock: at most one at a time, and turning the switch off cancels it. See
+        # _conversation_from_home_assistant.
+        self._switch_start_pending = False
         # While a turn waits for the answer to a question it's just asked - from the moment
         # it knows it's asking, until the answer is heard or given up on - the first thing
         # typed is that answer rather than a fresh request, with the spoken listen for it,
@@ -1002,6 +1010,44 @@ class Session:
         finally:
             self._announcing.release()
 
+    def _get_typed(self) -> Optional[Tuple[str, float]]:
+        """
+        Takes the next thing typed off the queue, judging the switch's start as it's taken.
+
+        Returns:
+            What was typed, with when it arrived - or None with nothing typed, or only starts of
+            the switch's which are dropped.
+        """
+        while True:
+            try:
+                text, arrived = self._typed.get_nowait()
+            except queue.Empty:
+                return None
+            if text is not SWITCH_START:
+                return text, arrived
+            if self._switch_start_taken():
+                return START_PHRASE, arrived
+
+    def _switch_start_taken(self) -> bool:
+        """
+        Judges a start of Home Assistant's Conversation switch as its turn comes, not only as it was
+        asked for - the session may have been busy for a long while, and meanwhile the switch may
+        have been turned off, tapped again, or a conversation started some other way.
+
+        Returns:
+            True if it is to be answered as "let's talk" is - False if it is dropped, saying nothing:
+            it was cancelled by the switch being turned off, or a conversation is on here already. One
+            for conversations which are switched off since is refused aloud, not left to Claude as chat.
+        """
+        with self._typed_lock:
+            pending, self._switch_start_pending = self._switch_start_pending, False
+        if not pending or self._conversation_here():
+            return False
+        if not self._conversations_enabled():
+            self._speak_from_home_assistant(UNAVAILABLE["conversation"])
+            return False
+        return True
+
     def _next_typed(self) -> Optional[Dict]:
         """
         The next thing typed, as run answers it, and whether it answers the typed
@@ -1013,9 +1059,8 @@ class Session:
             {"typed": text, "follow_up": whether it answers the question, "talked_over":
             False, "feed": None} - or None, with nothing typed.
         """
-        try:
-            text, arrived = self._typed.get_nowait()
-        except queue.Empty:
+        typed = self._get_typed()
+        if typed is None:
             with self._typed_lock:
                 question = self._typed_question
                 if question is not None and time.monotonic() > question[1]:
@@ -1025,6 +1070,7 @@ class Session:
             if question is not None:
                 logger.info("No typed answer in time, so the question's left")
             return None
+        text, arrived = typed
         with self._typed_lock:
             question, self._typed_question = self._typed_question, None
         follow_up = question is not None and question[0] <= arrived <= question[1]
@@ -1197,12 +1243,17 @@ class Session:
         after the phrase said. It's handed to the session's own thread, which does the speaking
         and the listening, and waits its turn behind any request, as a typed one does. Being a
         request, it forgets the model's stale history first, as at any wake, before the
-        conversation is switched on. Off, it's ended with the falling sound and nothing said.
+        conversation is switched on. Whether it still stands is judged when it's taken, not only when it was
+        asked for - see _switch_start_taken - and there's at most one waiting. Off, it's ended with the
+        falling sound and nothing said, and a start still waiting is cancelled.
 
         Args:
             on: True to start one, False to end the one on here.
         """
         if not on:
+            # A start still waiting its turn is cancelled too: it mustn't begin one he has turned off.
+            with self._typed_lock:
+                self._switch_start_pending = False
             self.end_conversation("switch")
             return
         if self._closed.is_set():
@@ -1215,9 +1266,15 @@ class Session:
         if self._conversation_here():
             # Already on, which the switch shows - nothing to start or say again.
             return
+        with self._typed_lock:
+            if self._switch_start_pending:
+                # Home Assistant shows the switch off until the start is taken, so a second tap
+                # while the session is busy asks for what is already waiting.
+                return
+            self._switch_start_pending = True
         # As arriving before any typed question, so it's never taken for its answer - which would
         # have Claude answer "let's talk" and start nothing.
-        self._typed.put((START_PHRASE, -math.inf))
+        self._typed.put((SWITCH_START, -math.inf))
 
     def end_conversation(self, reason: str) -> None:
         """
@@ -1664,10 +1721,8 @@ class Session:
                 feed, listen_from = cut_in["feed"], cut_in["from"]
             else:
                 if not follow_up:
-                    try:
-                        typed = self._typed.get_nowait()[0]
-                    except queue.Empty:
-                        typed = None
+                    taken = self._get_typed()
+                    typed = taken[0] if taken is not None else None
                     # Afresh, as a wake word starts a request - what's going off read as it starts.
                     ringing = self.brain.clock.ringing_state(
                         satellite=heard_in(self.brain.room_of(self.satellite.name)))

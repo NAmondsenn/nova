@@ -1161,6 +1161,20 @@ def test_the_switch_commands_reach_nova(switched, nova):
     assert nova.calls == [("set_conversation", True), ("set_conversation", False), ("stop",)]
 
 
+def test_the_switch_is_logged_as_asked_for_not_as_done(switched, nova, caplog):
+    # Nothing has started when it's asked for: the start may be refused, or wait its turn.
+    caplog.set_level(logging.INFO)
+    device, client = switched
+    client.connects()
+    client.delivers(f"{BASE}/conversation/set", "ON")
+    client.delivers(f"{BASE}/conversation/set", "OFF")
+    assert _eventually(lambda: len(nova.calls) == 2)
+    messages = [record.getMessage() for record in caplog.records if "Home Assistant" in record.getMessage()
+                and "onversation" in record.getMessage()]
+    assert messages == ["A conversation was asked for from Home Assistant",
+                        "A conversation was asked to end from Home Assistant"]
+
+
 def test_a_device_without_the_controls_for_it_has_no_switch(started):
     device, client = started
     client.connects()

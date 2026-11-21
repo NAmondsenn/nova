@@ -973,7 +973,7 @@ class NovaDevice:
                 self._queue("Microphone muted", self._set_muted, payload == ON)
         elif self._has_conversation() and topic == f"{self._conversation}/set":
             if payload in (ON, OFF):
-                logger.info(f"Conversation {'started' if payload == ON else 'ended'} from Home Assistant")
+                logger.info(f"A conversation was {'asked for' if payload == ON else 'asked to end'} from Home Assistant")
                 self._queue("Conversation", self._set_conversation, payload == ON)
         elif self._has_music() and topic in self._playback.values():
             # A button's payload is only Home Assistant's "PRESS", so it isn't looked at.
