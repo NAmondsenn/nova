@@ -28,7 +28,7 @@ llm:
   effort: "low"
   # Leave null: Haiku 5.5 refuses any request which sets a temperature. A number is only
   # for a model which takes one beside thinking. It is only ever sent to llm.model: the bigger
-  # models a conversation moves up to (Sonnet 5.5 and Opus 5.5) refuse one too.
+  # models a conversation moves up to (conversation.bigger_model) refuse one too.
   temperature: null
   # Seconds to wait for a reply before giving up, and how many times to retry.
   # Searches do more work, so they get longer.
@@ -251,8 +251,8 @@ usage:
   output_price: 0.50
   # The same for conversation.bigger_model, which prices any call not answered by llm.model.
   # Anthropic's published list prices, taken from the claude-api skill on 21 Nov 2026 and
-  # worth a check against its pricing page: Sonnet 5.5, the default, is $2.00 a million input
-  # tokens and $10.00 a million output tokens (Opus 5.5 is $4.00 and $20.00). They don't
+  # worth a check against its pricing page: claude-sonnet-5-5, the default, is $2.00 a million
+  # input tokens and $10.00 a million output tokens (claude-opus-5-5 is $4.00 and $20.00). They don't
   # follow conversation.bigger_model by themselves, so change them with it, or when Anthropic
   # does.
   bigger_input_price: 2.00

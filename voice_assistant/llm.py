@@ -89,7 +89,8 @@ THINK_HARDER = "think_harder"
 # How hard the bigger model thinks, and the most it may write, thinking included: it is moved up to for
 # planning, so what it writes is longer than a spoken reply and it thinks as long, where the usual
 # model's 1024 would cut a plan off - or give the didn't-work reply - and low effort would be thinking
-# harder at the least it can. Both are valid for Sonnet 5.5 and Opus 5.5, whose output goes to 128K.
+# harder at the least it can. Both are valid for either choice of conversation.bigger_model, whose output
+# goes to 128K.
 BIGGER_EFFORT = "medium"
 BIGGER_MAX_TOKENS = 4096
 
@@ -705,7 +706,7 @@ class LLMHandler:
                 system.append({"type": "text", "text": CONVERSATION_PROMPT})
 
             # Sends the system prompt, conversation history, current query and model settings to the LLM
-            # Not to the bigger models: Sonnet 5.5 and Opus 5.5 refuse a request which sets one (it
+            # Not to the bigger models, which refuse a request which sets one (it
             # was chosen for the usual model, and is left alone there). The thinking is taken by both.
             if model == self.model_name:
                 if self.temperature is not None:
