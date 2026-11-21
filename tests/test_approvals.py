@@ -578,3 +578,12 @@ def test_guarded_fails_closed(tmp_path, made, caplog):
     (tmp_path / "unreadable").mkdir(exist_ok=True)
     (tmp_path / "unreadable" / "passkeys.json").write_text("{not json")
     assert world.store.all() == [] and world.service.guarded() is True
+
+
+def test_a_pc_whose_wait_runs_out_has_its_prompt_withdrawn(tmp_path, made):
+    # The PC's own wait ends first, with no answer: no settle has withdrawn it, so its prompt is taken down here.
+    pc = FakeApprover("pc", answer=None)
+    world = World(tmp_path, made, passkey=False, approvers=[pc])
+    request = world.service.request("Remove 'Dentist'")
+    _until(lambda: pc.withdrawn)
+    assert pc.withdrawn == [request.id] and request.outcome is None

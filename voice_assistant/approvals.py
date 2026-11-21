@@ -329,14 +329,21 @@ class Approvals:
                 answer = None
             finally:
                 with self._lock:
+                    # Settled while it showed, the settle withdrew it; else nothing has.
+                    withdrawn = request.outcome is not None
                     showing = self._showing.get(request.id, [])
                     if approver in showing:
                         showing.remove(approver)
                     if not showing:
                         self._showing.pop(request.id, None)
         # None is a PC which has gone away or wasn't answered in time: it settles nothing,
-        # leaving the phone to answer.
-        if answer is True:
+        # leaving the phone to answer. Its prompt is taken down all the same unless a settle
+        # already did, as on a timeout the wait often runs out here before the waiter
+        # settles it, and a prompt left showing could hide the next one.
+        if answer is None:
+            if not withdrawn:
+                self._withdraw([(approver, request.id)])
+        elif answer is True:
             self._settle(request, "approved", approver.name)
         elif answer is False:
             self._settle(request, "refused", approver.name)

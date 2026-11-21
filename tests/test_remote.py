@@ -1379,3 +1379,29 @@ def test_an_answer_which_isnt_true_or_false_is_dropped(pair, caplog, approved):
         thread.join(5)
     assert results == [None]
     assert "approval" in caplog.text
+
+
+def test_a_pc_prompt_left_at_a_timeout_is_withdrawn(pair, tmp_path):
+    """
+    End to end, with the real clock: the PC's own wait and the service's waiter both end at
+    the request's expiry, and when the PC's ends first no settle withdraws its prompt - so the
+    prompt's own thread does. Nothing waits on the request here until after, so it's always so.
+    """
+    from voice_assistant.approvals import Approvals
+    from voice_assistant.passkeys import PasskeyStore
+
+    satellite, fake, serving = pair
+    service = Approvals(lambda: {}, PasskeyStore(str(tmp_path / "passkeys.json")), approvers=lambda: [satellite])
+    # A wait of under a second, not the settings' whole minutes.
+    service._minutes = lambda name, default: 0.01 if name == "wait_minutes" else default
+    try:
+        request = service.request("Remove 'Dentist'")
+        assert request.asked == ("bedroom",)
+        assert wait_for(lambda: fake.messages("approval"))
+        [asked] = fake.messages("approval")
+        assert wait_for(lambda: fake.messages("approval_withdraw"))
+        assert [each["id"] for each in fake.messages("approval_withdraw")] == [asked["id"]]
+        assert request.outcome is None
+        assert service.wait(request) == "timeout"
+    finally:
+        service.stop()
