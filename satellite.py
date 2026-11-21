@@ -1296,7 +1296,8 @@ class Satellite:
             Whether the brain is connected, whether the microphone is muted - None when it
             can't be told, or there's no Windows volume to ask - whether music plays, the
             shortcut as shown (None for none, or while another program has it), whether
-            there's a page, whether Nova starts at logon, and whether there are media controls.
+            there's a page which can be opened, whether Nova starts at logon, and whether
+            there are media controls.
         """
         shortcut_now = self._shortcut
         return AppState(
@@ -1304,7 +1305,8 @@ class Satellite:
             mic_muted=self._mic_for_the_tray(opening),
             playing=self._music_playing,
             shortcut=None if shortcut_now is None or self._shortcut_taken else shortcut.shown(shortcut_now),
-            page=self._page is not None,
+            # Only where a page can be opened: without Windows' parts Settings could only fail.
+            page=self._page is not None and self.opens,
             at_logon=not os.path.exists(NO_LOGON_MARK),
             music=self.media is not None,
         )
@@ -1483,10 +1485,17 @@ class Satellite:
             self.stop(code)
 
     def _open_page(self):
-        """Opens the settings page at its satellites, from the menu or a second launch of the app. Nothing without an address."""
+        """
+        Opens the settings page at its satellites, from the menu or a second launch of the app.
+        Nothing without an address, or where Nova can't open pages - so a second launch's ask
+        is still answered.
+        """
         page = self._page
         if page is None:
             logger.debug("Asked to open the settings page, but the brain gave no address for it")
+            return
+        if not self.opens:
+            logger.debug("Asked to open the settings page, but Nova can't open pages here")
             return
         # Any fragment the address has is replaced, so there's one, and no slash is added.
         self._open_in_browser(page.partition("#")[0] + "#satellites")

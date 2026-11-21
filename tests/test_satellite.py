@@ -4002,7 +4002,7 @@ def test_the_default_shortcut_is_registered_at_the_start(brain, make):
     assert made._app_state().shortcut == "Ctrl+Alt+N"
 
 
-def test_app_from_the_brain_sets_the_shortcut_page_and_minutes(brain, make):
+def test_app_from_the_brain_sets_the_shortcut_page_and_minutes(brain, make, pc):
     made = tray_pressable(brain, make)
     assert made._app_state().page is False
     told = len(made.tray.changes)
@@ -4041,7 +4041,7 @@ def test_one_bad_field_of_app_leaves_the_others_taken(brain, make, caplog):
 
 
 @pytest.mark.parametrize("page", ["file:///c:/x", "javascript:alert(1)", "http://nova.example", "https://a b", 5, ["https://x.y"]])
-def test_a_page_which_isnt_a_web_address_is_refused(brain, make, caplog, page):
+def test_a_page_which_isnt_a_web_address_is_refused(brain, make, pc, caplog, page):
     made = tray_pressable(brain, make)
     with caplog.at_level(logging.WARNING):
         brain.say("state", volumes={}, muted=False, app={"page": page, "mic_mute_minutes": 45})
@@ -4056,7 +4056,7 @@ def test_a_page_which_isnt_a_web_address_is_refused(brain, make, caplog, page):
     assert made._page == "https://nova.example" and made._app_state().page is True
 
 
-def test_an_empty_page_clears_it(brain, make):
+def test_an_empty_page_clears_it(brain, make, pc):
     made = tray_pressable(brain, make)
     brain.say("state", volumes={}, muted=False, app={"page": "https://nova.example"})
     assert wait_for(lambda: made._app_state().page)
@@ -4264,7 +4264,7 @@ def test_mute_from_the_menu_does_nothing_with_no_microphone_to_reach(brain, make
     assert made.speaker.files() == [] and made.system_volume.mic_changes == []
 
 
-def test_settings_opens_the_page_at_satellites(brain, make, monkeypatch):
+def test_settings_opens_the_page_at_satellites(brain, make, pc, monkeypatch):
     made = tray_pressable(brain, make)
     opened = []
     monkeypatch.setattr(made, "_open_in_browser", opened.append)
@@ -4288,6 +4288,39 @@ def test_settings_with_no_address_does_nothing(brain, make, monkeypatch, caplog)
     assert "no address" in caplog.text
 
 
+def test_the_page_is_only_offered_where_it_can_be_opened(brain, make):
+    # Here, as where Windows' parts couldn't be loaded, Nova can't open anything.
+    made = tray_pressable(brain, make)
+    assert made.opens is False
+    brain.say("state", volumes={}, muted=False, app={"page": "https://nova.example"})
+    assert wait_for(lambda: made._page is not None)
+    assert made._app_state().page is False
+
+
+def test_the_start_menu_ask_does_nothing_where_a_page_cant_be_opened(brain, make, pc, monkeypatch, caplog):
+    # Answered all the same, so a second launch of the app isn't told of a failure.
+    pc.loads = False
+    monkeypatch.setattr(satellite, "PressListener",
+                        lambda port, on_press, on_open=None: PressListener(0, on_press, on_open))
+    made = tray_pressable(brain, make)
+    assert made.opens is False
+    brain.say("state", volumes={}, muted=False, app={"page": "https://nova.example"})
+    assert wait_for(lambda: made._page is not None)
+    assert made._app_state().page is False
+    assert wait_for(lambda: made.press_listener is not None and made.press_listener.port)
+    port = made.press_listener.port
+    with caplog.at_level(logging.DEBUG):
+        with socket.socket() as sock:
+            sock.settimeout(5)
+            sock.connect(("127.0.0.1", port))
+            sock.sendall(f"POST /open HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Nova-Press: 1\r\n"
+                         f"Content-Length: 0\r\n\r\n".encode())
+            assert sock.recv(100).startswith(b"HTTP/1.0 204")
+        made.tray.on_choice("settings")
+    assert pc.started == []
+    assert "can't open pages" in caplog.text
+
+
 def test_the_page_is_opened_in_the_browser_and_brought_to_the_front(brain, make, pc):
     made = tray_pressable(brain, make)
     made._open_in_browser("https://nova.example#satellites")
@@ -4307,7 +4340,7 @@ def test_a_page_windows_cant_open_is_logged_and_goes_no_further(brain, make, pc,
     assert pc.fronted == []
 
 
-def test_the_start_menu_ask_opens_the_page(brain, make, monkeypatch):
+def test_the_start_menu_ask_opens_the_page(brain, make, pc, monkeypatch):
     # A second launch of the app posts /open, which the real listener answers.
     monkeypatch.setattr(satellite, "PressListener",
                         lambda port, on_press, on_open=None: PressListener(0, on_press, on_open))
