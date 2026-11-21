@@ -4881,6 +4881,28 @@ def test_a_conversation_whose_satellite_goes_ends_quietly(brain, connect, make_s
     assert [record for record in caplog.records if record.levelno >= logging.ERROR] == []
 
 
+def test_a_session_let_go_of_leaves_the_next_conversation_at_its_satellite_alone(brain, connect, make_session):
+    # Replaced as its satellite connected again, while it finished a slow turn: by then a new conversation may
+    # have begun there, which is the new session's - not the old one's to write into, or to end.
+    given = []
+    session, _ = _in_a_conversation(brain, connect, make_session, ended=given.append)
+    session._conversing = True
+    session.close()
+    talk, here = brain.open_conversation, session.satellite.name
+    # As the brain ends it, letting the session go - and the new one starts another.
+    talk.end("gone", satellite=here)
+    assert talk.start(here) == "started"
+
+    session._noted_in_conversation("Hello.", Reply(say="Hi."))
+    for _ in range(3):
+        session._noted_in_conversation("A line of a film.", Reply(not_for_me=True))
+    session.end_conversation("failed")
+    session._leave_conversation()
+    assert talk.on_at(here)
+    talk.end("said")
+    assert given[-1] == []
+
+
 def test_a_turn_which_goes_wrong_ends_the_conversation_and_says_so(brain, connect, make_session, monkeypatch):
     # Rather than every turn after it going wrong the same way, one straight after another.
     session, pi = _in_a_conversation(brain, connect, make_session, Reply(say="Okay."))

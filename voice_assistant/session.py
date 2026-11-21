@@ -1288,7 +1288,9 @@ class Session:
             reason: Why, as OpenConversation.end has it.
         """
         talk = self.brain.open_conversation
-        if talk is None:
+        # Nor for a session the brain has let go of, which may have been replaced by now: one on at the
+        # satellite is the new session's to end.
+        if talk is None or self._closed.is_set():
             return
         with self._open_lock:
             if not talk.end(reason, satellite=self.satellite.name):
@@ -1379,6 +1381,11 @@ class Session:
         if not self._conversing and not self._conversation_here():
             return
         self._conversing = False
+        if self._closed.is_set():
+            # Let go of by the brain, which ends its conversation itself (see Brain._let_go) - and which
+            # may have replaced it with a new session for the same satellite by now, whose own
+            # conversation this mustn't end: that one's open listen would be left holding the microphone.
+            return
         self.brain.open_conversation.end("gone", satellite=self.satellite.name)
         if self.satellite.connected and not self._closed.is_set():
             try:
@@ -2309,6 +2316,10 @@ class Session:
         """
         talk = self.brain.open_conversation
         here = self.satellite.name
+        if self._closed.is_set():
+            # A turn finished by a session the brain has let go of, perhaps replaced by now: one on at the
+            # satellite is the new session's, which this turn was never in.
+            return
         if reply.not_for_me:
             if talk.not_for_nova(satellite=here):
                 self.end_conversation("not for nova")
