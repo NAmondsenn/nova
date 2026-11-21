@@ -1276,26 +1276,45 @@ def test_an_answer_for_an_id_never_asked_is_dropped(pair, caplog):
     assert wait_for(lambda: fake.messages("approval"))
     with caplog.at_level(logging.WARNING):
         fake.say("approval_answer", id="approval-other", approved=True)
-        thread.join(5)
         # A note's or computer's id isn't an approval's either.
         fake.say("approval_answer", id="note-1", approved=True)
+        thread.join(5)
         fake.say("ping")
         assert wait_for(lambda: fake.messages("pong"))
     assert results == [None]
-    assert len([r for r in caplog.records if "approval" in r.getMessage()]) >= 1
+    assert len([r for r in caplog.records if "approval" in r.getMessage()]) == 2
 
 
 def test_an_answer_counts_once(pair, caplog):
     satellite, fake, serving = pair
     thread, results = _ask_approval_on_thread(satellite)
     assert wait_for(lambda: fake.messages("approval"))
-    # Back to back, as a double tap would be: the asking thread may not yet have forgotten the id.
     fake.say("approval_answer", id="approval-a1", approved=True)
-    fake.say("approval_answer", id="approval-a1", approved=False)
     thread.join(5)
-    fake.say("ping")
-    assert wait_for(lambda: fake.messages("pong"))
+    with caplog.at_level(logging.WARNING):
+        fake.say("approval_answer", id="approval-a1", approved=False)
+        fake.say("ping")
+        assert wait_for(lambda: fake.messages("pong"))
     assert results == [True]
+    assert len([r for r in caplog.records if "approval" in r.getMessage()]) == 1
+
+
+def test_a_withdrawal_ends_the_wait_at_once(pair, caplog):
+    satellite, fake, serving = pair
+    started = time.monotonic()
+    thread, results = _ask_approval_on_thread(satellite, wait=30)
+    assert wait_for(lambda: fake.messages("approval"))
+
+    satellite.withdraw_approval("a1")
+    thread.join(5)
+
+    assert results == [None] and time.monotonic() - started < 1
+    assert satellite._note_waits == {}
+    with caplog.at_level(logging.WARNING):
+        fake.say("approval_answer", id="approval-a1", approved=True)
+        fake.say("ping")
+        assert wait_for(lambda: fake.messages("pong"))
+    assert len([r for r in caplog.records if "approval" in r.getMessage()]) == 1
 
 
 def test_no_answer_in_time_or_gone_gives_none(pair):

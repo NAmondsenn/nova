@@ -872,17 +872,15 @@ class RemoteSatellite:
             Whether the user approved - or None if there was no answer in time, the request
             had already been withdrawn, or the satellite went.
         """
-        with self._notes_lock:
-            if f"approval-{id}" in self._withdrawn:
-                return None
         answer = self._ask(f"approval-{id}", "approval", b"", wait, description=description)
         return None if answer is None else answer["approved"]
 
     def withdraw_approval(self, id: str) -> bool:
         """
         Tells the satellite to stop asking for an approval, because it is settled or given up.
-        Only sends, never waits, and is remembered, so an ask_approval for the id which
-        comes after is not sent.
+        Only sends, never waits for the satellite, and is remembered, so an ask_approval for
+        the id which comes after is not sent. One waiting on it now ends with no answer, so
+        it doesn't hold up whatever asks next.
 
         Args:
             id: The request's id, as for ask_approval.
@@ -892,6 +890,9 @@ class RemoteSatellite:
         """
         with self._notes_lock:
             self._withdrawn.append(f"approval-{id}")
+            waiting = self._note_waits.get(f"approval-{id}")
+            if waiting is not None:
+                waiting.arrived.set()
         return self.send("approval_withdraw", id=f"approval-{id}")
 
     def _ask(self, id: str, kind: str, payload: bytes, wait: float, **fields) -> Optional[Dict]:
@@ -913,7 +914,9 @@ class RemoteSatellite:
         with self._notes_lock:
             # Checked under the lock _lost takes after it has made this False, so a
             # request is never left waiting on a satellite which has already gone.
-            if not self._connected:
+            # A withdrawn approval is checked here too, so either this sees the withdrawal
+            # or withdraw_approval ends the wait registered now.
+            if not self._connected or id in self._withdrawn:
                 return None
             self._note_waits[id] = waiting
         try:
@@ -1021,8 +1024,7 @@ class RemoteSatellite:
         with self._notes_lock:
             waiting = self._waiting_for("approval-", message.get("id"))
             # Not for an id never asked, nor one already answered (whose asker hasn't yet
-            # forgotten it), nor one which isn't plainly yes or no. A late answer to one
-            # given up is the same as for notes: nothing to mind.
+            # forgotten it), nor one which isn't plainly yes or no. Each is warned of once.
             if waiting is None or waiting.arrived.is_set() or not isinstance(approved, bool):
                 if waiting is not None or not isinstance(approved, bool):
                     logger.warning(f"The {self.name} satellite sent an approval answer which was dropped")
