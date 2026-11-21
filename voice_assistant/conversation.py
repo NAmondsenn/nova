@@ -43,7 +43,7 @@ LIGHTS_TIMEOUT = 1.5
 # nothing plays - as when nothing was caught at all.
 NOT_CAUGHT = "Sorry, I didn't catch that."
 
-# The whole of what may be said back to "Shut down the PC?" to do it, and to leave it. Not
+# The whole of what may be said back to "Do you want me to download it?" to do it, and to leave it. Not
 # Clock.answer_to_offer, which takes "stop", "cancel" or "thanks" for a yes - harmless for a
 # reminder, but for a download it'd start one - and "yes" with a request after it ("yes, play
 # music") for one too. Anything else is a fresh request, and nothing is pressed.
@@ -187,7 +187,7 @@ class Conversation:
         """
         timeline = timeline or Timeline()
 
-        # Answering "Shut down the PC?" or "Do you want me to download it?" - read before
+        # Answering "Want a reminder?" or "Do you want me to download it?" - read before
         # anything else, the follow-up window's going straight to Claude included, and only
         # once: whatever's said next drops it. Only a yes runs it, and as Nova's own action,
         # never the model's. A question with set answers ("The mic or the audio?") runs the
@@ -501,7 +501,7 @@ class Conversation:
 
 def agreed(text: str) -> Optional[bool]:
     """
-    Whether what was said back to a question that asks first - "Shut down the PC?" - agreed.
+    Whether what was said back to a question that asks first - "Do you want me to download it?" - agreed.
 
     Args:
         text: What the user said, e.g. "Nova, yes please."
@@ -559,7 +559,7 @@ def _only_question(reply: str, results: List[ActionResult]) -> Union[Action, Cho
     """
     What a yes (or, for a Choice, each answer) to the reply would do - only when exactly one result asks first and its
     question is the whole of what's asked: the reply's last sentence, with no other ending
-    "?". "Shut down the PC? Which light?" asks two things, so a yes does neither.
+    "?". "Do you want me to download it? Which light?" asks two things, so a yes does neither.
 
     Args:
         reply: The whole reply, as it's said.

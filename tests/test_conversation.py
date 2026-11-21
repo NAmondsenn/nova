@@ -1116,6 +1116,73 @@ def test_an_offer_left_unanswered_requests_nothing(downloading):
     assert downloads.requested == [] and llm.asked == ["play Gooba by 6ix9ine", "yes"]
 
 
+@pytest.mark.parametrize("answer", ["yes", "Yes please.", "Nova, yeah.", "yep", "go ahead", "Go on.", "sure",
+                                    "Do it.", "Okay, do it.", "ok do it please", "Yes.", "'yes'",
+                                    "\u2018yes\u2019"])
+def test_only_a_plain_yes_requests_the_download(downloading, answer):
+    conversation, downloads, llm = downloading()
+    conversation.handle("play Gooba by 6ix9ine")
+    conversation.handle(answer, follow_up=True)
+    assert downloads.requested == [("Gooba by 6ix9ine", "track", "kitchen")]
+    assert llm.asked == ["play Gooba by 6ix9ine"]
+
+
+@pytest.mark.parametrize("answer, said", [
+    # Backing out - "stop" and "cancel" most of all, which a reminder's offer takes for a yes.
+    ("stop", "Okay, I'll leave it."), ("Cancel.", "Okay, I'll leave it."), ("no thanks", "Okay, I'll leave it."),
+    ("Never mind.", "Okay, I'll leave it."), ("don't", "Okay, I'll leave it."), ("Nope.", "Okay, I'll leave it."),
+    ("leave it", "Okay, I'll leave it."),
+    # Neither, so a fresh request, Claude's - nor a yes with more said after it.
+    ("shut up", "Okay."), ("thanks", "Okay."), ("fine", "Okay."), ("okay thanks", "Okay."),
+    ("yes, play music", "Okay."), ("yes in a minute", "Okay."), ("absolutely", "Okay."),
+    # Digits and other scripts are words too - "Yes, 10." most likely means in ten minutes.
+    ("Yes, 10.", "Okay."), ("Yes. 10:30", "Okay."), ("yes 10", "Okay."), ("yes \u4e0d\u8981", "Okay."),
+])
+def test_no_or_anything_else_said_back_requests_nothing(downloading, answer, said):
+    conversation, downloads, llm = downloading(_answer("Okay."), _answer("Okay."))
+    conversation.handle("play Gooba by 6ix9ine")
+    assert conversation.handle(answer, follow_up=True).say == said
+    assert downloads.requested == []
+    assert llm.asked == ["play Gooba by 6ix9ine"] + ([] if said.startswith("Okay, I'll") else [answer])
+    # Either way, it's gone.
+    conversation.handle("yes", follow_up=True)
+    assert downloads.requested == []
+
+
+def test_a_yes_to_more_than_the_offer_requests_nothing(download_settings):
+    play = Action("play_music", {"query": "Gooba by 6ix9ine", "search_type": "track"}, from_model=True)
+    for actions in ([play, Action("dim_lights", {}, from_model=True)],
+                    [Action("dim_lights", {}, from_model=True), play],
+                    [play, Action("play_music", {"query": "Kids by 6ix9ine", "search_type": "track"},
+                                  from_model=True)]):
+        downloads = AskedDownloads(download_settings)
+        executor = AskingActions(music=NotInNavidrome(), downloads=downloads, satellite="kitchen")
+        llm = FakeLLM(_answer("Okay.", *actions), _answer("Okay."))
+        conversation = _conversation(llm=llm, actions=executor)
+        reply = conversation.handle("get me those")
+        assert reply.listen_again and reply.say.count("?") == 2
+        conversation.handle("yes", follow_up=True)
+        assert downloads.requested == [] and llm.asked == ["get me those", "yes"]
+
+
+def test_a_yes_to_another_question_or_with_no_question_listened_for_requests_nothing(downloading, download_settings):
+    # Nor does a yes said to any other question, with an offer made earlier and since dropped.
+    downloads = AskedDownloads(download_settings)
+    actions = ActionExecutor(music=NotInNavidrome(), downloads=downloads, satellite="kitchen")
+    llm = FakeLLM(_answer("Shall I play some music?"), _answer("Okay."))
+    conversation = _conversation(llm=llm, actions=actions)
+    conversation.handle("I'm bored")
+    conversation.handle("yes", follow_up=True)
+    assert downloads.requested == [] and llm.asked == ["I'm bored", "yes"]
+
+    # Nor one said with no question listened for - the follow-ups had run out.
+    conversation, downloads, llm = downloading(_answer("Okay."))
+    conversation.follow_ups = conversation.max_follow_ups
+    assert not conversation.handle("play Gooba by 6ix9ine").listen_again
+    conversation.handle("yes")
+    assert downloads.requested == []
+
+
 class FakeClaude:
     """
     Stands in for the Anthropic client, so the real LLMHandler's rules are used: each

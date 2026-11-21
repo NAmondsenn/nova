@@ -547,7 +547,7 @@ class Downloads:
             satellite: The satellite that asked, which is told how it went - or None.
             asked: Whether the user's own words asked for a download - "download X",
                 "get me X". If not, as when Claude takes an "okay" to an offer for a yes,
-                it's only offered, for a plain yes, as pc_power only ever asks.
+                it's only offered, for a plain yes.
 
         Returns:
             Dict with 'success' and 'message' - and 'later', True, once it's requested,
