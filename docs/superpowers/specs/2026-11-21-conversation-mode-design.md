@@ -161,7 +161,7 @@ The system prompt gains a short part while a conversation is on: this is a spoke
 ### Things that happen during a conversation
 
 - **Timers, alarms and announcements** don't wait for the conversation to end, as they wait for a request today: it could be half an hour. They wait for the next gap, when Nova isn't speaking and he isn't mid-turn, then ring or speak. Dismissing by voice needs no wake word, as he's already being listened to.
-- **Music.** Music playing when a conversation starts pauses, as for any request, and comes back when it ends. Music asked for during one plays at the level Nova already uses under its own voice until the conversation ends. The voice cut-in still applies to replies; whether music's leftover echo sets off dips is one of the things measured first.
+- **Music.** Music playing when a conversation starts pauses, as for any request, and comes back when it ends. Music asked for during one plays quietly, at about a third of the music volume, until the conversation ends, then at its full volume. (Today music is simply held for the whole of a request; this is new, and only for music asked for inside a conversation.) The voice cut-in still applies to replies. Whether the music's leftover echo upsets listening is one of the things measured first; if it does, music asked for starts as the conversation ends, and Nova says so.
 - **Mute.** Muting the microphone ends the conversation: Nova's own mute at the Pi, Windows' microphone mute at the PC. Starting a conversation at the PC, by any route, unmutes Windows' microphone as a press does: it is as deliberate.
 
 ### Home Assistant (ha_device.py)
