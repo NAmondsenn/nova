@@ -1074,11 +1074,13 @@ class GoogleCalendar:
                 "undo": _undo(summary, lambda: self._send_once("DELETE", added),
                               f"Took {summary} back off your calendar.", f"I can't tell whether {summary} was taken off.")}
 
-    def remove(self, search: str, day: Optional[date] = None, at: Optional[str] = None, following: bool = False,
-               calendar: Optional[str] = None, today: Optional[date] = None, now: Optional[datetime] = None) -> Dict:
+    def _remove_now(self, search: str, day: Optional[date] = None, at: Optional[str] = None,
+                    following: bool = False, calendar: Optional[str] = None, today: Optional[date] = None,
+                    now: Optional[datetime] = None) -> Dict:
         """
         Removes an event from one of the user's own calendars, for "cancel the dentist on
-        Thursday" - straight away, and said back so a mistake is heard, and undone by "undo
+        Thursday" - straight away, without his OK, so for the tests only: Nova removes
+        through find_removal and Approvals.gate. Said back so a mistake is heard, and undone by "undo
         that". Only that day's of a repeating event, unless following: then from that one on,
         as Google Calendar's "this and following events" does, so the times before it - past
         shifts and lectures - stay. It's sent once, never again by itself. It's find_removal,
@@ -1106,16 +1108,16 @@ class GoogleCalendar:
                      following: bool = False, calendar: Optional[str] = None, today: Optional[date] = None,
                      now: Optional[datetime] = None) -> Union[Dict, "Removal"]:
         """
-        Works out what remove would remove, writing nothing - so his OK can be asked for the
-        real event, and "which one?" or "I can't find it" is said first, as remove says it.
+        Works out what _remove_now would remove, writing nothing - so his OK can be asked for the
+        real event, and "which one?" or "I can't find it" is said first, as _remove_now says it.
 
         Args:
-            The same as remove's.
+            The same as _remove_now's.
 
         Returns:
             The reply when there's nothing to remove - several to choose from, none found, a day
             gone - else the Removal: what it is, as he's shown it, and what removes it, giving
-            just what remove would have.
+            just what _remove_now would have.
         """
         today, now = _today_and_now(today, now)
         found = (self._all_to_change if following else self._to_change)(search, day, at, today, now, calendar)
