@@ -746,7 +746,8 @@ class Satellite:
     def _cut_in(self, recording: _Recording):
         """
         A press over a reply while an open recording is being sent: stops the reply at once,
-        as a press over one always does, tells the brain, and leaves the recording going - it
+        as a press over one always does, tells the brain, unmutes Windows and plays the press's
+        sound as any press does, and leaves the recording going - it
         is his next turn, and what he says now is its start. In a conversation a press over a
         reply cuts in, where otherwise it would end the recording.
 
@@ -759,6 +760,9 @@ class Satellite:
             self.speaker.stop(["reply"])
             logger.info("Pressed over a reply: it's cut in on")
             self.link.send("cut_in", recording=recording.latest)
+        # As any press does, before its sound: Windows muted by hand since the conversation began
+        # is unmuted, so the sound and what Nova says next are heard.
+        self._unmute_windows()
         # After the reply was stopped, which would have stopped this with it, as it's the
         # same kind of sound.
         self.speaker.play_file(os.path.join(self.sounds_folder, PRESS_SOUND), volume=self.state.volume("general"))
@@ -2279,11 +2283,14 @@ class Satellite:
                 with self._lock:
                     if not self.link.connected:
                         self.ringer.check(time.time())
+            except Exception:
+                logger.exception("Couldn't check the alarm copy")
+            try:
                 # Looked at here, on a thread which is already waking every second, rather than
                 # on one of its own: the canceller is ready some seconds after it's engaged.
                 self._tell_echo_ready()
             except Exception:
-                logger.exception("Couldn't check the alarm copy")
+                logger.exception("Couldn't tell the brain whether the echo canceller is ready")
 
     def _note_start(self) -> bool:
         """

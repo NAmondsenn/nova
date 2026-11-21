@@ -1333,6 +1333,24 @@ def test_a_check_of_the_alarm_copy_which_fails_is_logged_with_where_it_failed(br
     assert record.exc_info is not None and "The copy can't be read" in caplog.text
 
 
+def test_telling_the_brain_the_echo_canceller_is_ready_failing_is_logged_as_that(brain, make, caplog):
+    # On the same thread, each second, as the check of the alarm copy - which still goes on.
+    brain.up = False
+    made = make(start=False)
+    checked = []
+    made.ringer.check = checked.append
+
+    def broken():
+        raise RuntimeError("no canceller")
+
+    made._tell_echo_ready = broken
+    with caplog.at_level(logging.ERROR, logger="satellite"):
+        make.begin(made)
+        assert wait_for(lambda: "Couldn't tell the brain whether the echo canceller is ready" in caplog.text)
+    assert "Couldn't check the alarm copy" not in caplog.text
+    assert wait_for(lambda: checked)
+
+
 def test_the_brains_copy_of_the_alarms_is_kept(brain, make, tmp_path):
     made = make()
     assert wait_for(lambda: connected(made))
@@ -4795,6 +4813,23 @@ def test_a_press_over_a_reply_in_an_open_recording_cuts_in(brain, make):
     made._pressed()
     assert wait_for(lambda: brain.messages("audio_end"))
     brain.say("stop_listening", recording="listen-1")
+
+
+def test_a_press_cutting_in_unmutes_windows_before_its_sound_as_any_press_does(brain, make, pc):
+    made = pressable(brain, make)
+    start_conversation(brain, made)
+    open_listen(brain, made)
+    # Muted by hand since the conversation began.
+    volume = made.system_volume
+    volume.muted = True
+    volume.log = order = []
+    made.speaker.play_file = lambda *args, **kwargs: order.append("chime")
+    say_a_reply(brain)
+    assert wait_for(lambda: made.speaker.streams() and made.speaker.streams()[0].pieces)
+    made._pressed()
+    assert wait_for(lambda: brain.messages("cut_in"))
+    assert wait_for(lambda: order == ["unmute", "chime"])
+    assert volume.muted is False
 
 
 def test_a_press_with_nothing_playing_ends_the_turn(brain, make):
