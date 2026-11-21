@@ -9,8 +9,10 @@ one JSON object:
 - longest_speech: the longest unbroken run of them, in seconds.
 - first_speech_at: when the first of them was, in seconds into the recording, or null if none.
 - words: what Nemotron heard.
-- own_words: with --said, the words the reply was saying, whether what Nemotron heard is a
-  run of them - the reply's own voice - or null if it heard nothing or no --said was given.
+- own_words: with --said, the words the reply was saying, whether what Nemotron heard is the
+  reply's own voice, as the cut-in judges it (a run of them, allowing a word wrong now and then
+  and a first or last word cut short - see cut_in.own_words) - or null if it heard nothing or
+  no --said was given.
 
 The start of a recording made without --warm-up was heard before the echo canceller was
 ready, which isn't like the satellite once it has been running. So with a ready.json beside

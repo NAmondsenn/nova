@@ -238,6 +238,87 @@ def test_a_wrong_word_is_a_substitution_not_a_gap():
     assert own_words("the weather tomorrow is dry", "the weather today is dry and bright")
 
 
+REPLY = "The temperature today is twelve degrees, with a light breeze from the north."
+
+
+def test_an_unfinished_last_word_is_still_the_replys_own():
+    assert own_words("the temperature tod", REPLY)
+    assert own_words("the temperature today is twelve deg", REPLY)
+    # The same, as the whole of what a cut-in hears.
+    assert dipped(REPLY).hear(loud(), "the temperature tod") is None
+
+
+def test_a_run_starting_part_way_through_a_word_is_still_the_replys_own():
+    assert own_words("rature today is", REPLY)
+    assert own_words("perature today is twelve", REPLY)
+
+
+def test_a_single_fragment_is_the_replys_own_from_either_end():
+    assert own_words("tod", REPLY)
+    assert own_words("rature", REPLY)
+    assert not own_words("t", REPLY)
+    assert not own_words("e", REPLY)
+
+
+def test_a_fragment_must_be_at_the_reply_words_own_end():
+    # "ratu" is neither the start nor the end of "temperature", and a start isn't wanted at the front.
+    assert not own_words("ratu today is", REPLY)
+    assert not own_words("temp today is", REPLY)
+    # And an end isn't wanted at the back.
+    assert not own_words("the temperature ay", REPLY)
+
+
+def test_a_different_whole_word_is_still_not_the_replys_own():
+    assert not own_words("the weather", REPLY)
+    assert not own_words("the temperature tomorrow", REPLY)
+
+
+def test_a_fragment_in_the_middle_of_a_run_is_a_wrong_word():
+    # Four words allow one wrong: a piece of a word in the middle is that one, not a free match.
+    assert own_words("the temp today is", REPLY)
+    assert not own_words("the temp tod is", REPLY)
+    # A word cut short at the end doesn't use the allowance up, so one in the middle can have it.
+    assert own_words("the temperature tod is twelve deg", REPLY)
+
+
+def test_a_curly_apostrophe_is_a_straight_one():
+    assert own_words("it's twelve", "It\u2019s twelve")
+    assert own_words("it\u2019s twelve", "It's twelve")
+    assert own_words("it\u2018s twelve", "It's twelve")
+
+
+# would_stop
+
+def test_would_stop_is_what_hear_judges_words_by():
+    cut_in = CutIn(FakeDetector(), SAYING)
+    # Before any dip, and without any effect on it.
+    assert cut_in.would_stop("turn the lights off")
+    assert cut_in.would_stop("stop")
+    assert not cut_in.would_stop("")
+    assert not cut_in.would_stop("weather today is dry")
+    assert not cut_in.would_stop("Yeah, mm-hm")
+    assert not cut_in.would_stop("weather tod")
+    assert cut_in.would_stop("okay but what about")
+    assert cut_in.voice_from is None
+    assert feed(cut_in, [loud()] * DIP_FRAMES)[-1] == "dip"
+
+
+def test_would_stop_holds_stop_even_when_the_reply_says_it():
+    assert CutIn(FakeDetector(), "I'll stop the music when you like").would_stop("stop the music")
+
+
+def test_would_stop_after_a_stop_leaves_it_stopped_and_judges_on():
+    cut_in = dipped()
+    assert cut_in.hear(loud(), "what time is it") == "stop"
+    assert not cut_in.would_stop("weather today is dry")
+    assert cut_in.hear(loud(), "weather today is dry") is None
+
+
+def test_the_replys_text_is_tidied_once():
+    cut_in = CutIn(FakeDetector(), "The weather, TODAY!")
+    assert cut_in._saying_words == ["the", "weather", "today"]
+
+
 # only_listening_noises
 
 def test_listening_noises_are_read_with_hyphens_as_spaces():

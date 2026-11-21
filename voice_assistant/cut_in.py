@@ -37,7 +37,7 @@ CUT_IN_WAIT = 1.0
 LISTENING_NOISES = frozenset({"yeah", "yes", "yep", "mm", "mhm", "mm hm", "uh huh", "okay", "ok", "right",
                               "sure", "i see", "got it"})
 
-# The words which always stop a reply, even when the reply itself says them.
+# The word which always stops a reply, even when the reply itself says it.
 STOP_WORD = "stop"
 
 
@@ -48,15 +48,48 @@ def _tidy(text: str) -> List[str]:
 
     Returns:
         The words, lower-cased and without punctuation, hyphens counting as spaces. An
-        apostrophe inside a word, as in "it's", stays.
+        apostrophe inside a word, as in "it's", stays, and a curly one is a straight one.
     """
+    text = text.replace("\u2019", "'").replace("\u2018", "'")
     return [word for word in (found.strip("'") for found in re.findall(r"[\w']+", text.lower())) if word]
+
+
+def _is_own(heard: List[str], saying: List[str]) -> bool:
+    """
+    Args:
+        heard: The words heard, tidied.
+        saying: The words of the reply, tidied.
+
+    Returns:
+        Whether own_words says the words heard are the reply's own.
+    """
+    length = len(heard)
+    if not length:
+        return False
+    allowed = 0 if length <= 2 else length // 4
+    for start in range(len(saying) - length + 1):
+        wrong = 0
+        for position, (said, was) in enumerate(zip(saying[start:start + length], heard)):
+            if was == said:
+                continue
+            # Speech-to-text hasn't finished the last word it has so far, and a run may begin
+            # part way through a word, so those two edges match a piece of the reply's word
+            # without counting as wrong.
+            if len(was) >= 2 and ((position == length - 1 and said.startswith(was))
+                                  or (position == 0 and said.endswith(was))):
+                continue
+            wrong += 1
+        if wrong <= allowed:
+            return True
+    return False
 
 
 def own_words(heard: str, saying: str) -> bool:
     """
-    Speech-to-text may write numbers and contractions differently from the reply's text,
-    so rather than normalising them a few wrong words are allowed.
+    The allowance is for speech-to-text mishearing a word in a longer run. It doesn't match
+    a number heard as digits against the reply's spoken one ("12" against "twelve"), nor a
+    contraction written another way: those change which words there are, and so aren't
+    matched.
 
     Args:
         heard: The words speech-to-text heard.
@@ -65,18 +98,12 @@ def own_words(heard: str, saying: str) -> bool:
     Returns:
         Whether the words heard are a run of consecutive words of the reply, with up to
         one wrong in every four of them (a substitution at its position) - none when
-        there are one or two. False if nothing was heard.
+        there are one or two. The last word heard also matches if it is the start of the
+        reply's word there, and the first if it is the end of it (each at least two
+        letters), as speech-to-text hasn't finished the last word, and a run may begin
+        part way through one; those aren't counted as wrong. False if nothing was heard.
     """
-    heard, saying = _tidy(heard), _tidy(saying)
-    length = len(heard)
-    if not length:
-        return False
-    allowed = 0 if length <= 2 else length // 4
-    for start in range(len(saying) - length + 1):
-        wrong = sum(1 for said, was in zip(saying[start:start + length], heard) if said != was)
-        if wrong <= allowed:
-            return True
-    return False
+    return _is_own(_tidy(heard), _tidy(saying))
 
 
 def only_listening_noises(heard: str) -> bool:
@@ -118,6 +145,8 @@ class CutIn:
         """
         self.detector = detector
         self.saying = saying
+        # Tidied once here, not for every frame.
+        self._saying_words = _tidy(saying)
         self.threshold = detector.threshold if threshold is None else threshold
         # Counted in frames, with a little allowance so a whole number of frames which is
         # exactly the time asked for isn't pushed up by floating point.
@@ -163,7 +192,7 @@ class CutIn:
             self.voice_from = index - self._speech_run + 1
             return "dip"
 
-        if self._wants_to_stop(words):
+        if self.would_stop(words):
             self._stopped = True
             return "stop"
         # Speech which goes on without real words, a long "mmmm" or Nova's own echo still
@@ -176,18 +205,21 @@ class CutIn:
         self._speech_run = 0
         return "undip"
 
-    def _wants_to_stop(self, words: str) -> bool:
+    def would_stop(self, words: str) -> bool:
         """
+        It has no effect on what hear does, and can be asked at any time, such as of the
+        final words of a transcription.
+
         Args:
-            words: The words heard so far since the voice began.
+            words: The words heard since the voice began.
 
         Returns:
-            Whether they hold "stop", or are neither the reply's own nor only listening
-            noises - as opposed to nothing, or something which doesn't cut in.
+            Whether they would stop the reply: they hold "stop", or are neither the
+            reply's own nor only listening noises. False for nothing.
         """
         tidied = _tidy(words)
         if not tidied:
             return False
         if STOP_WORD in tidied:
             return True
-        return not own_words(words, self.saying) and not only_listening_noises(words)
+        return not _is_own(tidied, self._saying_words) and not only_listening_noises(words)

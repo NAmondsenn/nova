@@ -330,6 +330,21 @@ def test_the_part_after_the_echo_canceller_was_ready_is_scored_on_its_own():
     assert after["words"] == "weather today" and after["own_words"] is True
 
 
+def test_a_word_cut_short_still_counts_as_the_replys_own_when_scored():
+    class Nemotron:
+        def start(self):
+            return object()
+
+        def add(self, stream, audio):
+            pass
+
+        def finish(self, stream):
+            return "the weather tod"
+
+    scored = score_cut_in.report(frames(9, 9), Detector(), Nemotron(), "The weather today is dry")
+    assert scored["own_words"] is True
+
+
 def test_the_time_the_echo_canceller_was_ready_comes_from_ready_json(tmp_path):
     assert score_cut_in.ready_from({"ready_after": 6.0, "recorded_from": 0.0}) == 6.0
     # Recorded from when it was ready, it was ready from the start.
