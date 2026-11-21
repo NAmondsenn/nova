@@ -4624,7 +4624,7 @@ class Approving:
         thread = threading.Thread(target=lambda: out.update(said=self.post(path, body)))
         thread.start()
         _until_true(lambda: len(self.ntfy.sent) > before)
-        answer(self.ntfy.sent[-1]["click"].rsplit("/", 1)[1])
+        answer(self.ntfy.sent[-1]["click"].rsplit("/", 1)[1].split("?")[0])
         thread.join(5)
         return out["said"]
 
@@ -4707,7 +4707,7 @@ def test_approving_through_the_page_settles_it(approving, caplog):
     ran = []
     pending = approving.approvals.gate("Remove 'Dentist'", lambda: ran.append(1) or {"message": "Removed."}, None)
     assert pending["message"] == "That needs your OK. Check your phone."
-    id = approving.ntfy.sent[-1]["click"].rsplit("/", 1)[1]
+    id = approving.ntfy.sent[-1]["click"].rsplit("/", 1)[1].split("?")[0]
     asked = json.loads(_ask(approving.page, f"/api/approvals/request?id={id}")[2])
     signed = approving.phones[0].assert_(from_b64url(asked["challenge"]))
     answer = {"id": id, "credential_id": b64url(signed["credential_id"]),
@@ -4859,7 +4859,7 @@ def test_removing_the_only_way_needs_nothing_and_another_needs_an_approval(files
         assert said == (200, {"success": False, "message": NEEDS_OK})
         assert world.ntfy.sent[-1]["message"] == "Remove the passkey 'Spare'"
         # The one being removed can't answer for itself.
-        assert world.approvals.lookup(world.ntfy.sent[-1]["click"].rsplit("/", 1)[1]).credentials == (
+        assert world.approvals.lookup(world.ntfy.sent[-1]["click"].rsplit("/", 1)[1].split("?")[0]).credentials == (
             b64url(phone.credential_id),)
         said = world.asked("/api/passkeys/remove", {"id": b64url(spare.credential_id)}, world.approve_with(phone))
         assert said == (200, {"success": True, "message": "Removed Spare."})

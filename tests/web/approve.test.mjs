@@ -51,7 +51,7 @@ const bytes = (...values) => Uint8Array.from(values).buffer;
 
 // The script over a stand-in page at `path`, with Nova saying `request` of it and the phone's
 // passkey prompt doing `prompt` (a function of the options it was given).
-async function page({ path = `/approve/${ID}`, request = null, prompt = null } = {}) {
+async function page({ path = `/approve/${ID}`, search = "", request = null, prompt = null } = {}) {
   const nodes = new Map();
   const document = {
     getElementById(id) {
@@ -67,7 +67,7 @@ async function page({ path = `/approve/${ID}`, request = null, prompt = null } =
   const prompts = [];
   const context = vm.createContext({
     document,
-    location: { pathname: path },
+    location: { pathname: path, search },
     console,
     atob,
     btoa,
@@ -229,4 +229,60 @@ test("the page has each id the script asks for, exactly once, and loads its look
   assert.equal(HTML.includes('<script src="/approve.js" defer></script>'), true);
   assert.equal(HTML.indexOf('<script src="/base64url.js" defer></script>') < HTML.indexOf('<script src="/approve.js"'), true);
   assert.equal(HTML.includes('<script src="/base64url.js" defer></script>'), true);
+});
+
+const SIGNED = () => ({ id: "AQID", rawId: bytes(1, 2, 3),
+                        response: { clientDataJSON: bytes(1), authenticatorData: bytes(2), signature: bytes(3) } });
+
+test("opened from the notification, the page approves by itself, once", async () => {
+  const shown = await page({ search: "?go=1", request: OPEN, prompt: SIGNED });
+  // The passkey prompt came with no tap, and its answer was sent.
+  assert.equal(shown.prompts.length, 1);
+  assert.deepEqual(shown.posted.map((one) => one.url), ["/api/approvals/answer"]);
+  assert.equal(shown.shows(), "Remove 'Dentist', Tue 25 Nov 10:00 | Approved.");
+  // Refuse is never done by itself.
+  assert.equal(shown.posted.some((one) => one.url === "/api/approvals/refuse"), false);
+});
+
+test("without go=1, nothing happens until Approve is tapped", async () => {
+  for (const search of ["", "?go=0", "?going=1", "?x=go=1"]) {
+    const shown = await page({ search, request: OPEN, prompt: SIGNED });
+    assert.equal(shown.prompts.length, 0, search);
+    assert.equal(shown.shows(), "Remove 'Dentist', Tue 25 Nov 10:00 | buttons", search);
+  }
+  const { goFrom } = (await page({ path: "/nowhere" })).context.NovaApprove;
+  assert.equal(goFrom("?go=1"), true);
+  assert.equal(goFrom("?a=b&go=1"), true);
+  assert.equal(goFrom(undefined), false);
+});
+
+test("a browser which won't ask without a tap leaves Approve, asking for one", async () => {
+  let refused = true;
+  const shown = await page({
+    search: "?go=1",
+    request: OPEN,
+    prompt: () => {
+      if (refused) {
+        const error = new Error("The request is not allowed without a user gesture.");
+        error.name = "NotAllowedError";
+        throw error;
+      }
+      return SIGNED();
+    },
+  });
+  assert.equal(shown.prompts.length, 1);
+  assert.equal(shown.posted.length, 0);
+  assert.equal(shown.shows(), "Remove 'Dentist', Tue 25 Nov 10:00 | buttons | Tap Approve to continue.");
+  assert.equal(shown.node("approve").disabled, false);
+  // The tap then approves as ever.
+  refused = false;
+  await shown.node("approve").click();
+  assert.equal(shown.shows(), "Remove 'Dentist', Tue 25 Nov 10:00 | Approved.");
+});
+
+test("a request no longer open never asks for a passkey, go=1 or not", async () => {
+  const shown = await page({ search: "?go=1", request: { state: "answered", description: "x", credentials: [] },
+                             prompt: SIGNED });
+  assert.equal(shown.prompts.length, 0);
+  assert.equal(shown.shows(), "Already answered.");
 });

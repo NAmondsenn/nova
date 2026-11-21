@@ -146,7 +146,7 @@ class World:
                                               assertion["signature"])
 
     def last_id(self):
-        return self.ntfy.sent[-1][4].rsplit("/", 1)[1]
+        return self.ntfy.sent[-1][4].rsplit("/", 1)[1].split("?")[0]
 
 
 class Doing:
@@ -188,7 +188,7 @@ def test_the_phone_is_notified_with_a_link(tmp_path, made):
     world = World(tmp_path, made)
     request = world.service.request("Remove 'Dentist', Tue 25 Nov 10:00")
     assert world.ntfy.sent == [(PHONE_TOPIC, "Remove 'Dentist', Tue 25 Nov 10:00", "Approve?", 4,
-                                "https://nova.example.ts.net/approve/" + request.id)]
+                                "https://nova.example.ts.net/approve/" + request.id + "?go=1")]
     assert len(request.id) == 32 and len(request.challenge) == 32
     # Tried again after a failure, a second and then three seconds on.
     assert world.ntfy.waits == (1, 3)

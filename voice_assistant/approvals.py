@@ -307,9 +307,11 @@ class Approvals:
         logger.info(f"Approval {_short(request.id)} is for: {description}", extra=TRANSCRIPT)
         if keys:
             newest = max(keys, key=lambda each: each.added)
+            # go=1 has the page start the passkey prompt itself, so a tap on the
+            # notification goes straight to his fingerprint.
             try:
                 self._ntfy.send_soon(self._ntfy.phone, description, title="Approve?", priority=4,
-                                     click=f"{newest.origin}/approve/{request.id}", waits=PHONE_WAITS)
+                                     click=f"{newest.origin}/approve/{request.id}?go=1", waits=PHONE_WAITS)
             except Exception as e:
                 logger.error(f"Could not tell the phone of an approval ({type(e).__name__})")
         for approver in approvers:
