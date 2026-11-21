@@ -112,7 +112,8 @@ def record_until_silence(source, detector, listen_from: Optional[int] = None,
             drawn-out "ummm", as loud as the rest of what they say, doesn't set off.
             Until it gives a number neither this nor voice_drop applies, so a recording
             kept going by background sound before the user speaks isn't ended before
-            they've said anything.
+            they've said anything. Should it give None again later, only this stops
+            applying: a real word has been heard, so voice_drop carries on.
         no_words_after: Seconds of audio without a new word which end the recording.
         report: Optional dict, filled in when the recording ends with how it did.
             ended_by: What ended it - "silence", "voice drop" (a quiet run which
@@ -177,6 +178,8 @@ def record_until_silence(source, detector, listen_from: Optional[int] = None,
     levels: List[float] = []
     speeches: List[float] = []
     last_still = None
+    # Whether words_quiet has ever given a number - a real word has been heard.
+    word_heard = False
     # Whether the quiet run so far has needed the voice drop to count a frame.
     voice_only = False
     # How many frames in a row have been well below the user's voice - see NO_WORDS_BELOW_DB.
@@ -273,8 +276,11 @@ def record_until_silence(source, detector, listen_from: Optional[int] = None,
             still = words_quiet() if words_quiet is not None else None
             if still is not None:
                 last_still = still
-            # With no words_quiet to ask there's no word to wait for.
-            dropped = (voice_drop is not None and (words_quiet is None or still is not None)
+                word_heard = True
+            # With no words_quiet to ask there's no word to wait for. And once a real word has
+            # been heard the user is talking, so the voice drop carries on even if the words stop
+            # being known - which only stops "no new words", as they can't be taken to have stopped.
+            dropped = (voice_drop is not None and (words_quiet is None or word_heard)
                        and level is not None and loudness is not None
                        and level < loudness * voice_drop)
 

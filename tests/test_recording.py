@@ -396,19 +396,34 @@ def test_a_loud_burst_in_the_middle_that_silero_doesnt_call_speech_doesnt_set_th
     assert report["loudness"] == pytest.approx(8000 / 32768, abs=0.005)
 
 
-def test_words_which_stop_being_known_stop_the_rules_applying():
-    # NemotronTranscription.quiet_words gives None for good if Nemotron can't say its words.
+def test_words_which_stop_being_known_stop_no_new_words_but_not_the_voice_drop():
+    # NemotronTranscription.quiet_words gives None for good if Nemotron can't say its words,
+    # which then can't be taken to have stopped - but a real word was heard, so he is talking.
+    def known_for_a_while(words):
+        steps = iter(range(10 ** 6))
+        return lambda: words.quiet_words() if next(steps) < 20 else None
+
+    # The voice drop carries on, and ends it as it would have.
     feed = AudioFeed()
     feed.feed(seconds(1.0, 8000))
     feed.feed(seconds(3.0, 1500))
     words, report = FakeWords(0.3), {}
-    steps = iter(range(10 ** 6))
-
-    def words_then_none():
-        return words.quiet_words() if next(steps) < 20 else None
 
     audio = record(feed, listen_from=0, timeout=3.0, voice_drop=TWELVE_DB,
-                   words_quiet=words_then_none, heard=words.heard, report=report)
+                   words_quiet=known_for_a_while(words), heard=words.heard, report=report)
+
+    assert 1.6 <= len(audio) / RATE <= 1.8
+    assert report["ended_by"] == "voice drop"
+
+    # But words which would have been still for 1.5s at 1.8s, over a background too loud for
+    # the voice drop, no longer end it.
+    feed = AudioFeed()
+    feed.feed(seconds(1.0, 8000))
+    feed.feed(seconds(3.0, 3000))
+    words, report = FakeWords(0.3, still_from=0.3), {}
+
+    audio = record(feed, listen_from=0, timeout=3.0, voice_drop=TWELVE_DB,
+                   words_quiet=known_for_a_while(words), heard=words.heard, report=report)
 
     assert len(audio) / RATE == pytest.approx(3.0, abs=0.05)
     assert report["ended_by"] == "limit"
