@@ -5,10 +5,11 @@ seconds, so it can be seen whether ending a recording when the voice drops away 
 words stop (see recording.py) works, and what is left.
 
 One line of JSON per recording goes in long-recordings.jsonl in the logs folder: when it
-was noted, how long the speech was, the numbers the recorder saw, and the words heard - only
-if the caller gives them, which it does while logging.log_transcripts is on. Never audio.
-The file is rewritten to keep only the newest MOST lines, so it can't grow, and there's
-no date after which it stops: how long it's wanted for is a decision for later.
+was noted, how long the speech was, the numbers the recorder saw, and the words heard -
+only if the caller gives them, which it does while logging.log_transcripts is on, and a
+line without them takes them out of the lines kept before it too. Never audio. The file
+is rewritten to keep only the newest MOST lines, so it can't grow, and there's no date
+after which it stops: how long it's wanted for is a decision for later.
 """
 
 import contextlib
@@ -17,7 +18,7 @@ import logging
 import os
 import threading
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 # Logger setup
 logger = logging.getLogger(__name__)
@@ -44,7 +45,9 @@ def note_long_recording(path: str, at: datetime, speech_seconds: float, report: 
                         words: Optional[str] = None) -> bool:
     """
     Adds a recording to the record if its speech was long, dropping the oldest lines
-    once there are more than MOST.
+    once there are more than MOST. Without the words - "Keep what's said in the logs" is
+    off - it takes them out of the lines already kept as well, so they don't stay there
+    once the switch is off until they drop off the end.
 
     Best-effort: a failure is only logged - the first time, until the file works again -
     since keeping this record must never be what stops a request being answered. That
@@ -57,7 +60,7 @@ def note_long_recording(path: str, at: datetime, speech_seconds: float, report: 
             speech_ended.
         report: What record_until_silence said about it - what ended it and the numbers
             it saw. Kept as it is, so it must hold nothing but numbers and strings.
-        words: What was heard, or None to leave the words out.
+        words: What was heard, or None to leave the words out - of every line kept.
 
     Returns:
         Whether a line was written.
@@ -77,6 +80,8 @@ def note_long_recording(path: str, at: datetime, speech_seconds: float, report: 
                 # being kept - it drops off the end as newer lines come.
                 with open(path, encoding="utf-8", errors="replace") as f:
                     kept = [kept_line for kept_line in f.read().splitlines() if kept_line.strip()]
+            if words is None:
+                kept = _without_words(kept)
             kept.append(json.dumps(line))
             # Written beside the file and moved over it, so a failure part way through
             # leaves the lines already kept as they were.
@@ -95,3 +100,23 @@ def note_long_recording(path: str, at: datetime, speech_seconds: float, report: 
             _warned = True
             logger.warning(f"Could not keep the note of a long recording in {path}: {e}")
         return False
+
+
+def _without_words(kept: List[str]) -> List[str]:
+    """
+    The lines kept, each without its words. One which can't be read as a line of the record
+    goes, as what is in it can't be told from words; one without words is kept just as it was.
+    """
+    stripped = []
+    for kept_line in kept:
+        try:
+            line = json.loads(kept_line)
+        except ValueError:
+            continue
+        if not isinstance(line, dict):
+            continue
+        if "words" in line:
+            del line["words"]
+            kept_line = json.dumps(line)
+        stripped.append(kept_line)
+    return stripped
