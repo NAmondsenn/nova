@@ -34,7 +34,10 @@
     { id: "routines", name: "Routines", group: "daily", icon: "i-routine", starts: [] },
     { id: "satellites", name: "Satellites", group: "nova", icon: "i-microphone", starts: ["computer."] },
     { id: "sound", name: "Sound and voice", group: "nova", icon: "i-sound", starts: ["voice.", "sounds.", "thresholds."] },
-    { id: "claude", name: "Claude", group: "nova", icon: "i-reply", starts: ["web_search.", "conversation.", "usage."] },
+    // Claude's own two settings of a thread's length are named in full, as the rest of "conversation." is the
+    // Conversation section's, which comes after.
+    { id: "claude", name: "Claude", group: "nova", icon: "i-reply", starts: ["web_search.", "conversation.history_length", "conversation.history_max_age", "usage."] },
+    { id: "conversation", name: "Conversation", group: "nova", icon: "i-voice", starts: ["conversation."] },
     { id: "notifications", name: "Notifications", group: "nova", icon: "i-bell", starts: ["ntfy."] },
     { id: "memory", name: "Memory", group: "nova", icon: "i-memory", starts: [] },
     { id: "keys", name: "Keys", group: "nova", icon: "i-key", starts: [] },
@@ -182,6 +185,15 @@
     claude: (view) => {
       if (view.webSearch == null) return { text: "" };
       return { text: view.webSearch ? "Web search on" : "Web search off" };
+    },
+    // Whether conversations can be started and, if they can, what cuts in on a reply.
+    conversation: (view) => {
+      const conversation = view.conversation;
+      if (!conversation) return { text: "" };
+      if (!conversation.on) return { text: "Conversations off" };
+      if (conversation.talkOver === "voice") return { text: "Conversations on, your voice cuts in" };
+      if (conversation.talkOver === "wake_word_or_press") return { text: "Conversations on, the wake word or a press cuts in" };
+      return { text: "Conversations on" };
     },
     notifications: (view) => {
       const quiet = view.quiet;

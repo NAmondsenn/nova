@@ -3195,7 +3195,7 @@ function batteryIsLow(device) {
 // The view settings_list.js reads, from what the page has been told: each part is null unless
 // the load it comes from last worked, so no line or attention row shows an old value as now.
 // Nova's saved settings which can't be read are shown as its own defaults, which say nothing
-// of what is in use, so the two the list reads are left out then.
+// of what is in use, so the ones the list reads are left out then.
 function currentView() {
   const state = stateSaid;
   const readable = Boolean(state) && !state.satellites_unreadable;
@@ -3205,6 +3205,8 @@ function currentView() {
   };
   const [from, until] = NIGHT.map(setting);
   const searching = setting("web_search.enabled");
+  const talking = setting("conversation.enabled");
+  const cutsIn = setting("conversation.talk_over");
   const volume = state && state.volumes ? state.volumes.general : null;
   const reminder = / reminder$/;
   const lights = worked.home && home && home.available && home.success ? home.lights : null;
@@ -3237,6 +3239,7 @@ function currentView() {
                                                             isDefault: Boolean(one.default) })) : null,
     voice: Number.isFinite(volume) ? Math.round(volume) : null,
     webSearch: typeof searching === "boolean" ? searching : null,
+    conversation: typeof talking === "boolean" ? { on: talking, talkOver: typeof cutsIn === "string" ? cutsIn : null } : null,
     quiet: from && until && typeof from === "string" && typeof until === "string"
       ? (from === until ? false : { from, until }) : null,
     memories: state ? state.memories.length : null,

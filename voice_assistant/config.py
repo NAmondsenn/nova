@@ -38,6 +38,8 @@ CHOICES = {
     ("computer", "screen_orb_place"): ("bottom centre", "bottom left", "bottom right",
                                        "top centre", "top left", "top right"),
     ("computer", "screen_orb_size"): ("small", "medium", "large"),
+    ("conversation", "talk_over"): ("voice", "wake_word_or_press"),
+    ("conversation", "bigger_model"): ("claude-sonnet-5-5", "claude-opus-5-5"),
 }
 # Battery marks are percentages, and how many each kind of device has - the settings page
 # allows no other number. The battery watcher can't check every 0 seconds or call a
@@ -88,6 +90,19 @@ LIMITS: Dict[Tuple[str, str], Limit] = {
     # 0 is no check, and above 0.95 hardly any wake would pass it.
     ("thresholds", "voice_check"): Limit("number", 0, 0.95),
     ("conversation", "history_max_age"): Limit("number", 0, 3600, True),
+    # In a conversation, under 0.6 seconds an ordinary pause between two thoughts would end his turn, and over 5
+    # Nova would seem not to have heard him. A turn under 15 seconds would be no longer than an ordinary request's,
+    # and over 5 minutes a noise taken for speech could hold the microphone open far too long.
+    ("conversation", "pause_seconds"): Limit("number", 0.6, 5),
+    ("conversation", "longest_turn"): Limit("number", 15, 300),
+    # Under a minute Nova would give up between one thought and the next, and over half an hour the microphone
+    # would be left open long after he has gone.
+    ("conversation", "idle_minutes"): Limit("number", 1, 30),
+    # Under 0.1 a reply would hardly be heard turning down, and over 0.8 the dip wouldn't be noticed.
+    ("conversation", "dip_level"): Limit("number", 0.1, 0.8),
+    # Under 20 exchanges a long talk would forget its start within minutes, and over 300 each reply would carry
+    # more than it is worth paying for.
+    ("conversation", "history_exchanges"): Limit("number", 20, 300, True),
     # Under a minute Nova would give up before SoulSync had answered once, and a wait of
     # more than an hour for a song, or four for an album, is a download which has stalled.
     ("music", "song_download_minutes"): Limit("number", 1, 60, True),

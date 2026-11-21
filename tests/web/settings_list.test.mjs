@@ -46,6 +46,7 @@ const view = (changes = {}) => ({
   satellites: [{ name: "bedroom", connected: true, isDefault: true }],
   voice: 60,
   webSearch: true,
+  conversation: { on: true, talkOver: "voice" },
   quiet: { from: "23:00", until: "07:00" },
   memories: 12,
   keys: { set: 6, total: 11 },
@@ -60,7 +61,7 @@ test("the groups and sections are in the contract's order", () => {
   assert.equal(List.GROUPS.map((group) => `${group.id}:${group.name}`).join(" "), "now:Now home:Home daily:Daily nova:Nova");
   assert.equal(
     List.SECTIONS.map((section) => section.id).join(" "),
-    "status music clock devices batteries displays journeys football calendars routines satellites sound claude notifications memory keys else",
+    "status music clock devices batteries displays journeys football calendars routines satellites sound claude conversation notifications memory keys else",
   );
   const section = (id) => List.SECTIONS.find((one) => one.id === id);
   assert.equal(section("status").name, "Status");
@@ -70,6 +71,9 @@ test("the groups and sections are in the contract's order", () => {
   assert.equal(section("satellites").group, "nova");
   assert.equal(section("else").name, "Everything else");
   assert.equal(section("else").icon, "i-settings");
+  // Conversation is in Claude's group, straight after it.
+  assert.equal(section("conversation").name, "Conversation");
+  assert.equal(section("conversation").group, section("claude").group);
 });
 
 test("every key start in the table belongs to its section and sub-heading", () => {
@@ -88,7 +92,17 @@ test("every key start in the table belongs to its section and sub-heading", () =
     ["sounds.chime", "sound", "Sounds"],
     ["thresholds.wake", "sound", "Listening"],
     ["web_search.enabled", "claude", null],
-    ["conversation.model", "claude", null],
+    ["conversation.history_length", "claude", null],
+    ["conversation.history_max_age", "claude", null],
+    ["conversation.enabled", "conversation", null],
+    ["conversation.pause_seconds", "conversation", null],
+    ["conversation.longest_turn", "conversation", null],
+    ["conversation.idle_minutes", "conversation", null],
+    ["conversation.talk_over", "conversation", null],
+    ["conversation.dip_level", "conversation", null],
+    ["conversation.bigger_model", "conversation", null],
+    ["conversation.switch_itself", "conversation", null],
+    ["conversation.history_exchanges", "conversation", null],
     ["usage.limit", "claude", null],
     ["ntfy.topic", "notifications", null],
     ["home_assistant.url", "else", "Home"],
@@ -282,6 +296,15 @@ test("the Claude line says whether web search is on", () => {
   assert.equal(said("claude", { webSearch: true }), "Web search on");
   assert.equal(said("claude", { webSearch: false }), "Web search off");
   assert.equal(said("claude", { webSearch: null }), "");
+});
+
+test("the Conversation line says whether conversations are on and what cuts in", () => {
+  assert.equal(said("conversation"), "Conversations on, your voice cuts in");
+  assert.equal(said("conversation", { conversation: { on: true, talkOver: "wake_word_or_press" } }),
+    "Conversations on, the wake word or a press cuts in");
+  assert.equal(said("conversation", { conversation: { on: true, talkOver: null } }), "Conversations on");
+  assert.equal(said("conversation", { conversation: { on: false, talkOver: "voice" } }), "Conversations off");
+  assert.equal(said("conversation", { conversation: null }), "");
 });
 
 test("the notifications line gives the quiet hours", () => {

@@ -303,6 +303,20 @@ test("each setting is drawn in its feature's block, under the Contract's sub-hea
   assert.equal(shown.headings("else"), "Other");
 });
 
+test("the conversation settings are drawn in the Conversation block and the two older ones stay in Claude's", async () => {
+  const keys = ["conversation.history_max_age", "conversation.history_length", "conversation.enabled",
+                "conversation.history_exchanges"];
+  const shown = page({ state: { ...STATE, settings: keys.map((key) => number(key, 5)) } });
+  await arrived(shown);
+  const inBlock = (id, key) => descendants(shown.block(id)).includes(shown.input(key));
+  assert.equal(`${inBlock("claude", "conversation.history_max_age")},${inBlock("claude", "conversation.history_length")}`, "true,true");
+  assert.equal(`${inBlock("conversation", "conversation.enabled")},${inBlock("conversation", "conversation.history_exchanges")}`, "true,true");
+  assert.equal(inBlock("conversation", "conversation.history_max_age"), false);
+  assert.equal(inBlock("claude", "conversation.enabled"), false);
+  assert.equal(shown.headings("conversation"), "");
+  assert.equal(shown.headings("claude"), "");
+});
+
 test("sub-headings are in the old groups' order, whatever order Nova lists the settings in", async () => {
   const keys = ["thresholds.voice_check", "sounds.chime_enabled", "voice.speed", "wrapped.enabled", "music.provider",
                 "logging.audio", "mqtt.host", "made.up"];
@@ -316,7 +330,7 @@ test("sub-headings are in the old groups' order, whatever order Nova lists the s
 test("a section with no settings on this Nova has no block drawn and no sub-heading", async () => {
   const shown = page();
   await arrived(shown);
-  for (const id of ["claude", "notifications", "music", "journeys", "displays"]) {
+  for (const id of ["claude", "conversation", "notifications", "music", "journeys", "displays"]) {
     assert.equal(shown.block(id).hidden, true, id);
     assert.equal(shown.block(id).children.length, 0, id);
   }

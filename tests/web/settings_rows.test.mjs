@@ -19,7 +19,7 @@ const HTML = web("settings.html");
 
 const BLOCKS = [...HTML.matchAll(/<div class="settings-of" data-settings="([a-z]+)"/g)].map((one) => one[1]);
 const SECTION_IDS = ["status", "music", "clock", "devices", "batteries", "displays", "journeys", "football",
-                     "calendars", "routines", "satellites", "sound", "claude", "notifications", "memory", "keys",
+                     "calendars", "routines", "satellites", "sound", "claude", "conversation", "notifications", "memory", "keys",
                      "else"];
 
 // What has the focus, and the top-level nodes of the page now being tested - which is what a node
@@ -221,6 +221,8 @@ const LABELS = {
   "journeys.buffer_minutes": "Minutes to spare when working out when to leave",
   "web_search.enabled": "Search the web when asked to",
   "music.player": "What plays the music",
+  "conversation.enabled": "Conversations can be started",
+  "conversation.talk_over": "What cuts in on a reply",
   "wrapped.enabled": "Make a Wrapped of your listening",
 };
 const labelOf = (key) => LABELS[key] || assert.fail(`No label for ${key}: copy it from EDITABLE`);
@@ -587,6 +589,23 @@ test("the lights, football, the sign-ins and the setting-based parts are read, a
   assert.equal(`${shown.line("devices")}|${shown.line("football")}|${shown.line("calendars")}`, "||");
 });
 
+test("the Conversation line is read from whether conversations are on and what cuts in, and left empty when they can't be known", async () => {
+  const talkOver = { key: "conversation.talk_over", label: labelOf("conversation.talk_over"), used: "Used straight away",
+                     kind: "text", value: "wake_word_or_press", choices: ["voice", "wake_word_or_press"] };
+  const shown = page({ state: { ...STATE, settings: [yesNo("conversation.enabled", true), talkOver] } });
+  await shown.context.load();
+  assert.equal(`${shown.view().conversation.on},${shown.view().conversation.talkOver}`, "true,wake_word_or_press");
+  assert.equal(shown.line("conversation"), "Conversations on, the wake word or a press cuts in");
+  shown.given.state = { ...STATE, settings: [yesNo("conversation.enabled", false), talkOver] };
+  await shown.context.load();
+  assert.equal(shown.line("conversation"), "Conversations off");
+  // Settings which can't be read are Nova's defaults, and say nothing of what is in use.
+  shown.given.state = { ...STATE, settings_problem: "line 3 is wrong", settings: [yesNo("conversation.enabled", true), talkOver] };
+  await shown.context.load();
+  assert.equal(shown.view().conversation, null);
+  assert.equal(shown.line("conversation"), "");
+});
+
 test("saved settings which can't be read leave the setting-based lines empty, as what is shown is Nova's own", async () => {
   const shown = page({ state: { ...STATE, settings_problem: "line 3 is wrong",
                                 settings: [timeOf("ntfy.quiet_from", "23:00"), timeOf("ntfy.quiet_until", "07:00"), yesNo("web_search.enabled", true)] } });
@@ -742,7 +761,7 @@ test("a search with no match says so, and one of pattern characters throws nothi
   shown.type("[a-");
   assert.equal(shown.node("rows").children[0].textContent, "Nothing on Nova's page matches that.");
   shown.type("");
-  assert.equal(shown.rows().length, 17);
+  assert.equal(shown.rows().length, SECTION_IDS.length);
 });
 
 test("a search reads each section's own words from the page: headings, labels, buttons and placeholders", async () => {

@@ -210,6 +210,41 @@ def test_a_computers_two_ends_for_a_recording_are_set_to_18_db_and_1_5_seconds(t
         assert limit_problem("thresholds", "press_no_words_seconds", value) == "should be from 1.2 to 5"
 
 
+def test_the_conversation_settings_load_with_their_defaults_and_limits(tmp_path):
+    conversation = Config(path=str(tmp_path / "none.yaml")).section("conversation")
+    assert (conversation["history_length"], conversation["history_max_age"]) == (5, 300)
+    assert (conversation["enabled"], conversation["switch_itself"]) == (True, True)
+    assert (conversation["pause_seconds"], conversation["longest_turn"], conversation["idle_minutes"]) == (1.5, 90, 5)
+    assert (conversation["dip_level"], conversation["history_exchanges"]) == (0.3, 100)
+    assert (conversation["talk_over"], conversation["bigger_model"]) == ("voice", "claude-sonnet-5-5")
+    for name, (low, high), message in (("pause_seconds", (0.6, 5), "should be from 0.6 to 5"),
+                                       ("longest_turn", (15, 300), "should be from 15 to 300"),
+                                       ("idle_minutes", (1, 30), "should be from 1 to 30"),
+                                       ("dip_level", (0.1, 0.8), "should be from 0.1 to 0.8"),
+                                       ("history_exchanges", (20, 300), "should be a whole number from 20 to 300")):
+        assert limit_problem("conversation", name, low) is None and limit_problem("conversation", name, high) is None
+        assert limit_problem("conversation", name, low - 0.01) == message, name
+        assert limit_problem("conversation", name, high + 0.01) == message, name
+
+
+def test_the_conversations_talk_over_and_bigger_model_are_choices(tmp_path):
+    (tmp_path / "config.yaml").write_text("conversation:\n  talk_over: shouting\n")
+    with pytest.raises(ConfigError) as caught:
+        Config(path=str(tmp_path / "config.yaml"))
+    assert "'conversation.talk_over' should be one of voice, wake_word_or_press, not 'shouting'" in str(caught.value)
+
+    (tmp_path / "config.yaml").write_text("conversation:\n  bigger_model: claude-haiku-5-5\n")
+    with pytest.raises(ConfigError) as caught:
+        Config(path=str(tmp_path / "config.yaml"))
+    assert ("'conversation.bigger_model' should be one of claude-sonnet-5-5, claude-opus-5-5, "
+            "not 'claude-haiku-5-5'") in str(caught.value)
+
+    for talk_over, model in (("wake_word_or_press", "claude-opus-5-5"), ("voice", "claude-sonnet-5-5")):
+        (tmp_path / "config.yaml").write_text(f"conversation:\n  talk_over: {talk_over}\n  bigger_model: {model}\n")
+        conversation = Config(path=str(tmp_path / "config.yaml")).section("conversation")
+        assert (conversation["talk_over"], conversation["bigger_model"]) == (talk_over, model)
+
+
 def test_the_batteries_defaults_are_checked(tmp_path):
     config = Config(path=str(tmp_path / "none.yaml"))
     batteries = config.section("batteries")
@@ -321,6 +356,11 @@ IN_AND_OUT = {
     ("thresholds", "media_wake_word_confidence"): ([0.3, 0.95, 0.75], [0.2, 0.29, 0.97, 1, True, 0]),
     ("thresholds", "voice_check"): ([0, 0.2, 0.95], [-0.1, 0.96, 1, True]),
     ("conversation", "history_max_age"): ([0, 3600, 300], [-1, 3601, 1.5]),
+    ("conversation", "pause_seconds"): ([0.6, 5, 1.5, 2], [0.59, 0.5, 5.1, 6, True, 0]),
+    ("conversation", "longest_turn"): ([15, 300, 90, 45.5], [14.9, 14, 301, True, 0]),
+    ("conversation", "idle_minutes"): ([1, 30, 5, 2.5], [0.9, 0.5, 31, True, 0]),
+    ("conversation", "dip_level"): ([0.1, 0.8, 0.3], [0.09, 0.81, 1, True, 0]),
+    ("conversation", "history_exchanges"): ([20, 300, 100], [19, 301, 100.5, True, 0]),
     ("mqtt", "host"): (["192.168.1.20", "ha.local", ""], ["http://ha.local", "ha local"]),
     ("mqtt", "port"): ([1, 1883, 65535], [0, 65536, 1883.5]),
     ("satellite", "press_port"): ([1024, 10401, 65535], [1023, 65536, 10401.5, True, "10401"]),

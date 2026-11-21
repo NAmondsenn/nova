@@ -2213,6 +2213,46 @@ def test_a_computers_two_ends_for_a_recording_are_on_the_page_and_used_straight_
             "success": False, "message": f"{rows[key][0]} should be from {low} to {high}."}
 
 
+def test_the_conversation_settings_are_on_the_page_used_straight_away(files):
+    rows = {"conversation.enabled": ("Conversations can be started", True),
+            "conversation.pause_seconds": ("Seconds of quiet which end your turn", 1.5),
+            "conversation.longest_turn": ("Longest turn, in seconds", 90),
+            "conversation.idle_minutes": ("Minutes of quiet which end a conversation", 5),
+            "conversation.talk_over": ("What cuts in on a reply", "voice"),
+            "conversation.dip_level": ("How far a reply turns down when you talk", 0.3),
+            "conversation.bigger_model": ("Model for planning", "claude-sonnet-5-5"),
+            "conversation.switch_itself": ("Nova may move up by itself", True),
+            "conversation.history_exchanges": ("Most exchanges remembered", 100)}
+    page, running = _running(files)
+    shown = {setting["key"]: setting for setting in page.state()["settings"]}
+    for key, (label, value) in rows.items():
+        assert (shown[key]["label"], shown[key]["value"], shown[key]["used"]) == (label, value, NOW), key
+    assert shown["conversation.enabled"]["kind"] == shown["conversation.switch_itself"]["kind"] == "yes/no"
+    assert shown["conversation.talk_over"]["choices"] == ["voice", "wake_word_or_press"]
+    assert shown["conversation.bigger_model"]["choices"] == ["claude-sonnet-5-5", "claude-opus-5-5"]
+    for key, low, high in (("pause_seconds", 0.6, 5), ("longest_turn", 15, 300), ("idle_minutes", 1, 30),
+                           ("dip_level", 0.1, 0.8), ("history_exchanges", 20, 300)):
+        row = shown[f"conversation.{key}"]
+        assert (row["min"], row["max"]) == (low, high), key
+
+    changes = {"conversation.enabled": False, "conversation.pause_seconds": 2.5, "conversation.longest_turn": 120,
+               "conversation.idle_minutes": 10, "conversation.talk_over": "wake_word_or_press",
+               "conversation.dip_level": 0.5, "conversation.bigger_model": "claude-opus-5-5",
+               "conversation.switch_itself": False, "conversation.history_exchanges": 150}
+    result = page.save_settings(changes, LOGIN)
+    assert result == {"success": True, "message": "Saved. It's used straight away.", "restart_needed": False}
+    for key, value in changes.items():
+        assert running.section("conversation")[key.split(".")[1]] == value, key
+
+    for key, refused in (("conversation.pause_seconds", 0.5), ("conversation.pause_seconds", 6),
+                         ("conversation.longest_turn", 14), ("conversation.longest_turn", 301),
+                         ("conversation.idle_minutes", 0.5), ("conversation.idle_minutes", 31),
+                         ("conversation.dip_level", 0.05), ("conversation.dip_level", 0.9),
+                         ("conversation.history_exchanges", 19), ("conversation.history_exchanges", 301),
+                         ("conversation.talk_over", "shouting"), ("conversation.bigger_model", "claude-haiku-5-5")):
+        assert page.save_settings({key: refused}, LOGIN)["success"] is False, (key, refused)
+
+
 def test_hear_it_refuses_a_speed_out_of_range(files):
     page = _page()
     for speed in (2, 0.5, "fast", float("inf"), True, None):
