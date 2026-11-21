@@ -28,7 +28,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from voice_assistant import paths, storage
 from voice_assistant.actions import ActionExecutor
 from voice_assistant.clock_ringing import heard_in
-from voice_assistant.computers import ComputerControl, ComputerHooks
+from voice_assistant.computers import MIC_MUTE_MINUTES, ComputerControl, ComputerHooks
 from voice_assistant.config import CHOICES
 from voice_assistant.conversation import NOT_CAUGHT, Conversation
 from voice_assistant.ha_device import DeviceControls, NovaDevice
@@ -466,7 +466,8 @@ class Session:
         satellite's to keep but are sent here so a save on the settings page can reach
         it in the same way - see Brain.apply_settings - as can something starting or
         stopping in its room. A push-to-talk satellite is also sent how to show Nova's
-        orb on its screen, the only kind which has one.
+        orb on its screen, the only kind which has one, and what its app needs: its
+        shortcut, this page's address and how long its microphone stays muted.
 
         Returns:
             Whether it was sent.
@@ -490,7 +491,7 @@ class Session:
                                 f"so its wake word needs {wake_confidence:g}")
             return self.satellite.set_state(volumes, self._muted, self.thresholds.get("recording_timeout", 15.0),
                                             wake_confidence=wake_confidence, voice_check=voice_check,
-                                            screen_orb=self._screen_orb())
+                                            screen_orb=self._screen_orb(), app=self._app())
 
     def _screen_orb(self) -> Optional[Dict]:
         """
@@ -511,6 +512,29 @@ class Session:
         on = computer.get("screen_orb")
         return {"on": on if isinstance(on, bool) else DEFAULT_SCREEN_ORB["on"],
                 "place": _orb_choice(computer, "place"), "size": _orb_choice(computer, "size")}
+
+    def _app(self) -> Optional[Dict]:
+        """
+        Returns:
+            What the satellite's app needs - {"shortcut", "page", "mic_mute_minutes"} - as the
+            settings are now so a save reaches it with no restart, or None for a satellite
+            which listens for a wake word, which has no app. The shortcut is as shortcut.written
+            gives it, "" for none, and the page is "" while no address is set.
+        """
+        if not self.satellite.push_to_talk:
+            return None
+        page = self.brain.config.section("wrapped").get("link")
+        minutes = self.brain.config.section("computer").get("mic_mute_minutes")
+        # config.yaml takes a whole number from 1 up, but one written by hand or left empty is the default.
+        if isinstance(minutes, bool) or not isinstance(minutes, int) or minutes < 1:
+            minutes = MIC_MUTE_MINUTES
+        return {"shortcut": self.brain.rooms.shortcut(self.satellite.name),
+                "page": page.strip() if isinstance(page, str) else "", "mic_mute_minutes": minutes}
+
+    @property
+    def shortcut_taken(self) -> bool:
+        """Whether the satellite said another program has its shortcut, on this connection."""
+        return self.satellite.shortcut_taken
 
     def _wake_confidence(self, playing: List[str]) -> float:
         """

@@ -160,7 +160,8 @@ MOVING_NEEDS_NAVIDROME = "Moving music only works with Navidrome."
 # save of any of them on the settings page sends every satellite its state again.
 SENT_IN_STATE = (("thresholds", "recording_timeout"), ("thresholds", "wake_word_confidence"),
                  ("thresholds", "media_wake_word_confidence"), ("thresholds", "voice_check"),
-                 ("computer", "screen_orb"), ("computer", "screen_orb_place"), ("computer", "screen_orb_size"))
+                 ("computer", "screen_orb"), ("computer", "screen_orb_place"), ("computer", "screen_orb_size"),
+                 ("computer", "mic_mute_minutes"), ("wrapped", "link"))
 
 
 def _speech_to_text(config, tts: TextToSpeech):

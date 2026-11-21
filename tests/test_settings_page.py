@@ -60,7 +60,7 @@ LOGIN = "you@example.com"
 # What the page says of a satellite nothing is known of: not what machine it is, what else it's called, whether it
 # saves notes or opens things, or which PC it is.
 UNKNOWN = {"machine": None, "called": [], "saves_notes": False, "opens": False, "opens_on": True, "apps_found": 0,
-           "app_names": {}, "pc_device": None}
+           "app_names": {}, "pc_device": None, "shortcut": "ctrl+alt+n", "shortcut_taken": False}
 
 
 class FakeVolume:
@@ -218,6 +218,8 @@ class FakeSession:
         self.routines_run = []
         # How many times its satellite was sent its state.
         self.states_sent = 0
+        # Whether the computer said another program has its shortcut.
+        self.shortcut_taken = False
 
     def run_routine(self, routine):
         self.routines_run.append(routine["name"])
@@ -276,6 +278,9 @@ class FakeRooms:
 
     def pc_device(self, name):
         return None
+
+    def shortcut(self, name):
+        return "ctrl+alt+n"
 
 
 class FakeBrain:
@@ -2656,6 +2661,76 @@ def test_set_opens_saves_the_switch(files, tmp_path, caplog):
     assert page.brain.rooms.opens_things("pc") is True
     assert page.set_opens("ghost", True, LOGIN)["success"] is False
     assert page.set_opens("pc", "false", LOGIN) == {"success": False, "message": "That didn't make sense."}
+
+
+def test_a_shortcut_is_saved_as_written_and_sent_at_once(files, tmp_path, caplog):
+    page = _opening(tmp_path)
+    with caplog.at_level(logging.INFO):
+        assert page.set_shortcut("pc", "Alt+CTRL+N", LOGIN) == {"success": True,
+                                                              "message": "pc listens on Ctrl+Alt+N now."}
+    # In the one form the app reads, whatever order and case it was typed in.
+    assert page.brain.rooms.shortcut("pc") == "ctrl+alt+n"
+    assert page.brain.sessions["pc"].states_sent == 1 and page.brain.sessions["mac"].states_sent == 0
+    assert f"Settings page: {LOGIN} set the shortcut of the pc satellite to ctrl+alt+n" in caplog.text
+    assert page.set_shortcut("pc", " shift + F5 ", LOGIN)["message"] == "pc listens on Shift+F5 now."
+    assert page.brain.rooms.shortcut("pc") == "shift+f5" and page.brain.sessions["pc"].states_sent == 2
+
+
+def test_a_shortcut_for_a_satellite_which_is_away_is_saved_for_when_it_is_back(files, tmp_path):
+    rooms = _rooms(tmp_path, ("pc", "pc", True))
+    page = _page(sessions={}, known=["pc"], rooms=rooms)
+    assert page.set_shortcut("pc", "ctrl+alt+m", LOGIN) == {"success": True, "message": "pc listens on Ctrl+Alt+M now."}
+    assert rooms.shortcut("pc") == "ctrl+alt+m"
+
+
+def test_an_empty_shortcut_is_none(files, tmp_path, caplog):
+    page = _opening(tmp_path)
+    with caplog.at_level(logging.INFO):
+        assert page.set_shortcut("pc", "  ", LOGIN) == {"success": True, "message": "pc has no shortcut now."}
+    # Kept as none, which isn't the default it started as.
+    assert page.brain.rooms.shortcut("pc") == "" and page.brain.sessions["pc"].states_sent == 1
+    assert f"Settings page: {LOGIN} took away the shortcut of the pc satellite" in caplog.text
+
+
+def test_a_bad_shortcut_says_why_and_saves_nothing(files, tmp_path):
+    page = _opening(tmp_path)
+    for text, why in (("ctrl+alt", "A shortcut needs a key as well as Ctrl, Alt, Shift or Win."),
+                      ("ctrl+alt+banana", "Nova doesn't know the key 'banana'."),
+                      ("n", "A shortcut needs Ctrl, Alt, Shift or Win with the key, unless it's a function key.")):
+        assert page.set_shortcut("pc", text, LOGIN) == {"success": False, "message": why}
+    assert page.set_shortcut("pc", 5, LOGIN) == {"success": False, "message": "That didn't make sense."}
+    assert page.set_shortcut(["pc"], "ctrl+alt+m", LOGIN) == {"success": False, "message": "That didn't make sense."}
+    assert page.brain.rooms.shortcut("pc") == "ctrl+alt+n" and page.brain.sessions["pc"].states_sent == 0
+
+
+def test_a_shortcut_which_cant_be_saved_says_so(files, tmp_path, monkeypatch):
+    page = _opening(tmp_path)
+
+    def refuse(name, text):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(page.brain.rooms, "set_shortcut", refuse)
+    assert page.set_shortcut("pc", "ctrl+alt+m", LOGIN) == {"success": False, "message": "That couldn't be saved."}
+    assert page.brain.sessions["pc"].states_sent == 0
+
+
+def test_a_shortcut_for_no_such_satellite_is_refused(files, tmp_path):
+    page = _opening(tmp_path)
+    assert page.set_shortcut("ghost", "ctrl+alt+m", LOGIN) == {"success": False,
+                                                              "message": "There's no satellite called ghost."}
+    assert page.brain.rooms.shortcut("ghost") == "ctrl+alt+n"
+
+
+def test_satellites_say_their_shortcut_and_whether_its_taken(files, tmp_path):
+    page = _opening(tmp_path)
+    page.brain.rooms.set_shortcut("mac", "")
+    page.brain.sessions["pc"].shortcut_taken = True
+    shown = {each["name"]: each for each in page.state()["satellites"]}
+    assert (shown["pc"]["shortcut"], shown["pc"]["shortcut_taken"]) == ("ctrl+alt+n", True)
+    assert (shown["mac"]["shortcut"], shown["mac"]["shortcut_taken"]) == ("", False)
+    # Away, nothing is holding it.
+    away = _page(sessions={}, known=["pc"], rooms=_rooms(tmp_path, ("pc", "pc", True)))
+    assert away.state()["satellites"][0]["shortcut_taken"] is False
 
 
 def test_app_names_saved_and_checked(files, tmp_path, caplog):

@@ -50,6 +50,45 @@ def test_a_post_with_the_header_presses(listener):
     assert len(listener.presses) == 1
 
 
+def test_open_calls_on_open(listener):
+    opened = []
+    listener._on_open = lambda: opened.append(threading.current_thread() is not threading.main_thread())
+    assert ask(listener, path="/open") == 204
+    # On the listener's thread, like a press, and no press counted.
+    assert opened == [True]
+    assert listener.presses == []
+
+
+def test_open_without_the_header_is_refused(listener):
+    opened = []
+    listener._on_open = lambda: opened.append(1)
+    assert ask(listener, path="/open", headers={}) == 403
+    assert ask(listener, path="/open", headers={"X-Nova-Press": "0"}) == 403
+    assert ask(listener, path="/open", host=f"evil.example:{listener.port}") == 403
+    assert ask(listener, "GET", "/open") in (403, 404, 405)
+    assert opened == []
+
+
+def test_open_with_nothing_to_open_is_refused(listener):
+    # The listener of a satellite which has no page to open, as the fixture's has none.
+    assert ask(listener, path="/open") == 403
+    assert listener.presses == []
+
+
+def test_press_still_works_beside_open():
+    opened, presses = [], []
+    made = PressListener(0, lambda: presses.append(1), lambda: opened.append(1))
+    made.start()
+    try:
+        assert ask(made, path="/open") == 204
+        assert ask(made, path="/press") == 204
+        assert ask(made, path="/open") == 204
+        # Opening twice is not a bounce: each asks for a window.
+        assert opened == [1, 1] and presses == [1]
+    finally:
+        made.close()
+
+
 def test_without_the_header_nothing_happens(listener):
     assert ask(listener, headers={}) == 403
     assert ask(listener, headers={"X-Nova-Press": "0"}) == 403

@@ -27,7 +27,8 @@ from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 
-from voice_assistant import paths, pc_apps, pc_windows, protocol, storage, watchdog
+from voice_assistant import paths, pc_apps, pc_windows, protocol, shortcut, storage, watchdog
+from voice_assistant.app_menu import AppState
 from voice_assistant.computers import MIC_MUTE_MINUTES, NOT_A_WEB_ADDRESS, safe_url, url_host
 from voice_assistant.config import Config, ConfigError
 from voice_assistant.echo import make_echo_canceller
@@ -43,6 +44,7 @@ from voice_assistant.satellite_link import SILENT_FOR, SatelliteLink
 from voice_assistant.screen_orb import PLACES, OrbStates, ScreenOrb
 from voice_assistant.speaker import BLOCK_SECONDS, Playback, Speaker
 from voice_assistant.timeline import Timeline
+from voice_assistant.tray import Tray
 from voice_assistant.wake_clips import WakeClips, clip_start
 from voice_assistant.wake_word import WakeWordDetector
 from voice_assistant.windows_media import UNCHANGED, WindowsMedia
@@ -59,6 +61,17 @@ RUNNING_MARK = os.path.join(paths.DATA_DIR, "running")
 # docs/superpowers/specs/2026-11-20-mute-means-the-microphone-design.md.
 MIC_MUTE_FILE = os.path.join(paths.DATA_DIR, "mic_muted_until.json")
 
+# Whose presence says Nova isn't to start when he signs in. The app's menu makes and removes it,
+# and the launcher which starts Nova at logon looks for it - see scripts/windows/launcher.pyw.
+NO_LOGON_MARK = os.path.join(paths.DATA_DIR, "no_logon_start")
+
+# The seconds between looks at Windows' microphone while there's a tray, so a mute by hand
+# reaches its icon. A constant so the tests can shorten it.
+MIC_WATCH = 2.0
+
+# Where the tray's icons are: next to this file, as the app is installed from the repository.
+ICONS_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "windows", "icons")
+
 # The seconds in each of the minutes a mute of the PC's microphone lasts - computer.mic_mute_minutes,
 # or computers.MIC_MUTE_MINUTES when the brain doesn't say - a constant so the tests can shorten it.
 MINUTE = 60
@@ -68,8 +81,17 @@ MINUTE = 60
 # long the PC slept.
 MIC_LOOK_EVERY = 30
 
-# Played when the PC's microphone comes back on by itself.
+# Played when the PC's microphone comes back on by itself, or is turned on from the tray's menu.
 MIC_ON_SOUND = "mic_on.wav"
+
+# Played as the tray's menu mutes the PC's microphone. (By voice the sound is MUTE_SOUND, played
+# before Windows is muted: the microphone's own mute silences nothing which is heard.)
+MIC_OFF_SOUND = "mic_off.wav"
+
+# What the app exits with when he chooses Quit or Restart in the tray's menu - the launcher, which
+# runs it, has the same two numbers. (1 is the brain's restart, which systemd answers on a Pi.)
+QUIT_CODE = 10
+RESTART_CODE = 11
 
 # Played, and heard to the end, before Windows is muted by voice, which would silence it; the longest
 # the wait for it goes on, in seconds (his ruling, 20 Nov: muting the sound sounds as the mic does).
@@ -286,10 +308,14 @@ def _machine_and_notes() -> Tuple[Optional[str], bool]:
 class Satellite:
     """One Pi's microphone and speaker, for a brain elsewhere."""
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, tray: Optional[Callable[..., Tray]] = None):
         """
         Args:
             config: The settings.
+            tray: Makes the tray icon, given Tray's own arguments - read_state, on_choice,
+                on_shortcut, on_taken and icons. Left out, it's Tray, and only a push-to-talk
+                satellite on Windows makes one; given, a push-to-talk satellite makes one on
+                any system, which is how the tests give a fake. A wake word satellite never does.
 
         Raises:
             ConfigError: There's no brain to connect to, as backend.address or the
@@ -390,6 +416,12 @@ class Satellite:
         self._mic_changed = threading.Event()
         # Whether looking at Windows' microphone has failed, so it's only logged the once.
         self._mic_look_failed = False
+        # Whether Windows' microphone was muted when last looked at - None if it couldn't be -
+        # so the tray's state never has to wait on Windows, and what the tray was last told
+        # of it. Both written under _mic_lock; the tray's thread reads _mic_seen and
+        # _mic_held_open without it, as the lock is held while Windows is asked.
+        self._mic_seen: Optional[bool] = None
+        self._mic_told: Optional[bool] = None
         # Nova's orb on the PC's screen, while it listens, thinks and speaks there - only
         # on a push-to-talk satellite on Windows, which is the PC, and only where its
         # window can be made, else None and nothing is shown. What it shows is worked out
@@ -485,12 +517,46 @@ class Satellite:
             "restart": self._restart,
         }
 
+        # What the app's tray shows and its menu works from, besides the microphone above and
+        # the brain's connection: the shortcut which makes Nova listen - the default until
+        # the brain says otherwise, or none - and whether another program has it; the address
+        # of the settings page, if the brain gave one; how long a mute of the microphone lasts
+        # (Task 8's menu uses it); and whether music is playing, None until the brain says.
+        self._shortcut: Optional[shortcut.Shortcut] = shortcut.read(shortcut.DEFAULT)
+        self._shortcut_taken = False
+        # Held across reading _shortcut_taken and sending it to the brain, and only then - never
+        # with _lock or _mic_lock - so two threads' tells reach the brain in order.
+        self._taken_lock = threading.Lock()
+        self._page: Optional[str] = None
+        self._mic_minutes = MIC_MUTE_MINUTES
+        self._music_playing: Optional[bool] = None
+        # What of the brain's app settings made no sense, by field, as it was logged.
+        self._refused_app: Dict[str, str] = {}
+        # Nova's icon in the PC's tray, with its menu and shortcut - only on a push-to-talk
+        # satellite (on Windows, unless a test gives one), and only where the icon can be
+        # made, else None and nothing is shown. Made last, as it reads the state above from
+        # its own thread as soon as it exists; and nothing the satellite does waits on it.
+        self.tray: Optional[Tray] = None
+        if self.push_to_talk and (tray is not None or _on_windows()):
+            if self.system_volume is not None:
+                with self._mic_lock:
+                    self._mic_seen = self._look_at_microphone()
+                    self._mic_told = self._mic_shown()
+            made = (tray if tray is not None else Tray)(self._app_state, self._menu_chosen, self._pressed,
+                                                          self._shortcut_is_taken, ICONS_FOLDER)
+            self.tray = made if made.available else None
+        if self.tray is not None:
+            # At the start, so the shortcut works before the brain has said a word.
+            self.tray.set_shortcut(self._shortcut)
+
     def run(self):
         """
         Connects to the brain, and listens for the wake word, until stopped.
 
         Raises:
-            SystemExit: Once stopped - with 1 when the brain asked for a restart.
+            SystemExit: Once stopped - with 1 when the brain asked for a restart, QUIT_CODE (10)
+                when Quit was chosen in the tray's menu and RESTART_CODE (11) for its Restart
+                Nova, which the launcher reads.
         """
         # Tells systemd it has started, and from here on that it's still working.
         watchdog.start()
@@ -501,7 +567,7 @@ class Satellite:
             if self.push_to_talk:
                 # Before the link, so one which can't have its port stops before the brain
                 # hears of it. A press meanwhile waits for the main loop, after the link.
-                self.press_listener = PressListener(self.press_port, self._pressed)
+                self.press_listener = PressListener(self.press_port, self._pressed, on_open=self._open_page)
                 self.press_listener.start()
             self.link = SatelliteLink(self.address, self.name, self.hostname, self.password, self.sample_rate,
                                       self._note_start(), self._on_message, self._on_connected,
@@ -513,6 +579,8 @@ class Satellite:
             threading.Thread(target=self._ring_when_due, daemon=True, name="fallback").start()
             if self.system_volume is not None:
                 threading.Thread(target=self._unmute_mic_when_due, daemon=True, name="microphone").start()
+                if self.tray is not None:
+                    threading.Thread(target=self._watch_mic, daemon=True, name="tray-mic").start()
             if self.opens:
                 threading.Thread(target=self._keep_apps, daemon=True, name="apps").start()
                 threading.Thread(target=self._keep_windows, daemon=True, name="windows").start()
@@ -670,8 +738,11 @@ class Satellite:
                 return
             if opened:
                 self._mic_held_open = True
+                changed = self._note_mic(False)
         if opened:
             logger.info("Windows' microphone was muted, so it's unmuted for this turn")
+            if changed:
+                self._tray_changed()
 
     def _mute_mic_again(self):
         """
@@ -686,13 +757,21 @@ class Satellite:
         with self._mic_lock:
             if not self._mic_held_open:
                 return
-            self._mic_held_open = False
+            # Still held open while Windows is asked, so the tray's state, read without the
+            # lock meanwhile, goes on saying muted; let go only once Windows has answered.
             try:
                 self.system_volume.mute_microphone(True)
+                muted = True
             except Exception as e:
                 logger.warning(f"Couldn't mute Windows' microphone again after the recording ({type(e).__name__})")
-                return
-        logger.info("Windows' microphone is muted again, as it was before the press")
+                muted = False
+            self._mic_held_open = False
+            # One which failed is left on, as last seen, and the tray is told it isn't muted.
+            changed = self._note_mic(True if muted else self._mic_seen)
+        if muted:
+            logger.info("Windows' microphone is muted again, as it was before the press")
+        if changed:
+            self._tray_changed()
 
     def _keep_clip(self, score: float):
         """
@@ -1085,6 +1164,9 @@ class Satellite:
         # request does - and one the orb can't take is left, the same way.
         if self.orb is not None:
             self._take_orb_setting(message.get("screen_orb"))
+        # The app's settings come with the state of a push-to-talk satellite too, each taken
+        # or refused on its own.
+        self._take_app(message.get("app"))
         # A push-to-talk satellite has no wake word to tune, to check a voice for or to
         # note an unmute for: only the mute, which the state copy has just taken.
         if self.wake is None:
@@ -1134,6 +1216,314 @@ class Satellite:
         orb = self.orb
         if orb is not None:
             orb.show(state)
+
+    def _take_app(self, app):
+        """
+        Takes the settings the brain sent for the app: the shortcut which makes Nova listen,
+        the settings page's address and how long a mute of the microphone lasts. Each is
+        checked on its own, so one which makes no sense leaves that one as it was and the
+        others are still taken.
+
+        Args:
+            app: The state's app, {"shortcut": text, "page": text, "mic_mute_minutes": a whole
+                number above 0}. None, or a field left out, when the brain doesn't send it, which
+                is nothing to say; "" for the shortcut means none, and for the page none too.
+                Anything else is left alone and logged, once for each such value, as the brain
+                repeats it with every state.
+        """
+        if app is None:
+            return
+        if not isinstance(app, dict):
+            self._refuse_app("app", app, "the app's settings stay as they were")
+            return
+        changed = False
+        text = app.get("shortcut")
+        if text is not None:
+            try:
+                new = shortcut.read(text)
+            except shortcut.ShortcutError as e:
+                self._refuse_app("shortcut", text, f"the shortcut stays as it was ({e})")
+            else:
+                self._refused_app.pop("shortcut", None)
+                changed = new != self._shortcut or changed
+                self._shortcut = new
+                # Given again whatever it is, so one which was taken is tried again - the tray
+                # keeps one it has registered, and says whether it is taken.
+                if self.tray is not None:
+                    self.tray.set_shortcut(new)
+        page = app.get("page")
+        if isinstance(page, str) and not page.strip():
+            # No page: the brain has no address for it.
+            self._refused_app.pop("page", None)
+            changed = self._page is not None or changed
+            self._page = None
+        elif page is not None:
+            # The same rule as for a page the brain asks to have opened (see _computer).
+            checked = safe_url(page.strip()) if isinstance(page, str) else None
+            if checked is None:
+                self._refuse_app("page", page, "the settings page stays as it was")
+            else:
+                self._refused_app.pop("page", None)
+                changed = checked != self._page or changed
+                self._page = checked
+        minutes = app.get("mic_mute_minutes")
+        if minutes is not None:
+            if _whole(minutes) and minutes > 0:
+                self._refused_app.pop("mic_mute_minutes", None)
+                self._mic_minutes = minutes
+            else:
+                self._refuse_app("mic_mute_minutes", minutes, "a mute of the microphone lasts as long as it did")
+        if changed:
+            self._tray_changed()
+
+    def _refuse_app(self, field: str, value, consequence: str):
+        """Logs a setting of the app which made no sense, once for each such value of each field."""
+        if ascii(value) != self._refused_app.get(field):
+            self._refused_app[field] = ascii(value)
+            logger.warning(f"The brain's app {field} makes no sense, so {consequence}: {ascii(value)[:80]}")
+
+    def _tray_changed(self):
+        """
+        Tells the tray something it shows may have changed. Never waits - see Tray - but the tray
+        may call back into the satellite, so it's called with neither _lock nor _mic_lock held.
+        """
+        tray = self.tray
+        if tray is not None:
+            tray.changed()
+
+    def _app_state(self, opening: bool = False) -> AppState:
+        """
+        Gives what the tray shows, from whichever thread it asks on - the tray's own.
+
+        Args:
+            opening: Whether the menu is about to be drawn, so Windows' microphone is looked at
+                there and then rather than taken from the last look (the watch, or a change
+                made here).
+
+        Returns:
+            Whether the brain is connected, whether the microphone is muted - None when it
+            can't be told, or there's no Windows volume to ask - whether music plays, the
+            shortcut as shown (None for none, or while another program has it), whether
+            there's a page which can be opened, whether Nova starts at logon, and whether
+            there are media controls.
+        """
+        shortcut_now = self._shortcut
+        return AppState(
+            connected=self.link is not None and self.link.connected,
+            mic_muted=self._mic_for_the_tray(opening),
+            playing=self._music_playing,
+            shortcut=None if shortcut_now is None or self._shortcut_taken else shortcut.shown(shortcut_now),
+            # Only where a page can be opened: without Windows' parts Settings could only fail.
+            page=self._page is not None and self.opens,
+            at_logon=not os.path.exists(NO_LOGON_MARK),
+            music=self.media is not None,
+        )
+
+    def _mic_for_the_tray(self, opening: bool) -> Optional[bool]:
+        """Whether the tray shows the microphone as muted (see _mic_shown), looking first if the menu is opening."""
+        if self.system_volume is None:
+            return None
+        if not opening:
+            # Without _mic_lock, which is held across Windows calls that can take seconds if
+            # its thread is stuck, and the tray's thread must stay free for a press or a click.
+            # Two plain reads: a pair caught half way through a change is put right by the
+            # tray_changed which _note_mic's caller makes once it lets the lock go.
+            return self._mic_shown()
+        # Only as the menu opens does the tray wait for Windows, as it means to.
+        with self._mic_lock:
+            changed = self._note_mic(self._look_at_microphone())
+            shown = self._mic_shown()
+        if changed:
+            self._tray_changed()
+        return shown
+
+    def _mic_shown(self) -> Optional[bool]:
+        """
+        Whether the tray shows Windows' microphone as muted: when it is, or a press is holding
+        it open, as it's muted again when the turn ends. None if it can't be told. The tray's
+        state calls this without _mic_lock; anything which changes the answer holds it.
+        """
+        return True if self._mic_held_open else self._mic_seen
+
+    def _note_mic(self, muted: Optional[bool]) -> bool:
+        """
+        Notes what Windows' microphone is now, as looked at or as it was just left.
+
+        Args:
+            muted: Whether it's muted, or None if it couldn't be looked at. Call with _mic_lock held.
+
+        Returns:
+            Whether that changes what the tray shows from what it was last told, so the
+            caller tells it once the lock is let go.
+        """
+        self._mic_seen = muted
+        shown = self._mic_shown()
+        changed = shown != self._mic_told
+        self._mic_told = shown
+        return changed
+
+    def _look_at_microphone(self) -> Optional[bool]:
+        """
+        Looks at whether Windows' microphone is muted. Call with _mic_lock held.
+
+        Returns:
+            Whether it is, or None if it couldn't be looked at - logged once, however often.
+        """
+        try:
+            return bool(self.system_volume.microphone_muted())
+        except Exception as e:
+            if not self._mic_look_failed:
+                logger.warning(f"Couldn't look at whether Windows' microphone is muted ({type(e).__name__})")
+                self._mic_look_failed = True
+            return None
+
+    def _watch_mic(self):
+        """
+        Looks at Windows' microphone each MIC_WATCH seconds, so a mute by hand reaches the tray,
+        until stopped - each MIC_LOOK_EVERY seconds instead while looking fails.
+        """
+        wait = MIC_WATCH
+        while not self._finished.wait(wait):
+            with self._mic_lock:
+                muted = self._look_at_microphone()
+                self._note_mic(muted)
+            # After a look which failed - Windows' volume thread may be stuck - the next is
+            # MIC_LOOK_EVERY away, until one succeeds, so the lock isn't held most of the time.
+            wait = MIC_WATCH if muted is not None else MIC_LOOK_EVERY
+            # Told on every look, not only on a change: the tray skips a look it already shows,
+            # and so a change it missed - read half way through one - is put right within
+            # MIC_WATCH. Only once the lock is let go: the tray never waits, but it may call back.
+            self._tray_changed()
+
+    def _shortcut_is_taken(self, taken: bool):
+        """
+        The tray says whether another program has the shortcut, on its own thread, each time it
+        tries it. A change is passed to the brain, which shows it on the settings page.
+        """
+        taken = bool(taken)
+        if taken == self._shortcut_taken:
+            return
+        self._shortcut_taken = taken
+        logger.info("Another program has the shortcut, so Nova's isn't set" if taken else "Nova has its shortcut")
+        self._tray_changed()
+        self._tell_brain_shortcut_taken()
+
+    def _tell_brain_shortcut_taken(self):
+        """
+        Tells the brain whether the shortcut is taken, if it can be reached; also done as each
+        connection is made. From the tray's thread and the link's, so the read and the send are
+        made together under _taken_lock: one which read the old value can't arrive after the new.
+        """
+        link = self.link
+        if link is not None:
+            with self._taken_lock:
+                link.send("shortcut_taken", taken=self._shortcut_taken)
+
+    def _menu_chosen(self, choice: str):
+        """
+        Does what an item of the tray's menu says, on the tray's own thread - so it never raises
+        into it, and never waits long. A choice Nova doesn't know is logged and left.
+
+        Args:
+            choice: The item's id, from voice_assistant.app_menu.
+        """
+        # Made as it's chosen, so each method is looked up then.
+        actions = {
+            "listen": self._pressed,
+            "play_pause": self._menu_play_pause,
+            "next": lambda: self._media_pressed("next"),
+            "mute": self._menu_mute,
+            "settings": self._open_page,
+            "at_logon": self._menu_at_logon,
+            "restart": lambda: self._leave(RESTART_CODE, "Restarting, as he chose in the tray's menu"),
+            "quit": lambda: self._leave(QUIT_CODE, "Quitting, as he chose in the tray's menu"),
+        }
+        action = actions.get(choice) if isinstance(choice, str) else None
+        if action is None:
+            logger.debug(f"The tray's menu gave a choice Nova doesn't know: {ascii(choice)[:40]}")
+            return
+        logger.debug(f"Menu item chosen: {choice}")
+        try:
+            action()
+        except Exception:
+            logger.exception(f"Menu item {choice} failed")
+
+    def _menu_play_pause(self):
+        """Pauses the music when it's playing, and plays it otherwise - also when the brain never said."""
+        self._media_pressed("pause" if self._music_playing is True else "play")
+
+    def _menu_mute(self):
+        """
+        Mutes Windows' microphone for the minutes the brain gave if it's on, and turns it on if it's
+        muted, with the sound for it - as by voice, but the brain isn't asked, so it works with the
+        brain away. Does nothing when the microphone can't be told or reached.
+        """
+        muted = self._app_state(True).mic_muted
+        if muted is None:
+            logger.info("The microphone can't be reached, so the menu's mute does nothing")
+            return
+        # With nothing held: this takes _mic_lock, and the speaker is used after it lets go.
+        answer = self._mute_microphone({"mute": not muted, "minutes": self._mic_minutes})
+        if "muted" not in answer:
+            logger.info("Windows' microphone couldn't be changed from the menu, so no sound is played")
+            return
+        sound = MIC_OFF_SOUND if answer["muted"] else MIC_ON_SOUND
+        self.speaker.play_file(os.path.join(self.sounds_folder, sound), volume=self.state.volume("general"))
+
+    def _menu_at_logon(self):
+        """Has Nova start when he signs in if it doesn't, and not if it does: the mark is the file which says not."""
+        try:
+            if os.path.exists(NO_LOGON_MARK):
+                os.remove(NO_LOGON_MARK)
+                logger.info("Nova will start when he signs in to Windows")
+            else:
+                with open(NO_LOGON_MARK, "w"):
+                    pass
+                logger.info("Nova won't start when he signs in to Windows")
+        except OSError as e:
+            logger.warning(f"Couldn't change whether Nova starts with Windows ({type(e).__name__})")
+        self._tray_changed()
+
+    def _leave(self, code: int, why: str):
+        """
+        Ends the app with this exit code, as Quit and Restart do. The icon goes at once - closing
+        the tray from its own thread doesn't wait for itself - while the rest is closed down
+        by the main loop's clean up, which closes it again, harmlessly.
+
+        Args:
+            code: The exit code: QUIT_CODE or RESTART_CODE, which the launcher acts on.
+            why: What's logged, as it goes.
+        """
+        logger.info(why)
+        try:
+            if self.tray is not None:
+                self.tray.close()
+        finally:
+            self.stop(code)
+
+    def _open_page(self):
+        """
+        Opens the settings page at its satellites, from the menu or a second launch of the app.
+        Nothing without an address, or where Nova can't open pages - so a second launch's ask
+        is still answered.
+        """
+        page = self._page
+        if page is None:
+            logger.debug("Asked to open the settings page, but the brain gave no address for it")
+            return
+        if not self.opens:
+            logger.debug("Asked to open the settings page, but Nova can't open pages here")
+            return
+        # Any fragment the address has is replaced, so there's one, and no slash is added.
+        self._open_in_browser(page.partition("#")[0] + "#satellites")
+
+    def _open_in_browser(self, url: str):
+        """Opens a web address, which safe_url has passed, as the brain's request to open a page does, then brings it to the front."""
+        logger.info(f"Opening a page on {url_host(url)}")
+        _, then = self._open(url, "", browser=True)
+        if then is not None:
+            # Which can take seconds, and the tray's and the listener's threads must stay free.
+            threading.Thread(target=then, daemon=True, name="front").start()
 
     def _check_voice_at(self, sureness: Optional[float]):
         """
@@ -1429,7 +1819,10 @@ class Satellite:
             # Said by voice, so a press's recording ending doesn't change it back.
             self._mic_held_open = False
             self._keep_mic_mute(time.time() + minutes * MINUTE if muted else None)
+            changed = self._note_mic(muted)
         self._mic_changed.set()
+        if changed:
+            self._tray_changed()
         logger.info(f"Windows' microphone is {f'muted for {minutes} minutes' if muted else 'on'}")
         return {"said": "Microphone off." if muted else "Microphone on.", "muted": muted}
 
@@ -1487,19 +1880,21 @@ class Satellite:
         with self._mic_lock:
             if self._mic_until != until or self._mic_held_open:
                 return False
-            try:
-                muted = self.system_volume.microphone_muted()
-            except Exception as e:
-                # Once, rather than every 30 seconds; the hour runs out as it would have.
-                if not self._mic_look_failed:
-                    logger.warning(f"Couldn't look at whether Windows' microphone is muted ({type(e).__name__})")
-                    self._mic_look_failed = True
+            muted = self._look_at_microphone()
+            if muted is None:
+                # Logged once there, rather than every 30 seconds; the hour runs out as it would have.
                 return False
+            changed = self._note_mic(muted)
             if muted:
-                return False
-            self._keep_mic_mute(None)
-        logger.info("Windows' microphone was turned back on by hand, so Nova's mute of it is over")
-        return True
+                ended = False
+            else:
+                self._keep_mic_mute(None)
+                ended = True
+        if changed:
+            self._tray_changed()
+        if ended:
+            logger.info("Windows' microphone was turned back on by hand, so Nova's mute of it is over")
+        return ended
 
     def _mic_mute_ran_out(self, until: float):
         """
@@ -1521,6 +1916,9 @@ class Satellite:
             except Exception as e:
                 logger.warning(f"Couldn't turn Windows' microphone back on ({type(e).__name__})")
                 return
+            changed = self._note_mic(False)
+        if changed:
+            self._tray_changed()
         if not back_on:
             logger.info("Nova's mute of Windows' microphone ran out, but it was already on")
             return
@@ -1600,14 +1998,22 @@ class Satellite:
     def _on_connected(self, connected: bool):
         """Called on the link's own thread each time the brain is reached, or lost."""
         if not connected:
+            # Nobody is left to say whether the music still plays, so the menu says Play / Pause.
+            self._music_playing = None
             # Nothing the brain was doing will end now, so the orb can't wait for it to.
             self._orb_states.lost()
             self._forget_the_brain()
+            self._tray_changed()
             return
         # A new brain, or the same one started again, has neither list yet.
         self._connection += 1
         self._apps_wanted.set()
         self._windows_wanted.set()
+        self._tray_changed()
+        # Whether another program has the shortcut, taken or not, so a brain which has just
+        # started hears it too. Not under _lock: the tray's own thread tells it as well.
+        if self.tray is not None:
+            self._tell_brain_shortcut_taken()
         with self._lock:
             # The brain takes over whatever is still ringing, which it hears is - having
             # been off as it came due, it wouldn't know to ring it otherwise. It's only
@@ -1637,9 +2043,14 @@ class Satellite:
         The brain says what this satellite's music is doing, for Windows' media controls
         to show: the cover with it only when it's a new one, as the payload, or none now.
         """
+        state = message.get("state")
+        if state in ("playing", "paused", "stopped"):
+            # Whether or not there are media controls to show it on: the tray's menu says
+            # Play or Pause by it.
+            self._music_playing = state == "playing"
+            self._tray_changed()
         if self.media is None:
             return
-        state = message.get("state")
         if state not in ("playing", "paused", "stopped"):
             logger.warning(f"The brain sent a now_playing which isn't playing, paused or stopped: "
                            f"{ascii(state)[:40]}")
@@ -1708,7 +2119,8 @@ class Satellite:
 
     def _note_start(self) -> bool:
         """
-        Leaves RUNNING_MARK, which _clean_up takes away.
+        Leaves RUNNING_MARK, which _clean_up takes away, saying where the press listener
+        is if there is one - it's started before this is called.
 
         Returns:
             Whether the last run left one too, so never stopped properly - which the
@@ -1720,7 +2132,11 @@ class Satellite:
             # Half written as the power went, most likely - which is a restart too.
             unclean = True
         try:
-            storage.save_json(RUNNING_MARK, {"started_at": time.time()})
+            mark = {"started_at": time.time()}
+            if self.press_listener is not None:
+                # Where a second launch of the app finds this one, to ask it to open its page.
+                mark["press_port"] = self.press_listener.port
+            storage.save_json(RUNNING_MARK, mark)
         except OSError as e:
             logger.warning(f"Couldn't note that the satellite is running: {e}")
         return unclean
@@ -1741,6 +2157,10 @@ class Satellite:
             self.press_listener.close()
         if self.link is not None:
             self.link.stop()
+        if self.tray is not None:
+            # On this thread, as it waits for the tray's, even if a menu choice has closed it
+            # already - closing it again is safe.
+            self.tray.close()
         if self.media is not None:
             self.media.close()
         if self.system_volume is not None:

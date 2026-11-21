@@ -297,3 +297,55 @@ def test_a_file_from_before_opens_things_and_odd_values_are_read_as_the_defaults
     rooms = _rooms(tmp_path)
     assert rooms.opens_things("pc") is True and rooms.app_names("pc") == {} and rooms.pc_device("pc") is None
     assert rooms.opens_things("mac") is True and rooms.app_names("mac") == {} and rooms.pc_device("mac") is None
+
+
+def test_a_shortcut_is_the_default_until_saved(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.seen("pc", True, "pc", True)
+    # The same for a satellite nobody has seen, so the page and the state never have to ask whether it's known.
+    assert rooms.shortcut("pc") == "ctrl+alt+n" and rooms.shortcut("ghost") == "ctrl+alt+n"
+
+
+def test_a_saved_shortcut_is_kept_across_a_restart(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.seen("pc", True, "pc", True)
+    rooms.set_shortcut("pc", "ctrl+shift+f5")
+    assert rooms.shortcut("pc") == "ctrl+shift+f5"
+    assert _rooms(tmp_path).shortcut("pc") == "ctrl+shift+f5"
+    # The next hello keeps it.
+    rooms.seen("pc", True, "pc", False)
+    assert _rooms(tmp_path).shortcut("pc") == "ctrl+shift+f5"
+
+
+def test_an_emptied_shortcut_stays_empty(tmp_path):
+    rooms = _rooms(tmp_path)
+    rooms.seen("pc", True, "pc", True)
+    rooms.set_shortcut("pc", "")
+    # No shortcut is his choice, not the same as never having chosen.
+    for kept in (rooms, _rooms(tmp_path)):
+        assert kept.shortcut("pc") == ""
+
+
+def test_a_shortcut_which_cant_be_saved_is_refused_and_not_kept(tmp_path, monkeypatch):
+    from voice_assistant import satellite_rooms as rooms_module
+
+    rooms = _rooms(tmp_path)
+    rooms.seen("pc", True, "pc", True)
+
+    def refuse(path, data, indent=None):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(rooms_module, "save_json", refuse)
+    with pytest.raises(OSError):
+        rooms.set_shortcut("pc", "ctrl+alt+m")
+    assert rooms.shortcut("pc") == "ctrl+alt+n"
+
+
+def test_a_shortcut_in_a_file_which_isnt_one_is_read_as_the_default(tmp_path):
+    (tmp_path / "satellite_rooms.json").write_text(json.dumps({
+        "pc": {"push_to_talk": True, "area": None, "shortcut": "ALT + Ctrl + M"},
+        "mac": {"push_to_talk": True, "area": None, "shortcut": "banana"},
+        "old": {"push_to_talk": True, "area": None, "shortcut": 7},
+        "none": {"push_to_talk": True, "area": None, "shortcut": ""}}))
+    rooms = _rooms(tmp_path)
+    assert [rooms.shortcut(name) for name in ("pc", "mac", "old", "none")] == ["ctrl+alt+m", "ctrl+alt+n", "ctrl+alt+n", ""]

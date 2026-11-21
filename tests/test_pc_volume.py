@@ -5,6 +5,7 @@ Audio's endpoint - comtypes is never imported: it's only on the PC.
 """
 
 import threading
+import time
 
 import pytest
 
@@ -142,6 +143,50 @@ def test_off_windows_there_is_no_volume(monkeypatch):
 def test_a_change_gives_up_before_the_brain_stops_waiting():
     # So the satellite's own "couldn't" reaches the brain, rather than the brain's.
     assert pc_volume.JOB_WAIT < remote.COMPUTER_WAIT
+
+
+class StuckCoreAudio(FakeCoreAudio):
+    """Core Audio whose microphone never answers until let go - as a stuck COM call."""
+
+    def __init__(self, endpoint, microphone):
+        super().__init__(endpoint, microphone)
+        self.let_go = threading.Event()
+
+    def microphone(self):
+        self.let_go.wait(10)
+        return super().microphone()
+
+
+def test_a_stuck_thread_is_given_no_more_work_until_it_answers(monkeypatch, endpoint, microphone):
+    monkeypatch.setattr(pc_volume, "JOB_WAIT", 0.2)
+    made = SystemVolume(lambda: StuckCoreAudio(endpoint, microphone))
+    try:
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            made.microphone_muted()
+        assert time.monotonic() - started >= 0.2
+        # The first job is still on the thread: the next is refused at once, and not queued.
+        for _ in range(3):
+            started = time.monotonic()
+            with pytest.raises(TimeoutError):
+                made.mute_microphone(True)
+            assert time.monotonic() - started < 0.1
+        assert made._jobs.qsize() == 0
+        assert microphone._muted is False
+        # Once it answers, calls work again.
+        made._backend.let_go.set()
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                assert made.microphone_muted() is False
+                break
+            except TimeoutError:
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+        assert made.mute_microphone(True) is True and microphone._muted is True
+    finally:
+        made._backend.let_go.set()
+        made.close()
 
 
 def test_unmute_if_muted_unmutes_and_keeps_the_level(volume, endpoint):

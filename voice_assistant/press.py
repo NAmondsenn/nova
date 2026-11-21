@@ -3,11 +3,12 @@ Press.
 
 How a key press reaches a push-to-talk satellite, such as the PC: a small web server on
 this machine's loopback address, which the key's script (flow100.ahk's Numpad 3) posts
-to. It answers one request only, and refuses anything which isn't certainly that - a web
-page open in the user's browser can post to a local address too, so the request must
-carry a header no page can add without the server's say-so (X-Nova-Press), and the Host
-it was sent to must be this address, which a page reaching it through a name of its own
-(DNS rebinding) won't have.
+to. It answers two requests only - POST /press, and POST /open, which a second launch of
+the app makes to have the running one show its page - and refuses anything which isn't
+certainly one of them. A web page open in the user's browser can post to a local address
+too, so the request must carry a header no page can add without the server's say-so
+(X-Nova-Press), and the Host it was sent to must be this address, which a page reaching it
+through a name of its own (DNS rebinding) won't have.
 """
 
 import logging
@@ -64,21 +65,29 @@ class _Server(ThreadingHTTPServer):
 
 
 class _Handler(BaseHTTPRequestHandler):
-    """Answers POST /press, and refuses everything else."""
+    """Answers POST /press and POST /open, and refuses everything else."""
 
     timeout = CLIENT_TIMEOUT
 
     def do_POST(self):
         listener: "PressListener" = self.server.listener
         expected_host = f"{ADDRESS}:{self.server.server_address[1]}"
-        if (self.path != "/press" or self.headers.get(PRESS_HEADER) != "1"
+        if (self.path not in ("/press", "/open") or self.headers.get(PRESS_HEADER) != "1"
                 or self.headers.get("Host") != expected_host):
             self._answer(403)
             return
+        if self.path == "/open":
+            if not listener.has_open:
+                # Nothing to open on this satellite, so it's refused like anything else.
+                self._answer(403)
+                return
+            action, failure = listener.opened, "An open"
+        else:
+            action, failure = listener.pressed, "A press"
         try:
-            listener.pressed()
+            action()
         except Exception:
-            logger.exception("A press failed")
+            logger.exception(f"{failure} failed")
             self._answer(500)
             return
         self._answer(204)
@@ -101,17 +110,21 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class PressListener:
-    """Calls a function whenever a press is posted to it, from a thread of its own."""
+    """Calls a function whenever a press or a request to open is posted to it, from a thread of its own."""
 
-    def __init__(self, port: int, on_press: Callable[[], None]):
+    def __init__(self, port: int, on_press: Callable[[], None], on_open: Optional[Callable[[], None]] = None):
         """
         Args:
             port: Where to listen on this machine, or 0 for any free port - see port.
             on_press: Called, on one of the listener's threads, for each press which isn't
                 a bounce of the one before. It should return quickly.
+            on_open: Called, on one of the listener's threads, for each request to open the
+                app's page, none of them taken for bounces. It should return quickly. Without
+                it, such a request is refused.
         """
         self._port = port
         self._on_press = on_press
+        self._on_open = on_open
         self._server: Optional[_Server] = None
         self._thread: Optional[threading.Thread] = None
         # Guards the time of the last press, as each request has a thread of its own.
@@ -122,6 +135,11 @@ class PressListener:
     def port(self) -> int:
         """Where it listens - once started, the free port it found if it was given 0."""
         return self._port
+
+    @property
+    def has_open(self) -> bool:
+        """Whether there is anything to call for a request to open the page."""
+        return self._on_open is not None
 
     def start(self):
         """
@@ -165,3 +183,8 @@ class PressListener:
                 return
             self._last_press = now
         self._on_press()
+
+    def opened(self):
+        """Passes on one request which has been accepted as asking for the page to open."""
+        if self._on_open is not None:
+            self._on_open()
