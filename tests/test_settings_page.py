@@ -2189,7 +2189,7 @@ def test_a_computers_two_ends_for_a_recording_are_on_the_page_and_used_straight_
     rows = {"thresholds.press_voice_drop_db": ("Quieter than your voice that counts as stopped, at a computer (dB)",
                                                18, 6, 40),
             "thresholds.press_no_words_seconds": ("Seconds without a new word that end it, at a computer",
-                                                  1.5, 0.8, 5)}
+                                                  1.5, 1.2, 5)}
     page, running = _running(files)
     shown = {setting["key"]: setting for setting in page.state()["settings"]}
     for key, (label, value, low, high) in rows.items():
@@ -2202,7 +2202,7 @@ def test_a_computers_two_ends_for_a_recording_are_on_the_page_and_used_straight_
             running.section("thresholds")["press_no_words_seconds"]) == (12, 2.5)
 
     for key, refused in (("thresholds.press_voice_drop_db", 5), ("thresholds.press_voice_drop_db", 41),
-                         ("thresholds.press_no_words_seconds", 0.5), ("thresholds.press_no_words_seconds", 6)):
+                         ("thresholds.press_no_words_seconds", 1.1), ("thresholds.press_no_words_seconds", 6)):
         low, high = rows[key][2:]
         assert page.save_settings({key: refused}, LOGIN) == {
             "success": False, "message": f"{rows[key][0]} should be from {low} to {high}."}

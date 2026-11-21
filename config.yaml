@@ -209,8 +209,9 @@ thresholds:
   # recordings end part way through a quiet sentence; lower it if they don't end.
   press_voice_drop_db: 18
   # The same at a computer when the words stop: the seconds without a new word which end
-  # the recording, whatever else the microphone is hearing. Raise it if Nova cuts you off
-  # when you pause to think; lower it if it waits for you to finish.
+  # the recording once what the microphone hears is well below your voice, from 1.2 to 5.
+  # Raise it if Nova cuts you off when you pause to think; lower it if it keeps listening
+  # after you've finished.
   press_no_words_seconds: 1.5
   # How sure the voice activity model has to be that it's hearing speech, from 0 to 1.
   # Raise it if background noise keeps recordings going; lower it if quiet speech is missed.

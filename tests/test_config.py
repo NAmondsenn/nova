@@ -204,8 +204,10 @@ def test_a_computers_two_ends_for_a_recording_are_set_to_18_db_and_1_5_seconds(t
     assert thresholds["press_no_words_seconds"] == 1.5
     for value in (5, 41):
         assert limit_problem("thresholds", "press_voice_drop_db", value) == "should be from 6 to 40"
-    for value in (0.5, 6):
-        assert limit_problem("thresholds", "press_no_words_seconds", value) == "should be from 0.8 to 5"
+    # Not under 1.2: Nemotron's words only move once each 0.56s of audio it works through, so at 0.8 a
+    # single stretch without a new word could end it.
+    for value in (0.8, 1.19, 6):
+        assert limit_problem("thresholds", "press_no_words_seconds", value) == "should be from 1.2 to 5"
 
 
 def test_the_batteries_defaults_are_checked(tmp_path):
@@ -313,7 +315,7 @@ IN_AND_OUT = {
     ("ntfy", "alerts"): ([["home-lab_1", "b"], []], [["home lab"], ["a/b"], [""], "homelab"]),
     ("thresholds", "silence_duration"): ([0.2, 3, 1], [0.19, 3.1, True]),
     ("thresholds", "press_voice_drop_db"): ([6, 40, 18, 12.5], [5, 41, 5.9, True, 0]),
-    ("thresholds", "press_no_words_seconds"): ([0.8, 5, 1.5, 2], [0.5, 6, 0.79, 5.1, True, 0]),
+    ("thresholds", "press_no_words_seconds"): ([1.2, 5, 1.5, 2], [0.8, 1.19, 6, 5.1, True, 0]),
     ("thresholds", "recording_timeout"): ([5, 30, 15, 7.5], [4, 30.1, True, 0, -1]),
     ("thresholds", "wake_word_confidence"): ([0.3, 0.95, 0.5], [0.2, 0.29, 0.97, 1, True, 0]),
     ("thresholds", "media_wake_word_confidence"): ([0.3, 0.95, 0.75], [0.2, 0.29, 0.97, 1, True, 0]),
