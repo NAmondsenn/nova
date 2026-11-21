@@ -4986,6 +4986,46 @@ def test_ended_while_nova_speaks_its_reply_finishes_and_nothing_more_is_listened
     assert [message["on"] for message in pi.messages("conversation")] == [True, False]
 
 
+def test_a_question_said_as_the_conversation_is_ended_from_elsewhere_isnt_listened_for(brain, connect,
+                                                                                       make_session):
+    # Muted, or switched off in Home Assistant, as a reply which asks something is said: the conversation is over,
+    # so the microphone isn't opened again for an ordinary answer.
+    session, pi = _in_a_conversation(brain, connect, make_session, Reply(say="Okay."),
+                                     Reply(say="Which room?", listen_again=True))
+    brain.stt.texts = ["Hello.", "Turn the lights on."]
+    pi.answers = [said(before=0, after=2), said(before=0, after=2)]
+    pi.held = {2}
+    running(session)
+
+    pi.wake(said())
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 2, seconds=TURNS)
+    session.end_conversation("switch")
+    pi.say("played", id=pi.messages("play_stream")[1]["id"])
+    assert wait_for(lambda: session._idle.is_set(), seconds=TURNS)
+    assert len(pi.messages("listen")) == 1 and brain.tts.said == ["Okay.", "Which room?"]
+    assert _sounds(pi) == ["listening.wav", "listening.wav", "not_heard.wav"]
+
+
+def test_a_typed_question_as_the_conversation_is_ended_from_elsewhere_is_left_unasked(brain, connect,
+                                                                                      make_session):
+    # Nor is a typed answer waited for: what's typed next is a fresh request.
+    session, pi = _in_a_conversation(brain, connect, make_session, Reply(say="Okay."),
+                                     Reply(say="Which room?", listen_again=True))
+    brain.stt.texts = ["Hello."]
+    pi.held = {2}
+    _sending_quiet(pi)
+    running(session)
+
+    pi.wake(said())
+    assert wait_for(lambda: pi.messages("listen"), seconds=TURNS)
+    session.ask("Turn the lights on.")
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 2, seconds=TURNS)
+    session.end_conversation("switch")
+    pi.say("played", id=pi.messages("play_stream")[1]["id"])
+    assert wait_for(lambda: session._idle.is_set(), seconds=TURNS)
+    assert session._typed_question is None
+
+
 def test_ended_is_given_every_exchange(brain, connect, make_session):
     given = []
     session, pi = _in_a_conversation(brain, connect, make_session, Reply(say="One."), Reply(not_for_me=True),

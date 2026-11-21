@@ -2182,9 +2182,12 @@ class Session:
             # What was ringing as the user began, rather than as the wait for them did - see _begun.
             with self._conversation_lock:
                 self.conversation.ringing = self._ringing_begun
+        # Looked at first, as the conversation may be ended from elsewhere while the reply is worked out or
+        # said - a mute, or Home Assistant's switch - after which nothing more is listened for.
+        conversation_on = self._conversation_here()
         heard_over, asked = self._reply_to(text, follow_up=follow_up, timeline=timeline)
         # In a conversation, its own next turn is the answer - see _converse.
-        if heard_over is not None or not asked or self._conversation_here():
+        if heard_over is not None or not asked or conversation_on or self._conversation_here():
             return heard_over
 
         # The assistant asked something, so it listens straight away for the answer.
@@ -2253,6 +2256,8 @@ class Session:
         self.activity = "thinking"
         logger.info("Answering what was typed in Home Assistant")
 
+        # Looked at first, as for a turn heard - see _handle_interaction.
+        conversation_on = self._conversation_here()
         # So Claude is told it was typed, not said - see _here.
         self._typing = True
         try:
@@ -2260,7 +2265,7 @@ class Session:
         finally:
             self._typing = False
         # In a conversation, its own next turn is the answer, spoken or typed - see _converse.
-        if heard_over is not None or not asked or self._conversation_here():
+        if heard_over is not None or not asked or conversation_on or self._conversation_here():
             return heard_over
 
         # The microphone stays shut, as the user chose to type - and it may be muted. An
