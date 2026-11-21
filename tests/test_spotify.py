@@ -164,6 +164,39 @@ def test_only_music_on_this_speaker_is_paused_for_speech(make_controller, device
     assert controller.sp.paused is paused and controller.was_playing() is paused
 
 
+class FakeHeld(FakePlayback):
+    """The client, for music just started and kept until the assistant has finished: paused, and started again."""
+
+    def __init__(self, device, fails=False):
+        super().__init__(device)
+        self.fails = fails
+        self.started = 0
+
+    def pause_playback(self):
+        if self.fails:
+            raise RuntimeError("Player command failed")
+        super().pause_playback()
+
+    def start_playback(self):
+        self.started += 1
+
+
+def test_music_kept_for_the_end_of_a_conversation_plays_once_the_assistant_has_finished(make_controller):
+    controller = make_controller(cached=SAVED)
+    controller.sp = FakeHeld("Kitchen")
+    # Just started, as a play leaves it, with nothing to carry on afterwards.
+    controller._paused_for_speech = False
+    assert controller.hold_for_speech() is True
+    assert controller.sp.paused and controller.sp.started == 0
+    controller.resume_after_speech()
+    assert controller.sp.started == 1
+    # One which couldn't be paused plays on, and isn't started again.
+    controller.sp = FakeHeld("Kitchen", fails=True)
+    assert controller.hold_for_speech() is False
+    controller.resume_after_speech()
+    assert controller.sp.started == 0
+
+
 # Signing in
 
 class FakeCacheFile:

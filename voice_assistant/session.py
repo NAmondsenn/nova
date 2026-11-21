@@ -402,12 +402,15 @@ class Session:
         self._in_gap = False
         self._gap_taken = False
         self._gap_words = False
+        # The thread which took it, so a routine run in it can play its own sounds there.
+        self._gap_taker: Optional[int] = None
         # Whether he has started his turn in the wait the session's thread is in, after which it's no
         # gap until the turn is over, however long he pauses. Only ever read and changed on that thread.
         self._turn_begun = False
         # The sessions of the room whose music the conversation here has let go of, for music asked for
-        # in it to play before it ends - see _let_music_play. Only on the session's own thread.
-        self._let_play: List["Session"] = []
+        # in it to play before it ends, each with the player it let play - see _let_music_play. Only on
+        # the session's own thread.
+        self._let_play: Dict["Session", object] = {}
         # The last volume beep the settings page played, stopped as the next starts,
         # so dragging a slider doesn't pile them up - see boop.
         self._last_boop = None
@@ -1167,12 +1170,12 @@ class Session:
             self.activity = "idle"
             self._idle.set()
             room, self._room_held = self._room_held, [self]
-            playing, self._let_play = self._let_play, []
+            playing, self._let_play = self._let_play, {}
             for session in room:
                 if session in playing:
                     # Let go of already, for music asked for in a conversation, which plays at all of its
-                    # volume now that it's over.
-                    session.music_player.set_share(1.0)
+                    # volume now that it's over - the player it let play, whatever the session has now.
+                    playing[session].set_share(1.0)
                 else:
                     session.music.release()
 
@@ -1334,8 +1337,8 @@ class Session:
         music asked of it is let go of, turned down to MUSIC_SHARE of its volume until the end (see
         _converse), so Nova is still heard over it without its being paused for every reply. Holds are
         counted, so an announcement's still keeps it quiet. Music which was playing as the conversation
-        began stays held, as for any request. Spotify plays what's asked for at once, held or not, and
-        neither says so nor takes a share, so is left as it is.
+        began stays held, as for any request. Spotify takes no share, and what's asked of it is kept
+        paused under the hold until the end instead (see ActionExecutor._until_the_conversation_ends).
         """
         for session in self._room_held:
             player = session.music_player
@@ -1343,7 +1346,7 @@ class Session:
                 continue
             # Turned down first, so it's never heard for a moment at all of its volume.
             player.set_share(MUSIC_SHARE)
-            self._let_play.append(session)
+            self._let_play[session] = player
             session.music.release()
 
     def _room_now(self) -> List["Session"]:
@@ -1829,34 +1832,39 @@ class Session:
         where none is said in a gap.
         """
         with self._gap:
-            while self._gap_taken:
+            # Not for a routine which took the gap, whose own sounds are played in it.
+            while self._gap_taken and self._gap_taker != threading.get_ident():
                 # Getting on, as the announcement ends however its satellite answers - see _play_announcement.
                 self._moved()
                 self._gap.wait(GAP_CHECK)
 
-    def _take_gap(self, words: bool) -> bool:
+    def _take_gap(self, words: bool, still_wanted: Optional[Callable[[], bool]] = None) -> bool:
         """
-        Waits for a gap in a conversation here, and takes it for an announcement: until it's let go of
-        (see _let_gap_go), the session's thread says nothing, and with words listens to nothing. The
-        satellite is let play announcements again, which it silences as it hears the wake word that
+        Waits for a gap in a conversation here, and takes it for an announcement or a routine: until it's
+        let go of (see _let_gap_go), the session's thread says nothing, and with words listens to nothing.
+        The satellite is let play announcements again, which it silences as it hears the wake word that
         starts the conversation.
 
         Args:
-            words: Whether what's to be played is the announcement's words, rather than its sound - which
-                is listened through, as that's when he'd say "stop" to it.
+            words: Whether what's to be played is words, rather than an announcement's sound - which is
+                listened through, as that's when he'd say "stop" to it.
+            still_wanted: The clock's check of what rings, given up on as soon as it's False - a timer
+                dismissed while it waits takes no gap, so nothing he starts saying is lost to its words.
 
         Returns:
-            True once it's taken. False at once with no conversation on here, and once the conversation
-            has ended or the session is idle - when it waits its turn as outside one.
+            True once it's taken, or given up on. False at once with no conversation on here, and once the
+            conversation has ended or the session is idle - when it waits its turn as outside one.
         """
         with self._gap:
             while True:
                 if self._idle.is_set() or not self._conversation_here():
                     return False
+                if still_wanted is not None and not still_wanted():
+                    return True
                 if self._in_gap:
                     break
                 self._gap.wait(GAP_CHECK)
-            self._gap_taken, self._gap_words = True, words
+            self._gap_taken, self._gap_words, self._gap_taker = True, words, threading.get_ident()
         self.speaker.allow("announcement")
         return True
 
@@ -2807,15 +2815,16 @@ class Session:
             gap: For an announcement, what it's about to play - "sound" or "words" - which
                 in an open conversation here waits for the next gap in it and takes it (see
                 _take_gap), rather than for the conversation to end, which could be half an
-                hour. None waits for the conversation to end whatever it is, as a routine does.
+                hour. A routine's words are "words". None waits for the conversation to end
+                whatever it is.
 
         Returns:
             True if the announcement should go ahead.
         """
-        taken = gap is not None and self._take_gap(gap == "words")
-        if not taken and not self._idle.wait(timeout=60):
+        waited = gap is not None and self._take_gap(gap == "words", still_wanted)
+        if not waited and not self._idle.wait(timeout=60):
             # One which became an open conversation meanwhile has gaps to wait for instead.
-            if gap is None or not self._take_gap(gap == "words"):
+            if gap is None or not self._take_gap(gap == "words", still_wanted):
                 logger.warning("Announcing over an unusually long interaction")
 
         # Talking to the assistant is often how something ringing gets dismissed, so
@@ -2877,42 +2886,68 @@ class Session:
         go through the conversation as if the user had said them (see routines.py),
         and what they say is said as an announcement is, so the wake word stops it.
 
+        In an open conversation here, which could go on for half an hour, it runs in
+        the next gap instead, taken as an announcement's words are (see _take_gap): it
+        isn't said over a reply, and what's left of it reaching the microphone isn't
+        taken for his turn. It leaves the conversation's turn as it found it, so a
+        question Nova had just asked can still be answered.
+
         Args:
             routine: The routine, as Routines has it.
         """
         # The music is held from now, so a step which plays some starts it once
-        # everything's been said - as when the user asks for it.
-        self.music.hold()
+        # everything's been said - as when the user asks for it. In an open conversation
+        # here only once it has its gap, so music let play quietly in the conversation
+        # isn't paused while it waits for one.
+        held = not self._conversation_here()
+        if held:
+            self.music.hold()
+        in_gap = False
         try:
             with self._announcing:
-                if not self._wait_for_turn():
-                    return
-                self.activity = "thinking"
-                # A conversation of its own, which drops what a typed question left open
-                # would do - so what's typed next is a fresh request, not its answer.
-                self._drop_typed_question()
-                with self._conversation_lock:
-                    self.conversation.start()
-                    reply = self.conversation.run_routine(routine)
-                for sound, category in reply.sounds:
-                    self._play_sound(sound, volume=self.volume.get(category))
-                if reply.shown:
-                    self._show(f"{self.assistant_name}: {reply.shown}")
-                if reply.say:
-                    self._show(f"{self.assistant_name}: {reply.say}")
-                    self.activity = "speaking"
-                    tts = self.brain.tts
-                    self._play_announcement(self.speaker.play_stream(
-                        tts.stream(reply.say), tts.sample_rate, volume=self.volume.get("general"),
-                        kind="announcement"))
-                # Once it's said, or when nothing was - as for a reply to the user.
-                self._run_after(reply.after)
+                try:
+                    if not self._wait_for_turn(gap="words"):
+                        return
+                    in_gap = self._gap_taken
+                    if not held:
+                        self.music.hold()
+                        held = True
+                    self.activity = "thinking"
+                    # A conversation of its own, which drops what a typed question left open
+                    # would do - so what's typed next is a fresh request, not its answer.
+                    self._drop_typed_question()
+                    with self._conversation_lock:
+                        if in_gap:
+                            with self.conversation.aside():
+                                reply = self.conversation.run_routine(routine)
+                        else:
+                            self.conversation.start()
+                            reply = self.conversation.run_routine(routine)
+                    for sound, category in reply.sounds:
+                        self._play_sound(sound, volume=self.volume.get(category))
+                    if reply.shown:
+                        self._show(f"{self.assistant_name}: {reply.shown}")
+                    if reply.say:
+                        self._show(f"{self.assistant_name}: {reply.say}")
+                        self.activity = "speaking"
+                        tts = self.brain.tts
+                        self._play_announcement(self.speaker.play_stream(
+                            tts.stream(reply.say), tts.sample_rate, volume=self.volume.get("general"),
+                            kind="announcement"))
+                    # Once it's said, or when nothing was - as for a reply to the user.
+                    self._run_after(reply.after)
+                finally:
+                    # The conversation carries on, listening as it was.
+                    self._let_gap_go()
         except Exception as e:
             logger.error(f"A routine failed: {e}", exc_info=True)
         finally:
             if self._idle.is_set():
                 self.activity = "idle"
-            self.music.release()
+            elif in_gap:
+                self.activity = "listening"
+            if held:
+                self.music.release()
 
     # For the settings page and Home Assistant
 

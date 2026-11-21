@@ -84,6 +84,9 @@ CONVERSATION_ENDED = "Okay."
 # What's said when one is asked for where the microphone is muted - by typing in Home Assistant at a
 # wake-word satellite, as nothing else can ask it then - and none is started, as nothing would hear him.
 MICROPHONE_MUTED = "The microphone's muted."
+# What's said in place of "Playing ..." for music asked for during a conversation on a player which would play
+# it at once at its own volume - Spotify - which is kept paused until the conversation ends.
+PLAY_WHEN_DONE = "I'll play it when we're done."
 # What's said on going back to the usual model, and at once on moving up to the bigger one when that is
 # asked again of a slower model, so the wait isn't silence.
 QUICK_ANSWERS = "Okay, quick answers."
@@ -876,13 +879,15 @@ class ActionExecutor:
             return self._play_on(other, "play_music", {"query": query, "search_type": search_type}, on)
         if not query:
             # Carries on whatever is paused in the user's room - see _resumes.
-            return self._music_offline() or self._resumes().play(None, search_type=search_type)
+            player = self._resumes()
+            return self._music_offline() or self._until_the_conversation_ends(
+                player, player.play(None, search_type=search_type))
         reply = self.play_without_offer(query, search_type)
         # Navidrome hasn't got it - not merely couldn't be asked - so it's offered for
         # download instead, if it can be.
         if reply.get("missing") and self.downloads is not None:
             return self.downloads.offer(query, search_type) or reply
-        return reply
+        return self._until_the_conversation_ends(self.music, reply)
 
     def play_without_offer(self, query: Optional[str] = None, search_type: Optional[str] = None) -> Dict:
         """
@@ -914,7 +919,29 @@ class ActionExecutor:
             return failure
         if other is not None:
             return self._play_on(other, "play_playlist", {"name": name}, on)
-        return self._music_offline() or self.music.play_playlist(name or "")
+        return self._music_offline() or self._until_the_conversation_ends(self.music,
+                                                                          self.music.play_playlist(name or ""))
+
+    def _until_the_conversation_ends(self, player, reply: Dict) -> Dict:
+        """
+        Keeps music just started during an open conversation here paused until it ends, on a player which
+        plays what's asked for at once, whatever holds it, at a volume of its own - Spotify - where it would
+        play through every reply and into the open microphone. The conversation's hold on it starts it as it
+        ends (see Session._converse). Navidrome's waits for that hold by itself, and is let play quietly
+        before the end instead (see Session._let_music_play); so would any player which takes a share.
+
+        Args:
+            player: The player which was asked.
+            reply: What it said.
+
+        Returns:
+            The reply - or, once the music is kept, PLAY_WHEN_DONE in place of its "Playing ...", which it
+            isn't. If it couldn't be paused, the reply as it was, as it's playing.
+        """
+        if (not reply.get("success") or hasattr(player, "set_share") or self.conversation is None
+                or not self.conversation.on_at(self.satellite) or not player.hold_for_speech()):
+            return reply
+        return {"success": True, "message": PLAY_WHEN_DONE}
 
     @tool(
         "Download a song or an album the user hasn't got yet, for 'download X', 'get me X' or "

@@ -17,6 +17,7 @@ here, in plain Python: text in, Reply out.
 
 import logging
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
@@ -32,6 +33,11 @@ logger = logging.getLogger(__name__)
 
 # What was going off at the moment the wake word fired, when nothing was.
 NOTHING_RINGING = {"insistent": False, "insistent_entries": [], "reminder": None, "reminder_sounding": False}
+
+# What start() sets afresh for each request: what was ringing as it began, how it began, and the
+# questions asked in it - kept aside by aside().
+TURN = ("ringing", "talked_over", "pressed", "follow_ups", "reminder_offered", "reminder_answer_pending",
+        "asked_first")
 
 # Seconds to wait for Home Assistant's lights before asking Claude without them. Every
 # request to Claude includes the lights, so a Home Assistant which is slow or down must
@@ -192,6 +198,21 @@ class Conversation:
         # morning's "play that one" doesn't colour tonight's "yes".
         self.llm.forget_stale_history()
 
+    @contextmanager
+    def aside(self):
+        """
+        Starts afresh, as start() does, for a routine run by itself during an open conversation - and puts
+        back what the conversation's own turn had once it's done, so a question Nova had just asked there
+        is still answered by what he says next, and what was ringing as the turn began still is.
+        """
+        kept = {name: getattr(self, name) for name in TURN}
+        self.start()
+        try:
+            yield
+        finally:
+            for name, value in kept.items():
+                setattr(self, name, value)
+
     def handle(self, text: str, follow_up: bool = False, timeline: Optional[Timeline] = None,
                in_routine: bool = False) -> Reply:
         """
@@ -278,10 +299,12 @@ class Conversation:
             return self.run_routine(routine, timeline=timeline)
 
         # A timer or alarm going off is silenced by the user saying anything at all,
-        # since talking to the assistant means they've heard it. Read from the wake
-        # word rather than now, so one which came due mid-conversation - which the
-        # user hasn't heard, because announcements wait for the conversation to end -
-        # isn't silenced along with it.
+        # since talking to the assistant means they've heard it. Read as the request
+        # began - the wake word, or the start of a turn of an open conversation -
+        # rather than now, so one which came due while it was being answered isn't
+        # silenced along with it: until a reply is over it waits unheard, as
+        # announcements wait for a request to end, and in an open conversation for
+        # its next gap.
         heard_ringing = self.ringing.get("insistent_entries", [])
 
         # The everyday commands which don't need a language model are handled straight

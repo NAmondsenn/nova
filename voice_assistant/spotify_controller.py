@@ -1432,6 +1432,28 @@ class SpotifyController:
             # Never let this stop the assistant from replying.
             logger.warning(f"Could not pause for speech: {e}")
 
+    def hold_for_speech(self) -> bool:
+        """
+        Pauses what has just been started, for resume_after_speech to carry on with once the assistant
+        has finished talking, as it does music pause_for_speech paused - for music asked for during an
+        open conversation, which Spotify would otherwise play at once through every reply (see
+        ActionExecutor._until_the_conversation_ends).
+
+        Returns:
+            Whether it's paused, to be carried on with then.
+        """
+        if not self._signed_in():
+            return False
+        try:
+            self.sp.pause_playback()
+        except Exception as e:
+            # Never let this stop the assistant from replying - it plays now instead.
+            logger.warning(f"Could not keep the music for the end of the conversation: {e}")
+            return False
+        self._paused_for_speech = True
+        logger.info("Kept Spotify paused until the conversation is over")
+        return True
+
     def close(self):
         """Nothing to stop: raspotify plays the music, and carries on by itself."""
 
