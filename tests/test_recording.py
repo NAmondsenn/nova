@@ -415,41 +415,138 @@ def test_words_which_stop_being_known_stop_the_rules_applying():
 
 
 def test_words_still_for_long_enough_end_it():
-    def steady():
+    def voice_then_background():
+        # His voice for 1s, then a background well below it which Silero still calls speech.
         feed = AudioFeed()
-        feed.feed(seconds(6.0, 8000))
+        feed.feed(seconds(1.0, 8000))
+        feed.feed(seconds(5.0, 3000))
         return feed
 
-    # Speech throughout, so Silero never ends it; the words are real from 0.5s and then
-    # still, so they have been quiet for 1.5s when the audio reaches 2.0s.
-    words, report = FakeWords(0.5, still_from=0.5), {}
-    audio = record(steady(), listen_from=0, words_quiet=words.quiet_words, heard=words.heard, report=report)
+    # Silero never ends it; the words are real from 0.5s and still from his last at 1.0s,
+    # so they have been quiet for 1.5s when the audio reaches 2.5s.
+    words, report = FakeWords(0.5, still_from=1.0), {}
+    audio = record(voice_then_background(), listen_from=0, words_quiet=words.quiet_words, heard=words.heard,
+                   report=report)
 
-    assert len(audio) / RATE == pytest.approx(2.0, abs=0.1)
+    assert len(audio) / RATE == pytest.approx(2.5, abs=0.1)
     assert report["ended_by"] == "no new words"
     assert report["words_quiet"] == pytest.approx(1.5, abs=0.1)
 
     # A shorter wait for it, when the caller asks.
-    words, report = FakeWords(0.5, still_from=0.5), {}
-    audio = record(steady(), listen_from=0, no_words_after=1.0, words_quiet=words.quiet_words,
+    words, report = FakeWords(0.5, still_from=1.0), {}
+    audio = record(voice_then_background(), listen_from=0, no_words_after=1.0, words_quiet=words.quiet_words,
                    heard=words.heard, report=report)
 
-    assert len(audio) / RATE == pytest.approx(1.5, abs=0.1)
+    assert len(audio) / RATE == pytest.approx(2.0, abs=0.1)
 
     # Words which keep changing keep it going to the limit.
     words, report = FakeWords(0.5), {}
-    audio = record(steady(), listen_from=0, words_quiet=words.quiet_words, heard=words.heard, report=report)
+    audio = record(voice_then_background(), listen_from=0, words_quiet=words.quiet_words, heard=words.heard,
+                   report=report)
 
     assert len(audio) / RATE == pytest.approx(5.0, abs=0.05)
     assert report["ended_by"] == "limit"
 
     # And so do none yet - nothing is ended by words nobody has heard.
     report = {}
-    audio = record(steady(), listen_from=0, words_quiet=lambda: None, report=report)
+    audio = record(voice_then_background(), listen_from=0, words_quiet=lambda: None, report=report)
 
     assert len(audio) / RATE == pytest.approx(5.0, abs=0.05)
     assert report["ended_by"] == "limit"
     assert report["words_quiet"] is None
+
+    # Nor does it need a report, or the voice drop, to know how loud it is.
+    words = FakeWords(0.5, still_from=1.0)
+    audio = record(voice_then_background(), listen_from=0, words_quiet=words.quiet_words, heard=words.heard)
+
+    assert len(audio) / RATE == pytest.approx(2.5, abs=0.1)
+
+
+# The settings' default, which the background below is within: 3000 is 8.5 dB below 8000.
+EIGHTEEN_DB = 10 ** (-18 / 20)
+
+
+@pytest.mark.parametrize("filler", [8000, 5000])
+def test_no_new_words_doesnt_end_his_own_long_filler(filler):
+    # "Remind me to... ummm... call the dentist" in a quiet room: Silero calls the "ummm" speech
+    # and Nemotron finds no word in it, but it's as loud as the rest of what he says (or 4 dB
+    # below, for 5000), so it is him still talking.
+    feed = AudioFeed()
+    for length, value in [(1.0, 8000), (2.5, filler), (1.0, 0)]:
+        feed.feed(seconds(length, value))
+    words, report = FakeWords(0.3, still_from=1.0), {}
+
+    audio = record(feed, listen_from=0, voice_drop=EIGHTEEN_DB, words_quiet=words.quiet_words,
+                   heard=words.heard, report=report)
+
+    # Silero's own 0.6s of quiet once he's finished, as today - not 1.5s into the "ummm".
+    assert len(audio) / RATE == pytest.approx(4.1, abs=0.1)
+    assert report["ended_by"] == "silence"
+    assert report["words_quiet"] >= 1.5
+
+
+def test_a_short_pause_after_his_long_filler_doesnt_end_it():
+    # "Remind me to... ummm... call the dentist", with a 0.3s pause after the "ummm": by then
+    # the words have been still for over 1.5s, but the quiet is no longer than a pause he
+    # could make in a quiet room today. Nemotron only finds "call" 0.5s after he says it.
+    feed = AudioFeed()
+    for length, value in [(1.0, 8000), (1.8, 8000), (0.3, 0), (1.0, 8000), (1.0, 0)]:
+        feed.feed(seconds(length, value))
+    words, report = FakeWords(0.3, still_from=1.0), {}
+
+    def still_until_call():
+        quiet = words.quiet_words()
+        return 0.1 if quiet is not None and words.given / RATE >= 3.6 else quiet
+
+    audio = record(feed, listen_from=0, timeout=6.0, voice_drop=EIGHTEEN_DB, words_quiet=still_until_call,
+                   heard=words.heard, report=report)
+
+    assert len(audio) / RATE == pytest.approx(4.7, abs=0.1)
+    assert report["ended_by"] == "silence"
+
+
+@pytest.mark.parametrize("background, ended_by, length", [(3000, "no new words", 2.5), (6000, "limit", 4.0)])
+def test_no_new_words_ends_only_a_background_well_below_his_voice(background, ended_by, length):
+    # 3000 is 8.5 dB below his 8000 - quiet enough for the rule, though not for the voice drop
+    # at 18 dB - and 6000, 2.5 dB below, sounds as loud as him, so runs to the limit as it
+    # did before the rule.
+    assert recording.NO_WORDS_BELOW_DB == 6
+    feed = AudioFeed()
+    feed.feed(seconds(1.0, 8000))
+    feed.feed(seconds(3.0, background))
+    words, report = FakeWords(0.3, still_from=1.0), {}
+
+    audio = record(feed, listen_from=0, timeout=4.0, voice_drop=EIGHTEEN_DB, words_quiet=words.quiet_words,
+                   heard=words.heard, report=report)
+
+    assert len(audio) / RATE == pytest.approx(length, abs=0.1)
+    assert report["ended_by"] == ended_by
+
+
+class MarginDetector(FakeDetector):
+    """Sure of a loud frame, and only unsure - within Silero's margin - of one less loud."""
+
+    def speech_probability(self, frame):
+        level = np.abs(frame).mean()
+        return 1.0 if level > 5000 else 0.4 if level > 1000 else 0.0
+
+
+def test_no_new_words_cant_end_it_before_his_loudness_is_known():
+    # Speech is found on its first 0.12s, but every 0.15s window after it is only maybe
+    # speech, so how loud he is never gets set - and without it there's nothing to be below.
+    feed = AudioFeed()
+    feed.feed(np.full(4 * FRAME, 8000, dtype=np.int16))
+    feed.feed(seconds(4.0, 3000))
+    words, report = FakeWords(0.1, still_from=0.1), {}
+
+    audio = record_until_silence(feed, MarginDetector(), listen_from=0, silence_duration=0.6,
+                                 speech_timeout=0.9, timeout=3.0, words_quiet=words.quiet_words,
+                                 heard=words.heard, report=report)
+
+    assert report["loudness"] is None
+    assert report["words_quiet"] > 2.5
+    assert len(audio) / RATE == pytest.approx(3.0, abs=0.05)
+    assert report["ended_by"] == "limit"
 
 
 def test_the_report_is_numbers_only():

@@ -44,6 +44,15 @@ LEAD_IN_SECONDS = 0.15
 # doesn't set how loud he is, and the dips between syllables don't count as quiet.
 VOICE_WINDOW = 5
 
+# "No new words" only ends a recording once the sound has been at least this far below the
+# loudest the user has been, in decibels, for as long as the quiet which ends one. His own
+# drawn-out "ummm", a hum or a laugh has no new word in it either, but is about as loud as
+# the rest of what he says, so it is never taken for him having stopped; a background which
+# isn't speech, at a microphone close to him, is usually well below his voice. And the
+# quiet has to last, as a pause no longer than one he could make in a quiet room today -
+# straight after a long "ummm", when the words have long been still - mustn't end it either.
+NO_WORDS_BELOW_DB = 6
+
 
 def record_until_silence(source, detector, listen_from: Optional[int] = None,
                          keep_before: float = 0.0, timeout: float = 10.0,
@@ -97,8 +106,11 @@ def record_until_silence(source, detector, listen_from: Optional[int] = None,
             None until speech-to-text has heard a real word in the recording, then
             the seconds of audio since the words last changed - see
             NemotronTranscription.quiet_words. The recording ends when that reaches
-            no_words_after, a backstop for loud sound which isn't speech. Until it
-            gives a number neither this nor voice_drop applies, so a recording
+            no_words_after and the last 0.15s has been at least NO_WORDS_BELOW_DB
+            below the loudest the user has been (see voice_drop) for silence_duration:
+            a backstop for loud sound which isn't speech, which the user's own
+            drawn-out "ummm", as loud as the rest of what they say, doesn't set off.
+            Until it gives a number neither this nor voice_drop applies, so a recording
             kept going by background sound before the user speaks isn't ended before
             they've said anything.
         no_words_after: Seconds of audio without a new word which end the recording.
@@ -151,7 +163,7 @@ def record_until_silence(source, detector, listen_from: Optional[int] = None,
     # rings of the frames' own numbers - a sum of squares and Silero's probability
     # each - so sliding the window on costs one frame's arithmetic and no copy of the
     # frames before it. Only worked out when something will use it.
-    measuring = voice_drop is not None or report is not None
+    measuring = voice_drop is not None or words_quiet is not None or report is not None
     square_ring = [0.0] * VOICE_WINDOW
     speech_ring = [0.0] * VOICE_WINDOW
     window_squares = 0.0
@@ -167,6 +179,9 @@ def record_until_silence(source, detector, listen_from: Optional[int] = None,
     last_still = None
     # Whether the quiet run so far has needed the voice drop to count a frame.
     voice_only = False
+    # How many frames in a row have been well below the user's voice - see NO_WORDS_BELOW_DB.
+    no_words_below = 10 ** (-NO_WORDS_BELOW_DB / 20)
+    below_frames = 0
     ended_by = "limit"
 
     def note(by: str):
@@ -277,7 +292,9 @@ def record_until_silence(source, detector, listen_from: Optional[int] = None,
                 voice_only = False
                 speech_ended_at = reader.position
 
-            if still is not None and still >= no_words_after:
+            below = level is not None and loudness is not None and level < loudness * no_words_below
+            below_frames = below_frames + 1 if below else 0
+            if still is not None and still >= no_words_after and below_frames >= frames_to_stop:
                 ended_by = "no new words"
                 logger.info(f"No new words for {still:.1f}s, stopping after "
                             f"{(reader.position - listen_from) / RATE:.1f}s")
