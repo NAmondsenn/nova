@@ -999,3 +999,62 @@ def test_words_is_empty_once_nemotron_cant_say_its_words():
         transcription.add(piece)
     transcription.cancel()
     assert transcription.words() == ""
+
+
+# Settling: the last words of a voice heard over a reply, once Nemotron has heard the last of it.
+
+def test_settling_gives_the_words_heard_once_the_stream_is_ended():
+    # A short "wait" said over a reply, whose word only comes once Nemotron has the quiet after it.
+    import time
+
+    nemotron = FakeNemotron(heard="Wait.")
+    fallback = FakeParakeet("Wait.")
+    transcription = speech_to_text.NemotronSpeechToText(nemotron, fallback=fallback).listen()
+    for piece in _tenths(3):
+        transcription.add(piece)
+    assert transcription.words() == ""
+    assert transcription.settle() == "Wait."
+    assert len(nemotron.finished) == 1
+    # It's finished: cancelling does nothing more.
+    started = time.monotonic()
+    transcription.cancel()
+    assert time.monotonic() - started < 0.5
+
+
+@pytest.mark.parametrize("heard", ["", "Thank you.", "."])
+def test_settling_on_no_words_never_asks_the_second_model_or_hears_it_again(heard):
+    # A cough over a reply: the heaviest hearing the brain has, on every one, would be against what it can run.
+    nemotron = FakeNemotron(heard=heard)
+    fallback = FakeParakeet("Wait.")
+    transcription = speech_to_text.NemotronSpeechToText(nemotron, fallback=fallback,
+                                                         please=np.zeros(480, np.float32)).listen()
+    for piece in _tenths(3):
+        transcription.add(piece)
+    assert transcription.settle() == ""
+    assert fallback.given == [] and len(nemotron.finished) == 1 and len(nemotron.streams) == 1
+
+
+def test_settling_a_nemotron_which_fails_gives_nothing_and_never_raises():
+    nemotron = FakeNemotron()
+    nemotron.fail = RuntimeError("Failed to decode")
+    transcription = speech_to_text.NemotronSpeechToText(nemotron).listen()
+    transcription.add(_tenths(1)[0])
+    assert transcription.settle() == ""
+    # Not heard again whole, as finish would.
+    assert nemotron.finished == []
+
+
+def test_settling_a_nemotron_which_hangs_gives_nothing_within_its_bound():
+    import time
+
+    nemotron = _Hanging()
+    try:
+        transcription = speech_to_text.NemotronSpeechToText(nemotron).listen()
+        transcription.add(_tenths(1)[0])
+        started = time.monotonic()
+        assert transcription.settle(timeout=0.2) == ""
+        transcription.cancel()
+        # Neither waited out CANCEL_LIMIT, nor raised.
+        assert time.monotonic() - started < 1
+    finally:
+        nemotron.let_go.set()

@@ -1507,15 +1507,17 @@ class Session:
             follow_up: True when the last reply asked something.
             listening_sound: True for the conversation's first turn, which plays the listening
                 sound as it starts - never between turns, where it would play dozens of times.
-            cut_in: The user cutting in on the reply before, as _cut_in_over gives it: the turn
-                is what they're saying, from where it gives - a fresh request said over a reply,
-                so "stop" only stops Nova talking (see Conversation.handle).
+            cut_in: The user cutting in on the reply before, as _cut_in gives it: the turn is
+                what they're saying, from where it gives - a fresh request said over a reply,
+                so "stop" only stops Nova talking (see Conversation.handle), and begun on a
+                press if it was one, as a pressed wake is.
 
         Returns:
             As _answer.
         """
         timeline = Timeline(follow_up=follow_up, open_turn=True)
         feed = None
+        pressed = cut_in is not None and cut_in["cut_in"] == "press"
         try:
             listen_from = None
             if cut_in is not None:
@@ -1524,7 +1526,7 @@ class Session:
                 ringing = self.brain.clock.ringing_state(
                     satellite=heard_in(self.brain.room_of(self.satellite.name)))
                 with self._conversation_lock:
-                    self.conversation.start(ringing, talked_over=True)
+                    self.conversation.start(ringing, talked_over=True, pressed=pressed)
                 self._open_answer()
                 feed, listen_from = cut_in["feed"], cut_in["from"]
             else:
@@ -1551,7 +1553,7 @@ class Session:
             if listening_sound and self.listening_sound_enabled:
                 self._play_sound("listening.wav")
             return self._handle_interaction(feed, follow_up=follow_up, timeline=timeline, open_turn=True,
-                                            listen_from=listen_from)
+                                            listen_from=listen_from, pressed=pressed)
         except Exception as e:
             # Said, as for any request, so it isn't taken for not having been heard - and the
             # conversation ended, rather than every turn after it going wrong the same way at once.
@@ -1571,13 +1573,16 @@ class Session:
         Returns:
             The listen the reply before was heard over and left open for this turn, with where
             in it the turn starts - see _cut_in_over - or None, when the turn asks for one of its
-            own. One which has ended since, the satellite having stopped sending, is let go of.
+            own. One which has ended since, the satellite having stopped sending, or which has
+            nowhere to start, is let go of.
         """
         with self._open_lock:
             feed, start, self._open_from = self._open_feed, self._open_from, None
-        if feed is None or start is None:
+        if feed is None:
             return None
-        if feed.ended:
+        if start is None or feed.ended:
+            # One with nowhere to start was left by something going wrong, and is stopped
+            # rather than left sending under the turn's own listen.
             self._let_go_of_open_feed(feed)
             return None
         return feed, start
@@ -1610,7 +1615,8 @@ class Session:
         feed = self.satellite.listen(open=True)
         with self._open_lock:
             if self._conversation_here():
-                self._open_feed = feed
+                # Its turn starts wherever it does: no start left for another listen is its own.
+                self._open_feed, self._open_from = feed, None
                 return feed
         self.satellite.stop_listening(feed)
         return None
@@ -2120,9 +2126,9 @@ class Session:
 
         Speech-to-text only hears what's said over a reply once a voice has been heard, from just
         before it began - it's the slowest thing the brain runs, with no GPU to run it on, and a
-        reply can go on for minutes. Should the listen end or stall, or the conversation be ended
-        from elsewhere, the reply is finished as _heard_over finishes one, at its full volume,
-        and nothing more is listened to over it.
+        reply can go on for minutes. Should the listen end or stall, the conversation be ended
+        from elsewhere, or anything here go wrong, the reply is finished as _heard_over finishes
+        one, at its full volume, and nothing more is listened to over it.
 
         Args:
             playback: The reply, playing on the satellite.
@@ -2132,12 +2138,10 @@ class Session:
                 or None.
 
         Returns:
-            A wake word, as _heard_over gives it - or the user cutting in, as {"talked_over":
-            True, "feed": the feed, "from": where in it their turn starts - CUT_IN_PRE_ROLL
-            before the voice began, or for a press where it had got to - "cut_in": True}. None
-            once the reply has finished, with the feed left open for the next turn, which starts
-            in it where the reply ended - or before a voice which had dipped it and is still
-            going (see _carried).
+            A wake word, as _heard_over gives it - or the user cutting in, as _cut_in gives it.
+            None once the reply has finished, with the feed left open for the next turn, which
+            starts in it where the reply ended - or before a voice which still had it dipped,
+            if that voice's words are the user's own (see _carried).
         """
         started = time.monotonic()
         # What the reply comes back up to, read before anything dips it.
@@ -2148,76 +2152,78 @@ class Session:
         voice = CutIn(self._cut_in_detector, saying)
         # From the feed's start, which is where CutIn counts frames from.
         reader = feed.listen(start=0)
-        pre_roll = round(CUT_IN_PRE_ROLL * RATE)
-
-        def voice_began() -> int:
-            """Where the turn starts in the feed: CUT_IN_PRE_ROLL before the voice CutIn heard."""
-            return max(0, voice.voice_from * FRAME - pre_roll)
-
-        # Speech-to-text, only while a voice is heard.
-        listening = None
+        # While a voice has the reply dipped: speech-to-text of it, and where in the feed a turn
+        # it starts would start - CUT_IN_PRE_ROLL before it began. Kept here, as CutIn forgets
+        # the voice as it says "undip".
+        listening = began = None
         came_back = 0
-        cut_from = how = None
+        # Where the user's turn starts and how they cut in, once they have.
+        cut = None
         try:
-            while not playback.done:
-                # A reply can rightly play for minutes, so this is getting on - see _heard_over.
-                self._moved()
-                if self._overdue(playback, started):
-                    break
-                if feed.cut_in.is_set():
-                    # The satellite has stopped the reply and played its own sound for the press.
-                    cut_from, how = feed.position, "press"
-                    break
-                try:
-                    wake = self.satellite.wakes.get_nowait()
-                except queue.Empty:
-                    wake = None
-                frame = reader.read(FRAME) if wake is None and self._conversation_here() else None
-                if frame is None or len(frame) < FRAME:
-                    # A wake word, the conversation ended from elsewhere, or the listen ended or
-                    # stalled - the satellite gone, say - so there's nothing more to hear over it.
-                    if voice.voice_from is not None and wake is None:
-                        playback.fade_to(full, DIP_FADE)
-                    self._let_go_of_open_feed(feed)
-                    return wake if wake is not None else self._heard_over(playback)
-                if listening is not None:
-                    listening.add(frame.astype(np.float32) / 32768.0)
-                heard = voice.hear(frame, listening.words() if listening is not None else "")
-                if heard == "dip":
-                    playback.fade_to(full * dip_level, DIP_FADE)
-                    listening = self.brain.stt.listen()
-                    began = voice_began()
-                    so_far = feed.listen(start=began).read(reader.position - began)
-                    listening.add(so_far.astype(np.float32) / 32768.0)
-                elif heard == "undip":
-                    playback.fade_to(full, DIP_FADE)
-                    listening.cancel()
-                    listening = None
-                    came_back += 1
-                elif heard == "stop":
-                    cut_from, how = voice_began(), "voice"
-                    break
-            if cut_from is None and feed.cut_in.is_set():
-                # Pressed just as it ended: the satellite says so before it says the reply stopped.
-                cut_from, how = feed.position, "press"
-            if cut_from is not None:
-                # Stopped by _say, as a reply the wake word is said over is.
-                logger.info(f"Cut in on by {'a press' if how == 'press' else 'voice'}")
-                if timeline:
-                    timeline.note(cut_in=how)
-                return {"talked_over": True, "feed": feed, "from": cut_from, "cut_in": True}
-            # One last look, as _heard_over has, for a wake word said just as the reply ended.
             try:
-                wake = self.satellite.wakes.get_nowait()
-            except queue.Empty:
-                wake = None
-            if wake is not None:
-                self._let_go_of_open_feed(feed)
-                return wake
-            with self._open_lock:
-                if self._open_feed is feed:
-                    self._open_from = reader.position if voice.voice_from is None else voice_began()
-            return None
+                while cut is None and not playback.done:
+                    # A reply can rightly play for minutes, so this is getting on - see _heard_over.
+                    self._moved()
+                    if self._overdue(playback, started):
+                        break
+                    if feed.cut_in.is_set():
+                        # The satellite has stopped the reply and played its own sound for the press.
+                        cut = (feed.position, "press")
+                        break
+                    wake = self._wake_waiting()
+                    frame = reader.read(FRAME) if wake is None and self._conversation_here() else None
+                    if frame is None or len(frame) < FRAME:
+                        # A wake word, the conversation ended from elsewhere, or the listen ended or
+                        # stalled - the satellite gone, say - so there's nothing more to hear over it.
+                        return self._stop_hearing_over(playback, feed, wake, full if began is not None else None)
+                    if listening is not None:
+                        listening.add(frame.astype(np.float32) / 32768.0)
+                    heard = voice.hear(frame, listening.words() if listening is not None else "")
+                    if heard == "dip":
+                        playback.fade_to(full * dip_level, DIP_FADE)
+                        began = max(0, voice.voice_from * FRAME - round(CUT_IN_PRE_ROLL * RATE))
+                        listening = self.brain.stt.listen()
+                        so_far = feed.listen(start=began).read(reader.position - began)
+                        listening.add(so_far.astype(np.float32) / 32768.0)
+                    elif heard == "stop":
+                        cut = (began, "voice")
+                    elif heard == "undip":
+                        # The last word of a short "wait" may only come once speech-to-text has heard
+                        # the quiet after it - so it's judged once more before the reply comes back.
+                        stops, listening = self._judge_voice(listening, voice), None
+                        if stops:
+                            cut = (began, "voice")
+                        else:
+                            playback.fade_to(full, DIP_FADE)
+                            came_back += 1
+                            began = None
+                if cut is None and feed.cut_in.is_set():
+                    # Pressed just as it ended: the satellite says so before it says the reply stopped.
+                    cut = (feed.position, "press")
+                if cut is not None:
+                    return self._cut_in(playback, feed, cut, timeline)
+                # One last look, as _heard_over has, for a wake word said just as the reply ended.
+                wake = self._wake_waiting()
+                if wake is not None:
+                    self._let_go_of_open_feed(feed)
+                    return wake
+                start = reader.position
+                if began is not None:
+                    # A voice still had it dipped as it ended: the next turn starts before it only if
+                    # its words are the user's - not Nova's own echo, nor only listening noises.
+                    stops, listening = self._judge_voice(listening, voice), None
+                    if stops:
+                        start = began
+                with self._open_lock:
+                    if self._open_feed is feed:
+                        self._open_from = start
+                return None
+            except Exception as e:
+                # Never left playing, perhaps dipped, under an apology for a turn which went wrong,
+                # with its listen left open: a reply heard over goes on as any other would.
+                logger.error(f"Couldn't hear what was said over the reply, so it carries on as usual "
+                             f"({type(e).__name__})")
+                return self._stop_hearing_over(playback, feed, None, full if began is not None else None)
         finally:
             # The turn which follows has its own, which hears it all again from the pre-roll.
             if listening is not None:
@@ -2225,6 +2231,80 @@ class Session:
             if timeline:
                 # So the timings show how often a reply is dipped for nothing.
                 timeline.note(dips_back=came_back)
+
+    def _wake_waiting(self, wait: float = 0.0) -> Optional[Dict]:
+        """
+        Args:
+            wait: How long to wait for one, in seconds - none if 0.
+
+        Returns:
+            The next wake word the satellite heard, as its wakes have it - or None.
+        """
+        try:
+            return self.satellite.wakes.get(timeout=wait) if wait else self.satellite.wakes.get_nowait()
+        except queue.Empty:
+            return None
+
+    def _stop_hearing_over(self, playback, feed: AudioFeed, wake: Optional[Dict],
+                           full: Optional[float]) -> Optional[Dict]:
+        """
+        Stops hearing what's said over a reply, and lets go of its listen - so the reply is
+        finished as _heard_over finishes one, if there's no wake word to stop it.
+
+        Args:
+            playback: The reply, playing on the satellite.
+            feed: Its listen.
+            wake: A wake word already taken from the satellite's wakes, or None.
+            full: The reply's own volume, to bring it back up to while it's dipped - None if it
+                isn't.
+
+        Returns:
+            As _heard_over.
+        """
+        if wake is None:
+            # The satellite ends the listen a moment before the wake word which ended it arrives -
+            # see RemoteSatellite._woken - so it's waited for, briefly, rather than the reply
+            # being brought back up only to be stopped.
+            wake = self._wake_waiting(TALKED_OVER_CHECK)
+        if full is not None and wake is None:
+            playback.fade_to(full, DIP_FADE)
+        self._let_go_of_open_feed(feed)
+        return wake if wake is not None else self._heard_over(playback)
+
+    def _cut_in(self, playback, feed: AudioFeed, cut: Tuple[int, str], timeline: Optional[Timeline]) -> Dict:
+        """
+        Stops a reply the user has cut in on - before anything else, as they're talking over it.
+
+        Args:
+            playback: The reply, playing on the satellite.
+            feed: The listen it was heard over, which their turn goes on in.
+            cut: Where in it their turn starts, and how they cut in - "voice" or "press".
+            timeline: The turn's Timeline, noting how, or None.
+
+        Returns:
+            {"talked_over": True, "feed": the feed, "from": where in it their turn starts,
+            "cut_in": "voice" or "press"}.
+        """
+        start, how = cut
+        playback.stop()
+        logger.info(f"Cut in on by {how}")
+        if timeline:
+            timeline.note(cut_in=how)
+        return {"talked_over": True, "feed": feed, "from": start, "cut_in": how}
+
+    @staticmethod
+    def _judge_voice(listening, voice: CutIn) -> bool:
+        """
+        Whether a voice heard over a reply is the user's - its words a stop, by CutIn's own
+        judgement - once speech-to-text has heard the last of it, as its words lag the audio.
+        Only Nemotron's own words, and only so long (see NemotronTranscription.settle), as the
+        reply stays dipped meanwhile; the feed keeps what's said.
+
+        Args:
+            listening: Speech-to-text of the voice, which is finished by this.
+            voice: The reply's CutIn.
+        """
+        return voice.would_stop(listening.settle())
 
     def _show(self, line):
         """

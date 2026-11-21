@@ -340,6 +340,11 @@ _FINISHED, _CANCELLED = "finished", "cancelled"
 FINISH_LIMIT = 20.0
 CANCEL_LIMIT = 5.0
 
+# How long to wait for Nemotron to hear the last of a voice heard over a reply, in seconds -
+# see NemotronTranscription.settle. Long enough for the last 0.56s chunk it works on and the
+# quiet after; short, as the reply stays dipped while it waits.
+SETTLE_LIMIT = 1.5
+
 
 class NemotronTranscription:
     """
@@ -378,6 +383,8 @@ class NemotronTranscription:
         # The words as they were last looked at, which only _hear's thread changes - under
         # the lock, as words() reads them too.
         self._last_words = ""
+        # Whether it has been settled, after which there's nothing to cancel - see settle.
+        self._settled = False
         self._thread = threading.Thread(target=self._hear, name="nemotron", daemon=True)
         self._thread.start()
 
@@ -517,11 +524,37 @@ class NemotronTranscription:
         heard["imagined"] = False
         return heard
 
+    def settle(self, timeout: float = SETTLE_LIMIT) -> str:
+        """
+        Nemotron's own last words for what it was given, once it has heard the end of it - for
+        a voice heard over a reply, whose last word may only come once the quiet after it has
+        been heard. Never the second model nor hearing it again, as finish has for speech heard
+        as nothing: a cough over a reply is exactly that, and it would put the brain's heaviest
+        hearing on every one. It's over after this, so cancel does nothing.
+
+        Args:
+            timeout: The longest to wait for Nemotron, in seconds.
+
+        Returns:
+            The words - or '' for none, words imagined in noise, a Nemotron which failed, or
+            one which hadn't finished in time. Never raises.
+        """
+        self._settled = True
+        self._waiting.put(_FINISHED)
+        self._thread.join(timeout)
+        if self._thread.is_alive() or self._failed is not None:
+            return ""
+        text = str(self._text or "").strip()
+        return "" if not _words(text) or _imagined(text) else text
+
     def cancel(self):
         """
         The recording came to nothing, so Nemotron stops without finishing it - or is
         left to, if it hasn't within CANCEL_LIMIT, as one which has hung never would.
+        Nothing once it has been settled.
         """
+        if self._settled:
+            return
         self._waiting.put(_CANCELLED)
         self._thread.join(CANCEL_LIMIT)
         if self._thread.is_alive():

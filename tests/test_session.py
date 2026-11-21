@@ -156,6 +156,7 @@ class FakeTranscription:
         self.finished_with = None
         self.finished_how = None
         self.cancelled = False
+        self.settled = False
 
     def add(self, audio):
         self.added.append(audio)
@@ -167,6 +168,10 @@ class FakeTranscription:
 
     def words(self):
         # Its text, once it has been given anything to hear - as Nemotron has words only once it has heard some.
+        return self.text if self.added else ""
+
+    def settle(self, timeout=None):
+        self.settled = True
         return self.text if self.added else ""
 
     def cancel(self):
@@ -229,10 +234,12 @@ class ScriptedConversation:
     def __init__(self, *replies):
         self.replies = list(replies)
         self.started = []
+        self.pressed = []
         self.heard = []
 
     def start(self, ringing=None, talked_over=False, pressed=False):
         self.started.append(talked_over)
+        self.pressed.append(pressed)
 
     def handle(self, text, follow_up=False, timeline=None):
         self.heard.append((text, follow_up))
@@ -4921,16 +4928,18 @@ def test_a_session_waiting_for_a_turn_is_still_moving(brain, connect, make_sessi
 TODAY = "Today, you've got lunch, then the gym."
 
 
-def _over_a_reply(brain, connect, make_session, *texts, ready=True):
+def _over_a_reply(brain, connect, make_session, *texts, ready=True, setup=None):
     """
     A conversation under way at a satellite whose echo canceller is ready, unless ready is False: "Hello." woke
     it, "What's on today?" is its first open turn, and its reply - TODAY, the second - plays on until the test
     lets it finish, with "Tuesday's clear." the reply after. Speech-to-text hears the texts given after those
-    two.
+    two. setup, if given, is called with the session before it runs.
     """
     session, pi = _in_a_conversation(brain, connect, make_session, Reply(say="Okay."), Reply(say=TODAY),
                                      Reply(say="Tuesday's clear."))
     session.satellite.echo_ready = ready
+    if setup is not None:
+        setup(session)
     brain.stt.texts = ["Hello.", "What's on today?", *texts]
     pi.answers = [said(before=0, after=2)]
     pi.held = {2}
@@ -5013,7 +5022,7 @@ def test_a_cough_dips_it_and_it_carries_on(brain, connect, make_session):
     heard.put(said(seconds=0.3, before=0.5, after=0))
     # Down, and back up once no words have come - with speech-to-text let go of.
     assert wait_for(lambda: len(_fades(pi, reply)) == 2)
-    assert _fades(pi, reply) == [(0.21, 0.05), (0.7, 0.05)] and brain.stt.made[2].cancelled
+    assert _fades(pi, reply) == [(0.21, 0.05), (0.7, 0.05)] and brain.stt.made[2].settled
     time.sleep(0.2)
     pi.say("played", id=reply)
     # Played to the end, and the next turn hears what he says after it in the same listen.
@@ -5058,6 +5067,8 @@ def test_a_press_cuts_in(brain, connect, make_session):
     # to hear over the reply first.
     assert session.conversation.heard[2] == ("What about Tuesday?", False)
     assert session.conversation.started == [False, False, True]
+    # A turn begun on a press, as one woken by a press is.
+    assert session.conversation.pressed[2] is True
     assert brain.stt.made[2].finished_with is not None
     assert _listens_and_replies(pi)[:6] == ["play_stream", "listen", "listen", "play_stream", "listen",
                                             "play_stream"]
@@ -5222,9 +5233,16 @@ def test_a_wake_word_over_a_reply_listened_over_still_stops_it(brain, connect, m
     _ended(session)
 
 
+class _LateWords(FakeTranscription):
+    """Speech-to-text whose words only come once it has heard the last of what it was given, as a short word's can."""
+
+    def words(self):
+        return ""
+
+
 def test_a_voice_still_going_as_the_reply_ends_starts_the_next_turn(brain, connect, make_session):
-    # "Yeah" only says he's listening, so the reply stays dipped and carries on - and ends as he goes on talking.
-    session, pi = _over_a_reply(brain, connect, make_session, "Yeah", "Yeah, and Tuesday?")
+    # His words, still to be heard as the reply ends - so it stays dipped and carries on to its end.
+    session, pi = _over_a_reply(brain, connect, make_session, _LateWords("Hang on"), "Hang on, and Tuesday?")
     heard = _open_microphone(pi)
     reply = pi.messages("play_stream")[1]["id"]
     heard.put(said(seconds=1.0, before=0.96, after=0))
@@ -5234,11 +5252,33 @@ def test_a_voice_still_going_as_the_reply_ends_starts_the_next_turn(brain, conne
     # Never stopped, nor brought back up once it had finished.
     assert not _stopped(pi, reply) and _fades(pi, reply) == [(0.21, 0.05)]
     # The next turn is in the same listen, from half a second before his voice began, so all of it is heard.
-    assert session.conversation.heard[2] == ("Yeah, and Tuesday?", False)
+    assert session.conversation.heard[2] == ("Hang on, and Tuesday?", False)
     assert session.conversation.started == [False, False, False]
     recording = brain.stt.made[3].finished_with
     began = np.flatnonzero(recording)[0]
     assert 8000 <= began < 8000 + FRAME and (recording[began:began + RATE] > 0).all()
+    _ended(session)
+
+
+@pytest.mark.parametrize("over", ["Yeah", "you've got lunch then the gym"])
+def test_listening_noises_or_novas_own_echo_as_the_reply_ends_arent_the_next_turn(brain, connect, make_session,
+                                                                                  over):
+    # "Yeah" only says he's listening, and a run of the reply's own words is its echo: either keeps the reply
+    # dipped to its end, and neither is anything he said to it.
+    session, pi = _over_a_reply(brain, connect, make_session, over, "And Tuesday?")
+    heard = _open_microphone(pi)
+    reply = pi.messages("play_stream")[1]["id"]
+    heard.put(said(seconds=1.0, before=0.5, after=0))
+    assert wait_for(lambda: _fades(pi, reply))
+    time.sleep(0.3)
+    pi.say("played", id=reply)
+    # What he says after the reply, quieter than what was heard over it.
+    heard.put(np.full(round(0.5 * RATE), 4000, np.int16))
+    assert wait_for(lambda: len(pi.messages("play_stream")) == 3, seconds=10)
+    assert session.conversation.heard[2] == ("And Tuesday?", False)
+    # The next turn starts where the reply ended, so none of what was heard over it is in it.
+    recording = brain.stt.made[3].finished_with
+    assert recording.max() == np.float32(4000 / 32768.0)
     _ended(session)
 
 
@@ -5255,3 +5295,165 @@ def test_something_typed_while_a_reply_is_listened_over_is_the_turn_after_it(bra
     recording = pi.messages("listen")[1]["recording"]
     assert any(message.get("recording") == recording for message in pi.messages("stop_listening"))
     _ended(session)
+
+
+class _BreaksOnSpeech(LoudnessDetector):
+    """Hears speech by how loud it is, then raises at its sixth frame of it - once a reply has dipped."""
+
+    def __init__(self):
+        super().__init__()
+        self.speech = 0
+
+    def speech_probability(self, frame):
+        heard = super().speech_probability(frame)
+        self.speech += heard > 0
+        if self.speech > 5:
+            raise RuntimeError("the model failed")
+        return heard
+
+
+def test_a_failure_hearing_over_a_reply_lets_it_finish_at_full_volume(brain, connect, make_session, caplog):
+    # Rather than the reply playing on, dipped, under an apology, with its listen never let go of.
+    session, pi = _over_a_reply(brain, connect, make_session, "",
+                                setup=lambda session: setattr(session, "_cut_in_detector", _BreaksOnSpeech()))
+    heard = _open_microphone(pi)
+    reply = pi.messages("play_stream")[1]["id"]
+    heard.put(said(seconds=1.0, before=0.5, after=0))
+    assert wait_for(lambda: len(_fades(pi, reply)) == 2)
+    assert _fades(pi, reply) == [(0.21, 0.05), (0.7, 0.05)]
+    recording = pi.messages("listen")[1]["recording"]
+    assert wait_for(lambda: any(message.get("recording") == recording for message in pi.messages("stop_listening")))
+    time.sleep(0.2)
+    assert not _stopped(pi, reply) and brain.tts.said == ["Okay.", TODAY]
+    pi.say("played", id=reply)
+    # The conversation goes on, with the one listen of its next turn - nothing said, and nothing left open.
+    assert wait_for(lambda: len(pi.messages("listen")) == 3)
+    time.sleep(0.3)
+    assert len(pi.messages("listen")) == 3 and brain.tts.said == ["Okay.", TODAY]
+    third = pi.messages("listen")[2]["recording"]
+    assert not any(message.get("recording") == third for message in pi.messages("stop_listening"))
+    assert "RuntimeError" in caplog.text and "the model failed" not in caplog.text
+    _ended(session)
+
+
+class _NotingCancel(FakeTranscription):
+    """Speech-to-text which notes, in order, when it's let go of."""
+
+    def __init__(self, text, order):
+        super().__init__(text)
+        self.order = order
+
+    def cancel(self):
+        self.order.append("cancel")
+        super().cancel()
+
+
+def test_words_stop_the_reply_before_speech_to_text_is_let_go_of(brain, connect, make_session):
+    # Letting it go waits for Nemotron to finish what it has, which the reply mustn't be said over him for.
+    order = []
+
+    def noting_stops(session):
+        play_stream = session.speaker.play_stream
+
+        def playing(*args, **kwargs):
+            playback = play_stream(*args, **kwargs)
+            stop = playback.stop
+            playback.stop = lambda: order.append("stop") or stop()
+            return playback
+        session.speaker.play_stream = playing
+
+    session, pi = _over_a_reply(brain, connect, make_session, _NotingCancel("Hang on, what about Tuesday?", order),
+                                "Hang on, what about Tuesday?", setup=noting_stops)
+    heard = _open_microphone(pi)
+    heard.put(said(seconds=1.0, before=0.5, after=0))
+    assert wait_for(lambda: "cancel" in order, seconds=10)
+    assert "stop" in order and order.index("stop") < order.index("cancel")
+    _ended(session)
+
+
+class _SlowWakes(queue.Queue):
+    """The satellite's wakes, each arriving a moment after the listen it ends - as RemoteSatellite._woken has it."""
+
+    def put(self, item, block=True, timeout=None):
+        time.sleep(0.02)
+        super().put(item, block, timeout)
+
+
+def test_a_wake_word_while_the_reply_is_dipped_doesnt_bring_it_back_up(brain, connect, make_session):
+    session, pi = _over_a_reply(brain, connect, make_session, "", "What about Tuesday?",
+                                setup=lambda session: setattr(session.satellite, "wakes", _SlowWakes()))
+    heard = _open_microphone(pi)
+    reply = pi.messages("play_stream")[1]["id"]
+    heard.put(said(seconds=0.3, before=0.5, after=0))
+    assert wait_for(lambda: _fades(pi, reply))
+    pi.wake(said(), talked_over=True)
+    assert wait_for(lambda: _stopped(pi, reply))
+    time.sleep(0.2)
+    # Stopped where it was, not swelling back up first.
+    assert _fades(pi, reply) == [(0.21, 0.05)]
+    assert wait_for(lambda: len(session.conversation.heard) == 3, seconds=10)
+    assert session.conversation.heard[2] == ("What about Tuesday?", False)
+    # The turn after it may have begun by now.
+    assert session.conversation.started[:3] == [False, False, True]
+    _ended(session)
+
+
+def test_a_short_word_heard_only_once_the_voice_has_stopped_stops_the_reply(brain, connect, make_session):
+    # Nemotron's words come a moment behind the audio, and the last of a short "wait" only once it has heard the
+    # quiet after - by which time the reply would be coming back up.
+    session, pi = _over_a_reply(brain, connect, make_session, _LateWords("Wait."), "Wait.")
+    heard = _open_microphone(pi)
+    reply = pi.messages("play_stream")[1]["id"]
+    heard.put(said(seconds=0.3, before=0.96, after=0))
+    assert wait_for(lambda: len(pi.messages("play_stream")) == 3, seconds=10)
+    assert _stopped(pi, reply) and _fades(pi, reply) == [(0.21, 0.05)]
+    assert brain.stt.made[2].settled
+    assert session.conversation.heard[2] == ("Wait.", False)
+    # The turn after it may have begun by now.
+    assert session.conversation.started[:3] == [False, False, True]
+    # His turn, from half a second before the word.
+    recording = brain.stt.made[3].finished_with
+    assert 8000 <= np.flatnonzero(recording)[0] < 8000 + FRAME
+    _ended(session)
+
+
+def test_a_listen_which_stalls_over_a_reply_is_let_go_of_and_the_reply_finishes(brain, connect, make_session):
+    session, pi = _over_a_reply(brain, connect, make_session)
+    reply = pi.messages("play_stream")[1]["id"]
+    assert wait_for(lambda: len(pi.messages("listen")) == 2)
+    recording = pi.messages("listen")[1]["recording"]
+    # Nothing comes from the satellite, so the listen is taken to have ended - and is stopped there too.
+    assert wait_for(lambda: any(message.get("recording") == recording for message in pi.messages("stop_listening")))
+    assert not _stopped(pi, reply) and not session._idle.is_set()
+    pi.say("played", id=reply)
+    # The next turn asks for a listen of its own.
+    assert wait_for(lambda: len(pi.messages("listen")) == 3)
+    _ended(session)
+
+
+def test_a_reply_never_said_to_have_finished_is_given_up_on_and_the_next_turn_listens_on(brain, connect,
+                                                                                         make_session, monkeypatch):
+    monkeypatch.setattr(session_module, "PLAYBACK_SLACK", 0.5)
+    session, pi = _over_a_reply(brain, connect, make_session, "And Tuesday?")
+    heard = _open_microphone(pi)
+    reply = pi.messages("play_stream")[1]["id"]
+    assert wait_for(lambda: _stopped(pi, reply))
+    heard.put(said(seconds=0.5, before=0, after=0))
+    assert wait_for(lambda: len(pi.messages("play_stream")) == 3, seconds=10)
+    assert session.conversation.heard[2] == ("And Tuesday?", False)
+    assert session.conversation.started == [False, False, False]
+    assert _listens_and_replies(pi)[:6] == ["play_stream", "listen", "listen", "play_stream", "listen",
+                                            "play_stream"]
+    _ended(session)
+
+
+def test_a_listen_noted_without_a_start_isnt_carried_but_stopped(connect, make_session):
+    satellite, pi = connect(conversations=True)
+    session = make_session(satellite)
+    feed = satellite.listen(open=True)
+    session._open_feed = feed
+    assert session._carried() is None
+    assert feed.ended and session._open_feed is None
+    assert wait_for(lambda: pi.messages("listen"))
+    recording = pi.messages("listen")[0]["recording"]
+    assert wait_for(lambda: any(message.get("recording") == recording for message in pi.messages("stop_listening")))
