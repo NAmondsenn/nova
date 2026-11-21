@@ -1235,6 +1235,24 @@ def downloading_with_claude(download_settings, monkeypatch):
     return make
 
 
+def test_a_yes_to_a_third_album_offer_asks_for_approval(download_settings):
+    fake = FakeApprovals("wait")
+    downloads = AskedDownloads(download_settings)
+    downloads._approvals = fake
+    for name in ("Hotel California", "Tusk"):
+        downloads._album_starts.append(downloads._now())
+    actions = ActionExecutor(music=NotInNavidrome(), downloads=downloads, satellite="kitchen")
+    llm = FakeLLM(_answer("Okay.", Action("play_music", {"query": "Rumours by Fleetwood Mac", "search_type": "album"},
+                                          from_model=True)))
+    conversation = _conversation(llm=llm, actions=actions)
+    assert conversation.handle("play Rumours by Fleetwood Mac").listen_again
+
+    conversation.handle("yes please", follow_up=True)
+
+    assert fake.asked == [("Download the album Rumours by Fleetwood Mac (3 albums in 5 minutes)", "kitchen")]
+    assert downloads.started == []
+
+
 @pytest.mark.parametrize("answer", ["okay", "go on then", "fine"])
 def test_anything_but_a_plain_yes_to_the_offer_only_asks_again_whatever_claude_calls(downloading_with_claude,
                                                                                   answer):

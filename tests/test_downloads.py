@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 import requests
 
+from tests.fake_approvals import FakeApprovals
 from voice_assistant.actions import Action
 from voice_assistant.clean_ear import Verdict
 from voice_assistant.clean_store import CleanStore
@@ -1600,3 +1601,125 @@ def test_the_library_is_navidrome_as_set_up_now(set_up, make_config, said):
     assert (first.url, first.username) == ("http://navidrome.local:4533", "nova")
     assert downloads.library() is not first
     assert Downloads(make_config(), lambda satellite, message: None).library() is None
+
+
+# Large downloads need approval
+
+BIG_ALBUM = "Download the album Rumours by Fleetwood Mac (3 albums in 5 minutes)"
+
+
+@pytest.fixture
+def approving(config, clock, said, ears, swapper, store):
+    """
+    Makes Downloads with a FakeApprovals, as answered, and the settings given if any - whose
+    watches wait on the stop event, so a request stays waiting until the test ends.
+    """
+    made = []
+
+    def make(soulsync, library, answer="wait", settings=None, approvals=...):
+        fake = FakeApprovals(answer) if approvals is ... else approvals
+        downloads = Downloads(settings or config, lambda satellite, message: said.append((satellite, message)),
+                              soulsync=lambda: soulsync, library=lambda: library, now=clock.now,
+                              ears=ears, swapper=swapper, store=store, approvals=fake)
+        made.append(downloads)
+        return downloads, fake
+
+    yield make
+    for downloads in made:
+        downloads.stop()
+    _all_ended()
+
+
+def _two_albums_before(downloads, count=2):
+    """Notes albums started just now, without watching any - which the fake library knows none of."""
+    downloads._album_starts.extend([downloads._now()] * count)
+
+
+def test_two_albums_go_ahead_and_the_third_asks(approving, clock, set_up):
+    downloads, fake = approving(FakeSoulSync(), FakeLibrary(clock), settings=set_up)
+    _two_albums_before(downloads)
+    assert fake.asked == []
+
+    reply = downloads.download("Rumours by Fleetwood Mac", "album", "kitchen")
+
+    assert fake.asked == [(BIG_ALBUM, "kitchen")]
+    assert "Rumours by Fleetwood Mac" not in downloads.waiting()
+    assert reply["message"].startswith("That needs your OK")
+
+
+def test_albums_further_apart_than_the_trust_minutes_dont_add_up(approving, clock, set_up):
+    downloads, fake = approving(FakeSoulSync(), FakeLibrary(clock), settings=set_up)
+    _two_albums_before(downloads)
+    clock.time += 301
+
+    reply = downloads.download("Rumours by Fleetwood Mac", "album", "kitchen")
+
+    assert fake.asked == [] and reply["later"]
+
+
+def test_songs_never_count(approving, clock, set_up):
+    downloads, fake = approving(FakeSoulSync(), FakeLibrary(clock), settings=set_up)
+    _two_albums_before(downloads)
+    # A song is neither counted nor asked for, whatever albums came before.
+    assert downloads.download("Gooba by 6ix9ine", "track", "kitchen")["later"]
+    assert fake.asked == [] and len(downloads._album_starts) == 2
+
+
+def test_the_album_count_is_the_setting(approving, clock, make_config, monkeypatch):
+    monkeypatch.setenv("SOULSYNC_API_KEY", "made-up-key")
+    monkeypatch.setenv("NAVIDROME_PASSWORD", "made-up-password")
+    settings = make_config(approvals={"album_count": 5}, soulsync={"url": "http://soulsync.local:8008"},
+                           navidrome={"url": "http://navidrome.local:4533", "username": "nova"},
+                           music={"song_download_minutes": 10, "album_download_minutes": 30})
+    downloads, fake = approving(FakeSoulSync(), FakeLibrary(clock), settings=settings)
+    _two_albums_before(downloads, 4)
+
+    downloads.download("Rumours by Fleetwood Mac", "album", "kitchen")
+
+    assert fake.asked == [("Download the album Rumours by Fleetwood Mac (5 albums in 5 minutes)", "kitchen")]
+
+
+def test_an_approved_album_starts_and_says_downloading(approving, clock, set_up):
+    downloads, fake = approving(FakeSoulSync(), FakeLibrary(clock), settings=set_up)
+    _two_albums_before(downloads)
+    downloads.download("Rumours by Fleetwood Mac", "album", "kitchen")
+    assert "Rumours by Fleetwood Mac" not in downloads.waiting()
+
+    [reply] = fake.approve_waiting()
+
+    assert reply == {"success": True, "message": "Downloading Rumours by Fleetwood Mac.", "later": True}
+    assert "Rumours by Fleetwood Mac" in downloads.waiting()
+
+
+def test_an_approved_album_already_asked_for_meanwhile_says_so(approving, clock, set_up):
+    downloads, fake = approving(FakeSoulSync(), FakeLibrary(clock), settings=set_up)
+    _two_albums_before(downloads)
+    downloads.download("Rumours by Fleetwood Mac", "album", "kitchen")
+    assert downloads.start(RUMOURS_WANTED, "lounge")
+
+    [reply] = fake.approve_waiting()
+
+    assert reply == {"success": True, "message": "I'm already getting Rumours by Fleetwood Mac."}
+
+
+def test_with_no_approvals_a_large_download_is_refused(approving, clock, set_up):
+    downloads, _ = approving(FakeSoulSync(), FakeLibrary(clock), settings=set_up, approvals=None)
+    _two_albums_before(downloads)
+
+    reply = downloads.download("Rumours by Fleetwood Mac", "album", "kitchen")
+
+    assert reply["success"] is False and reply["message"].startswith("That needs your OK, but there's no way")
+    assert "Rumours by Fleetwood Mac" not in downloads.waiting()
+
+
+def test_already_had_or_waiting_is_answered_without_asking(approving, clock, set_up):
+    # Navidrome has a song, and an album which is already on its way: both are answered first.
+    downloads, fake = approving(FakeSoulSync(), FakeLibrary(clock, songs=([GOOBA],)), settings=set_up)
+    _two_albums_before(downloads)
+    assert downloads.start(RUMOURS_WANTED, "kitchen")
+    _two = downloads._album_starts[:]
+
+    assert downloads.download("Gooba by 6ix9ine", "track", "kitchen")["message"].startswith("You've already got")
+    assert downloads.download("Rumours by Fleetwood Mac", "album", "kitchen")["message"] == (
+        "I'm already getting Rumours by Fleetwood Mac.")
+    assert fake.asked == [] and downloads._album_starts == _two

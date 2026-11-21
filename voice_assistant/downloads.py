@@ -31,6 +31,7 @@ import requests
 
 from voice_assistant import music
 from voice_assistant.actions import Action
+from voice_assistant.approvals import NO_WAY, TRUST_MINUTES
 from voice_assistant.clean_ear import Verdict
 from voice_assistant.clean_store import CleanStore
 from voice_assistant.navidrome import (BRACKETED, CLEAN_VERSIONS, DASH, NavidromeError, NavidromeLibrary,
@@ -114,6 +115,10 @@ NOT_CHECKED_BACK = ("{name} came down again, but I couldn't check the new copy, 
                     "version. The new copy is set aside.")
 # Why an album's clean tracks couldn't be swapped, when every try for each came down clean.
 ONLY_CLEAN = "SoulSync only brought clean copies"
+
+
+# The default of the setting for the albums which make a download large (approvals.album_count).
+ALBUM_COUNT = 3
 
 
 def song_limit(config) -> float:
@@ -411,7 +416,7 @@ class Downloads:
                  library: Optional[Callable[[], Optional[NavidromeLibrary]]] = None,
                  now: Callable[[], float] = time.monotonic, wait: Optional[Callable[[float], bool]] = None,
                  ears: Optional["Ears"] = None, swapper: Optional["Swapper"] = None,
-                 store: Optional[CleanStore] = None, wall: Callable[[], float] = time.time):
+                 store: Optional[CleanStore] = None, wall: Callable[[], float] = time.time, approvals=None):
         """
         Args:
             config: Configs loaded from config.yaml. The time limits are read from it
@@ -435,8 +440,12 @@ class Downloads:
                 clean.
             wall: The wall clock a swap is saved by, to tell how long ago one carried on
                 after a restart was asked for.
+            approvals: The brain's Approvals, which a large download - albums enough, in
+                the trust minutes - asks before it starts. None if there's no way to ask,
+                so a large download is never started.
         """
         self.config = config
+        self._approvals = approvals
         self._ears = ears
         self._swapper = swapper
         self._store = store
@@ -458,6 +467,8 @@ class Downloads:
         self._waiting: Dict[str, Wanted] = {}
         self._asked_at: Dict[str, float] = {}
         self._names: Dict[str, str] = {}
+        # When each album was started, on the same clock, to tell when albums add up to a large download.
+        self._album_starts: List[float] = []
 
     def _own_library(self) -> Optional[NavidromeLibrary]:
         """A NavidromeLibrary from the settings as they are now, or None if they're incomplete."""
@@ -584,6 +595,7 @@ class Downloads:
         if problem:
             return {"success": False, "message": problem}
         if search_type == "artist":
+            # A whole artist would be a large download: if it is ever allowed, it needs approval.
             return {"success": False, "message": WHOLE_ARTIST}
         if not (query or "").strip():
             return {"success": False, "message": WHAT_TO_DOWNLOAD}
@@ -599,12 +611,60 @@ class Downloads:
                 return had
         if not asked:
             return self._offered(query, search_type, wanted)
+        if wanted.kind == "album":
+            count = self._albums_lately() + 1
+            if count >= self._album_count():
+                return self._ask_for_albums(wanted, satellite, count)
         if not self.start(wanted, satellite):
             # Asked for elsewhere since it was checked.
             return already
         # Kept in Claude's history as its call's answer; "X requested." is said once SoulSync has it.
         return {"success": True, "message": f"Asked SoulSync for {wanted.name}. {ON_ITS_WAY[wanted.kind]}",
                 "later": True}
+
+    def _trust_minutes(self) -> int:
+        """The minutes one approval lasts, from the settings as they are now."""
+        try:
+            return int(self.config.section("approvals").get("trust_minutes", TRUST_MINUTES))
+        except (TypeError, ValueError):
+            return TRUST_MINUTES
+
+    def _album_count(self) -> int:
+        """The albums which make a download large, from the settings as they are now."""
+        try:
+            return int(self.config.section("approvals").get("album_count", ALBUM_COUNT))
+        except (TypeError, ValueError):
+            return ALBUM_COUNT
+
+    def _albums_lately(self) -> int:
+        """How many albums were started in the last trust minutes. Songs never count."""
+        since = self._now() - self._trust_minutes() * 60
+        with self._lock:
+            return len([started for started in self._album_starts if started > since])
+
+    def _ask_for_albums(self, wanted: Wanted, satellite: Optional[str], count: int) -> Dict:
+        """
+        Asks approval to start an album which makes a large download, with the albums
+        before it in the trust minutes.
+
+        Args:
+            wanted: The album.
+            satellite: The satellite that asked, which is told how it went - or None.
+            count: The albums, this one included.
+
+        Returns:
+            What the gate gives; a refusal when there's no way to approve.
+        """
+        if self._approvals is None:
+            return {"success": False, "message": NO_WAY}
+
+        def do() -> Dict:
+            if not self.start(wanted, satellite):
+                return {"success": True, "message": f"I'm already getting {wanted.name}."}
+            return {"success": True, "message": f"Downloading {wanted.name}.", "later": True}
+
+        return self._approvals.gate(f"Download the album {wanted.name} ({count} albums in {self._trust_minutes()} "
+                                    f"minutes)", do, satellite)
 
     def _is_waiting(self, wanted: Wanted) -> bool:
         """Whether the same request is already waiting."""
@@ -666,6 +726,8 @@ class Downloads:
                 return False
             self._waiting[wanted.key] = wanted
             self._asked_at[wanted.key] = self._now()
+            if wanted.kind == "album":
+                self._album_starts.append(self._now())
         threading.Thread(target=self._watch, args=(wanted, satellite), daemon=True, name="download").start()
         # Anything left for later - the music folder away, say - is tried again now.
         self.resume_swaps()

@@ -535,7 +535,7 @@ class Brain:
         # for it - see downloads.py. One for every satellite, so the same song asked for
         # on two is only requested once.
         self.downloads = Downloads(config, say=self._say_download, ears=self.ears, swapper=self.swapper,
-                                   store=self.clean_store)
+                                   store=self.clean_store, approvals=self.approvals)
 
         # One Piper, and one Nemotron, which every session shares.
         self.tts = TextToSpeech(config)
