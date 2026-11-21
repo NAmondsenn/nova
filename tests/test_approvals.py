@@ -40,8 +40,9 @@ class FakeNtfy:
         self.phone = phone
         self.sent = []
 
-    def send_soon(self, topic, message, title="", priority=0, click=""):
+    def send_soon(self, topic, message, title="", priority=0, click="", waits=()):
         self.sent.append((topic, message, title, priority, click))
+        self.waits = waits
 
 
 class FakeApprover:
@@ -189,6 +190,8 @@ def test_the_phone_is_notified_with_a_link(tmp_path, made):
     assert world.ntfy.sent == [(PHONE_TOPIC, "Remove 'Dentist', Tue 25 Nov 10:00", "Approve?", 4,
                                 "https://nova.example.ts.net/approve/" + request.id)]
     assert len(request.id) == 32 and len(request.challenge) == 32
+    # Tried again after a failure, a second and then three seconds on.
+    assert world.ntfy.waits == (1, 3)
     assert request.asked == ("your phone",)
     assert request.credentials == (b64url(world.auth.credential_id),)
 

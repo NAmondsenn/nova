@@ -317,6 +317,72 @@ def test_a_click_is_sent_on_the_thread_send_soon_starts():
     assert session.posted[0]["json"]["click"] == "https://nova.example.com/wrapped?key=2026"
 
 
+class DroppingSession(FakeSession):
+    """A server whose first `drops` posts have their connection reset, as on 21 November."""
+
+    def __init__(self, drops):
+        super().__init__()
+        self.drops = drops
+
+    def post(self, url, json=None, headers=None, timeout=None):
+        self.posted.append({"url": url, "json": json, "headers": headers})
+        if len(self.posted) <= self.drops:
+            raise requests.ConnectionError("('Connection aborted.', ConnectionResetError(104, "
+                                           "'Connection reset by peer'))")
+        return FakeResponse(200)
+
+
+def _sent_soon(ntfy, waits):
+    """send_soon with an approval's click, waited for; gives whether it was sent in the end."""
+    result = []
+    done = threading.Event()
+    real = ntfy._send_trying
+
+    def trying(*args):
+        result.append(real(*args))
+        done.set()
+
+    ntfy._send_trying = trying
+    ntfy.send_soon("phone", "Remove 'Dentist'", title="Approve?", priority=4,
+                   click="https://nova.example.ts.net/approve/0123456789abcdef0123456789abcdef", waits=waits)
+    assert done.wait(5)
+    return result[0]
+
+
+def test_send_soon_tries_again_after_a_failure(caplog):
+    session = DroppingSession(drops=1)
+    ntfy, _ = _ntfy(session=session)
+    with caplog.at_level("INFO", logger=ntfy_module.__name__):
+        assert _sent_soon(ntfy, (0.01, 0.01)) is True
+    assert len(session.posted) == 2
+    failures = [record for record in caplog.records if record.getMessage().startswith("Couldn't send")]
+    assert len(failures) == 1 and "reset by peer" in failures[0].getMessage()
+    # The approval's address, with its id, is never in the log.
+    assert "0123456789abcdef" not in caplog.text
+
+
+def test_send_soon_gives_up_after_its_last_try(caplog):
+    session = DroppingSession(drops=10)
+    ntfy, _ = _ntfy(session=session)
+    with caplog.at_level("INFO", logger=ntfy_module.__name__):
+        assert _sent_soon(ntfy, (0.01, 0.01)) is False
+    assert len(session.posted) == 3
+    assert len([record for record in caplog.records if record.getMessage().startswith("Couldn't send")]) == 3
+    assert "Gave up sending to phone after 3 tries" in caplog.text
+    assert "0123456789abcdef" not in caplog.text
+    # With no waits, one try only, as before.
+    once = DroppingSession(drops=10)
+    ntfy, _ = _ntfy(session=once)
+    assert _sent_soon(ntfy, ()) is False and len(once.posted) == 1
+
+
+def test_a_stop_ends_the_tries():
+    session = DroppingSession(drops=10)
+    ntfy, _ = _ntfy(session=session)
+    ntfy.stop()
+    assert _sent_soon(ntfy, (5, 5)) is False and len(session.posted) == 1
+
+
 def test_sending_says_when_it_didnt_work():
     ntfy, _ = _ntfy(session=FakeSession(posted_status=403))
     assert not ntfy.send("clipboard", "Hello")

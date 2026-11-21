@@ -74,6 +74,11 @@ KEPT_SETTLED = 3600
 # service's own (moved by hand in tests), so the wait can't simply sleep until expiry.
 CHECK_EVERY = 1.0
 
+# The seconds between tries at telling the phone of a request, after one which failed: the
+# notification is sent on a thread of the ntfy server's own, never under the lock, and a
+# single try once left the phone with nothing (21 November, "Connection reset by peer").
+PHONE_WAITS = (1, 3)
+
 # The settings' own defaults, should the section be missing a value.
 TRUST_MINUTES = 5
 WAIT_MINUTES = 2
@@ -304,7 +309,7 @@ class Approvals:
             newest = max(keys, key=lambda each: each.added)
             try:
                 self._ntfy.send_soon(self._ntfy.phone, description, title="Approve?", priority=4,
-                                     click=f"{newest.origin}/approve/{request.id}")
+                                     click=f"{newest.origin}/approve/{request.id}", waits=PHONE_WAITS)
             except Exception as e:
                 logger.error(f"Could not tell the phone of an approval ({type(e).__name__})")
         for approver in approvers:

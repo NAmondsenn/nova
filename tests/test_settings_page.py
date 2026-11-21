@@ -4573,7 +4573,7 @@ class PhoneNtfy:
     def __init__(self):
         self.sent = []
 
-    def send_soon(self, topic, message, title="", priority=0, click=""):
+    def send_soon(self, topic, message, title="", priority=0, click="", waits=()):
         self.sent.append({"topic": topic, "message": message, "title": title, "click": click})
 
 
