@@ -1,6 +1,6 @@
-# 0036: Approval for big actions
+# 0037: Approval for big actions
 
-20 November 2026 · Asked for by the user in chat (his call of 16 Nov: "real proof, works away from home, costs nothing"; the PC's Windows Hello added on 20 Nov) · Design: [the spec](../superpowers/specs/2026-11-20-approval-for-big-actions-design.md) · Built; his named deploys and hand checks (71 to 80) to come
+20 November 2026 · Asked for by the user in chat (his call of 16 Nov: "real proof, works away from home, costs nothing"; the PC's Windows Hello added on 20 Nov) · Design: [the spec](../superpowers/specs/2026-11-20-approval-for-big-actions-design.md) · Built; his named deploys and hand checks (76 to 85) to come
 
 **Context.** Nova can now do things that cost money, run code or delete his data. A misheard request, someone else in the room, a TV or a prompt slipped into something Claude read must not be able to do those things on their own. He wanted real proof that it is him, from something only he holds: a passkey on his phone, and Windows Hello at the PC (his hand is bandaged, so he'll enrol a finger of the other hand; both fall back to a PIN).
 
@@ -66,4 +66,4 @@
 
 **Anti-goals** (a failure even if it works). A big action going ahead without a fresh verified approval or outside an open trust window, including through a crash, a restart, a timeout or a reply from a device which wasn't asked; an approval for one action used for another (replay); Claude being able to skip, fake or pre-approve (the check is in the executor, after Claude has chosen); the approval page usable by anyone but him; a secret or private key anywhere but his phone, or a challenge, assertion, credential id or description-bearing id path in the log.
 
-**Setting it up (his named jobs, in order).** Push to GitHub main. On the brain, **install `cryptography` into the brain's venv as the `nova` user** (`requirements-backend.txt` pins it) and restart `nova-backend`. On the PC, `scripts/deploy_pc.sh` with `requirements-pc.txt` (the Windows Hello package). The Tailscale HTTPS address must already serve the settings page. Then the hand checks in the release checklist (71 to 80), **registering the phone's passkey first**, and warning before sound.
+**Setting it up (his named jobs, in order).** Push to GitHub main. On the brain, **install `cryptography` into the brain's venv as the `nova` user** (`requirements-backend.txt` pins it) and restart `nova-backend`. On the PC, `scripts/deploy_pc.sh` with `requirements-pc.txt` (the Windows Hello package). The Tailscale HTTPS address must already serve the settings page. Then the hand checks in the release checklist (76 to 85), **registering the phone's passkey first**, and warning before sound.
