@@ -5,7 +5,7 @@ seconds, so it can be seen whether ending a recording when the voice drops away 
 words stop (see recording.py) works, and what is left.
 
 One line of JSON per recording goes in long-recordings.jsonl in the logs folder: when it
-was, how long the speech was, the numbers the recorder saw, and the words heard - only
+was noted, how long the speech was, the numbers the recorder saw, and the words heard - only
 if the caller gives them, which it does while logging.log_transcripts is on. Never audio.
 The file is rewritten to keep only the newest MOST lines, so it can't grow, and there's
 no date after which it stops: how long it's wanted for is a decision for later.
@@ -47,11 +47,12 @@ def note_long_recording(path: str, at: datetime, speech_seconds: float, report: 
     once there are more than MOST.
 
     Best-effort: a failure is only logged - the first time, until the file works again -
-    since keeping this record must never be what stops a request being answered.
+    since keeping this record must never be what stops a request being answered. That
+    goes for what it's given too: nothing in making the line is ever raised.
 
     Args:
         path: The .jsonl file to keep the record in.
-        at: When the recording was made.
+        at: When it's noted - once the words are known, a moment after the recording ended.
         speech_seconds: How long the speech in it lasted, from speech_started to
             speech_ended.
         report: What record_until_silence said about it - what ended it and the numbers
@@ -62,14 +63,13 @@ def note_long_recording(path: str, at: datetime, speech_seconds: float, report: 
         Whether a line was written.
     """
     global _warned
-    if speech_seconds <= LONGEST_SPEECH:
-        return False
-
-    line = {"at": at.isoformat(timespec="seconds"), "speech_seconds": round(speech_seconds, 2), **report}
-    if words is not None:
-        line["words"] = words
-    temporary = path + ".new"
     try:
+        if speech_seconds <= LONGEST_SPEECH:
+            return False
+        line = {"at": at.isoformat(timespec="seconds"), "speech_seconds": round(speech_seconds, 2), **report}
+        if words is not None:
+            line["words"] = words
+        temporary = path + ".new"
         with _save_lock:
             kept = []
             if os.path.exists(path):

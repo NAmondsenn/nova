@@ -167,6 +167,14 @@ def test_a_failed_write_leaves_what_was_kept(path, tmp_path, monkeypatch):
     assert [file.name for file in tmp_path.iterdir()] == ["long-recordings.jsonl"]
 
 
+def test_what_cannot_be_made_into_a_line_is_not_raised(path):
+    # However it's called, keeping the note never stops a request being answered.
+    assert note_long_recording(path, None, 9.0, REPORT) is False
+    assert note_long_recording(path, AT, None, REPORT) is False
+    assert note_long_recording(path, AT, 9.0, None) is False
+    assert note_long_recording(path, AT, 9.0, ["not", "a", "report"]) is False
+
+
 def test_a_folder_where_the_file_should_be_is_not_raised(tmp_path):
     folder = tmp_path / "long-recordings.jsonl"
     folder.mkdir()
