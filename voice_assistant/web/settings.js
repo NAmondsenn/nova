@@ -68,6 +68,14 @@ const CALENDARS_EVERY = 60000;
 // What Home Assistant has to choose from changes when something is added to it, and every
 // look asks it, so once a minute too.
 const HOME_CHOICES_EVERY = 60000;
+// How often the Approvals section asks Nova for the passkeys, who can approve and the recent
+// approvals - and so how soon an approval given elsewhere is listed.
+const APPROVALS_EVERY = 20000;
+// How long the phone's passkey prompt may wait for him while a passkey is added, as the
+// approval page's does.
+const PASSKEY_WAIT = 120000;
+// The most passkeys Nova keeps, as passkeys.py has it.
+const MOST_PASSKEYS = 3;
 
 // How long the page waits for Nova to begin answering, in milliseconds, before it gives
 // up on a request. Without it one that hangs holds up what asks next for good, as each
@@ -100,7 +108,7 @@ const TYPED = new Set(["text", "password", "number", "time", "url", "search", "e
 // The forms always on show, which empty themselves once sent - so anything in one which
 // differs from how the page drew it is half done, wherever the focus has gone since: a
 // time picked for an alarm, then its Repeats tapped, say.
-const ALWAYS_SHOWN = ["add-alarm", "add-satellite", "add-display", "play-something", "follow-team"];
+const ALWAYS_SHOWN = ["add-alarm", "add-satellite", "add-display", "play-something", "follow-team", "add-passkey"];
 
 // The colours offered as swatches on a light which can be set to one, as a hue in
 // degrees and a saturation in percent.
@@ -228,6 +236,11 @@ let calendars = null;
 // What /api/home-choices said last.
 let homeChoices = null;
 
+// What /api/approvals said last, and whether a passkey's being added - from Add a passkey
+// until Nova has answered, the phone's own prompt in between.
+let approvals = null;
+let passkeyComing = false;
+
 // What /api/state last said of why Nova's saved settings can't be read, or "" when they can,
 // and the paragraphs which say it, one at the top of each section's settings.
 let settingsProblem = "";
@@ -241,7 +254,7 @@ let stateSaid = null;
 
 // Whether the last try of each of the other loads worked. Several swallow a failure and keep
 // what they held before it, which is then from the past.
-const worked = { music: false, home: false, batteries: false, football: false, calendars: false };
+const worked = { music: false, home: false, batteries: false, football: false, calendars: false, approvals: false };
 
 // Whether the save bar offers to restart Nova rather than to save - once a save has
 // something which waits for a restart, while nothing else is waiting to be saved - and
@@ -580,6 +593,7 @@ async function live() {
     loadClean();
     loadCalendars();
     loadHomeChoices();
+    loadApprovals();
   }
   activity = now;
   showActivity();
@@ -802,7 +816,7 @@ function changedField(field) {
 // done, a key or the page password half put in, settings not yet saved, the login form -
 // or a satellite's password or a clock's key, each shown only the once, on its way or on show.
 function editingSomething() {
-  if (passwordComing || displayKeyComing) return true;
+  if (passwordComing || displayKeyComing || passkeyComing) return true;
   if (TYPED.has(document.activeElement && document.activeElement.type)) return true;
   if (ALWAYS_SHOWN.some((id) => [...document.getElementById(id).elements].some(changedField))) return true;
   const open = ["routine-editor", "renew-panel", "password-panel", "display-key-panel", "spotify-finish", "google-finish",
@@ -1659,6 +1673,268 @@ async function finishSignIn(service, reload) {
   address.value = "";
   document.getElementById(`${service}-finish`).hidden = true;
   document.getElementById(`${service}-link-note`).hidden = true;
+}
+
+// Approvals
+//
+// How big actions are approved - see voice_assistant/approvals.py. His passkeys (each one his
+// phone, say, which approves with its fingerprint, face or PIN), the satellites which can
+// approve (the PC, with Windows Hello), the approval settings, drawn with the others, and the
+// recent approvals. Through NPM Nova refuses all of it, so it isn't asked for and only that is said.
+
+// Base64url, as Nova sends and takes every binary part of a passkey - as approve.js has it.
+function b64urlToBytes(text) {
+  const plain = String(text).replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(plain + "=".repeat((4 - (plain.length % 4)) % 4));
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+function bytesToB64url(buffer) {
+  const view = ArrayBuffer.isView(buffer)
+    ? new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength) : new Uint8Array(buffer);
+  let binary = "";
+  for (const byte of view) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// A satellite which can approve, as it's said: "the PC".
+function spokenOf(satellite) {
+  return satellite.spoken || satellite.name;
+}
+
+async function loadApprovals() {
+  const npm = Boolean(loginState && loginState.route === "npm");
+  document.getElementById("approvals-body").hidden = npm;
+  document.getElementById("approvals-npm").hidden = !npm;
+  if (npm) {
+    approvals = null;
+    noted("approvals", true);
+    return;
+  }
+  try {
+    const response = answered(await fetchWithin("/api/approvals"));
+    if (!response.ok) {
+      noted("approvals", false);
+      return;
+    }
+    approvals = await response.json();
+  } catch (error) {
+    noted("approvals", false);
+    return;
+  }
+  showApprovals();
+  noted("approvals", true);
+}
+
+// Where his OK would be asked for now, as Nova says it - "Check your phone or the PC." - or
+// null when there's no way to give one, when nothing is asked. `without` is a passkey being
+// removed, which can't approve its own removal.
+function checkWords(without) {
+  if (!approvals) return null;
+  const ways = approvals.passkeys.some((passkey) => passkey.id !== without) ? ["your phone"] : [];
+  ways.push(...approvals.satellites.filter((one) => one.can_approve && one.connected).map(spokenOf));
+  return ways.length ? `Check ${ways.join(" or ")}.` : null;
+}
+
+// Runs a change which may wait for his OK, with the control it came from saying where to give
+// it until Nova answers. With no words, it's run as it is.
+async function whileAsking(label, words, work) {
+  if (!words) return work();
+  const before = label.textContent;
+  label.textContent = words;
+  try {
+    return await work();
+  } finally {
+    label.textContent = before;
+  }
+}
+
+// When an approval was asked for, as "Today 14:05" or "3 Nov 14:05", from epoch seconds.
+function approvalTime(seconds) {
+  const date = new Date(seconds * 1000);
+  return `${dayOf(date)} ${clockTime(date)}`;
+}
+
+// When a passkey was added, as "Added today", "Added on Tuesday" or "Added on 3 Nov", from epoch seconds.
+function addedOn(seconds) {
+  const day = dayOf(new Date(seconds * 1000));
+  return day === "Today" || day === "Yesterday" ? `Added ${day.toLowerCase()}` : `Added on ${day}`;
+}
+
+// Draws the section from what /api/approvals said. Each list is drawn again only as it changes,
+// and not while one of its controls is held down.
+function showApprovals() {
+  const passkeys = document.getElementById("passkeys");
+  drawIfChanged("passkeys", approvals.passkeys, () => {
+    if (passkeys.querySelector(":active")) return false;
+    passkeys.replaceChildren(...(approvals.passkeys.length ? approvals.passkeys.map(passkeyRow)
+      : [emptyRow("No passkey yet. Add one on your phone, and it can approve big actions.", "warning")]));
+  });
+  document.getElementById("add-passkey").hidden = approvals.passkeys.length >= MOST_PASSKEYS;
+
+  const approvers = document.getElementById("approvers");
+  document.getElementById("approvers-title").hidden = approvers.hidden = !approvals.satellites.length;
+  drawIfChanged("approvers", approvals.satellites, () => {
+    if (approvers.querySelector(":active")) return false;
+    approvers.replaceChildren(...approvals.satellites.map(approverRow));
+  });
+
+  drawIfChanged("recent-approvals", [approvals.recent, approvals.satellites, approvals.passkeys], () => {
+    document.getElementById("recent-approvals").replaceChildren(...(approvals.recent.length
+      ? approvals.recent.map(recentRow) : [emptyRow("Nothing's been asked for yet.")]));
+  });
+}
+
+// Shows the section again from Nova, whatever the data says - as a switch which failed to save
+// is still showing what wasn't saved.
+function reloadApprovals() {
+  for (const part of ["passkeys", "approvers", "recent-approvals"]) delete drawn[part];
+  return loadApprovals();
+}
+
+// A passkey: its name, when it was added, and Remove.
+function passkeyRow(passkey) {
+  const row = element("li");
+  const what = element("span", undefined, "what");
+  what.append(element("span", passkey.name, "name"));
+  if (Number.isFinite(passkey.added)) what.append(element("span", addedOn(passkey.added), "detail"));
+  const actions = element("span", undefined, "actions");
+  const remove = element("button", "Remove", "button quiet danger");
+  remove.type = "button";
+  remove.setAttribute("aria-label", `Remove the passkey ${passkey.name}`);
+  remove.addEventListener("click", () => removePasskey(passkey, remove));
+  actions.append(remove);
+  row.append(icon("i-key"), what, actions);
+  return row;
+}
+
+// A satellite which said it can approve, and whether it's asked to. Letting it needs his OK
+// once there's a way to give one; stopping it is free.
+function approverRow(satellite) {
+  const row = element("li");
+  const what = element("span", undefined, "what");
+  what.append(satellite.name);
+  what.append(element("span", satellite.connected ? "Connected" : "Not connected", "detail"));
+  const actions = element("span", undefined, "actions");
+  const choice = element("label", undefined, "choice");
+  const words = element("span", "Can approve");
+  const box = element("input");
+  Object.assign(box, { type: "checkbox", checked: Boolean(satellite.can_approve) });
+  box.setAttribute("role", "switch");
+  box.setAttribute("aria-label", `${capitalised(spokenOf(satellite))} can approve`);
+  box.addEventListener("change", () => whileAsking(words, box.checked ? checkWords() : null,
+    () => change("/api/approvals/can-approve", { name: satellite.name, on: box.checked }, reloadApprovals)));
+  choice.append(words, box);
+  actions.append(choice);
+  row.append(dot(satellite.connected ? "good" : "off"), what, actions);
+  return row;
+}
+
+// How an approval ended, as the recent list says it, with its dot.
+const OUTCOMES = {
+  approved: ["Approved", "good"],
+  refused: ["Refused", "bad"],
+  timeout: ["No answer", "off"],
+  no_way: ["No way to approve", "off"],
+  stopped: ["Nova restarted", "off"],
+};
+
+// Who answered, as the recent list says it: a passkey by its name, a satellite as it's said,
+// the phone's page, which refuses with no passkey, or the approval just before it.
+function answeredBy(by) {
+  if (!by) return "";
+  if (by === "phone") return "Your phone";
+  if (by === "trust") return "Covered by an approval just before";
+  const satellite = approvals.satellites.find((one) => one.name === by);
+  return satellite ? capitalised(spokenOf(satellite)) : by;
+}
+
+// One approval: what it was for, when, who answered and how it ended.
+function recentRow(approval) {
+  const row = element("li");
+  const [outcome, mood] = OUTCOMES[approval.outcome] || [capitalised(String(approval.outcome || "")), "off"];
+  const what = element("span", undefined, "what");
+  what.append(element("span", approval.description || "", "name"));
+  const parts = [Number.isFinite(approval.at) ? approvalTime(approval.at) : "", answeredBy(approval.by)].filter(Boolean);
+  if (parts.length) what.append(element("span", parts.join(" · "), "detail"));
+  row.append(dot(mood), what, element("span", outcome, "badge"));
+  return row;
+}
+
+// Adds a passkey: Nova gives a challenge (once his OK is given, if he has a passkey already), the
+// phone makes the passkey with his fingerprint, face or PIN, and Nova checks it and keeps it.
+async function addPasskey(event) {
+  event.preventDefault();
+  const field = document.getElementById("passkey-name");
+  const button = document.getElementById("add-passkey-go");
+  const name = field.value.trim();
+  if (!name || passkeyComing) {
+    field.focus();
+    return;
+  }
+  if (!window.PublicKeyCredential || !navigator.credentials) {
+    toast("This browser can't make a passkey here. Open the page at its Tailscale address on your phone.", false);
+    return;
+  }
+  passkeyComing = true;
+  button.disabled = true;
+  try {
+    const words = approvals && approvals.passkeys.length ? checkWords() : null;
+    const begun = await whileAsking(button, words, () => send("/api/passkeys/begin", {}));
+    if (!begun.success) {
+      toast(begun.message || "That didn't work.", false);
+      return;
+    }
+    let made;
+    try {
+      made = await navigator.credentials.create({ publicKey: {
+        challenge: b64urlToBytes(begun.challenge),
+        rp: { id: begun.rp_id, name: "Nova" },
+        user: { id: b64urlToBytes(begun.user_id), name: "nova", displayName: "Nova" },
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+        authenticatorSelection: { residentKey: "discouraged", userVerification: "required" },
+        attestation: "none",
+        excludeCredentials: begun.exclude.map((id) => ({ type: "public-key", id: b64urlToBytes(id) })),
+        timeout: PASSKEY_WAIT,
+      } });
+    } catch (error) {
+      toast(error.name === "InvalidStateError" ? "That passkey is added already." : "No passkey was added.", false);
+      return;
+    }
+    const response = made.response;
+    const key = response.getPublicKey ? response.getPublicKey() : null;
+    if (!key) {
+      toast("This browser can't give Nova the passkey's key, so it wasn't added.", false);
+      return;
+    }
+    const result = await change("/api/passkeys/finish", {
+      name,
+      credential_id: bytesToB64url(made.rawId),
+      client_data: bytesToB64url(response.clientDataJSON),
+      authenticator_data: bytesToB64url(response.getAuthenticatorData()),
+      public_key: bytesToB64url(key),
+      algorithm: response.getPublicKeyAlgorithm(),
+    }, reloadApprovals);
+    if (result.success) field.value = "";
+  } catch (error) {
+    toast("Couldn't reach Nova.", false);
+  } finally {
+    passkeyComing = false;
+    button.disabled = false;
+  }
+}
+
+// Removes a passkey - asked first, as the phone it's on can't approve with it again. While
+// another way to approve is left, that way has to approve it.
+async function removePasskey(passkey, button) {
+  if (!confirm(`Remove the passkey ${passkey.name}? It can't approve anything once it's gone.`)) return;
+  button.disabled = true;
+  try {
+    await whileAsking(button, checkWords(passkey.id),
+      () => change("/api/passkeys/remove", { id: passkey.id }, reloadApprovals));
+  } finally {
+    button.disabled = false;
+  }
 }
 
 // Calendars and lists
@@ -2963,89 +3239,9 @@ function showSettingsProblem(problem) {
   }
 }
 
-// The night sky behind the page - the same stars every time, from the same seed,
-// drawn again only when the window changes size.
+// The night sky behind the page - see sky.js.
 function drawSky() {
-  const canvas = document.getElementById("sky");
-  const { width, height } = canvas.getBoundingClientRect();
-  const ratio = Math.min(window.devicePixelRatio || 1, 2);
-  if (canvas.width === Math.round(width * ratio) && canvas.height === Math.round(height * ratio)) return;
-  canvas.width = Math.round(width * ratio);
-  canvas.height = Math.round(height * ratio);
-  const sky = canvas.getContext("2d");
-  sky.scale(ratio, ratio);
-
-  const night = sky.createLinearGradient(0, 0, 0, height);
-  night.addColorStop(0, "#0a1024");
-  night.addColorStop(1, "#04060e");
-  sky.fillStyle = night;
-  sky.fillRect(0, 0, width, height);
-
-  // A faint band of haze across it, like the Milky Way, with more stars in it.
-  const band = { x: width * 0.62, y: height * 0.3, angle: -0.42, length: Math.hypot(width, height),
-                 across: Math.min(width, height) * 0.22 };
-  sky.save();
-  sky.translate(band.x, band.y);
-  sky.rotate(band.angle);
-  sky.scale(1, (band.across * 2) / band.length);
-  const haze = sky.createRadialGradient(0, 0, 0, 0, 0, band.length / 2);
-  haze.addColorStop(0, "rgba(120, 140, 210, 0.1)");
-  haze.addColorStop(0.5, "rgba(90, 100, 180, 0.05)");
-  haze.addColorStop(1, "rgba(90, 100, 180, 0)");
-  sky.fillStyle = haze;
-  sky.fillRect(-band.length / 2, -band.length / 2, band.length, band.length);
-  sky.restore();
-
-  // And a little warmth low down, as if from a town far off.
-  const warmth = sky.createRadialGradient(width * 0.1, height, 0, width * 0.1, height, Math.max(width, height) * 0.5);
-  warmth.addColorStop(0, "rgba(130, 90, 140, 0.08)");
-  warmth.addColorStop(1, "rgba(130, 90, 140, 0)");
-  sky.fillStyle = warmth;
-  sky.fillRect(0, 0, width, height);
-
-  const random = seeded(2026);
-  const stars = Math.round((width * height) / 2400);
-  for (let i = 0; i < stars; i++) {
-    let x = random() * width;
-    let y = random() * height;
-    if (i % 3 === 0) {
-      // In the band: anywhere along it, and mostly near its middle across it.
-      const along = (random() - 0.5) * band.length;
-      const across = (random() + random() + random() - 1.5) * band.across * 0.9;
-      x = band.x + along * Math.cos(band.angle) - across * Math.sin(band.angle);
-      y = band.y + along * Math.sin(band.angle) + across * Math.cos(band.angle);
-    }
-    const size = 0.3 + Math.pow(random(), 4) * 1.4;
-    const alpha = (0.2 + random() * 0.65).toFixed(2);
-    const tint = random();
-    sky.fillStyle = tint < 0.12 ? `rgba(255, 226, 186, ${alpha})`
-      : tint > 0.88 ? `rgba(186, 206, 255, ${alpha})` : `rgba(236, 240, 255, ${alpha})`;
-    sky.beginPath();
-    sky.arc(x, y, size, 0, Math.PI * 2);
-    sky.fill();
-  }
-
-  // A few bright ones, with a soft glow.
-  for (let i = 0; i < Math.round(stars / 120); i++) {
-    const x = random() * width;
-    const y = random() * height;
-    const glow = sky.createRadialGradient(x, y, 0, x, y, 5);
-    glow.addColorStop(0, "rgba(255, 248, 235, 0.9)");
-    glow.addColorStop(0.25, "rgba(243, 214, 160, 0.3)");
-    glow.addColorStop(1, "rgba(243, 214, 160, 0)");
-    sky.fillStyle = glow;
-    sky.fillRect(x - 5, y - 5, 10, 10);
-  }
-}
-
-// Random numbers, the same ones each time for the same seed - mulberry32.
-function seeded(seed) {
-  return () => {
-    seed = (seed + 0x6d2b79f5) | 0;
-    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
+  NovaSky.draw(document.getElementById("sky"));
 }
 
 // The list of sections, and the one open from it
@@ -3220,6 +3416,9 @@ function currentView() {
       ? (from === until ? false : { from, until }) : null,
     memories: state ? state.memories.length : null,
     keys: state && state.keys.length ? { set: state.keys.filter((one) => one.set).length, total: state.keys.length } : null,
+    approvals: loginState && loginState.route === "npm" ? { npm: true }
+      : worked.approvals && approvals ? { passkeys: approvals.passkeys.length,
+                                          approvers: approvals.satellites.filter((one) => one.can_approve).map(spokenOf) } : null,
   };
 }
 
@@ -3588,7 +3787,10 @@ function setUpSettings() {
     if (!changed.length) return;
     const changes = Object.fromEntries(
       changed.map((input) => [input.name, input.type === "checkbox" ? input.checked : input.value]));
-    const result = await change("/api/settings", { changes });
+    // Raising an approval setting needs his OK, which the save waits for.
+    const raised = changed.some((input) => input.name.startsWith("approvals.") && Number(input.value) > Number(input.dataset.saved));
+    const result = await whileAsking(document.getElementById("unsaved"), raised ? checkWords() : null,
+      () => change("/api/settings", { changes }));
     if (result.success) {
       for (const input of changed) input.dataset.saved = valueOf(input);
       offerRestart = Boolean(result.restart_needed);
@@ -3815,6 +4017,8 @@ document.addEventListener("DOMContentLoaded", () => {
   every(cleanEvery, loadClean);
   every(CALENDARS_EVERY, loadCalendars);
   every(HOME_CHOICES_EVERY, loadHomeChoices);
+  every(APPROVALS_EVERY, loadApprovals);
+  document.getElementById("add-passkey").addEventListener("submit", addPasskey);
   document.getElementById("also-send-box").addEventListener("change", (event) =>
     changeBattery("/api/batteries/also", { on: event.target.checked }));
   // Home Assistant has to look the team up, which is usually a few seconds and can take up

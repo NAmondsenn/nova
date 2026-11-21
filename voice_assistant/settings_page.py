@@ -82,6 +82,8 @@ FILES = {"/": ("settings.html", "text/html; charset=utf-8"),
          # The list's rules, which never touch the page - loaded before settings.js.
          "/settings_list.js": ("settings_list.js", "text/javascript; charset=utf-8"),
          "/settings.css": ("settings.css", "text/css; charset=utf-8"),
+         # The night sky behind the settings page and the phone's approval page.
+         "/sky.js": ("sky.js", "text/javascript; charset=utf-8"),
          "/icon.svg": ("icon.svg", "image/svg+xml"),
          # The Wrapped's story page - see wrapped.py - which asks /api/wrapped for what it shows.
          "/wrapped": ("wrapped.html", "text/html; charset=utf-8"),
@@ -97,7 +99,7 @@ FILES = {"/": ("settings.html", "text/html; charset=utf-8"),
 # update that it's out of date - see page_version. Not the Wrapped's: it is read once, as
 # it's opened, and asks for nothing after, so a change to it would only reload a settings
 # page for nothing. The approval page's are, as it asks the brain for the request it shows.
-PAGE_FILES = ("settings.html", "settings_list.js", "settings.js", "settings.css", "approve.html", "approve.js")
+PAGE_FILES = ("settings.html", "settings_list.js", "settings.js", "settings.css", "sky.js", "approve.html", "approve.js")
 
 # Sent with every answer: nothing but the page's own files may run in it, no other
 # site may show it in a frame, and nothing is kept in a cache.
@@ -2594,8 +2596,9 @@ class SettingsPage:
         if approvals is None or passkeys is None:
             return {"passkeys": [], "satellites": [], "trusted_until": None, "recent": []}
         rooms = self.brain.rooms
-        satellites = [{"name": name, "connected": self.brain.session_for(name) is not None,
-                       "can_approve": rooms.can_approve(name)}
+        # Each with what it's called when said - "the PC" - as the page names who can approve.
+        satellites = [{"name": name, "spoken": self.brain.spoken_name(name),
+                       "connected": self.brain.session_for(name) is not None, "can_approve": rooms.can_approve(name)}
                       for name in self._satellite_names() or [] if rooms.approves(name)]
         return {"passkeys": [{"id": each.id, "name": each.name, "added": each.added} for each in passkeys.all()],
                 "satellites": satellites, "trusted_until": approvals.trusted_until(), "recent": approvals.recent()}

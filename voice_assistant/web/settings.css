@@ -1511,6 +1511,55 @@ input[type="range"]:focus-visible::-moz-range-thumb {
   .satellites .actions .button { flex: 1 1 auto; }
 }
 
+/* The Approvals section: each passkey with Remove, each satellite which can approve with its
+   switch, and the recent approvals - each a name over its quieter details, as a satellite's is. */
+.passkeys .what,
+.approvers .what,
+.recent-approvals .what {
+  display: grid;
+  gap: 2px;
+}
+
+.passkeys .detail,
+.approvers .detail,
+.recent-approvals .detail {
+  color: var(--dusk);
+  font-size: 13px;
+}
+
+.passkeys .button {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+/* "Can approve": its words, then its switch, 44px tall as the satellites' choices are. */
+.approvers .choice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+}
+
+/* An approval's description can take two lines, so its dot and how it ended stay by the first. */
+.recent-approvals li {
+  align-items: flex-start;
+  padding: 12px 16px;
+}
+
+.recent-approvals li > .dot { margin-top: 8px; }
+
+.recent-approvals .badge {
+  color: var(--dusk);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: nowrap;
+  margin-top: 1px;
+}
+
+#add-passkey { flex-wrap: wrap; }
+
+#add-passkey input { flex: 1 1 200px; }
+
 /* The new satellite's name has the row to itself, so its example isn't cut short, and
    its button goes the width of the panel under it. */
 #add-satellite { flex-wrap: wrap; }
@@ -2003,6 +2052,39 @@ input[type="range"].warmth::-moz-range-progress { background: transparent; }
 }
 
 p.login { color: var(--moon); }
+
+/* The phone's approval page, opened from his notification: one panel, as the login is, with
+   what Nova would do and the two buttons, wide enough for a thumb. */
+.approval {
+  display: grid;
+  gap: 16px;
+  max-width: 440px;
+  margin: 0 auto;
+  padding: 18px 20px 20px;
+}
+
+.approval .heading { margin: 0; }
+
+.approval .description {
+  margin: 0;
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+
+.approval .entry {
+  display: flex;
+  gap: 10px;
+}
+
+.approval .entry .button {
+  flex: 1;
+  min-height: 48px;
+}
+
+.approval .said {
+  margin: 0;
+  color: var(--dusk);
+}
 
 /* The page password sits under the other keys, and needs its current one beside the
    new one through NPM - on a line of its own, as two fields and Save don't fit a

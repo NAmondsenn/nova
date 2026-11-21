@@ -104,7 +104,7 @@ function descendants(node) {
 }
 
 const SECTION_IDS = ["status", "music", "clock", "devices", "batteries", "displays", "journeys", "football",
-                     "calendars", "routines", "satellites", "sound", "claude", "notifications", "memory", "keys",
+                     "calendars", "routines", "satellites", "approvals", "sound", "claude", "notifications", "memory", "keys",
                      "else"];
 
 // What /api/state says, with nothing in it.
@@ -115,12 +115,21 @@ const STATE = {
   displays: { port: 0, list: [] }, keys: [], settings: [], settings_problem: "", restart_needed: false, page: "one",
 };
 
+// What /api/approvals says: one passkey, the PC which can approve, and one approval.
+const APPROVALS = {
+  passkeys: [{ id: "AQID", name: "Phone", added: 1700000000 }],
+  satellites: [{ name: "pc", spoken: "the PC", connected: true, can_approve: true }],
+  trusted_until: null,
+  recent: [{ at: 1700000600, description: "Remove 'Dentist'", by: "Phone", outcome: "approved" }],
+};
+
 // The page's scripts over a stand-in page, at the address `hash` (whose history entry has the
 // state `entry`, as a reloaded one does) and logged in or, with `loggedIn` false, through NPM
 // and not yet; on a wide screen if `wide`. `before` are the history's entries under this one,
 // each { state, hash }, which belong to another load of a document - going back to one is a
 // whole new load, not a popstate. `state` is what Nova says of itself.
-function page({ hash = "", entry = null, before = [], loggedIn = true, wide = false, state = STATE } = {}) {
+function page({ hash = "", entry = null, before = [], loggedIn = true, wide = false, state = STATE, route = null,
+                approvals = APPROVALS } = {}) {
   const nodes = new Map();
   const document = {
     hidden: false,
@@ -178,8 +187,10 @@ function page({ hash = "", entry = null, before = [], loggedIn = true, wide = fa
       windowListeners[kind] = (windowListeners[kind] || []).filter((one) => one !== listener);
     },
   };
-  const login = { route: loggedIn ? "direct" : "npm", logged_in: loggedIn, password_set: true, page: "one" };
-  const answers = { state };
+  const login = { route: route || (loggedIn ? "direct" : "npm"), logged_in: loggedIn, password_set: true, page: "one" };
+  const answers = { state, approvals };
+  // Each path the page asked Nova for, in order.
+  const asked = [];
   const answer = (body) => ({ ok: true, status: 200, json: async () => body, text: async () => "" });
   const context = vm.createContext({
     document,
@@ -198,8 +209,10 @@ function page({ hash = "", entry = null, before = [], loggedIn = true, wide = fa
       }
     },
     async fetch(path) {
+      asked.push(path);
       if (path === "/api/login-state") return answer(login);
       if (path === "/api/state") return answer(answers.state);
+      if (path === "/api/approvals") return answer(answers.approvals);
       return answer({});
     },
   });
@@ -216,6 +229,7 @@ function page({ hash = "", entry = null, before = [], loggedIn = true, wide = fa
     scrolls,
     login,
     answers,
+    asked,
     // The row of a section in the list.
     row: (id) => descendants(node("rows")).find((one) => one.dataset.open === id),
     // Whether the focus is on the node of that id, or on a row.
@@ -540,4 +554,26 @@ test("every id the script asks the page for by name is in the page, exactly once
   assert.equal(asked.size > 50, true);
   const wrong = [...asked].filter((id) => HTML.split(`id="${id}"`).length - 1 !== 1);
   assert.equal(wrong.join(","), "");
+});
+
+test("the approvals section is hidden through npm", async () => {
+  const shown = page({ route: "npm" });
+  await arrived(shown);
+  await shown.context.loadApprovals();
+  assert.equal(shown.node("approvals-body").hidden, true);
+  assert.equal(shown.node("approvals-npm").hidden, false);
+  assert.equal(HTML.includes(`<p class="panel note" id="approvals-npm" hidden>Only at the page's Tailscale address.</p>`), true);
+  assert.equal(shown.node("line-approvals").textContent, "Only at the page's Tailscale address");
+  // Nor is Nova asked, which would refuse it.
+  assert.equal(shown.asked.includes("/api/approvals"), false);
+  // At the Tailscale address it's shown, with the passkeys, who can approve and what was approved.
+  const tailnet = page();
+  await arrived(tailnet);
+  await tailnet.context.loadApprovals();
+  assert.equal(tailnet.node("approvals-body").hidden, false);
+  assert.equal(tailnet.node("approvals-npm").hidden, true);
+  assert.equal(tailnet.node("line-approvals").textContent, "1 passkey, the PC");
+  assert.equal(tailnet.node("passkeys").textContent.includes("Phone"), true);
+  assert.equal(tailnet.node("approvers").textContent.includes("Can approve"), true);
+  assert.equal(tailnet.node("recent-approvals").textContent.includes("Remove 'Dentist'"), true);
 });

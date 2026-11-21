@@ -33,6 +33,7 @@
     { id: "calendars", name: "Calendars and lists", group: "daily", icon: "i-calendar", starts: [] },
     { id: "routines", name: "Routines", group: "daily", icon: "i-routine", starts: [] },
     { id: "satellites", name: "Satellites", group: "nova", icon: "i-microphone", starts: ["computer."] },
+    { id: "approvals", name: "Approvals", group: "nova", icon: "i-key", starts: ["approvals."] },
     { id: "sound", name: "Sound and voice", group: "nova", icon: "i-sound", starts: ["voice.", "sounds.", "thresholds."] },
     { id: "claude", name: "Claude", group: "nova", icon: "i-reply", starts: ["web_search.", "conversation.", "usage."] },
     { id: "notifications", name: "Notifications", group: "nova", icon: "i-bell", starts: ["ntfy."] },
@@ -177,6 +178,17 @@
       if (!satellites) return { text: "" };
       if (!satellites.length) return { text: "None added" };
       return { text: `${satellites.filter((satellite) => satellite.connected).length} of ${satellites.length} connected` };
+    },
+    // His passkeys and the satellites which can approve, as "1 passkey, the PC" - a warning
+    // while there's no way to approve at all, as every big action is then refused.
+    approvals: (view) => {
+      const approvals = view.approvals;
+      if (!approvals) return { text: "" };
+      if (approvals.npm) return { text: "Only at the page's Tailscale address" };
+      const approvers = approvals.approvers || [];
+      if (!approvals.passkeys && !approvers.length) return { text: "No passkey yet", warn: true };
+      const passkeys = approvals.passkeys ? count(approvals.passkeys, "passkey", "passkeys") : "No passkey";
+      return { text: [passkeys, ...approvers].join(", ") };
     },
     sound: (view) => ({ text: view.voice == null ? "" : `Voice at ${view.voice}%` }),
     claude: (view) => {
