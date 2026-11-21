@@ -4554,6 +4554,40 @@ def test_quit_while_recording_cleans_up_and_exits_with_quit_code(brain, make, pc
     assert not os.path.exists(satellite.RUNNING_MARK)
 
 
+class WaitingWindowsHello(FakeWindowsHello):
+    """Holds each prompt open until closed, which ends it with no, as the real WindowsHello's close does."""
+
+    def __init__(self):
+        super().__init__()
+        self.waiting = threading.Event()
+        self._released = threading.Event()
+
+    def ask(self, id, description):
+        self.asked.append((id, description))
+        self.waiting.set()
+        self._released.wait(5)
+        return False
+
+    def close(self):
+        self.closed = True
+        self._released.set()
+
+
+def test_quit_while_an_approval_waits_exits_with_the_quit_code_and_sends_no_answer(brain, make, pc, monkeypatch):
+    monkeypatch.setattr(satellite, "WindowsHello", WaitingWindowsHello)
+    made = tray_pressable(brain, make)
+    brain.say("approval", id="approval-1", description="Remove 'Dentist'")
+    assert wait_for(lambda: made.hello.waiting.is_set())
+    made.tray.on_choice("quit")
+    assert wait_for(lambda: made.exited)
+    assert made.exited == [satellite.QUIT_CODE]
+    # Cleaned up: Hello closed, which ends the prompt, and nothing left to say the satellite is running.
+    assert made.hello.closed and made.speaker.closed and not os.path.exists(satellite.RUNNING_MARK)
+    # The link was stopped before Hello was closed, so the prompt's ending never reaches the brain as an answer.
+    time.sleep(0.2)
+    assert brain.messages("approval_answer") == []
+
+
 def test_a_choice_nova_doesnt_know_is_ignored(brain, make, caplog):
     made = tray_pressable(brain, make)
     sent = brain.kinds()
