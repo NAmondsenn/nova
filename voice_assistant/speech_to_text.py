@@ -522,14 +522,17 @@ class NemotronTranscription:
                 if piece is _FINISHED:
                     self._text = nemotron.finish(stream)
                     return
-                nemotron.add(stream, piece)
-                self._note_words(nemotron, stream, len(piece))
+                worked = nemotron.add(stream, piece)
+                self._note_words(nemotron, stream, len(piece), worked)
         except Exception as e:
             self._failed = e
 
-    def _note_words(self, nemotron, stream, samples: int):
+    def _note_words(self, nemotron, stream, samples: int, worked: bool):
         """
         Notes what Nemotron has heard so far, after it's been given more of the recording.
+        The words are only read when it worked on some of it: they can't have changed
+        otherwise, and the recording comes in 30ms pieces, where Nemotron works on it a
+        0.56s chunk at a time - for every satellite.
 
         Whatever goes wrong here only costs the recording ending on its words being
         still, never the transcript: it's never raised, which would have the whole
@@ -539,11 +542,13 @@ class NemotronTranscription:
             nemotron: The Nemotron.
             stream: Its stream for this recording.
             samples: How many samples it was just given.
+            worked: Whether it worked on any of the recording when given them - see
+                Nemotron.add.
         """
         try:
             with self._words_lock:
                 self._given += samples
-                if self._words_failed:
+                if self._words_failed or not worked:
                     return
             words = nemotron.words(stream)
             real = not _no_word_yet(words)

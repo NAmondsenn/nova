@@ -54,6 +54,10 @@ class FakeNemotron:
         # The words-so-far after each piece, as a list: the one at the stream's piece
         # count, or the last once it's past the end - or None to hear no words yet.
         self.script = None
+        # The pieces, by their count in the stream, after which it works on what it has been
+        # given (None for every piece), and the count each time its words are read.
+        self.decodes = None
+        self.read_at = []
 
     def start(self):
         self.streams.append([])
@@ -66,8 +70,10 @@ class FakeNemotron:
             failure, self.fail = self.fail, None
             raise failure
         stream.append(audio)
+        return self.decodes is None or len(stream) in self.decodes
 
     def words(self, stream):
+        self.read_at.append(len(stream))
         if self.script is None or not stream:
             return ""
         return self.script[min(len(stream), len(self.script)) - 1]
@@ -178,7 +184,7 @@ class _Hanging(FakeNemotron):
     def add(self, stream, audio):
         if self.hanging:
             self.let_go.wait(10)
-        super().add(stream, audio)
+        return super().add(stream, audio)
 
 
 def _given_up_on(stt):
@@ -305,6 +311,47 @@ def test_words_which_start_nothing_imagined_are_real_at_once(first):
     nemotron = FakeNemotron()
     nemotron.script = [first, first + " a"]
     assert _heard_pieces(nemotron, 1).quiet_words() == pytest.approx(0.0, abs=0.01)
+
+
+def test_the_words_are_only_read_once_nemotron_has_worked_on_more_of_the_recording():
+    # It works through the recording a chunk at a time, about 0.56s, so its words can't have
+    # changed after a piece it only kept - and every satellite's recording is heard this way.
+    nemotron = FakeNemotron()
+    nemotron.script = ["", "", "", "Set", "Set", "Set", "Set a"]
+    nemotron.decodes = {4, 7}
+    transcription = _heard_pieces(nemotron, 8)
+
+    assert nemotron.read_at == [4, 7]
+    # The audio is still counted a piece at a time: the words changed at the 7th piece of 8.
+    assert transcription.quiet_words() == pytest.approx(0.1, abs=0.01)
+
+
+def test_nemotron_says_whether_it_worked_on_what_it_was_given():
+    from voice_assistant.nemotron import Nemotron
+
+    class Recognizer:
+        """Stands in for sherpa-onnx's: ready to work on the stream as many times as the test says."""
+
+        def __init__(self):
+            self.ready = 0
+            self.decoded = 0
+
+        def is_ready(self, stream):
+            return self.ready > 0
+
+        def decode_stream(self, stream):
+            self.ready -= 1
+            self.decoded += 1
+
+    # Made without its model, which needs sherpa-onnx.
+    nemotron = Nemotron.__new__(Nemotron)
+    nemotron.recognizer = Recognizer()
+    stream = SimpleNamespace(accept_waveform=lambda rate, audio: None)
+
+    assert nemotron.add(stream, np.zeros(480, dtype=np.float32)) is False
+    nemotron.recognizer.ready = 2
+    assert nemotron.add(stream, np.zeros(480, dtype=np.float32)) is True
+    assert nemotron.recognizer.decoded == 2
 
 
 def _wait_for(condition, seconds=2.0):
