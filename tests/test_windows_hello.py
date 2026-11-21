@@ -226,3 +226,66 @@ def test_the_operation_iid_is_worked_out_as_windows_does():
     assert str(windows_hello._parameterised_iid("pinterface({9fc2b0bb-e446-44e2-aa61-9cab8f636af2};b1)")) == \
         "cdb5efb3-5788-509d-9be1-71ccb8a3362a"
     assert str(windows_hello.OPERATION_IID) == "fd596ffd-2318-558f-9dbe-d21df43764a5"
+
+
+class _ResultEnum:
+    """UserConsentVerificationResult as winrt has it: an IntEnum, so a value it hasn't is a ValueError."""
+
+    import enum
+
+    Kind = enum.IntEnum("UserConsentVerificationResult", {"VERIFIED": 0, "CANCELED": 6})
+
+
+class _Completed:
+    """A finished operation whose result is whatever results() was made to give."""
+
+    def __init__(self, results):
+        self._results = results
+        self.closed = False
+
+    def status(self):
+        return windows_hello._COMPLETED
+
+    def results(self):
+        return self._results()
+
+    def close(self):
+        self.closed = True
+
+
+def _winrt():
+    """A _Winrt made without winrt, with a stand-in for its result enum."""
+    made = windows_hello._Winrt.__new__(windows_hello._Winrt)
+    made.UserConsentVerificationResult = _ResultEnum.Kind
+    made._window = None
+    return made
+
+
+def test_a_result_never_written_is_never_verified(monkeypatch):
+    import ctypes
+
+    # GetResults succeeding without writing its result: what the ctypes int starts as is read.
+    monkeypatch.setattr(ctypes, "HRESULT", ctypes.c_long, raising=False)
+    monkeypatch.setattr(windows_hello, "_method", lambda pointer, index, restype, *argtypes: lambda *args: 0)
+    operation = windows_hello._RawOperation.__new__(windows_hello._RawOperation)
+    operation._ctypes, operation._pointer, operation._info = ctypes, 1, 2
+    unwritten = operation.results()
+    assert unwritten != 0
+
+    # Read as Hello's result, it's no name Windows has, so not VERIFIED - and the prompt's answer is no.
+    completed = _Completed(lambda: unwritten)
+    assert _winrt().wait(completed, 1) == "UNKNOWN" and completed.closed
+
+    class Unwritten(FakeBackend):
+        def wait(self, operation, seconds):
+            return _winrt().wait(_Completed(lambda: unwritten), seconds)
+
+    hello = WindowsHello(Unwritten())
+    try:
+        assert hello.ask("approval-1", "Remove 'Dentist'") is False
+    finally:
+        hello.close()
+
+
+def test_a_verified_result_is_still_read_as_verified():
+    assert _winrt().wait(_Completed(lambda: 0), 1) == "VERIFIED"

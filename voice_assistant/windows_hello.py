@@ -137,8 +137,13 @@ class _Winrt:
                 self._window.pump()
             status = operation.status()
             if status == _COMPLETED:
-                result = self.UserConsentVerificationResult(operation.results()).name
-                operation.close()
+                try:
+                    result = self.UserConsentVerificationResult(operation.results()).name
+                except ValueError:
+                    # A result Windows has no name for is never taken as a yes.
+                    result = "UNKNOWN"
+                finally:
+                    operation.close()
                 return result
             if status == _CANCELED:
                 operation.close()
@@ -223,7 +228,9 @@ class _RawOperation:
 
     def results(self) -> int:
         ctypes = self._ctypes
-        result = ctypes.c_int32()
+        # Started at -1, no result Windows has: 0 is VERIFIED, so a result never written
+        # must not read as a yes.
+        result = ctypes.c_int32(-1)
         _method(self._pointer, 8, ctypes.HRESULT, ctypes.POINTER(ctypes.c_int32))(self._pointer, ctypes.byref(result))
         return result.value
 
