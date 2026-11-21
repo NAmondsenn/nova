@@ -37,6 +37,7 @@ from voice_assistant.conversation import Reply
 from voice_assistant.lists import Lists
 from voice_assistant.media_watch import MediaWatcher
 from voice_assistant.navidrome import NavidromePlayer
+from voice_assistant.open_conversation import OpenConversation
 from voice_assistant.recording import RATE, AudioFeed
 from voice_assistant.remote import RemoteSatellite
 from voice_assistant.routines import Routines
@@ -4453,3 +4454,28 @@ def test_the_device_failing_to_be_worked_out_costs_only_the_sentence(brain, make
         raise RuntimeError("no rooms")
     brain.room_of = broken
     assert session._here() is None
+
+
+# Starting and ending an open conversation, by the brain's one OpenConversation
+
+def test_a_session_starts_and_ends_a_conversation_at_its_satellite_by_voice(brain, make_session):
+    brain.open_conversation = OpenConversation(lambda: {"enabled": True})
+    session = make_session()
+    here = session.satellite.name
+    # Said, with no chime: the session's own sound for it comes later.
+    reply = session.conversation.handle("Let's talk.")
+    assert (reply.say, reply.sounds) == ("Go ahead.", [])
+    assert brain.open_conversation.on_at(here)
+    reply = session.conversation.handle("That's all.")
+    assert (reply.say, reply.sounds) == ("Okay.", [])
+    assert not brain.open_conversation.on_at(here) and brain.open_conversation.satellite is None
+
+
+def test_a_session_with_no_conversations_leaves_the_phrases_to_claude(make_session, monkeypatch):
+    # The fixture's brain has none, as a test's executor has none.
+    session = make_session()
+    asked = []
+    monkeypatch.setattr(session.llm, "process_query", lambda text, **kwargs: asked.append(text) or {
+        "response": "Sorry.", "actions": [], "success": True})
+    assert session.conversation.handle("Let's talk.").say == "Sorry."
+    assert asked == ["Let's talk."]
