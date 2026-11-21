@@ -1126,8 +1126,7 @@ class GoogleCalendar:
                            lambda: self._remove_one(found, False, today))
         if len(found.units) > 1:
             first = min((_day_of(unit) for unit in found.units))
-            return Removal(f"Remove {len(found.units)} '{found.units[0]['summary']}' events from "
-                           f"{first.strftime(APPROVAL_DAY)} on",
+            return Removal(_several_described(found.units, search, first),
                            lambda: self._remove_all(found, day, today))
         unit = found.units[0]
         # One time of a series takes every time after it - however many, as one with no end has no count.
@@ -3218,6 +3217,31 @@ def _started(event: Dict, now: datetime) -> bool:
             # When it was meant to be can't be read, so it's never changed.
             return True
     return any(start <= now if isinstance(start, datetime) else start <= now.date() for start in starts)
+
+
+# The most names an approval of several removals lists; past that it says what was searched for.
+MOST_NAMED = 3
+
+
+def _several_described(units: List[Dict], search: str, first: date) -> str:
+    """
+    What removing several events is called as his OK is asked: every name among them -
+    or, past MOST_NAMED, what was searched for - so "remove all my gym" can't hide a
+    "Gym with Sam" behind "Gym", and every time after them when any is a series, so a
+    series is never hidden behind a count.
+    """
+    names = list(dict.fromkeys(unit["summary"] for unit in units))
+    count, on = len(units), f"from {first.strftime(APPROVAL_DAY)} on"
+    if len(names) == 1:
+        described = f"Remove {count} '{names[0]}' events {on}"
+    elif len(names) <= MOST_NAMED:
+        listed = ", ".join(f"'{name}'" for name in names[:-1]) + f" and '{names[-1]}'"
+        described = f"Remove {count} events, {listed}, {on}"
+    else:
+        described = f"Remove {count} events matching '{search}' {on}"
+    if any(unit["recurring_id"] for unit in units):
+        described += ", and every time after them"
+    return described
 
 
 def _approval_when(event: Dict) -> str:

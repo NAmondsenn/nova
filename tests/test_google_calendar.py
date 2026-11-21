@@ -2272,6 +2272,28 @@ def test_find_removal_describes_several(for_changing):
     assert calendar._session.sent == []
 
 
+def test_find_removal_names_every_name_among_several(for_changing):
+    # "Remove all my gym" finding a "Gym with Sam" too names it, not only the first found.
+    sessions = [_session(23), _session(24, summary="Gym with Sam"), _session(25)]
+    calendar = for_changing(personal=sessions)
+    assert calendar.find_removal("gym", following=True, today=NOVEMBER_21).description == \
+        "Remove 3 events, 'Gym' and 'Gym with Sam', from Mon 23 Nov on"
+    # Past three names it says what was searched for instead.
+    sessions = [_session(day, summary=f"Gym {day}") for day in range(23, 27)]
+    calendar = for_changing(personal=sessions)
+    assert calendar.find_removal("gym", following=True, today=NOVEMBER_21).description == \
+        "Remove 4 events matching 'gym' from Mon 23 Nov on"
+    assert calendar._session.sent == []
+
+
+def test_find_removal_of_several_says_a_series_goes_on(for_changing):
+    # A series among them takes every time after it, which the count alone would hide.
+    calendar = for_changing(personal=[_session(23), GYM_24TH, GYM_1ST])
+    assert calendar.find_removal("gym", following=True, today=NOVEMBER_21).description == \
+        "Remove 2 'Gym' events from Mon 23 Nov on, and every time after them"
+    assert calendar._session.sent == []
+
+
 def test_find_removal_answers_no_match_and_which_one_as_before(for_changing):
     # The same words remove gives, before any approval is asked - and nothing written.
     personal = [_own("Dentist", "2026-11-23T09:00:00Z", "2026-11-23T09:30:00Z", "made-up-dentist-1"),
