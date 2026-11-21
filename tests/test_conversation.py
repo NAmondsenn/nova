@@ -87,6 +87,8 @@ class FakeLLM:
         self.tools, self.read_tools, self.offered = [], set(), []
         # What Claude was told of the device spoken through, for each request.
         self.devices = []
+        # The exchanges it keeps, which each answer it gives adds to, as the real one's do.
+        self.history = []
 
     def forget_stale_history(self):
         pass
@@ -99,7 +101,10 @@ class FakeLLM:
         self.playing.append(list(playing))
         self.offered.append((list(self.tools), set(self.read_tools)))
         self.read += [read(action) for action in self.to_read]
-        return self.replies.pop(0)
+        reply = self.replies.pop(0)
+        if reply.get("success") and not reply.get("not_for_me"):
+            self.history.append({"user": text, "assistant": reply["response"]})
+        return reply
 
     def remember(self, text, reply):
         self.remembered.append((text, reply))
@@ -1445,3 +1450,99 @@ def test_a_routines_steps_are_never_said_to_come_through_a_device():
     _conversation(llm=llm, routines=evening, here=lambda: "You're speaking through the bedroom Pi (wake word).").handle(
         "evening")
     assert llm.devices == [None]
+
+
+# Moving up to the bigger model, and back, by his words
+
+EARLIER = {"user": "help me plan my week", "assistant": "Sure, which days?"}
+
+
+def _bigger(rest=None):
+    """The local rule's answer to "think harder", with what was said after it."""
+    return _answer("Okay.", Action("use_bigger_model", {"rest": rest} if rest else {}))
+
+
+def test_think_harder_alone_answers_the_last_turn_again():
+    llm = FakeLLM(_answer("Monday, the gym; Tuesday, the library."))
+    llm.history = [{"user": "hello", "assistant": "Hi."}, dict(EARLIER)]
+    actions = FakeActions()
+    conversation = _conversation(intents=FakeIntents({"think harder": _bigger()}), llm=llm, actions=actions)
+    reply = conversation.handle("think harder")
+    # Moved up, then the last request asked again - not what he said - and answered as Claude's answers are.
+    assert actions.run == ["use_bigger_model"] and llm.asked == ["help me plan my week"]
+    assert (reply.say, reply.claude_answered) == ("Monday, the gym; Tuesday, the library.", True)
+    assert llm.recorded == [("help me plan my week", "Monday, the gym; Tuesday, the library.")]
+    # The new answer replaces that exchange, in the same place, rather than being kept beside it.
+    assert llm.history == [{"user": "hello", "assistant": "Hi."},
+                           {"user": "help me plan my week", "assistant": "Monday, the gym; Tuesday, the library."}]
+
+
+def test_think_harder_alone_with_nothing_said_before_only_moves_up():
+    llm = FakeLLM()
+    actions = FakeActions()
+    reply = _conversation(intents=FakeIntents({"think harder": _bigger()}), llm=llm, actions=actions).handle(
+        "think harder")
+    assert (reply.say, reply.claude_answered) == ("Okay.", False)
+    assert actions.run == ["use_bigger_model"] and llm.asked == []
+
+
+@pytest.mark.parametrize("failed", [
+    {"response": "Sorry, that didn't work.", "actions": [], "success": False}, NOT_FOR_ME])
+def test_an_exchange_isnt_lost_when_asking_it_again_gave_no_answer(failed):
+    llm = FakeLLM(failed)
+    llm.history = [dict(EARLIER)]
+    _conversation(intents=FakeIntents({"think harder": _bigger()}), llm=llm).handle("think harder")
+    assert llm.history == [EARLIER]
+
+
+def test_think_harder_with_more_asks_the_rest():
+    llm = FakeLLM(_answer("Take the A1."))
+    llm.history = [dict(EARLIER)]
+    said = "Think harder about the route to Leeds."
+    conversation = _conversation(intents=FakeIntents({said: _bigger("about the route to leeds")}), llm=llm)
+    reply = conversation.handle(said)
+    # The whole of what he said, which Claude copes with, and what went before is left where it was.
+    assert llm.asked == [said] and reply.say == "Take the A1."
+    assert llm.recorded == [(said, "Take the A1.")]
+    assert llm.history == [EARLIER, {"user": said, "assistant": "Take the A1."}]
+
+
+def test_quick_answers_goes_back():
+    talk = OpenConversation(lambda: {"enabled": True})
+    talk.start("pc")
+    talk.bigger = True
+    llm = FakeLLM()
+    conversation = _conversation(intents=LocalIntents(conversation=talk, satellite="pc"), llm=llm,
+                                 actions=ActionExecutor(conversation=talk, satellite="pc"))
+    reply = conversation.handle("Quick answers.")
+    assert (reply.say, reply.claude_answered) == ("Okay, quick answers.", False)
+    assert not talk.bigger and llm.asked == []
+
+
+def test_thinking_harder_by_his_words_moves_the_conversation_up_even_when_it_may_not_by_itself():
+    talk = OpenConversation(lambda: {"enabled": True, "switch_itself": False})
+    talk.start("pc")
+    llm = FakeLLM(_answer("Monday, the gym."))
+    llm.history = [dict(EARLIER)]
+    conversation = _conversation(intents=LocalIntents(conversation=talk, satellite="pc"), llm=llm,
+                                 actions=ActionExecutor(conversation=talk, satellite="pc"))
+    assert conversation.handle("Think harder.").say == "Monday, the gym."
+    assert talk.bigger and llm.asked == ["help me plan my week"]
+
+
+def test_the_model_phrases_are_heard_in_the_answer_to_a_question_while_one_is_on():
+    talk = OpenConversation(lambda: {"enabled": True})
+    talk.start("pc")
+    intents = LocalIntents(conversation=talk, satellite="pc")
+    actions = ActionExecutor(conversation=talk, satellite="pc")
+    llm = FakeLLM(_answer("Sorry?"), _answer("Monday."))
+    # Told it isn't in one, they are Claude's, as any answer to a question is.
+    _conversation(intents=intents, llm=llm, actions=actions, conversing=lambda: False).handle(
+        "Think harder.", follow_up=True)
+    assert llm.asked == ["Think harder."] and not talk.bigger
+    llm.history = [dict(EARLIER)]
+    conversation = _conversation(intents=intents, llm=llm, actions=actions, conversing=lambda: talk.on_at("pc"))
+    assert conversation.handle("Think harder.", follow_up=True).say == "Monday."
+    assert talk.bigger and llm.asked == ["Think harder.", "help me plan my week"]
+    reply = conversation.handle("Quick answers.", follow_up=True)
+    assert (reply.say, talk.bigger) == ("Okay, quick answers.", False)

@@ -82,6 +82,11 @@ class OpenConversation:
         return bool(self._settings().get("enabled", True))
 
     @property
+    def switch_itself(self) -> bool:
+        """Whether Claude may move the conversation up to the bigger model by itself, as `switch_itself` is set now."""
+        return bool(self._settings().get("switch_itself", True))
+
+    @property
     def bigger(self) -> bool:
         """Whether the conversation has moved up to the bigger model."""
         with self._lock:

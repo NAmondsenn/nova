@@ -104,6 +104,36 @@ def test_a_price_change_leaves_what_was_already_recorded(tmp_path):
     assert log.summary()["today_pounds"] == 55.0
 
 
+def test_the_bigger_models_spending_uses_its_own_prices(tmp_path):
+    clock = Clock(local(2026, 11, 21, 12))
+    prices = {**SETTINGS, "bigger_input_price": 2.0, "bigger_output_price": 10.0}
+    usual = ["haiku"]
+    log = UsageLog(str(tmp_path / "usage.jsonl"), lambda: prices, clock=clock, usual_model=lambda: usual[0])
+    # A million tokens each way: $1 and $5 for the usual model, $2 and $10 for any other.
+    both_ways = reply(output=1_000_000, input=1_000_000, searches=1)
+    log.record(both_ways, "haiku")
+    assert log.summary()["today_pounds"] == 6.01
+    log.record(both_ways, "sonnet")
+    assert log.summary()["today_pounds"] == 18.02
+    assert abs(cost_in_dollars(both_ways.usage, prices, bigger=True) - 12.01) < 1e-9
+    # Opus is any other too, and the dashboard tells them apart by name.
+    log.record(both_ways, "opus")
+    assert set(log.summary()["models"]["24h"]) == {"haiku", "sonnet", "opus"}
+    # What was costed stays as it was when a price changes, or llm.model does: the usual model is read as it
+    # is now, for the calls which follow.
+    prices["bigger_output_price"] = 100.0
+    assert log.summary()["today_pounds"] == 30.03
+    usual[0] = "sonnet"
+    log.record(both_ways, "sonnet")
+    assert log.summary()["today_pounds"] == 36.04
+
+
+def test_without_a_usual_model_every_call_is_costed_at_the_usual_prices(tmp_path):
+    log = make_log(tmp_path, Clock(local(2026, 11, 21, 12)), bigger_input_price=2.0, bigger_output_price=10.0)
+    log.record(reply(output=1_000_000), "anything")
+    assert log.summary()["today_pounds"] == 5.0
+
+
 def test_windows_and_models(tmp_path):
     now = local(2026, 11, 12, 12, 30)
     clock = Clock(now - 20 * DAY)

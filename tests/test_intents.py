@@ -1354,3 +1354,46 @@ def test_the_end_phrases_arent_dismissals():
     # tries before the rules, takes only words which are all dismissals or filler, and none of these are
     # - so the end phrase is the request, and saying anything silences what rang in the same turn.
     assert not any(ClockWords.looks_like_dismissal(phrase) for phrase in END_PHRASES + START_PHRASES)
+
+
+# Moving an open conversation up to the bigger model, and back
+
+BIGGER_PHRASES = ["think harder", "use the bigger model", "use the big model"]
+QUICK_PHRASES = ["quick answers", "back to normal", "use the quick model"]
+
+
+@pytest.mark.parametrize("phrase", BIGGER_PHRASES)
+def test_each_phrase_for_the_bigger_model_moves_up(phrase):
+    assert _talk(phrase, on_at="pc") == [Action("use_bigger_model")]
+    assert _talk(phrase.capitalize() + ".", on_at="pc") == [Action("use_bigger_model")]
+    assert _talk(phrase.upper() + "!", on_at="pc") == [Action("use_bigger_model")]
+    assert _talk(phrase + " please", on_at="pc") == [Action("use_bigger_model")]
+
+
+@pytest.mark.parametrize("phrase", BIGGER_PHRASES)
+def test_the_bigger_model_may_be_asked_for_with_more_said(phrase):
+    # What comes after is what's asked of it, by Conversation, which has the whole of what was said.
+    assert _talk(f"{phrase.capitalize()} about the route to Leeds.", on_at="pc") == [
+        Action("use_bigger_model", {"rest": "about the route to leeds"})]
+
+
+@pytest.mark.parametrize("phrase", QUICK_PHRASES)
+def test_each_phrase_for_quick_answers_goes_back(phrase):
+    assert _talk(phrase, on_at="pc") == [Action("use_quick_model")]
+    assert _talk(phrase.capitalize() + ".", on_at="pc") == [Action("use_quick_model")]
+    assert _talk(phrase.upper() + "!", on_at="pc") == [Action("use_quick_model")]
+
+
+@pytest.mark.parametrize("text", ["Quick answers about the weather.", "Back to normal programming.",
+                                  "Use the quick model for that.", "I think harder than you.", "Think harderr."])
+def test_going_back_is_the_whole_of_what_is_said(text):
+    assert _talk(text, on_at="pc") is None
+
+
+@pytest.mark.parametrize("phrase", BIGGER_PHRASES + QUICK_PHRASES + ["Think harder about the route to Leeds."])
+def test_the_model_phrases_mean_nothing_outside_a_conversation(phrase):
+    # They go on to Claude as any other words would.
+    assert _talk(phrase) is None
+    # Nor when it's on at another satellite, which isn't the one he's talking to.
+    assert _talk(phrase, on_at="bedroom") is None
+    assert LocalIntents().match(phrase) is None

@@ -4312,6 +4312,17 @@ def test_a_prices_change_is_used_by_the_next_call_recorded(make_brain):
     assert brain.usage.summary()["today_pounds"] == 0.05
 
 
+def test_a_call_answered_by_another_model_than_the_usual_is_costed_at_the_bigger_prices(make_brain):
+    brain = make_brain(usage={**USAGE, "bigger_input_price": 2.0, "bigger_output_price": 10.0},
+                       llm={"model": "claude-haiku-5-5"})
+    spend(brain, 0.10)
+    usage = SimpleNamespace(input_tokens=0, output_tokens=60_000, cache_read_input_tokens=0,
+                            cache_creation_input_tokens=0, cache_creation=None, server_tool_use=None)
+    brain.usage.record(SimpleNamespace(usage=usage, content=[]), "claude-sonnet-5-5")
+    # $0.10 of the usual, and sixty thousand tokens at $10 a million.
+    assert brain.usage.summary()["today_pounds"] == 0.7
+
+
 def test_the_brain_has_one_open_conversation_which_reads_the_settings_as_they_are_now(make_brain):
     brain = make_brain(conversation={"enabled": True, "idle_minutes": 5})
     assert isinstance(brain.open_conversation, OpenConversation)

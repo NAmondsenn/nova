@@ -150,9 +150,12 @@ LIMITS: Dict[Tuple[str, str], Limit] = {
     # Nothing near 0, and not 10 pounds to a dollar either: a number outside this is a slip,
     # and every pound shown on the dashboard would be wrong by it.
     ("usage", "pounds_per_dollar"): Limit("number", 0.1, 10),
-    # Dollars per million tokens, and per 1,000 searches. Claude's cost nothing like 1,000.
+    # Dollars per million tokens, and per 1,000 searches, for the usual model and the bigger one. Claude's
+    # cost nothing like 1,000.
     ("usage", "input_price"): Limit("number", 0, 1000),
     ("usage", "output_price"): Limit("number", 0, 1000),
+    ("usage", "bigger_input_price"): Limit("number", 0, 1000),
+    ("usage", "bigger_output_price"): Limit("number", 0, 1000),
     ("usage", "search_price"): Limit("number", 0, 1000),
     # The month the yearly Wrapped is made on the 1st of. Empty is no link in its notification.
     ("wrapped", "yearly_month"): Limit("number", 1, 12, True),

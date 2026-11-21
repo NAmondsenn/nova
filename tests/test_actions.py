@@ -3854,3 +3854,17 @@ def test_the_conversation_tools_are_for_claude_to_use_in_any_words():
         assert schemas[name]["input_schema"] == {"type": "object", "properties": {}, "required": []}
     assert "never call it unasked" in schemas["start_conversation"]["description"]
     assert "'stop'" in schemas["end_conversation"]["description"]
+
+
+def test_the_model_tools_move_the_conversation_up_and_back():
+    executor, conversation = _talking("pc", on_at="pc")
+    assert executor.execute(Action("use_bigger_model")).ok and conversation.bigger
+    result = executor.execute(Action("use_quick_model"))
+    assert (result.ok, result.say, result.confirm) == (True, "Okay, quick answers.", "speak")
+    assert not conversation.bigger
+    # Neither is Claude's to call - its own way up is think_harder - and neither works where none is on.
+    assert not executor.execute(Action("use_bigger_model", from_model=True)).ok and not conversation.bigger
+    elsewhere, _ = _talking("bedroom", on_at="pc")
+    result = elsewhere.execute(Action("use_bigger_model"))
+    assert (result.ok, result.say) == (False, "We're not in a conversation.")
+    assert not elsewhere.conversation.bigger

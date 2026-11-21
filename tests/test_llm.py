@@ -1520,3 +1520,164 @@ def test_a_paused_search_in_a_conversation_is_continued_with_the_same_prompt_and
     first, second = handler.client.requests
     assert first["system"] == second["system"] and len(second["system"]) == 2
     assert "cache_control" in json.dumps(second["messages"][-3])
+
+
+# Moving a conversation up to a bigger model
+
+BIGGER = "claude-sonnet-5-5"
+PLAN = "Plan the week: gym on Monday, the library on Tuesday."
+
+
+def _planner(make_config, clock, **settings):
+    """A handler in a conversation at the "pc", offered the tools an executor gives it there, and what it records."""
+    handler, conversation, settings = _talker(make_config, clock, **settings)
+    conversation.start("pc")
+    handler.tools = ActionExecutor(satellite="pc", conversation=conversation).tool_schemas()
+    handler.usage = FakeUsage()
+    return handler, conversation, settings
+
+
+def test_a_conversation_starts_on_the_usual_model(make_config, clock):
+    handler, conversation, settings = _planner(make_config, clock)
+    handler.process_query("what's the capital of France")
+    assert handler.client.requests[0]["model"] == handler.model_name != BIGGER
+    # Moved up, it is asked of the one chosen, as that is set now - and recorded as the one which answered.
+    conversation.bigger = True
+    handler.process_query("plan my week")
+    settings["bigger_model"] = "claude-opus-5-5"
+    handler.process_query("and the one after")
+    assert [request["model"] for request in handler.client.requests] == [handler.model_name, BIGGER, "claude-opus-5-5"]
+    assert [model for _, model, _ in _recorded(handler)] == [handler.model_name, BIGGER, "claude-opus-5-5"]
+    # And only while it lasts.
+    conversation.end("said")
+    handler.process_query("thanks")
+    assert handler.client.requests[-1]["model"] == handler.model_name
+
+
+def test_a_conversation_at_another_satellite_doesnt_move_this_one_up(make_config, clock):
+    handler, _, settings = _talker(make_config, clock)
+    elsewhere = OpenConversation(lambda: settings, now=clock)
+    elsewhere.start("bedroom")
+    elsewhere.bigger = True
+    handler.open_conversation = elsewhere
+    handler.process_query("what's the capital of France")
+    assert handler.client.requests[0]["model"] == handler.model_name
+
+
+def test_the_bigger_model_is_sent_the_effort_and_thinking_but_never_a_temperature(make_config, clock):
+    handler, conversation, _ = _planner(make_config, clock)
+    # Haiku 5.5 refuses one, but a model which takes one is given it - and the bigger models refuse it.
+    handler.temperature = 0.5
+    handler.process_query("what's the capital of France")
+    conversation.bigger = True
+    handler.process_query("plan my week")
+    usual, bigger = handler.client.requests
+    assert usual["temperature"] == 0.5 and "temperature" not in bigger
+    assert (bigger["thinking"], bigger["output_config"]) == (usual["thinking"], usual["output_config"])
+
+
+def _names(request):
+    return {tool["name"] for tool in request["tools"]}
+
+
+def test_think_harder_asks_again_on_the_bigger_model_and_keeps_one_exchange(make_config, clock):
+    handler, conversation, _ = _planner(make_config, clock)
+    said = []
+    # What was asked by the time it was said: the line has to come before the slow request, not after.
+    handler.say_first = lambda message: said.append((message, len(handler.client.requests)))
+    handler.client = FakeClient([_reply("", _tool("think_harder")), _reply(PLAN)])
+    result = handler.process_query("help me plan my week")
+    first, second = handler.client.requests
+    assert "think_harder" in _names(first) and first["model"] == handler.model_name
+    assert second["model"] == BIGGER and "think_harder" not in _names(second)
+    assert said == [("Let me think about that.", 1)]
+    # The same words asked again, with nothing of the first answer in what it's sent.
+    assert len(second["messages"]) == len(first["messages"]) == 1
+    assert second["messages"][-1]["content"].endswith("help me plan my week")
+    assert (result["response"], result["actions"], result["success"]) == (PLAN, [], True)
+    # One exchange, with the second answer and no tool call - and it was the bigger model's, recorded as so.
+    assert [(turn["user"], turn["assistant"], turn.get("tools")) for turn in handler.history] == [
+        ("help me plan my week", PLAN, [])]
+    assert conversation.bigger
+    assert [model for _, model, _ in _recorded(handler)] == [handler.model_name, BIGGER]
+
+
+def test_think_harder_runs_nothing_else_claude_called_with_it(make_config, clock):
+    handler, _, _ = _planner(make_config, clock)
+    handler.client = FakeClient([_reply("Okay.", _tool("set_timer", use_id="t1", seconds=60), _tool("think_harder")),
+                                 _reply(PLAN)])
+    assert handler.process_query("help me plan my week")["actions"] == []
+
+
+def test_it_stays_bigger_for_the_next_turn(make_config, clock):
+    handler, _, _ = _planner(make_config, clock)
+    handler.client = FakeClient([_reply("", _tool("think_harder")), _reply(PLAN), _reply("On Wednesday, swimming.")])
+    handler.process_query("help me plan my week")
+    handler.process_query("and Wednesday?")
+    third = handler.client.requests[2]
+    # Asked of the bigger model straight away, which is never offered the way up it is on already, though
+    # the tools it's given were made before that.
+    assert third["model"] == BIGGER and "think_harder" not in _names(third)
+    assert len(handler.client.requests) == 3
+
+
+def test_think_harder_isnt_asked_again_if_the_conversation_ended_meanwhile(make_config, clock):
+    handler, conversation, _ = _planner(make_config, clock)
+
+    class Ending(FakeClient):
+        def create(self, **request):
+            reply = super().create(**request)
+            conversation.end("said")
+            return reply
+
+    handler.client = Ending([_reply("Okay.", _tool("think_harder"))])
+    result = handler.process_query("help me plan my week")
+    # Left on the usual model, so asking again would be asking the same one: it's answered as it is.
+    assert len(handler.client.requests) == 1
+    assert (result["response"], result["actions"]) == ("Okay.", [])
+
+
+def test_the_tool_is_hidden_when_it_may_not_move_itself(make_config, clock):
+    settings = {"enabled": True, "switch_itself": False}
+    conversation = OpenConversation(lambda: settings)
+    conversation.start("pc")
+    executor = ActionExecutor(satellite="pc", conversation=conversation)
+    assert "think_harder" not in {tool["name"] for tool in executor.tool_schemas()}
+    # It is read as it is now.
+    settings["switch_itself"] = True
+    assert "think_harder" in {tool["name"] for tool in executor.tool_schemas()}
+
+
+def test_the_tool_is_hidden_when_already_bigger(make_config, clock):
+    handler, conversation, _ = _planner(make_config, clock)
+    conversation.bigger = True
+    executor = ActionExecutor(satellite="pc", conversation=conversation)
+    assert "think_harder" not in {tool["name"] for tool in executor.tool_schemas()}
+    # And not sent from tools made before it moved up.
+    handler.process_query("and the day after")
+    assert "think_harder" not in _names(handler.client.requests[0])
+
+
+def test_the_tool_is_hidden_outside_a_conversation(make_config, clock):
+    conversation = OpenConversation(lambda: {"enabled": True})
+    executor = ActionExecutor(satellite="pc", conversation=conversation)
+    assert "think_harder" not in {tool["name"] for tool in executor.tool_schemas()}
+    # Nor where one is on at another satellite.
+    conversation.start("bedroom")
+    assert "think_harder" not in {tool["name"] for tool in executor.tool_schemas()}
+    # And not sent in an ordinary request, whatever the tools it was given.
+    handler = LLMHandler(api_key=None, tools=[{"name": "think_harder", "description": "", "input_schema": {}}])
+    handler.client = FakeClient(_reply("Okay."))
+    handler.process_query("what's the capital of France")
+    assert "think_harder" not in _names(handler.client.requests[0])
+
+
+def test_the_tool_is_for_claude_to_call_without_saying_anything_else():
+    conversation = OpenConversation(lambda: {"enabled": True})
+    conversation.start("pc")
+    schemas = {tool["name"]: tool for tool in ActionExecutor(satellite="pc", conversation=conversation).tool_schemas()}
+    assert schemas["think_harder"]["input_schema"] == {"type": "object", "properties": {}, "required": []}
+    assert "say nothing else" in schemas["think_harder"]["description"]
+    assert "Never for ordinary questions" in schemas["think_harder"]["description"]
+    # Going up or back by his words is not Claude's to do.
+    assert not {"use_bigger_model", "use_quick_model"} & set(schemas)

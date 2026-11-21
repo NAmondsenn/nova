@@ -151,7 +151,7 @@ def _cache_writes(usage) -> float:
     return _count(breakdown, "ephemeral_5m_input_tokens") + _count(breakdown, "ephemeral_1h_input_tokens")
 
 
-def cost_in_dollars(usage, settings: Dict) -> float:
+def cost_in_dollars(usage, settings: Dict, bigger: bool = False) -> float:
     """
     Works out what one call cost.
 
@@ -163,13 +163,16 @@ def cost_in_dollars(usage, settings: Dict) -> float:
         usage: The usage object of a response from Anthropic, or anything with the
             same attributes. A missing or None field counts as 0.
         settings: The prices - 'input_price' and 'output_price' in dollars per million
-            tokens, and 'search_price' in dollars per 1,000 web searches.
+            tokens, and 'search_price' in dollars per 1,000 web searches. Those for the bigger
+            model, which a conversation may move up to, are 'bigger_input_price' and
+            'bigger_output_price'.
+        bigger: Whether the call was answered by the bigger model, so its prices are used.
 
     Returns:
         The cost in dollars.
     """
-    input_price = _price(settings, "input_price")
-    output_price = _price(settings, "output_price")
+    input_price = _price(settings, "bigger_input_price" if bigger else "input_price")
+    output_price = _price(settings, "bigger_output_price" if bigger else "output_price")
     search_price = _price(settings, "search_price")
 
     breakdown = getattr(usage, "cache_creation", None)
@@ -219,7 +222,8 @@ class UsageLog:
 
     def __init__(self, path: str, settings: Callable[[], Dict],
                  on_over_limit: Optional[Callable[[float, float], None]] = None,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time,
+                 usual_model: Optional[Callable[[], str]] = None):
         """
         Reads the log in, skipping any line which can't be read - a power cut can leave
         the last one half written.
@@ -233,11 +237,15 @@ class UsageLog:
                 call takes the day's spending from at or under the limit to over it. Once
                 a day, not on every call after.
             clock: Gives the time in seconds since 1970. Only given by tests.
+            usual_model: Gives the model Nova usually asks - llm.model, as it is now. A call answered by
+                any other model is the bigger one's, and costed at its prices. None costs every call at
+                the usual prices.
         """
         self._path = path
         self._settings = settings
         self._on_over_limit = on_over_limit
         self._clock = clock
+        self._usual_model = usual_model
         self._events: List[Dict] = []
         self._cache = None
         # Held while the calls are changed or read, as sessions record from threads of their own.
@@ -355,7 +363,8 @@ class UsageLog:
             "cache_write": int(_cache_writes(usage)),
             "searches": searches,
             "kind": kind or kind_of(tools, searches),
-            "dollars": cost_in_dollars(usage, settings),
+            # Costed once, here, and kept: a price changed later doesn't change what a past call cost.
+            "dollars": cost_in_dollars(usage, settings, bigger=self._is_bigger(model)),
         }
 
         rate = _price(settings, "pounds_per_dollar") or 1.0
@@ -375,6 +384,10 @@ class UsageLog:
                 self._on_over_limit(after, limit)
             except Exception as e:
                 logger.warning(f"Could not report that the spending limit was passed: {e}")
+
+    def _is_bigger(self, model: str) -> bool:
+        """Whether a call answered by this model is the bigger one's - any but the usual model."""
+        return self._usual_model is not None and str(model) != self._usual_model()
 
     def _dollars_on(self, day) -> float:
         """What was spent on one day, in dollars. Reads back from the newest call, which is cheap."""

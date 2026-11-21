@@ -401,7 +401,8 @@ class Brain:
         # prices and the limit are read from the settings at each call, so ones changed on the
         # settings page are used from the next.
         self.usage = UsageLog(os.path.join(paths.DATA_DIR, "usage.jsonl"), lambda: self.config.section("usage"),
-                              on_over_limit=self._spending_alert)
+                              on_over_limit=self._spending_alert,
+                              usual_model=lambda: self.config.section("llm").get("model", "claude-haiku-5-5"))
         # The brain's own device in Home Assistant, showing that log - or None with no MQTT broker
         # set. Started by run().
         self.usage_device = UsageDevice.from_config(config, os.getenv("MQTT_PASSWORD"), self.usage)

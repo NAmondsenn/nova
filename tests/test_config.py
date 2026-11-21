@@ -388,6 +388,8 @@ IN_AND_OUT = {
     ("usage", "pounds_per_dollar"): ([0.1, 0.79, 10], [0, 0.09, 10.5, True]),
     ("usage", "input_price"): ([0, 0.1, 1000], [-1, 1001, True]),
     ("usage", "output_price"): ([0, 0.5, 1000], [-1, 1001, True]),
+    ("usage", "bigger_input_price"): ([0, 2, 1000], [-1, 1001, True]),
+    ("usage", "bigger_output_price"): ([0, 10, 1000], [-1, 1001, True]),
     ("usage", "search_price"): ([0, 10, 1000], [-1, 1001, True]),
     ("wrapped", "yearly_month"): ([1, 11, 12], [0, 13, 11.5, True]),
     ("wrapped", "link"): (["https://nova.example.com", ""], ["nova.example.com", "ftp://nova.example.com"]),
@@ -910,7 +912,8 @@ def test_apply_changes_only_what_it_is_given(config_with):
 
 def test_the_repositorys_config_has_the_usage_settings(tmp_path):
     usage = Config(path=str(tmp_path / "none.yaml")).section("usage")
-    assert set(usage) == {"daily_limit", "pounds_per_dollar", "input_price", "output_price", "search_price"}
+    assert set(usage) == {"daily_limit", "pounds_per_dollar", "input_price", "output_price", "bigger_input_price",
+                          "bigger_output_price", "search_price"}
     # Each is inside its own limit, so the settings page can save what config.yaml starts it with.
     for name, value in usage.items():
         assert limit_problem("usage", name, value) is None, name

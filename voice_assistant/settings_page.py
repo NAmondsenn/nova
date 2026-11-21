@@ -181,6 +181,8 @@ EDITABLE = [
     ("usage", "pounds_per_dollar", "Pounds per dollar, for what Claude costs", "now"),
     ("usage", "input_price", "Claude's price per million input tokens, in dollars", "now"),
     ("usage", "output_price", "Claude's price per million output tokens, in dollars", "now"),
+    ("usage", "bigger_input_price", "The planning model's price per million input tokens, in dollars", "now"),
+    ("usage", "bigger_output_price", "The planning model's price per million output tokens, in dollars", "now"),
     ("usage", "search_price", "Claude's price per 1,000 web searches, in dollars", "now"),
     ("wrapped", "enabled", "Make a Wrapped of your listening", "now"),
     ("wrapped", "monthly", "A smaller one each month", "now"),

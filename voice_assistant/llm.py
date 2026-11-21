@@ -81,6 +81,15 @@ NOT_FOR_ME = {
 }
 
 
+# Claude's way, in a conversation, to say the talk has turned to planning or working-out which a
+# quick answer won't do - see ActionExecutor.think_harder. Never an Action: process_query answers it
+# by asking again of the bigger model, so it's never run, and the exchange it came in isn't kept.
+THINK_HARDER = "think_harder"
+
+# What's said at once when Claude moves a conversation up to the bigger model, so the wait for
+# the slower answer isn't silence.
+LET_ME_THINK = "Let me think about that."
+
 # What Claude is told, after the instructions it is always given, while a conversation is on
 # - see LLMHandler.process_query. A block of its own, so the cached one is the same in and out of one.
 CONVERSATION_PROMPT = (
@@ -98,7 +107,8 @@ class LLMHandler:
     def __init__(self, config=None, api_key=None, model=None, max_tokens=None,
                  temperature=None, history_length=None, assistant_name=None, tools=None, memory=None,
                  read_tools: Sequence[str] = (), usage: Optional[UsageLog] = None,
-                 open_conversation: Optional[OpenConversation] = None, satellite: Optional[str] = None):
+                 open_conversation: Optional[OpenConversation] = None, satellite: Optional[str] = None,
+                 say_first: Optional[Callable[[str], None]] = None):
         """
         Each argument left out comes from config.yaml.
 
@@ -120,6 +130,8 @@ class LLMHandler:
                 brain's, shared by every satellite's session - or None to record nothing.
             open_conversation: The brain's OpenConversation, or None for no conversations.
             satellite: This session's satellite's name, to tell whether a conversation is on here.
+            say_first: Says something to the user and returns once it's been said, or None to say nothing -
+                for "Let me think about that." before the slow request to the bigger model.
         """
         # Pulls llm, conversation, assistant and web_search sections from config.yaml
         llm_config = config.section("llm") if config else {}
@@ -182,6 +194,7 @@ class LLMHandler:
         # see _talking_here. It's the brain's one, shared by every satellite's session.
         self.open_conversation = open_conversation
         self.satellite = satellite
+        self.say_first = say_first
         # Whether a conversation was on here when the history was last used or added to, to
         # notice that it's ended - see _settle_history.
         self._was_talking = False
@@ -632,6 +645,12 @@ class LLMHandler:
             # Whether a conversation is on here is asked once, so what Claude is told and what
             # it's sent are of the same one through every round of this request.
             talking = self._settle_history()
+            # The model which answers every request of this turn - the bigger one once the
+            # conversation here has moved up to it, else the usual one - and whether it still can.
+            # Only here, so a conversation at another satellite, and ordinary requests, are never
+            # answered by the bigger model.
+            model = self.open_conversation.model(self.model_name) if talking else self.model_name
+            can_move_up = talking and not self.open_conversation.bigger
 
             # Maintains a conversation history to provide context for the model's responses.
             messages = []
@@ -655,7 +674,10 @@ class LLMHandler:
             # was said aloud. In a trial of 36 replies per setup, low effort leaked none,
             # for 0.4 s more. Thinking counts toward max_tokens, which is why they're
             # larger than a spoken reply needs; and its blocks are never read as text below.
-            request_kwargs = {"max_tokens": self.max_tokens, "tools": list(self.tools) + [NOT_FOR_ME],
+            # What moves a conversation up is only offered to one which can still, whatever the tools
+            # given were made for - the turn which moved it up asks again with the same ones.
+            offered = [tool for tool in self.tools if can_move_up or tool["name"] != THINK_HARDER]
+            request_kwargs = {"max_tokens": self.max_tokens, "tools": offered + [NOT_FOR_ME],
                               "thinking": {"type": "adaptive"}, "output_config": {"effort": self.effort}}
 
             # Only attaches the web search tool when the user explicitly asked to look something up.
@@ -681,12 +703,15 @@ class LLMHandler:
                 system.append({"type": "text", "text": CONVERSATION_PROMPT})
 
             # Sends the system prompt, conversation history, current query and model settings to the LLM
-            if self.temperature is not None:
+            # Not to the bigger models: Sonnet 5.5 and Opus 5.5 refuse a request which sets one (it
+            # was chosen for the usual model, and is left alone there). The thinking and the effort
+            # are taken by both.
+            if self.temperature is not None and model == self.model_name:
                 request_kwargs["temperature"] = self.temperature
             response = client.messages.create(
-                model=self.model_name, system=system, messages=messages, **request_kwargs)
+                model=model, system=system, messages=messages, **request_kwargs)
             # What the turn is, by what Claude first called in it - see _log_usage.
-            turn_kind = self._log_usage(response)
+            turn_kind = self._log_usage(response, model=model)
 
             # A long-running search can come back as "pause_turn" rather than a finished
             # answer. The paused turn is sent back unchanged to let it continue, with a
@@ -720,8 +745,8 @@ class LLMHandler:
                 if reads == MOST_READS:
                     request_kwargs["tool_choice"] = {"type": "none"}
                 response = client.messages.create(
-                    model=self.model_name, system=system, messages=messages, **request_kwargs)
-                turn_kind = self._log_usage(response, turn_kind)
+                    model=model, system=system, messages=messages, **request_kwargs)
+                turn_kind = self._log_usage(response, turn_kind, model)
 
             stop_reason = getattr(response, "stop_reason", None)
 
@@ -745,6 +770,21 @@ class LLMHandler:
             if stop_reason == "refusal" and playing:
                 return {"response": "", "actions": [], "success": True, "not_for_me": True}
 
+            # Claude took the talk for planning, or working-out a quick answer won't do: the conversation
+            # moves up, and the same request is asked again of the bigger model, whose answer is the
+            # reply. Before anything else of this response is read, so nothing else it called is run
+            # and nothing of it is kept - the history only has the second answer, one exchange for the
+            # turn. What's said first is said before that request is made, not after.
+            if can_move_up and stop_reason not in STOPPED_SHORT and any(use.name == THINK_HARDER for use in uses):
+                self.open_conversation.bigger = True
+                # Not if the conversation ended while this was being asked, which leaves it on the
+                # usual model, so it would be asked again of the same one - and again.
+                if self.open_conversation.bigger:
+                    logger.info("Claude asked to think harder, so the bigger model is asked instead")
+                    self._say_first(LET_ME_THINK)
+                    return self.process_query(text, context=context, lights=lights, read=read,
+                                              playing=playing, device=device)
+
             # Retrieves text blocks from the model's response, joins them and strips excess whitespace.
             # This is because responses come as several text blocks which need to be formatted.
             # Only blocks which say they're text, so Claude's thinking is never spoken.
@@ -760,8 +800,9 @@ class LLMHandler:
             # ten minute timer" comes back as two, and only running the first did half of
             # what was asked. If it didn't call one, there is no action. The model's
             # judgement is trusted rather than keyword guessing.
+            # Never think_harder, which only moves a conversation up, above - one called now couldn't.
             actions = [self._action_from_tool_use(block) for block in response.content
-                       if getattr(block, "type", None) == "tool_use"]
+                       if getattr(block, "type", None) == "tool_use" and block.name != THINK_HARDER]
             stopped_short = stop_reason in STOPPED_SHORT and bool(actions)
 
             if stopped_short:
@@ -840,7 +881,22 @@ class LLMHandler:
             return {"response": self._failure_message(e),
                     "actions": [] if reads or playing else self._fallback_actions(text), "success": False}
 
-    def _log_usage(self, response, turn_kind: Optional[str] = None) -> Optional[str]:
+    def _say_first(self, message: str):
+        """
+        Has something said to the user before the request which follows is waited for. Never raises,
+        as the answer is worth more than the words said before it.
+
+        Args:
+            message: What to say.
+        """
+        if self.say_first is None:
+            return
+        try:
+            self.say_first(message)
+        except Exception as e:
+            logger.warning(f"Could not say a line first: {type(e).__name__}")
+
+    def _log_usage(self, response, turn_kind: Optional[str] = None, model: Optional[str] = None) -> Optional[str]:
         """
         Logs how much Claude read and wrote for a response, and how much of what it read came
         from its cache, and has the response recorded in the usage log. Called for every
@@ -854,6 +910,7 @@ class LLMHandler:
                 called a tool or searched - or None before there has been one. The answer to
                 a read calls no tool, so with no help it would be counted as chat; given the
                 kind of the call which asked for the read, it's counted with that.
+            model: The model which answered it, recorded with what it cost - or None for the usual one.
 
         Returns:
             The kind of the turn now, to be given with the next response's.
@@ -868,7 +925,7 @@ class LLMHandler:
             if turn_kind is None and (tools or searches):
                 turn_kind = kind_of(tools, searches)
             if self.usage is not None:
-                self.usage.record_later(response, self.model_name, turn_kind)
+                self.usage.record_later(response, model or self.model_name, turn_kind)
         except Exception as e:
             logger.warning(f"Could not log the usage: {e}")
         return turn_kind

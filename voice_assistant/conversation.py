@@ -54,8 +54,9 @@ DECLINED = {"no", "nope", "nah", "no thanks", "no thank you", "don't", "dont", "
             "not now", "no not now"}
 
 # The tools of an open conversation's own phrases, whose local rules are matched even in the
-# answer to a question while one is on - as at any other turn of it, where "that's all" ends it.
-CONVERSATION_TOOLS = ["end_conversation"]
+# answer to a question while one is on - as at any other turn of it, where "that's all" ends it,
+# and "think harder" moves it up to the bigger model.
+CONVERSATION_TOOLS = ["end_conversation", "use_bigger_model", "use_quick_model"]
 
 
 @dataclass
@@ -293,7 +294,21 @@ class Conversation:
             result = self.intents.match(text)
         local = result is not None
         claude_answered = not local
-        if local:
+        # "Think harder", by his words: the conversation moves up, and what is asked of the bigger
+        # model is answered as any other of Claude's answers is, from here.
+        moved_up = local and any(action.tool == "use_bigger_model" for action in result["actions"])
+        earlier = None
+        if moved_up:
+            asked = self._asked_of_the_bigger_model(text, result["actions"][0])
+            if asked is None:
+                return Reply(say="Okay.")
+            text, earlier = asked
+            local, claude_answered = False, True
+            result = self._ask_claude(text, in_routine=in_routine)
+            # A turn nobody answered leaves the exchange it was to replace as it was.
+            if earlier is not None and (not result.get("success") or result.get("not_for_me")):
+                self.llm.history.append(earlier)
+        elif local:
             timeline.note(local_intent=True)
         else:
             result = self._ask_claude(text, in_routine=in_routine)
@@ -409,6 +424,28 @@ class Conversation:
                 self.asked_first = _only_question(response_text, action_results)
         return Reply(say=response_text, sounds=sounds, listen_again=listen_again, after=after,
                      claude_answered=claude_answered)
+
+    def _asked_of_the_bigger_model(self, text: str, move: Action) -> Optional[Tuple[str, Optional[Dict]]]:
+        """
+        Moves the conversation up to the bigger model, and says what it is to be asked.
+
+        Args:
+            text: What he said, e.g. "think harder about the route to Leeds".
+            move: The use_bigger_model action his words matched, whose "rest" is what came after them.
+
+        Returns:
+            None when he said it alone and there is no earlier request to ask again - it has moved up
+            and that is all. Else the request to ask: the whole of what he said when he said more, as
+            Claude copes with the words before it, or the last request when he said it alone, with
+            that exchange - taken out of the history, to be replaced by the answer - or None.
+        """
+        self._run([Action("use_bigger_model")])
+        if move.params.get("rest"):
+            return text, None
+        if not self.llm.history:
+            return None
+        earlier = self.llm.history.pop()
+        return earlier["user"], earlier
 
     def _ask_claude(self, text: str, in_routine: bool = False) -> Dict:
         """

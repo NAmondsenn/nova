@@ -73,12 +73,16 @@ UNAVAILABLE = {
     # reach, as neither tool is offered then.
     "conversation": "Conversations are switched off.",
     "conversation_open": "We're not in a conversation.",
+    # Which only a race can reach too: the tool is offered only while it can move up.
+    "think_harder": "I can't move up to the bigger model right now.",
 }
 
 # What's said on starting a conversation, and on ending one he asked to end. Said through the
 # ordinary reply, so the session adds only the sounds.
 CONVERSATION_STARTED = "Go ahead."
 CONVERSATION_ENDED = "Okay."
+# What's said on going back to the usual model.
+QUICK_ANSWERS = "Okay, quick answers."
 
 # What's said when the new-music playlist isn't there - before Nova's first morning making it,
 # see new_music.py - or isn't set, and when Spotify, which has none of it, is the player.
@@ -659,10 +663,16 @@ class ActionExecutor:
         Whether the part of the assistant a tool needs is there - for the computer, one which opens things,
         and for notes, a satellite which saves them, whichever one the user is talking to - and for the
         computer's own microphone, being at one which can mute it - and for conversations, their being
-        switched on and the user being at a satellite, and for ending one, its being on at this satellite.
+        switched on and the user being at a satellite, and for ending one, its being on at this satellite,
+        and for thinking harder, its being allowed to move up by itself and not already being up.
         """
         if name == "conversation_open":
             return self.conversation is not None and self.conversation.on_at(self.satellite)
+        if name == "think_harder":
+            # Claude's own way up, so only to one which is on here, may be moved by it and isn't up already.
+            # His words move it whatever the setting says, by use_bigger_model.
+            return (self.conversation is not None and self.conversation.on_at(self.satellite)
+                    and self.conversation.switch_itself and not self.conversation.bigger)
         if name == "computer_mic":
             # Only at a computer which said it can reach Windows' volume, whatever it opens.
             return self.computer is not None and self.computer.has_microphone()
@@ -2543,6 +2553,31 @@ class ActionExecutor:
             # It ended itself since the tool was offered.
             return ActionResult(False, UNAVAILABLE["conversation_open"])
         return ActionResult(True, CONVERSATION_ENDED)
+
+    @tool(
+        "Move the open conversation up to a bigger model, for when the talk has turned to planning something "
+        "through or needs real working-out which a quick answer won't do - a route with several stops, a "
+        "schedule, weighing up a choice. Call it and say nothing else: Nova says it's thinking, then the same "
+        "request is asked again of the bigger model, whose answer is the reply. Never for ordinary questions or "
+        "commands.",
+        needs="think_harder",
+    )
+    def think_harder(self):
+        # LLMHandler answers Claude's call itself, by asking again, so it's never run as an action: this is
+        # only what the call means.
+        return self.use_bigger_model()
+
+    # The bigger model, by his words - see Conversation, which asks again once this has moved up.
+
+    @tool("Move the open conversation up to the bigger model.", needs="conversation_open", for_model=False)
+    def use_bigger_model(self):
+        self.conversation.bigger = True
+        return ActionResult(True)
+
+    @tool("Go back to the usual model in the open conversation.", needs="conversation_open", for_model=False)
+    def use_quick_model(self):
+        self.conversation.bigger = False
+        return ActionResult(True, QUICK_ANSWERS)
 
     # Opening, searching and closing on a computer
 

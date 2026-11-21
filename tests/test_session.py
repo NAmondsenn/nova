@@ -682,6 +682,16 @@ def test_what_is_left_until_after_the_reply_is_done_once_it_is_said(connect, mak
     assert order == ["say", "press"]
 
 
+def test_claude_says_a_line_first_through_the_session_and_waits_for_it(connect, make_session, monkeypatch):
+    session = make_session(connect()[0])
+    spoken = []
+    monkeypatch.setattr(session, "_say", lambda message, timeline=None, listen=False: spoken.append((message, listen)))
+    # Said without listening for the wake word over it, which returns once it's been said - so the request which
+    # follows isn't made until it has - and the answer is still being waited for.
+    session.llm.say_first("Let me think about that.")
+    assert spoken == [("Let me think about that.", False)] and session.activity == "thinking"
+
+
 def test_after_runs_when_talked_over_or_nothing_is_said(connect, make_session, monkeypatch):
     session = make_session(connect()[0])
     ran = []

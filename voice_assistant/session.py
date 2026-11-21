@@ -445,7 +445,7 @@ class Session:
         self.llm = LLMHandler(config=config, tools=self.actions.tool_schemas(),
                               read_tools=self.actions.read_tools(), memory=brain.memory,
                               usage=brain.usage, open_conversation=brain.open_conversation,
-                              satellite=satellite.name)
+                              satellite=satellite.name, say_first=self._say_first)
 
         # How each thing the user says is answered - everything between hearing it and
         # saying the reply. See conversation.py.
@@ -1952,6 +1952,19 @@ class Session:
             if talked_over:
                 timeline.note(talked_over=True)
         return heard_over
+
+    def _say_first(self, message: str) -> None:
+        """
+        Says a line before a slow request, and returns once it has been said - so it's heard before the
+        answer is waited for, not after: "Let me think about that." for the bigger model. It runs on the
+        thread which is answering, which has nothing else to do until the request comes back.
+
+        Args:
+            message: What to say.
+        """
+        self._say(message)
+        # The answer is still being waited for.
+        self.activity = "thinking"
 
     def _heard_over(self, playback) -> Optional[Dict]:
         """

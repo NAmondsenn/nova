@@ -98,6 +98,10 @@ START_CONVERSATION = (r"let's talk|let's have a conversation|conversation mode|s
                       r"start a conversation")
 END_CONVERSATION = (r"end conversation|end the conversation|end conversation mode|stop the conversation|that's all|"
                     r"that's everything|goodbye")
+# What moves an open conversation up to the bigger model, which may have more said after it - "think
+# harder about the route to Leeds" - and what takes it back to the usual one, which is the whole of it.
+BIGGER_MODEL = r"think harder|use the bigger model|use the big model"
+QUICK_MODEL = r"quick answers|back to normal|use the quick model"
 
 # A web address said with its dots - "bbc.co.uk", "my-site.com" - as written in the request
 # itself, since the rules see it without them. The last part is letters, so "open 3.5" isn't one.
@@ -409,6 +413,10 @@ class LocalIntents:
             # start a longer request.
             (START_CONVERSATION, self._conversation_started),
             (END_CONVERSATION, self._conversation_ended),
+            # Which model answers, said only in one. The bigger one may have more said after it, which
+            # is then what's asked of it.
+            (rf"(?:{BIGGER_MODEL})(?P<rest> .+)?", self._use_bigger_model),
+            (QUICK_MODEL, self._use_quick_model),
             # "Set of one minute timer" is how Moonshine heard "set a one minute timer"
             # with the network cable out - so it went to Claude, who couldn't be asked.
             (r"(?:(?:set|start) (?:me )?(?:a |an |of )?)?timer for (?P<amount>[a-z0-9 ]+?) (?P<unit>second|minute|hour)s?",
@@ -654,6 +662,19 @@ class LocalIntents:
         if self.conversation is None or not self.conversation.on_at(self.satellite):
             return None
         return self._result("Okay.", [Action("end_conversation")])
+
+    def _use_bigger_model(self, found) -> Optional[Dict]:
+        # Only in one, here: said otherwise it's just words, which are Claude's.
+        if self.conversation is None or not self.conversation.on_at(self.satellite):
+            return None
+        # What came after is Conversation's to ask the bigger model, which says nothing of its own first.
+        params = {"rest": found["rest"].strip()} if found["rest"] else {}
+        return self._result("Okay.", [Action("use_bigger_model", params)])
+
+    def _use_quick_model(self, found) -> Optional[Dict]:
+        if self.conversation is None or not self.conversation.on_at(self.satellite):
+            return None
+        return self._result("Okay.", [Action("use_quick_model")])
 
     @staticmethod
     def _result(response: str, actions: Optional[List[Action]] = None) -> Dict:
