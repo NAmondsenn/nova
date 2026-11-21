@@ -3868,3 +3868,16 @@ def test_the_model_tools_move_the_conversation_up_and_back():
     result = elsewhere.execute(Action("use_bigger_model"))
     assert (result.ok, result.say) == (False, "We're not in a conversation.")
     assert not elsewhere.conversation.bigger
+
+
+def test_the_model_tools_only_move_the_conversation_which_is_on_here():
+    # Asked for between the tool being found available and run: it ended, and another began at the Pi.
+    executor, conversation = _talking("pc", on_at="pc")
+    method = ActionExecutor.tools()["use_bigger_model"]
+    conversation.end("idle")
+    conversation.start("bedroom")
+    result = method(executor)
+    assert (result.ok, result.say) == (False, "We're not in a conversation.") and not conversation.bigger
+    conversation.move_up("bedroom")
+    result = ActionExecutor.tools()["use_quick_model"](executor)
+    assert (result.ok, result.say) == (False, "We're not in a conversation.") and conversation.bigger

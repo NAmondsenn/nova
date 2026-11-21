@@ -93,13 +93,38 @@ class OpenConversation:
         with self._lock:
             return self._bigger
 
-    @bigger.setter
-    def bigger(self, value: bool):
+    def move_up(self, satellite: Optional[str]) -> bool:
+        """
+        Moves the conversation up to the bigger model, if one is on at this satellite.
+
+        Args:
+            satellite: Where the turn which asks for it was heard. A turn still being answered when
+                its conversation ended from another thread - and another began, at this satellite
+                or another - must not leave the bigger model on for what follows.
+
+        Returns:
+            Whether it was moved, False if none is on there.
+        """
+        return self._move(satellite, True)
+
+    def move_down(self, satellite: Optional[str]) -> bool:
+        """
+        Moves the conversation back to the usual model, if one is on at this satellite.
+
+        Args:
+            satellite: Where the turn which asks for it was heard.
+
+        Returns:
+            Whether it was moved, False if none is on there.
+        """
+        return self._move(satellite, False)
+
+    def _move(self, satellite: Optional[str], bigger: bool) -> bool:
         with self._lock:
-            # A turn still being answered when the conversation ended from another thread
-            # must not leave the bigger model on for the ordinary requests which follow.
-            if self._satellite is not None:
-                self._bigger = value
+            if satellite is None or self._satellite != satellite:
+                return False
+            self._bigger = bigger
+            return True
 
     def on_at(self, satellite: Optional[str]) -> bool:
         """Whether a conversation is on at this satellite. False for None."""

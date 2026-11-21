@@ -90,13 +90,13 @@ def test_the_bigger_model_stays_until_moved_down_or_the_end():
     conversation.start("pc")
     assert not conversation.bigger
     assert conversation.model("h") == "h"
-    conversation.bigger = True
+    conversation.move_up("pc")
     assert conversation.model("h") == "claude-sonnet-5-5"
     conversation.answered("plan it", "here", "claude-sonnet-5-5")
     assert conversation.model("h") == "claude-sonnet-5-5"
-    conversation.bigger = False
+    conversation.move_down("pc")
     assert conversation.model("h") == "h"
-    conversation.bigger = True
+    conversation.move_up("pc")
     conversation.end("said")
     conversation.start("pc")
     assert not conversation.bigger
@@ -106,7 +106,7 @@ def test_the_bigger_model_stays_until_moved_down_or_the_end():
 def test_the_bigger_model_is_the_one_set_now():
     conversation, _, settings = make()
     conversation.start("pc")
-    conversation.bigger = True
+    conversation.move_up("pc")
     settings["bigger_model"] = "claude-opus-5-5"
     assert conversation.model("h") == "claude-opus-5-5"
 
@@ -121,7 +121,7 @@ def test_ended_gets_the_whole_conversation_once():
     conversation.start("pc")
     conversation.answered("one", "1", "claude-haiku-5-5")
     conversation.answered("two", "2", "claude-haiku-5-5")
-    conversation.bigger = True
+    conversation.move_up("pc")
     conversation.answered("three", "3", "claude-sonnet-5-5")
     assert conversation.end("said") is True
     assert conversation.end("said") is False
@@ -201,7 +201,7 @@ def test_a_late_move_up_after_the_end_doesnt_leave_the_bigger_model_on():
     conversation.start("pc")
     conversation.end("idle")
     # A turn still being answered when the conversation ended.
-    conversation.bigger = True
+    assert not conversation.move_up("pc")
     assert not conversation.bigger
     assert conversation.model("h") == "h"
     conversation.start("pc")
@@ -234,3 +234,14 @@ def test_an_end_for_another_satellite_ends_nothing():
     assert conversation.on_at("pc") and given == []
     assert conversation.end("gone", satellite="pc") is True
     assert conversation.satellite is None and given == [[]]
+
+
+def test_a_move_for_another_satellite_than_the_one_its_on_at_does_nothing():
+    conversation, _, _ = make()
+    conversation.start("pc")
+    # A turn heard at the Pi, whose conversation ended while it was answered - and another began at the PC.
+    assert not conversation.move_up("pi") and not conversation.move_up(None)
+    assert not conversation.bigger
+    assert conversation.move_up("pc") and conversation.bigger
+    assert not conversation.move_down("pi") and conversation.bigger
+    assert conversation.move_down("pc") and not conversation.bigger

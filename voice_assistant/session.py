@@ -455,7 +455,7 @@ class Session:
                                          routines=brain.routines, satellite=satellite.name,
                                          playing=self.playing_here, progress=self._moved,
                                          room=lambda: brain.room_of(satellite.name), here=self._here,
-                                         conversing=self._conversation_here)
+                                         conversing=self._conversation_here, say_first=self._say_first)
 
     @property
     def thresholds(self) -> Dict:

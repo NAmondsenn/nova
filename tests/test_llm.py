@@ -1557,7 +1557,7 @@ def test_a_conversation_starts_on_the_usual_model(make_config, clock):
     handler.process_query("what's the capital of France")
     assert handler.client.requests[0]["model"] == handler.model_name != BIGGER
     # Moved up, it is asked of the one chosen, as that is set now - and recorded as the one which answered.
-    conversation.bigger = True
+    conversation.move_up("pc")
     handler.process_query("plan my week")
     settings["bigger_model"] = "claude-opus-5-5"
     handler.process_query("and the one after")
@@ -1573,22 +1573,64 @@ def test_a_conversation_at_another_satellite_doesnt_move_this_one_up(make_config
     handler, _, settings = _talker(make_config, clock)
     elsewhere = OpenConversation(lambda: settings, now=clock)
     elsewhere.start("bedroom")
-    elsewhere.bigger = True
+    elsewhere.move_up("bedroom")
     handler.open_conversation = elsewhere
     handler.process_query("what's the capital of France")
     assert handler.client.requests[0]["model"] == handler.model_name
 
 
-def test_the_bigger_model_is_sent_the_effort_and_thinking_but_never_a_temperature(make_config, clock):
+def test_the_bigger_model_is_sent_the_thinking_but_never_a_temperature(make_config, clock):
     handler, conversation, _ = _planner(make_config, clock)
     # Haiku 5.5 refuses one, but a model which takes one is given it - and the bigger models refuse it.
     handler.temperature = 0.5
     handler.process_query("what's the capital of France")
-    conversation.bigger = True
+    conversation.move_up("pc")
     handler.process_query("plan my week")
     usual, bigger = handler.client.requests
     assert usual["temperature"] == 0.5 and "temperature" not in bigger
-    assert (bigger["thinking"], bigger["output_config"]) == (usual["thinking"], usual["output_config"])
+    assert bigger["thinking"] == usual["thinking"]
+
+
+def test_the_bigger_model_thinks_at_medium_with_room_for_a_plan_and_the_usual_one_is_as_before(make_config, clock):
+    handler, conversation, _ = _planner(make_config, clock)
+    handler.process_query("what's the capital of France")
+    conversation.move_up("pc")
+    handler.process_query("plan my week")
+    usual, bigger = handler.client.requests
+    # Thinking counts inside max_tokens, so the usual 1024 would cut a plan off.
+    assert (bigger["max_tokens"], bigger["output_config"]) == (4096, {"effort": "medium"})
+    assert (usual["max_tokens"], usual["output_config"]) == (1024, {"effort": "low"})
+    # The usual model's request is the one an ordinary request makes, beyond what it's asked and told.
+    plain = LLMHandler(api_key=None)
+    plain.client = FakeClient(_reply("Okay."))
+    plain.process_query("what's the capital of France")
+    unchanged = {name: value for name, value in plain.client.requests[0].items()
+                 if name not in ("messages", "system", "tools")}
+    assert {name: usual[name] for name in unchanged} == unchanged
+    assert set(usual) - set(unchanged) <= {"messages", "system", "tools"}
+    # Left to be set as they were, the usual model's own settings are what they are.
+    handler.effort, handler.max_tokens = "high", 700
+    conversation.move_down("pc")
+    handler.process_query("and the day after")
+    assert (handler.client.requests[2]["max_tokens"], handler.client.requests[2]["output_config"]) == (
+        700, {"effort": "high"})
+
+
+def test_a_search_by_the_bigger_model_has_the_larger_of_its_room_and_the_searchs(make_config, clock):
+    handler, conversation, _ = _planner(make_config, clock)
+    conversation.move_up("pc")
+    handler.process_query("search for the best route to Leeds")
+    assert handler.client.requests[0]["max_tokens"] == 4096
+    handler.max_tokens_search = 8000
+    handler.process_query("search for the best route to York")
+    assert handler.client.requests[1]["max_tokens"] == 8000
+    # Where the usual model's search keeps its own.
+    conversation.move_down("pc")
+    handler.process_query("search for the best route to Hull")
+    assert handler.client.requests[2]["max_tokens"] == 8000
+    handler.max_tokens_search = 1200
+    handler.process_query("search for the best route to Ely")
+    assert handler.client.requests[3]["max_tokens"] == 1200
 
 
 def _names(request):
@@ -1665,7 +1707,7 @@ def test_the_tool_is_hidden_when_it_may_not_move_itself(make_config, clock):
 
 def test_the_tool_is_hidden_when_already_bigger(make_config, clock):
     handler, conversation, _ = _planner(make_config, clock)
-    conversation.bigger = True
+    conversation.move_up("pc")
     executor = ActionExecutor(satellite="pc", conversation=conversation)
     assert "think_harder" not in {tool["name"] for tool in executor.tool_schemas()}
     # And not sent from tools made before it moved up.
@@ -1696,3 +1738,55 @@ def test_the_tool_is_for_claude_to_call_without_saying_anything_else():
     assert "Never for ordinary questions" in schemas["think_harder"]["description"]
     # Going up or back by his words is not Claude's to do.
     assert not {"use_bigger_model", "use_quick_model"} & set(schemas)
+
+
+def test_think_harder_from_a_turn_whose_conversation_ended_doesnt_move_up_one_begun_elsewhere(make_config, clock):
+    handler, conversation, _ = _planner(make_config, clock)
+
+    class Replacing(FakeClient):
+        def create(self, **request):
+            reply = super().create(**request)
+            # While the turn is being answered, it ends and another begins at the Pi.
+            conversation.end("said")
+            conversation.start("bedroom")
+            return reply
+
+    said = []
+    handler.say_first = said.append
+    handler.client = Replacing([_reply("Okay.", _tool("think_harder"))])
+    result = handler.process_query("help me plan my week")
+    assert not conversation.bigger and conversation.satellite == "bedroom"
+    assert len(handler.client.requests) == 1 and said == []
+    assert (result["response"], result["actions"]) == ("Okay.", [])
+
+
+def test_think_harder_isnt_asked_again_if_the_conversation_ended_while_the_line_was_said(make_config, clock):
+    handler, conversation, _ = _planner(make_config, clock)
+    handler.say_first = lambda message: conversation.end("said")
+    handler.client = FakeClient([_reply("Okay.", _tool("think_harder"))])
+    result = handler.process_query("help me plan my week")
+    assert len(handler.client.requests) == 1
+    assert (result["response"], result["actions"]) == ("Okay.", [])
+
+
+# What an exchange in the history says of how it was answered
+
+def test_an_exchange_says_whether_claude_answered_it_without_running_anything(make_config, clock):
+    handler, _, _ = _planner(make_config, clock)
+    handler.read_tools = {"home_status"}
+    handler.client = FakeClient([_reply("Paris."),
+                                 _reply("", _tool("home_status", use_id="t1", about="sunset")),
+                                 _reply("Sunset's at 5:52 PM."),
+                                 _reply("Okay.", _tool("set_timer", use_id="t2", seconds=600))])
+    handler.process_query("what's the capital of France")
+    handler.process_query("when's sunset?", read=lambda action: SUNSET)
+    handler.process_query("set a timer for ten minutes")
+    handler.remember("quick answers", "Okay, quick answers.")
+    # A read is only something read; a timer set is run, and a local phrase is nothing Claude answered.
+    assert [(turn["user"], turn.get("plain", False)) for turn in handler.history] == [
+        ("what's the capital of France", True), ("when's sunset?", True), ("set a timer for ten minutes", False),
+        ("quick answers", False)]
+    # And Claude is never told, in what it is sent of the history.
+    handler.client = FakeClient(_reply("Okay."))
+    handler.process_query("and then?")
+    assert "plain" not in json.dumps(handler.client.requests[0]["messages"])

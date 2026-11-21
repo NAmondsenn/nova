@@ -22,7 +22,7 @@ from datetime import datetime
 from typing import Callable, Dict, List, Optional, Sequence
 import anthropic
 from anthropic import Anthropic
-from voice_assistant.actions import Action, bare_acknowledgement
+from voice_assistant.actions import LET_ME_THINK, Action, bare_acknowledgement
 from voice_assistant.clock import spoken_clock_time
 from voice_assistant.downloads import OFFERS
 from voice_assistant.intents import not_a_list, points_back
@@ -86,9 +86,12 @@ NOT_FOR_ME = {
 # by asking again of the bigger model, so it's never run, and the exchange it came in isn't kept.
 THINK_HARDER = "think_harder"
 
-# What's said at once when Claude moves a conversation up to the bigger model, so the wait for
-# the slower answer isn't silence.
-LET_ME_THINK = "Let me think about that."
+# How hard the bigger model thinks, and the most it may write, thinking included: it is moved up to for
+# planning, so what it writes is longer than a spoken reply and it thinks as long, where the usual
+# model's 1024 would cut a plan off - or give the didn't-work reply - and low effort would be thinking
+# harder at the least it can. Both are valid for Sonnet 5.5 and Opus 5.5, whose output goes to 128K.
+BIGGER_EFFORT = "medium"
+BIGGER_MAX_TOKENS = 4096
 
 # What Claude is told, after the instructions it is always given, while a conversation is on
 # - see LLMHandler.process_query. A block of its own, so the cached one is the same in and out of one.
@@ -704,10 +707,14 @@ class LLMHandler:
 
             # Sends the system prompt, conversation history, current query and model settings to the LLM
             # Not to the bigger models: Sonnet 5.5 and Opus 5.5 refuse a request which sets one (it
-            # was chosen for the usual model, and is left alone there). The thinking and the effort
-            # are taken by both.
-            if self.temperature is not None and model == self.model_name:
-                request_kwargs["temperature"] = self.temperature
+            # was chosen for the usual model, and is left alone there). The thinking is taken by both.
+            if model == self.model_name:
+                if self.temperature is not None:
+                    request_kwargs["temperature"] = self.temperature
+            else:
+                # At least that, and more if a search is given more.
+                request_kwargs["output_config"] = {"effort": BIGGER_EFFORT}
+                request_kwargs["max_tokens"] = max(request_kwargs["max_tokens"], BIGGER_MAX_TOKENS)
             response = client.messages.create(
                 model=model, system=system, messages=messages, **request_kwargs)
             # What the turn is, by what Claude first called in it - see _log_usage.
@@ -775,13 +782,14 @@ class LLMHandler:
             # reply. Before anything else of this response is read, so nothing else it called is run
             # and nothing of it is kept - the history only has the second answer, one exchange for the
             # turn. What's said first is said before that request is made, not after.
-            if can_move_up and stop_reason not in STOPPED_SHORT and any(use.name == THINK_HARDER for use in uses):
-                self.open_conversation.bigger = True
-                # Not if the conversation ended while this was being asked, which leaves it on the
-                # usual model, so it would be asked again of the same one - and again.
-                if self.open_conversation.bigger:
-                    logger.info("Claude asked to think harder, so the bigger model is asked instead")
-                    self._say_first(LET_ME_THINK)
+            # Only this satellite's conversation is moved, so one which ended while this was being asked, and
+            # another begun elsewhere, is left on the usual model.
+            if (can_move_up and stop_reason not in STOPPED_SHORT and any(use.name == THINK_HARDER for use in uses)
+                    and self.open_conversation.move_up(self.satellite)):
+                logger.info("Claude asked to think harder, so the bigger model is asked instead")
+                self._say_first(LET_ME_THINK)
+                # Not if it ended while that was said, which would ask the same model again - and again.
+                if self._talking_here() and self.open_conversation.bigger:
                     return self.process_query(text, context=context, lights=lights, read=read,
                                               playing=playing, device=device)
 
@@ -849,9 +857,11 @@ class LLMHandler:
             # The tools it called, and its own text with them, are kept too, so the next
             # request can show them as called - see _earlier_messages. So are its reads,
             # with what each gave.
+            # "plain" says Claude answered it and ran nothing, however much it read, so asking it again
+            # can't do anything twice - see Conversation. Not one remembered from a local command.
             self._keep({"user": text, "assistant": response_text, "at": time.monotonic(),
                         "tools": [(action.tool, dict(action.params)) for action in actions],
-                        "model_text": response_text, "reads": read_so_far})
+                        "model_text": response_text, "reads": read_so_far, "plain": not actions})
 
             # A download the user's words didn't ask for is only offered, by Nova's own
             # offer_download, which only asks - for a plain yes, as pc_power only asks. After

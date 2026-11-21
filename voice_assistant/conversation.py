@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
-from voice_assistant.actions import Action, ActionExecutor, ActionResult, Choice, confirm
+from voice_assistant.actions import LET_ME_THINK, Action, ActionExecutor, ActionResult, Choice, confirm
 from voice_assistant.clock_ringing import Where, heard_in
 from voice_assistant.devices import told_claude
 from voice_assistant.journeys import told_claude as journey_told_claude
@@ -94,7 +94,8 @@ class Conversation:
                  max_follow_ups: int = 3, routines=None, satellite: Optional[str] = None,
                  playing: Optional[Callable[[], List[str]]] = None, progress: Optional[Callable[[], None]] = None,
                  room: Optional[Callable[[], List[str]]] = None, here: Optional[Callable[[], str]] = None,
-                 conversing: Optional[Callable[[], bool]] = None):
+                 conversing: Optional[Callable[[], bool]] = None,
+                 say_first: Optional[Callable[[str], None]] = None):
         """
         Args:
             clock: The Clock, for what's ringing and for dismissing it.
@@ -128,6 +129,8 @@ class Conversation:
                 see OpenConversation - in which every reply is listened after: so a question
                 is listened for however many came before it, and the conversation's own
                 phrases are heard even in its answer. None for never.
+            say_first: Says something to the user and returns once it's been said, or None to say nothing -
+                for "Let me think about that." before the slow request to the bigger model.
         """
         self.clock = clock
         self.intents = intents
@@ -143,6 +146,7 @@ class Conversation:
         self.room = room
         self.here = here
         self.conversing = conversing or (lambda: False)
+        self.say_first = say_first
         self.start()
 
     def _heard_here(self) -> Where:
@@ -304,6 +308,12 @@ class Conversation:
                 return Reply(say="Okay.")
             text, earlier = asked
             local, claude_answered = False, True
+            # The wait for the slower model isn't silence, as when Claude moves up by itself.
+            if self.say_first is not None and not in_routine:
+                try:
+                    self.say_first(LET_ME_THINK)
+                except Exception as e:
+                    logger.warning(f"Could not say a line first: {type(e).__name__}")
             result = self._ask_claude(text, in_routine=in_routine)
             # A turn nobody answered leaves the exchange it was to replace as it was.
             if earlier is not None and (not result.get("success") or result.get("not_for_me")):
@@ -434,15 +444,19 @@ class Conversation:
             move: The use_bigger_model action his words matched, whose "rest" is what came after them.
 
         Returns:
-            None when he said it alone and there is no earlier request to ask again - it has moved up
-            and that is all. Else the request to ask: the whole of what he said when he said more, as
-            Claude copes with the words before it, or the last request when he said it alone, with
-            that exchange - taken out of the history, to be replaced by the answer - or None.
+            None when it has moved up and that is all - he said it alone and the last exchange can't be
+            asked again: it ran something, which would be run twice, or it was a local command or phrase
+            he gave, which isn't a request to answer, or there is none; or it couldn't be moved up.
+            Else the request to ask: the whole of what he said when he said more, as Claude copes with
+            the words before it, with None; or the last request when he said it alone and Claude
+            answered it without running anything, with that exchange - taken out of the history, to be
+            replaced by the answer.
         """
-        self._run([Action("use_bigger_model")])
+        if not self._run([Action("use_bigger_model")])[0].ok:
+            return None
         if move.params.get("rest"):
             return text, None
-        if not self.llm.history:
+        if not self.llm.history or not self.llm.history[-1].get("plain"):
             return None
         earlier = self.llm.history.pop()
         return earlier["user"], earlier

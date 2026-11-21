@@ -103,11 +103,13 @@ class FakeLLM:
         self.read += [read(action) for action in self.to_read]
         reply = self.replies.pop(0)
         if reply.get("success") and not reply.get("not_for_me"):
-            self.history.append({"user": text, "assistant": reply["response"]})
+            self.history.append({"user": text, "assistant": reply["response"], "plain": not reply["actions"]})
         return reply
 
     def remember(self, text, reply):
         self.remembered.append((text, reply))
+        # Not Claude's answer, so not "plain" - see LLMHandler.process_query.
+        self.history.append({"user": text, "assistant": reply})
 
     def record_reply(self, text, spoken, tool_answers=()):
         self.recorded.append((text, spoken))
@@ -1454,7 +1456,7 @@ def test_a_routines_steps_are_never_said_to_come_through_a_device():
 
 # Moving up to the bigger model, and back, by his words
 
-EARLIER = {"user": "help me plan my week", "assistant": "Sure, which days?"}
+EARLIER = {"user": "help me plan my week", "assistant": "Sure, which days?", "plain": True}
 
 
 def _bigger(rest=None):
@@ -1464,26 +1466,33 @@ def _bigger(rest=None):
 
 def test_think_harder_alone_answers_the_last_turn_again():
     llm = FakeLLM(_answer("Monday, the gym; Tuesday, the library."))
-    llm.history = [{"user": "hello", "assistant": "Hi."}, dict(EARLIER)]
+    llm.history = [{"user": "hello", "assistant": "Hi.", "plain": True}, dict(EARLIER)]
     actions = FakeActions()
-    conversation = _conversation(intents=FakeIntents({"think harder": _bigger()}), llm=llm, actions=actions)
+    said = []
+    # What had been asked by the time it was said: the line comes before the slow request, not after.
+    conversation = _conversation(intents=FakeIntents({"think harder": _bigger()}), llm=llm, actions=actions,
+                                 say_first=lambda message: said.append((message, len(llm.asked))))
     reply = conversation.handle("think harder")
+    assert said == [("Let me think about that.", 0)]
     # Moved up, then the last request asked again - not what he said - and answered as Claude's answers are.
     assert actions.run == ["use_bigger_model"] and llm.asked == ["help me plan my week"]
     assert (reply.say, reply.claude_answered) == ("Monday, the gym; Tuesday, the library.", True)
     assert llm.recorded == [("help me plan my week", "Monday, the gym; Tuesday, the library.")]
     # The new answer replaces that exchange, in the same place, rather than being kept beside it.
-    assert llm.history == [{"user": "hello", "assistant": "Hi."},
-                           {"user": "help me plan my week", "assistant": "Monday, the gym; Tuesday, the library."}]
+    assert llm.history == [{"user": "hello", "assistant": "Hi.", "plain": True},
+                           {"user": "help me plan my week", "assistant": "Monday, the gym; Tuesday, the library.",
+                            "plain": True}]
 
 
 def test_think_harder_alone_with_nothing_said_before_only_moves_up():
     llm = FakeLLM()
     actions = FakeActions()
-    reply = _conversation(intents=FakeIntents({"think harder": _bigger()}), llm=llm, actions=actions).handle(
-        "think harder")
+    said = []
+    reply = _conversation(intents=FakeIntents({"think harder": _bigger()}), llm=llm, actions=actions,
+                          say_first=said.append).handle("think harder")
     assert (reply.say, reply.claude_answered) == ("Okay.", False)
-    assert actions.run == ["use_bigger_model"] and llm.asked == []
+    # Nothing is waited for, so nothing is said first.
+    assert actions.run == ["use_bigger_model"] and llm.asked == [] and said == []
 
 
 @pytest.mark.parametrize("failed", [
@@ -1499,18 +1508,21 @@ def test_think_harder_with_more_asks_the_rest():
     llm = FakeLLM(_answer("Take the A1."))
     llm.history = [dict(EARLIER)]
     said = "Think harder about the route to Leeds."
-    conversation = _conversation(intents=FakeIntents({said: _bigger("about the route to leeds")}), llm=llm)
+    first = []
+    conversation = _conversation(intents=FakeIntents({said: _bigger("about the route to leeds")}), llm=llm,
+                                 say_first=lambda message: first.append((message, len(llm.asked))))
     reply = conversation.handle(said)
+    assert first == [("Let me think about that.", 0)]
     # The whole of what he said, which Claude copes with, and what went before is left where it was.
     assert llm.asked == [said] and reply.say == "Take the A1."
     assert llm.recorded == [(said, "Take the A1.")]
-    assert llm.history == [EARLIER, {"user": said, "assistant": "Take the A1."}]
+    assert llm.history == [EARLIER, {"user": said, "assistant": "Take the A1.", "plain": True}]
 
 
 def test_quick_answers_goes_back():
     talk = OpenConversation(lambda: {"enabled": True})
     talk.start("pc")
-    talk.bigger = True
+    talk.move_up("pc")
     llm = FakeLLM()
     conversation = _conversation(intents=LocalIntents(conversation=talk, satellite="pc"), llm=llm,
                                  actions=ActionExecutor(conversation=talk, satellite="pc"))
@@ -1546,3 +1558,56 @@ def test_the_model_phrases_are_heard_in_the_answer_to_a_question_while_one_is_on
     assert talk.bigger and llm.asked == ["Think harder.", "help me plan my week"]
     reply = conversation.handle("Quick answers.", follow_up=True)
     assert (reply.say, talk.bigger) == ("Okay, quick answers.", False)
+
+
+def _talking_at_the_pc(llm, **settings):
+    """A conversation as the PC has it, with the real rules and the real executor, and the OpenConversation."""
+    talk = OpenConversation(lambda: {"enabled": True, **settings})
+    talk.start("pc")
+    said = []
+    conversation = _conversation(intents=LocalIntents(conversation=talk, satellite="pc"), llm=llm,
+                                 actions=ActionExecutor(conversation=talk, satellite="pc"), say_first=said.append)
+    return conversation, talk, said
+
+
+def test_think_harder_alone_after_a_request_which_ran_something_only_moves_up():
+    # Asking "add the gym to my calendar on Monday" again would add a second event.
+    llm = FakeLLM(_answer("Okay.", Action("add_to_calendar", {"title": "Gym"}, from_model=True)), _answer("Monday."))
+    conversation, talk, said = _talking_at_the_pc(llm)
+    conversation.handle("add the gym to my calendar on Monday")
+    assert llm.history[-1]["plain"] is False
+    reply = conversation.handle("think harder")
+    assert (reply.say, reply.claude_answered) == ("Okay.", False)
+    assert llm.asked == ["add the gym to my calendar on Monday"] and said == []
+    assert talk.bigger and talk.model("h") == "claude-sonnet-5-5"
+    assert len(llm.history) == 1
+
+
+def test_think_harder_alone_after_a_local_phrase_asks_nothing():
+    llm = FakeLLM()
+    conversation, talk, said = _talking_at_the_pc(llm)
+    assert conversation.handle("Quick answers.").say == "Okay, quick answers."
+    reply = conversation.handle("Think harder.")
+    assert (reply.say, llm.asked, said) == ("Okay.", [], [])
+    assert talk.bigger
+
+
+def test_think_harder_alone_after_a_plain_answer_asks_it_again_and_replaces_it():
+    llm = FakeLLM(_answer("It depends."), _answer("Monday, the gym."))
+    conversation, talk, said = _talking_at_the_pc(llm)
+    conversation.handle("which days should I go to the gym")
+    reply = conversation.handle("think harder")
+    assert reply.say == "Monday, the gym." and said == ["Let me think about that."]
+    assert llm.asked == ["which days should I go to the gym"] * 2
+    assert [turn["assistant"] for turn in llm.history] == ["Monday, the gym."]
+
+
+def test_think_harder_alone_after_an_answer_which_only_read_something_asks_it_again():
+    # What it read is not run again as an action: it is Claude's own reading, in its answer.
+    llm = FakeLLM(_answer("Sunset's at 5:52 PM."), _answer("Sunset's at 5:52 PM, so leave by five."))
+    llm.to_read = [Action("home_status", {"about": "sunset"}, from_model=True)]
+    conversation, talk, said = _talking_at_the_pc(llm)
+    conversation.handle("when's sunset?")
+    assert llm.history[-1]["plain"] is True
+    reply = conversation.handle("think harder")
+    assert reply.say == "Sunset's at 5:52 PM, so leave by five." and llm.asked == ["when's sunset?"] * 2

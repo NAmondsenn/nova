@@ -81,8 +81,10 @@ UNAVAILABLE = {
 # ordinary reply, so the session adds only the sounds.
 CONVERSATION_STARTED = "Go ahead."
 CONVERSATION_ENDED = "Okay."
-# What's said on going back to the usual model.
+# What's said on going back to the usual model, and at once on moving up to the bigger one when that is
+# asked again of a slower model, so the wait isn't silence.
 QUICK_ANSWERS = "Okay, quick answers."
+LET_ME_THINK = "Let me think about that."
 
 # What's said when the new-music playlist isn't there - before Nova's first morning making it,
 # see new_music.py - or isn't set, and when Spotify, which has none of it, is the player.
@@ -2571,12 +2573,15 @@ class ActionExecutor:
 
     @tool("Move the open conversation up to the bigger model.", needs="conversation_open", for_model=False)
     def use_bigger_model(self):
-        self.conversation.bigger = True
+        # Where it's on here only: it may have ended, and another begun elsewhere, since it was asked for.
+        if not self.conversation.move_up(self.satellite):
+            return ActionResult(False, UNAVAILABLE["conversation_open"])
         return ActionResult(True)
 
     @tool("Go back to the usual model in the open conversation.", needs="conversation_open", for_model=False)
     def use_quick_model(self):
-        self.conversation.bigger = False
+        if not self.conversation.move_down(self.satellite):
+            return ActionResult(False, UNAVAILABLE["conversation_open"])
         return ActionResult(True, QUICK_ANSWERS)
 
     # Opening, searching and closing on a computer

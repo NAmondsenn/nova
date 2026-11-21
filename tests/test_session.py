@@ -690,6 +690,9 @@ def test_claude_says_a_line_first_through_the_session_and_waits_for_it(connect, 
     # follows isn't made until it has - and the answer is still being waited for.
     session.llm.say_first("Let me think about that.")
     assert spoken == [("Let me think about that.", False)] and session.activity == "thinking"
+    # And so does the conversation, for "think harder" said in his own words.
+    session.conversation.say_first("Let me think about that.")
+    assert spoken[1:] == [("Let me think about that.", False)]
 
 
 def test_after_runs_when_talked_over_or_nothing_is_said(connect, make_session, monkeypatch):
