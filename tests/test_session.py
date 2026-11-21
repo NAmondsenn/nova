@@ -2339,6 +2339,20 @@ def test_a_long_recording_with_no_words_heard_is_still_noted(brain, connect, mak
     assert line["ended_by"] == "limit" and line["words"] == ""
 
 
+def test_a_long_recording_speech_to_text_failed_on_says_so(brain, connect, make_session, monkeypatch, tmp_path):
+    # Otherwise it would look, in the note, like loud sound in which no word was heard.
+    _recordings(monkeypatch, ended_by="limit", speech=9.0)
+    monkeypatch.setattr(session_module, "transcripts_logged", lambda: True)
+    satellite, _ = connect(name="pc", hostname="pc.local")
+    satellite.push_to_talk = True
+    failed = QuietWordsTranscription()
+    failed.finish = lambda audio, **how: {"text": "", "error": "Failed to decode"}
+    _record(make_session(satellite), brain, failed)
+
+    (line,) = _long_recordings(tmp_path)
+    assert line["stt_error"] is True and line["words"] == ""
+
+
 def test_a_short_push_to_talk_recording_is_not_noted(brain, connect, make_session, monkeypatch, tmp_path):
     _recordings(monkeypatch, speech=4.0)
     satellite, _ = connect(name="pc", hostname="pc.local")

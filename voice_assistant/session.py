@@ -1388,7 +1388,7 @@ class Session:
         # recording sometimes catches - see strip_wake_word.
         text = strip_wake_word((transcription or {}).get("text", ""), self.wake_word)
         if self.satellite.push_to_talk:
-            self._note_if_long(report, timeline, text)
+            self._note_if_long(report, timeline, text, stt_error="error" in (transcription or {}))
         if not text.strip():
             timeline.note(outcome="nothing_transcribed")
             if (transcription or {}).get("imagined"):
@@ -1429,7 +1429,7 @@ class Session:
         finally:
             follow_up_timeline.save(self.latency_file)
 
-    def _note_if_long(self, report: Dict, timeline: Timeline, text: str):
+    def _note_if_long(self, report: Dict, timeline: Timeline, text: str, stt_error: bool = False):
         """
         Keeps a note of a recording whose speech ran long, for seeing how well the ways of
         ending a recording work - see long_recordings.py. Done once the words are known, so
@@ -1441,10 +1441,14 @@ class Session:
             timeline: The recording's Timeline, whose marks say when the speech started
                 and ended.
             text: What was heard.
+            stt_error: Whether speech-to-text failed, which is said in the note, as nothing
+                heard would otherwise look like loud sound in which there was no word.
         """
         started, ended = timeline.marks.get("speech_started"), timeline.marks.get("speech_ended")
         if started is None or ended is None:
             return
+        if stt_error:
+            report = {**report, "stt_error": True}
         # The words are only kept as they are in the logs: while transcripts are.
         note_long_recording(self.long_recordings_file, datetime.now(), (ended - started) / 1000, report,
                             words=text if transcripts_logged() else None)
