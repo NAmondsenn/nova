@@ -2185,6 +2185,29 @@ def test_a_voice_check_saved_is_sent_to_every_satellite(files):
     assert [session.states_sent for session in sessions.values()] == [1, 1]
 
 
+def test_a_computers_two_ends_for_a_recording_are_on_the_page_and_used_straight_away(files):
+    rows = {"thresholds.press_voice_drop_db": ("Quieter than your voice that counts as stopped, at a computer (dB)",
+                                               18, 6, 40),
+            "thresholds.press_no_words_seconds": ("Seconds without a new word that end it, at a computer",
+                                                  1.5, 1.2, 5)}
+    page, running = _running(files)
+    shown = {setting["key"]: setting for setting in page.state()["settings"]}
+    for key, (label, value, low, high) in rows.items():
+        assert shown[key]["label"] == label and shown[key]["value"] == value
+        assert shown[key]["used"] == NOW and (shown[key]["min"], shown[key]["max"]) == (low, high)
+
+    result = page.save_settings({"thresholds.press_voice_drop_db": 12, "thresholds.press_no_words_seconds": 2.5}, LOGIN)
+    assert result == {"success": True, "message": "Saved. It's used straight away.", "restart_needed": False}
+    assert (running.section("thresholds")["press_voice_drop_db"],
+            running.section("thresholds")["press_no_words_seconds"]) == (12, 2.5)
+
+    for key, refused in (("thresholds.press_voice_drop_db", 5), ("thresholds.press_voice_drop_db", 41),
+                         ("thresholds.press_no_words_seconds", 1.1), ("thresholds.press_no_words_seconds", 6)):
+        low, high = rows[key][2:]
+        assert page.save_settings({key: refused}, LOGIN) == {
+            "success": False, "message": f"{rows[key][0]} should be from {low} to {high}."}
+
+
 def test_hear_it_refuses_a_speed_out_of_range(files):
     page = _page()
     for speed in (2, 0.5, "fast", float("inf"), True, None):
