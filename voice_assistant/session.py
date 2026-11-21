@@ -28,7 +28,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 from voice_assistant import paths, storage
-from voice_assistant.actions import ActionExecutor
+from voice_assistant.actions import UNAVAILABLE, ActionExecutor
 from voice_assistant.clock_ringing import heard_in
 from voice_assistant.computers import MIC_MUTE_MINUTES, ComputerControl, ComputerHooks
 from voice_assistant.config import CHOICES
@@ -94,6 +94,10 @@ CUT_IN_PRE_ROLL = 0.5
 # falling sound.
 CONVERSATION_LEFT = "I'll leave it there."
 UNASKED_ENDS = ("idle", "not for nova", "failed")
+# What Home Assistant's switch has the session take as typed, so a conversation is started by
+# the one piece of code which starts one for the phrase - with its refusals, its words and its
+# sound - rather than a second copy of them.
+START_PHRASE = "let's talk"
 
 # How long a conversation's wait for his next turn must have heard no speech before it's a gap, in
 # which what goes off by itself is said, in seconds - so not as he's just starting, and not straight
@@ -1173,6 +1177,44 @@ class Session:
                     session.music.release()
 
     # An open conversation - see OpenConversation
+
+    def _conversations_enabled(self) -> bool:
+        """Whether conversations can be started at all, as the setting is now - False without any."""
+        talk = self.brain.open_conversation
+        return talk is not None and talk.enabled
+
+    def _conversation_from_home_assistant(self, on: bool) -> None:
+        """
+        Starts a conversation here, or ends the one on here, as Home Assistant's Conversation
+        switch is turned on or off.
+
+        On, it is as if "let's talk" had been typed into Ask Nova - through the same checks, with
+        the same words said here ("Go ahead.", or why not: one elsewhere, conversations switched
+        off, the microphone muted), and on a start the listening sound and the open listen, as
+        after the phrase said. It's handed to the session's own thread, which does the speaking
+        and the listening, and waits its turn behind any request, as a typed one does. Being a
+        request, it forgets the model's stale history first, as at any wake, before the
+        conversation is switched on. Off, it's ended with the falling sound and nothing said.
+
+        Args:
+            on: True to start one, False to end the one on here.
+        """
+        if not on:
+            self.end_conversation("switch")
+            return
+        if self._closed.is_set():
+            return
+        if not self._conversations_enabled():
+            # A switch Home Assistant still shows for a moment after the setting was turned off.
+            # Typed, the phrase would be left to Claude, so the refusal is said as it would be.
+            self._speak_from_home_assistant(UNAVAILABLE["conversation"])
+            return
+        if self._conversation_here():
+            # Already on, which the switch shows - nothing to start or say again.
+            return
+        # As arriving before any typed question, so it's never taken for its answer - which would
+        # have Claude answer "let's talk" and start nothing.
+        self._typed.put((START_PHRASE, -math.inf))
 
     def end_conversation(self, reason: str) -> None:
         """
@@ -2935,6 +2977,11 @@ class Session:
             say=self._say_from_home_assistant,
             add_timer=self._add_timer_from_home_assistant,
             add_alarm=self._add_alarm_from_home_assistant,
+            # The Conversation switch: on while one is running here, and withdrawn while conversations are
+            # switched off.
+            conversations=self._conversations_enabled,
+            in_conversation=self._conversation_here,
+            set_conversation=self._conversation_from_home_assistant,
             # Read by the device on a thread of its own, never the one that publishes the
             # state every second, as the player may be asking Navidrome or Spotify.
             now_playing=(lambda: self.music_player.now_playing()) if player else None,

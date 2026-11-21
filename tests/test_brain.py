@@ -4363,6 +4363,30 @@ def test_a_satellite_connecting_again_ends_its_conversation(brain, connect):
     assert brain.open_conversation.satellite is None
 
 
+def test_a_conversation_starting_or_ending_anywhere_has_every_device_publish_its_state(brain, connect, passwords):
+    # So a Conversation switch shows one starting or ending at any satellite, and the one asked for
+    # while another runs shows off again, without waiting for the device's next round.
+    passwords.add("hall", HALL)
+    serving(brain)
+    connect(brain)
+    connect(brain, "kitchen", KITCHEN)
+    connect(brain, "hall", HALL)
+    published = []
+    for name in ("bedroom", "kitchen", "hall"):
+        session = connected(brain, name)
+        # The hall's session has no device, as one with no broker set up has none.
+        session.device = None if name == "hall" else SimpleNamespace(
+            publish_state=lambda name=name: published.append(name), stop=lambda: None)
+    assert brain.open_conversation.start("kitchen") == "started"
+    assert sorted(published) == ["bedroom", "kitchen"]
+    # Refused at another satellite: nothing starts, and nothing changes to tell.
+    published.clear()
+    assert brain.open_conversation.start("bedroom") == "elsewhere"
+    assert published == []
+    assert brain.open_conversation.end("said")
+    assert sorted(published) == ["bedroom", "kitchen"]
+
+
 def test_passing_the_daily_limit_tells_the_phone_once(make_brain):
     brain = make_brain(usage=USAGE)
     brain.ntfy = FakeNtfy()

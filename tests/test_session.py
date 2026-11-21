@@ -4992,6 +4992,132 @@ def test_a_session_waiting_for_a_turn_is_still_moving(brain, connect, make_sessi
     _ended(session)
 
 
+# Home Assistant's Conversation switch
+
+def _a_session_with_conversations(brain, connect, make_session, **settings):
+    """A session at a satellite which knows conversations, with none on, and the real conversation answering it."""
+    brain.open_conversation = OpenConversation(lambda: {"enabled": True, **settings})
+    satellite, pi = connect(conversations=True)
+    return make_session(satellite), pi
+
+
+def test_turning_it_on_starts_one_and_listens(brain, connect, make_session, monkeypatch):
+    session, pi = _a_session_with_conversations(brain, connect, make_session)
+    here = session.satellite.name
+    # What the model's history is, as the conversation is begun: the stale is forgotten as at any wake, which
+    # does nothing once a conversation is on.
+    on_when_forgotten = []
+    monkeypatch.setattr(session.llm, "forget_stale_history",
+                        lambda: on_when_forgotten.append(brain.open_conversation.on_at(here)))
+    _sending_quiet(pi)
+    running(session)
+
+    session._device_controls().set_conversation(True)
+
+    assert wait_for(lambda: pi.messages("listen"))
+    # The same words as the phrase, said here, then the open listen and its listening sound, as after "let's talk".
+    assert brain.tts.said == ["Go ahead."] and _sounds(pi) == ["listening.wav"]
+    assert pi.messages("listen")[0].get("open") is True
+    kinds = [message["type"] for message, _ in pi.received if message["type"] in ("play_stream", "play_sound", "listen")]
+    assert kinds == ["play_stream", "listen", "play_sound"]
+    assert brain.open_conversation.on_at(here) and session._device_controls().in_conversation()
+    assert [message["on"] for message in pi.messages("conversation")] == [True]
+    # Before it was on, as for the phrase said - the open turn's own start after is one for a conversation which
+    # is on, and forgets nothing.
+    assert on_when_forgotten[0] is False
+    _ended(session)
+
+
+def test_turning_it_off_ends_it_with_the_falling_sound_and_nothing_said(brain, connect, make_session):
+    session, pi = _in_a_conversation(brain, connect, make_session, Reply(say="Okay."))
+    brain.stt.texts = ["Hello."]
+    _sending_quiet(pi)
+    running(session)
+    pi.wake(said())
+    assert wait_for(lambda: pi.messages("listen"))
+    assert session._device_controls().in_conversation()
+
+    session._device_controls().set_conversation(False)
+
+    assert wait_for(lambda: session._idle.is_set())
+    assert not session._device_controls().in_conversation()
+    recording = pi.messages("listen")[0]["recording"]
+    assert any(message.get("recording") == recording for message in pi.messages("stop_listening"))
+    # Nothing but his reply to "Hello." said: it was his doing, so no "I'll leave it there.".
+    assert brain.tts.said == ["Okay."] and _sounds(pi)[-1] == "not_heard.wav"
+    assert [message["on"] for message in pi.messages("conversation")] == [True, False]
+    # Off with none on does nothing.
+    session._device_controls().set_conversation(False)
+    assert brain.tts.said == ["Okay."]
+
+
+def test_turning_it_on_while_one_runs_elsewhere_stays_off_and_says_so(brain, connect, make_session):
+    session, pi = _a_session_with_conversations(brain, connect, make_session)
+    brain.spoken_name = {"pc": "the PC"}.get
+    assert brain.open_conversation.start("pc") == "started"
+    running(session)
+
+    session._device_controls().set_conversation(True)
+
+    assert wait_for(lambda: brain.tts.said and session._idle.is_set())
+    assert brain.tts.said == ["We're already talking at the PC."]
+    # Nothing started here, nor listened for, and the one at the PC carries on.
+    assert pi.messages("listen") == [] and _sounds(pi) == [] and pi.messages("conversation") == []
+    assert not session._device_controls().in_conversation() and brain.open_conversation.on_at("pc")
+
+
+def test_turning_it_on_at_a_muted_pi_is_refused_as_the_phrase_is(brain, connect, make_session):
+    session, pi = _a_session_with_conversations(brain, connect, make_session)
+    session.set_muted(True)
+    running(session)
+
+    session._device_controls().set_conversation(True)
+
+    assert wait_for(lambda: brain.tts.said and session._idle.is_set())
+    assert brain.tts.said == ["The microphone's muted."]
+    assert brain.open_conversation.satellite is None and pi.messages("listen") == []
+
+
+def test_turning_it_on_while_conversations_are_off_says_so(brain, connect, make_session):
+    # A switch Home Assistant still showed for a moment after the setting was turned off. Typed, the phrase would
+    # be left to Claude, who would answer it as chat.
+    session, pi = _a_session_with_conversations(brain, connect, make_session, enabled=False)
+    controls = session._device_controls()
+    assert controls.conversations() is False
+    running(session)
+
+    controls.set_conversation(True)
+
+    assert wait_for(lambda: brain.tts.said)
+    assert brain.tts.said == ["Conversations are switched off."]
+    assert brain.open_conversation.satellite is None and pi.messages("listen") == []
+
+
+def test_the_switch_is_only_there_with_conversations(brain, make_session):
+    # The fixture's brain has none.
+    controls = make_session()._device_controls()
+    assert controls.conversations() is False and controls.in_conversation() is False
+    controls.set_conversation(False)
+
+
+def test_turning_it_on_where_one_is_already_running_starts_nothing_more(brain, connect, make_session):
+    session, pi = _in_a_conversation(brain, connect, make_session)
+    session._device_controls().set_conversation(True)
+    assert session._typed.empty()
+
+
+def test_turning_it_on_is_never_taken_for_the_answer_to_a_typed_question(brain, connect, make_session):
+    session, pi = _a_session_with_conversations(brain, connect, make_session)
+    now = time.monotonic()
+    # A question asked of something typed is open, so what's typed now would be its answer.
+    session._typed_question = (now - 1, now + 60)
+
+    session._device_controls().set_conversation(True)
+
+    wake = session._next_typed()
+    assert wake["typed"] == "let's talk" and wake["follow_up"] is False
+
+
 # What goes off by itself during a conversation
 
 def _announcing(session, *args, **kwargs):

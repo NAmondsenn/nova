@@ -159,6 +159,16 @@ class DeviceControls:
     # Whether this device gets a tile per playlist. Only the satellite whose Nova view shows
     # them should: two devices both named Nova race for each new tile's entity id.
     playlist_tiles: bool = True
+    # Whether conversations can be started at all, as the setting is now - the Conversation
+    # switch is only shown while they can, and comes back when they can again. Read by the
+    # state thread, so it must return at once. The switch is only there when all three are set.
+    conversations: Optional[Callable[[], bool]] = None
+    # Whether an open conversation is on at this satellite.
+    in_conversation: Optional[Callable[[], bool]] = None
+    # Starts one here, or ends the one on here, as the switch is turned on or off. Carried out
+    # like the other commands, so it may take a moment - but the start only hands the
+    # satellite's session the request, which the session answers on its own thread.
+    set_conversation: Optional[Callable[[bool], None]] = None
 
 
 def _slug(text: str) -> str:
@@ -229,6 +239,11 @@ class NovaDevice:
         self._timers_attributes = f"{base}/timers/attributes"
         self._backend = f"{base}/backend"
         self._muted = f"{base}/muted"
+        self._conversation = f"{base}/conversation"
+        # Whether the Conversation switch was in the last announcement: None before the first,
+        # so a device which starts with conversations off still removes the switch an earlier
+        # run announced - see discovery.
+        self._announced_conversation: Optional[bool] = None
         self._stop, self._restart, self._speak = f"{base}/stop", f"{base}/restart", f"{base}/speak"
         self._playing = f"{base}/playing"
         self._playing_attributes = f"{base}/playing/attributes"
@@ -348,6 +363,18 @@ class NovaDevice:
                       "command_topic": f"{self._muted}/set", "payload_on": ON, "payload_off": OFF,
                       "icon": "mdi:microphone-off"},
         })
+        if self._has_conversation():
+            offered = self.controls.conversations()
+            if offered:
+                controls["conversation"] = {"p": "switch", "name": "Conversation", "state_topic": self._conversation,
+                                            "command_topic": f"{self._conversation}/set", "payload_on": ON,
+                                            "payload_off": OFF, "icon": "mdi:forum"}
+            elif self._announced_conversation is not False:
+                # Conversations are off: Home Assistant only removes a component of a device which it's
+                # sent as its platform alone, once, before it's left out - and does so for a switch an
+                # earlier run announced, which this run's first announcement can't know of.
+                controls["conversation"] = {"p": "switch"}
+            self._announced_conversation = bool(offered)
         if self._has_music():
             controls.update(self._music_discovery())
         if self._has_ask():
@@ -382,6 +409,11 @@ class NovaDevice:
                 "o": {"name": "Nova"},
                 "availability_topic": self._availability,
                 "cmps": controls}
+
+    def _has_conversation(self) -> bool:
+        """Whether Nova can have conversations started and ended from Home Assistant - the brain's usage device can't."""
+        return (self.controls is not None and self.controls.conversations is not None
+                and self.controls.in_conversation is not None and self.controls.set_conversation is not None)
 
     def _has_music(self) -> bool:
         """Whether Nova has a player to show - a device with no controls, like the brain's, has none."""
@@ -589,6 +621,8 @@ class NovaDevice:
         topics = ([(f"{self._volume[category]}/set", QOS) for category, _, _, _ in VOLUMES] +
                   [(f"{self._muted}/set", QOS), (self._stop, QOS), (self._restart, QOS),
                    (self._speak, QOS), (HA_STATUS, QOS)])
+        if self._has_conversation():
+            topics.append((f"{self._conversation}/set", QOS))
         if self._has_music():
             topics += [(topic, QOS) for topic in (*self._playback.values(), self._playlist_set)]
         if self._has_ask():
@@ -636,6 +670,10 @@ class NovaDevice:
         backend = controls.backend()
         state[self._backend] = UNKNOWN if backend is None else (ON if backend else OFF)
         state[self._muted] = ON if controls.muted() else OFF
+        # Not while conversations are off, when the switch is withdrawn: its state topic would be
+        # kept by the broker with nothing to show it.
+        if self._has_conversation() and controls.conversations():
+            state[self._conversation] = ON if controls.in_conversation() else OFF
         if self._has_ask():
             # Always the placeholder, which the box shows as empty: the box is only for
             # sending, and what was typed on it - which is what the user said - is never
@@ -679,6 +717,7 @@ class NovaDevice:
         """Keeps Home Assistant up to date, until stopped."""
         while not self._stopping.wait(PUBLISH_EVERY):
             self.publish_state()
+            self._announce_if_conversations_changed()
 
     # What Nova's playing, to Home Assistant
 
@@ -740,6 +779,22 @@ class NovaDevice:
         if self._connected and (self._playlists != self._announced_playlists
                                 or self._cover_type != self._announced_cover_type
                                 or tile_types != self._announced_tile_types):
+            self._announce()
+
+    def _announce_if_conversations_changed(self):
+        """
+        Announces the device again if conversations were switched on or off on the settings page
+        since it was last announced, so the Conversation switch is withdrawn, and comes back,
+        without waiting for the broker to be reconnected.
+        """
+        if not self._connected or not self._has_conversation():
+            return
+        try:
+            offered = bool(self.controls.conversations())
+        except Exception as e:
+            logger.error(f"Couldn't tell whether conversations are on, for Home Assistant: {e}")
+            return
+        if offered != self._announced_conversation:
             self._announce()
 
     def _send(self, topic: str, payload):
@@ -916,6 +971,10 @@ class NovaDevice:
             if payload in (ON, OFF):
                 logger.info(f"Microphone {'muted' if payload == ON else 'unmuted'} from Home Assistant")
                 self._queue("Microphone muted", self._set_muted, payload == ON)
+        elif self._has_conversation() and topic == f"{self._conversation}/set":
+            if payload in (ON, OFF):
+                logger.info(f"Conversation {'started' if payload == ON else 'ended'} from Home Assistant")
+                self._queue("Conversation", self._set_conversation, payload == ON)
         elif self._has_music() and topic in self._playback.values():
             # A button's payload is only Home Assistant's "PRESS", so it isn't looked at.
             action = next(action for action, where in self._playback.items() if where == topic)
@@ -968,3 +1027,10 @@ class NovaDevice:
     def _set_muted(self, muted: bool):
         self.controls.set_muted(muted)
         self.publish_state()
+
+    def _set_conversation(self, on: bool):
+        # Not sent straight back as a volume is: a start is only handed to the session, which
+        # answers it on its own thread, and the switch shows it once a conversation is on - or stays
+        # off if it was refused. Nova tells the device of every start and end - see
+        # Brain._conversation_changed.
+        self.controls.set_conversation(on)

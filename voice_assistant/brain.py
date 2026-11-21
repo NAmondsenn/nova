@@ -325,9 +325,10 @@ class Brain:
         # Whether an open conversation is on, and where - one for the whole brain, as only one is
         # allowed at a time. Its settings are read at each use, so ones changed on the settings
         # page are used at once. One starting or ending wakes the quiet-others thread, so the
-        # room goes quiet, and is let go, at once.
+        # room goes quiet, and is let go, at once, and has each satellite's device in Home Assistant
+        # show its Conversation switch as it is now.
         self.open_conversation = OpenConversation(lambda: self.config.section("conversation"),
-                                                  changed=self._quiet_nudge.set)
+                                                  changed=self._conversation_changed)
         # The apps and open windows of each computer satellite - see computers.py.
         self.computers = Computers()
         # Each satellite's session, by its name, for as long as it's connected.
@@ -1552,6 +1553,19 @@ class Brain:
         finally:
             session.satellite.close()
             self._conversation_gone(name)
+
+    def _conversation_changed(self):
+        """
+        Called whenever a conversation starts or ends, on whichever thread did it: wakes the
+        quiet-others thread, and has every satellite's device in Home Assistant send its state
+        at once, so a Conversation switch shows one starting or ending anywhere - the one asked
+        for at another satellite while this runs shows off again - without waiting for its
+        next round.
+        """
+        self._quiet_nudge.set()
+        for session in self.connected_sessions():
+            if session.device:
+                session.device.publish_state()
 
     def _conversation_gone(self, name: str):
         """

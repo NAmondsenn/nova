@@ -113,6 +113,9 @@ class FakeNova:
         self.is_muted = False
         self.calls = []
         self.broken = False
+        # The Conversation switch: whether conversations can be started, and whether one is on here.
+        self.conversations_on = True
+        self.in_conversation = False
         # Cleared, setting a volume waits until it's set again.
         self.release = threading.Event()
         self.release.set()
@@ -122,6 +125,12 @@ class FakeNova:
                               set_volume=self._set_volume, clock=lambda: self.overview, backend=lambda: self.reachable,
                               muted=lambda: self.is_muted, set_muted=lambda muted: self.calls.append(("set_muted", muted)),
                               stop=self._stop, restart=lambda: self.calls.append(("restart",)), speak=self._speak)
+
+    def switch_controls(self):
+        """The controls of a satellite whose device has the Conversation switch."""
+        return dataclasses.replace(
+            self.controls(), conversations=lambda: self.conversations_on, in_conversation=lambda: self.in_conversation,
+            set_conversation=lambda on: self.calls.append(("set_conversation", on)))
 
     def _set_volume(self, category, percent):
         self.release.wait(2)
@@ -1102,5 +1111,92 @@ def test_a_device_without_playlist_tiles_removes_any_it_had_and_reads_no_covers(
         device.refresh_playlists()
         assert len(client.sent(DISCOVERY)) == sent
         assert read == []
+    finally:
+        device.stop()
+
+
+@pytest.fixture
+def switched(nova):
+    """A NovaDevice for a satellite with the Conversation switch, started, with its client - not yet connected."""
+    made = []
+    device = NovaDevice("broker.local", 1883, "nova", "secret", nova.switch_controls(), node_id="nova_test",
+                        client_factory=lambda client_id: made.append(FakeClient(client_id)) or made[-1])
+    device.start()
+    yield device, made[0]
+    device.stop()
+
+
+def test_the_switch_is_discovered_and_shows_the_state(switched, nova):
+    device, client = switched
+    client.connects()
+    config = json.loads(client.sent(DISCOVERY)[-1][1])["cmps"]
+    # A switch beside the microphone's, with the neighbours' qos and unique id.
+    assert config["conversation"] == {
+        "p": "switch", "name": "Conversation", "state_topic": f"{BASE}/conversation",
+        "command_topic": f"{BASE}/conversation/set", "payload_on": "ON", "payload_off": "OFF", "icon": "mdi:forum",
+        "unique_id": "nova_test_conversation", "qos": 1}
+    assert config["muted"]["p"] == "switch" and len(config) == 12
+    assert (f"{BASE}/conversation/set", 1) in client.subscribed
+    assert client.latest()[f"{BASE}/conversation"] == "OFF"
+
+    # On while one is running here, and off again when it ends.
+    nova.in_conversation = True
+    device.publish_state()
+    assert client.latest()[f"{BASE}/conversation"] == "ON"
+    nova.in_conversation = False
+    device.publish_state()
+    assert client.latest()[f"{BASE}/conversation"] == "OFF"
+
+
+def test_the_switch_commands_reach_nova(switched, nova):
+    device, client = switched
+    client.connects()
+    client.delivers(f"{BASE}/conversation/set", "ON")
+    client.delivers(f"{BASE}/conversation/set", "OFF")
+    client.delivers(f"{BASE}/conversation/set", "maybe")
+    client.delivers(f"{BASE}/conversation/set", "ON", retain=True)
+    client.delivers(f"{BASE}/stop", "PRESS")
+    # In the order they came, junk and a kept command left out.
+    assert _eventually(lambda: ("stop",) in nova.calls)
+    assert nova.calls == [("set_conversation", True), ("set_conversation", False), ("stop",)]
+
+
+def test_a_device_without_the_controls_for_it_has_no_switch(started):
+    device, client = started
+    client.connects()
+    assert "conversation" not in _components(device)
+    assert f"{BASE}/conversation" not in client.latest()
+    assert (f"{BASE}/conversation/set", 1) not in client.subscribed
+
+
+def test_no_switch_when_conversations_are_off(nova, monkeypatch):
+    monkeypatch.setattr(ha_device, "PUBLISH_EVERY", 0.01)
+    nova.conversations_on = False
+    made = []
+    device = NovaDevice("broker.local", 1883, "nova", "secret", nova.switch_controls(), node_id="nova_test",
+                        client_factory=lambda client_id: made.append(FakeClient(client_id)) or made[-1])
+    device.start()
+    try:
+        client = made[0]
+        client.connects()
+        # Sent as its platform alone, once, so a switch an earlier run announced is removed - and with
+        # nothing to show, no state is kept by the broker for it.
+        assert json.loads(client.sent(DISCOVERY)[-1][1])["cmps"]["conversation"] == {"p": "switch"}
+        assert f"{BASE}/conversation" not in client.latest()
+        time.sleep(0.1)
+        assert len(client.sent(DISCOVERY)) == 1 and "conversation" not in _components(device)
+
+        # Switched on on the settings page, it comes back without the broker being reconnected...
+        nova.conversations_on = True
+        assert _eventually(lambda: len(client.sent(DISCOVERY)) == 2)
+        assert json.loads(client.sent(DISCOVERY)[-1][1])["cmps"]["conversation"]["name"] == "Conversation"
+        assert _eventually(lambda: client.latest().get(f"{BASE}/conversation") == "OFF")
+
+        # ...and off again, it's removed once more, and not announced over and over.
+        nova.conversations_on = False
+        assert _eventually(lambda: len(client.sent(DISCOVERY)) == 3)
+        assert json.loads(client.sent(DISCOVERY)[-1][1])["cmps"]["conversation"] == {"p": "switch"}
+        time.sleep(0.1)
+        assert len(client.sent(DISCOVERY)) == 3 and "conversation" not in _components(device)
     finally:
         device.stop()
