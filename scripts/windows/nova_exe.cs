@@ -78,9 +78,15 @@ namespace NovaHost
         private const int Unexpected = 126;
 
         // No [STAThread] or [MTAThread]. With neither, the CLR still makes the main thread a
-        // multithreaded apartment before Main runs, where pythonw.exe leaves its COM
-        // uninitialised; numpy, sounddevice, comtypes and Windows' media controls all
-        // worked under it in its first test (20 Nov).
+        // multithreaded apartment (MTA) before Main runs. Under pythonw.exe it is a
+        // single-threaded apartment instead, set by PortAudio as sounddevice is imported
+        // (windows_media.py records this), so here it goes from STA to MTA: PortAudio
+        // accepts an apartment already set, WASAPI works in an MTA, and winrt's modules,
+        // imported on this thread as WindowsMedia is made (only its objects are made on a
+        // thread of its own), import into an existing MTA harmlessly. Threads which never
+        // set up COM, the tray's and the press listener's, join the process's MTA. Its first
+        // test (20 Nov) imported comtypes and winrt on a thread of their own, so the first
+        // deploy is what proves winrt's import on the main thread.
         public static int Main(string[] args)
         {
             try
