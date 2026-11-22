@@ -5138,7 +5138,8 @@ def test_turning_it_on_starts_one_and_listens(brain, connect, make_session, monk
 
     session._device_controls().set_conversation(True)
 
-    assert wait_for(lambda: pi.messages("listen"))
+    # The listening sound is sent just after the listen, so both are waited for.
+    assert wait_for(lambda: pi.messages("listen") and _sounds(pi))
     # The same words as the phrase, said here, then the open listen and its listening sound, as after "let's talk".
     assert brain.tts.said == ["Go ahead."] and _sounds(pi) == ["listening.wav"]
     assert pi.messages("listen")[0].get("open") is True
