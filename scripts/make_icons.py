@@ -29,6 +29,7 @@ import numpy as np
 PROJECT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_DIRECTORY)
 
+from voice_assistant import orb_drawing
 from voice_assistant.orb_drawing import OrbPainter
 
 # The sizes Windows asks an icon for: 16 and 20 to 32 for the tray at 100% to 200% scaling,
@@ -44,12 +45,30 @@ FILES = {"ready": "nova.ico", "muted": "nova-muted.ico", "offline": "nova-offlin
 # The orb is drawn this big (its body's width in pixels) and reduced from there.
 _BODY = 384
 
-# The moment of the orb's drift which is drawn: this many frames of 0.1 s of "listening".
-# It is fixed here, so the files never change between runs. At two seconds in the lobes are
-# spread round the core, with the blue and violet both showing, so the orb reads as lopsided
-# colour at 256 and as a violet disc with a bright middle when small.
-_MOMENT_FRAMES = 20
-_MOMENT_STEP = 0.1
+# The icon's own still pose. The orb on the screen is never still, and at any one moment of
+# its drift its lobes are bunched to one side of the core, which in a picture looks like the
+# core pushed out of its own orb. So the icon sets its lobes evenly round the core instead,
+# with the same colours, gradients, auras and core as the screen's orb. Each row is a lobe
+# of the orb's (its place in orb_drawing's list: blue, violet, cyan, indigo, pink-violet),
+# the direction it lies from the core in degrees (0 to the right, 90 down, as the screen's
+# y runs), how far out its middle is in the clock's pixels (the body is 300 wide), how much
+# it is turned from pointing out from the core, in degrees, its stretch along that and
+# across it, and how much of it shows, in the order they are drawn. The last five are the
+# orb's own lobes, one in each fifth of the circle; the first five are fainter copies of
+# their colours between them and further out, which fill in the body's edge, so it fades
+# out softly all the way round instead of ending where the five lobes do.
+_POSE = (
+    (1, 54, 58, 90, (1, 1), 0.5),
+    (4, 126, 58, 90, (1, 1), 0.5),
+    (0, 198, 58, 90, (1, 1), 0.5),
+    (2, 270, 58, 90, (1, 1), 0.5),
+    (3, 342, 58, 90, (1, 1), 0.5),
+    (0, 18, 40, 90, (1, 1), 1),
+    (1, 90, 40, 90, (1, 1), 1),
+    (2, 162, 40, 90, (1, 1), 1),
+    (3, 234, 40, 90, (1, 1), 1),
+    (4, 306, 40, 90, (1, 1), 1),
+)
 
 # Up to this many pixels the picture is cropped to the body, and made more solid, because
 # the orb's aura - nearly three quarters of the window - would be a faint smudge. (Seen at
@@ -109,11 +128,41 @@ def _weights(count: int, start: float, stop: float, size: int) -> np.ndarray:
 
 @functools.lru_cache(maxsize=1)
 def _orb() -> np.ndarray:
-    """The orb at its fixed moment: premultiplied BGRA, uint8, drawn large."""
+    """
+    The orb in the icon's still pose: premultiplied BGRA, uint8, drawn large.
+
+    It is laid up the way OrbPainter.frame does, with the same layers over each other in
+    the same order, but with the lobes where _POSE puts them. It borrows the painter's
+    layer drawing and the orb's gradients, so it stays the same picture.
+    """
     painter = OrbPainter(_BODY)
-    frame = painter.frame("listening", 0, 1, 1)
-    for _ in range(_MOMENT_FRAMES):
-        frame = painter.frame("listening", _MOMENT_STEP, 1, 1)
+    unit = _BODY / orb_drawing._BODY
+    mix = orb_drawing._mix
+    # The auras and the core are at the biggest of their breath and hum, where the glow
+    # shows most.
+    swing = 1.0
+    breath = mix(0.9, 1.08, swing)
+    layers = []
+    for gradient in (orb_drawing._OUTER_AURA, orb_drawing._INNER_AURA):
+        layers.append((gradient, (0, 0), 0, (breath, breath), mix(0.75, 1, swing)))
+    for index, direction, distance, turn, stretch, opacity in _POSE:
+        angle = math.radians(direction)
+        centre = (distance * math.cos(angle), distance * math.sin(angle))
+        layers.append((orb_drawing._LOBES[index].gradient, centre, angle + math.radians(turn),
+                       stretch, opacity))
+    pixels = np.zeros((4, painter.side, painter.side), dtype=np.float32)
+    for arguments in layers:
+        layer = painter._layer(unit, *arguments)
+        pixels *= 1 - layer[3]
+        pixels += layer
+    # The core is lit over everything, as on the screen.
+    hum = mix(0.9, 1.06, swing)
+    layer = painter._layer(unit, orb_drawing._CORE, (0, 0), 0, (hum, hum), 1)
+    pixels += layer * (1 - pixels)
+    np.minimum(pixels[:3], pixels[3], out=pixels[:3])
+    frame = np.empty((painter.side, painter.side, 4), dtype=np.uint8)
+    for channel in range(4):
+        frame[..., channel] = pixels[channel] * 255 + 0.5
     return frame
 
 

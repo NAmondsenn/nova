@@ -35,6 +35,7 @@ from voice_assistant import paths, protocol
 from voice_assistant import routines as routines_module
 from voice_assistant import session as session_module
 from voice_assistant import settings_page as settings_page_module
+from voice_assistant.approvals import Approvals
 from voice_assistant.batteries import Battery, BatteryChoices, BatteryWatcher
 from voice_assistant.config import Config
 from voice_assistant.displays import Displays
@@ -55,6 +56,7 @@ from voice_assistant.navidrome import NavidromeLibrary, normalise
 from voice_assistant.new_music import NewMusicPlaylist
 from voice_assistant.ntfy import Alert
 from voice_assistant.open_conversation import OpenConversation
+from voice_assistant.passkeys import Passkey, PasskeyStore
 from voice_assistant.playlist_changes import PlaylistChanges
 from voice_assistant.recording import RATE
 from voice_assistant.remote import RemoteSatellite
@@ -293,7 +295,7 @@ class Satellite:
     """
 
     def __init__(self, brain, name="bedroom", password=BEDROOM, unclean=False, away=NOTHING_AWAY, push_to_talk=False,
-                 machine=None, saves_notes=False, media_controls=False, opens=False):
+                 machine=None, saves_notes=False, media_controls=False, opens=False, approves=False):
         self.socket = socket.create_connection(("127.0.0.1", brain.port), timeout=5)
         self.stream = self.socket.makefile("rwb")
         self.lock = threading.Lock()
@@ -302,7 +304,8 @@ class Satellite:
         self.gone = threading.Event()
         try:
             protocol.greet(self.stream, name, f"{name}-pi", password, 48000, unclean, push_to_talk=push_to_talk,
-                           machine=machine, saves_notes=saves_notes, media_controls=media_controls, opens=opens)
+                           machine=machine, saves_notes=saves_notes, media_controls=media_controls, opens=opens,
+                           approves=approves)
         except BaseException:
             # As satellite_link does, so the brain sees it hang up.
             self.socket.close()
@@ -4612,3 +4615,195 @@ def test_music_never_quiets_the_others(brain, connect):
     assert bedroom.messages("quiet") == []
     release.set()
 
+
+
+# Approvals
+
+
+def test_the_brain_makes_the_approvals_and_keeps_them_in_its_data(brain):
+    assert isinstance(brain.passkeys, PasskeyStore) and isinstance(brain.approvals, Approvals)
+    assert brain.passkeys.path == os.path.join(paths.DATA_DIR, "passkeys.json")
+    assert brain.approvals._log_path == os.path.join(paths.DATA_DIR, "approvals.json")
+    assert brain.approvals._passkeys is brain.passkeys and brain.approvals._ntfy is brain.ntfy
+    assert brain.approvals._approvers == brain._approvers and brain.approvals._say == brain._say_approval_outcome
+    assert brain.approvals._guards == brain._approver_kept
+    assert brain.approvals._spoken == brain.spoken_name
+
+
+def test_the_approvals_settings_are_its_own(make_brain):
+    brain = make_brain(approvals={"trust_minutes": 7})
+    assert brain.approvals._minutes("trust_minutes", 5) == 7
+
+
+def test_only_a_connected_satellite_that_approves_and_may_is_asked(brain, connect, passwords):
+    serving(brain)
+    # A PC whose hello says it approves, and a Pi which says so too but was never switched on.
+    connect(brain, "bedroom", BEDROOM, machine="pc", approves=True)
+    connect(brain, "kitchen", KITCHEN, machine="pi", approves=True)
+    bedroom, kitchen = connected(brain, "bedroom"), connected(brain, "kitchen")
+    # What each said is kept with what's known of it.
+    assert brain.rooms.approves("bedroom") is True and brain.rooms.approves("kitchen") is True
+
+    assert brain._approvers() == [bedroom.satellite]
+
+    # Switched on for the Pi on the settings page, it may.
+    brain.rooms.set_can_approve("kitchen", True)
+    assert sorted(each.name for each in brain._approvers()) == ["bedroom", "kitchen"]
+
+    # Switched off for the PC, it isn't asked, though its hello says it approves.
+    brain.rooms.set_can_approve("bedroom", False)
+    assert brain._approvers() == [kitchen.satellite]
+
+    # A PC switched on whose hello doesn't say it approves (an older satellite) never is.
+    brain.rooms.seen("study", False, "pc")
+    brain.rooms.set_can_approve("study", True)
+    put_in_session(brain, "study")
+    brain.sessions["study"].satellite.approves = False
+    # Nor one which says it does but has gone.
+    brain.rooms.seen("office", False, "pc", approves=True)
+    put_in_session(brain, "office")
+    brain.sessions["office"].satellite.approves = True
+    brain.sessions["office"].satellite.connected = False
+    assert brain._approvers() == [kitchen.satellite]
+    # Put in by hand, so not let go as the brain stops.
+    del brain.sessions["study"], brain.sessions["office"]
+
+
+def test_a_pc_first_seen_once_a_way_to_approve_is_set_up_isnt_let_approve(brain, connect, passwords):
+    serving(brain)
+    # A passkey is set up first, so a satellite saying it's the PC and approves isn't let approve by that alone.
+    brain.passkeys.add(Passkey(id="made-up-credential", name="Phone", public_key="key", algorithm=-7, counter=0,
+                               origin="https://nova.example.ts.net", added=1.0))
+    connect(brain, "bedroom", BEDROOM, machine="pc", approves=True)
+    connected(brain, "bedroom")
+    assert brain.rooms.approves("bedroom") is True and brain.rooms.can_approve("bedroom") is False
+    assert brain._approvers() == []
+
+
+def test_a_kept_approving_satellite_guards_while_away(brain):
+    # The brain's guard reads the rooms, connected or not: a PC asleep is still a way to approve.
+    brain.rooms.seen("bedroom", False, "pc", approves=True, guarded=False)
+    assert brain.approvals.guarded() is True
+    brain.rooms.set_can_approve("bedroom", False)
+    assert brain.approvals.guarded() is False
+
+
+def test_a_new_password_switches_can_approve_off_once_a_way_is_set_up(brain, connect, passwords):
+    serving(brain)
+    # The PC set up first, so let approve - and it guards, so a re-key is made while guarded.
+    connect(brain, "bedroom", BEDROOM, machine="pc", approves=True)
+    session = connected(brain, "bedroom")
+    assert brain._approvers() == [session.satellite] and brain.approvals.guarded()
+
+    password = brain.renew_password("bedroom")
+
+    # Whoever has the new password could be anything saying it's the PC, so it isn't asked.
+    assert brain.rooms.can_approve("bedroom") is False
+    assert wait_for(lambda: brain.session_for("bedroom") is None)
+    connect(brain, "bedroom", password, machine="pc", approves=True)
+    connected(brain, "bedroom")
+    assert brain._approvers() == [] and brain.rooms.can_approve("bedroom") is False
+    assert SatelliteRooms(os.path.join(paths.DATA_DIR, "satellite_rooms.json")).can_approve("bedroom") is False
+
+
+def test_a_satellite_removed_and_added_again_isnt_let_approve(brain, connect, passwords):
+    serving(brain)
+    brain.passkeys.add(Passkey(id="made-up-credential", name="Phone", public_key="key", algorithm=-7, counter=0,
+                               origin="https://nova.example.ts.net", added=1.0))
+    brain.rooms.seen("bedroom", False, "pc", approves=True, guarded=False)
+    assert brain.rooms.can_approve("bedroom") is True
+
+    brain.remove_satellite("bedroom")
+    # Forgotten entirely as it goes.
+    assert brain.rooms.can_approve("bedroom") is False and brain.rooms.approves("bedroom") is False
+    password = brain.add_satellite("bedroom")
+    connect(brain, "bedroom", password, machine="pc", approves=True)
+    connected(brain, "bedroom")
+    assert brain.rooms.can_approve("bedroom") is False and brain._approvers() == []
+
+
+def test_a_new_password_at_first_set_up_lets_the_pc_approve(brain, connect, passwords):
+    # Nothing set up: the PC's switch off, no passkey. A re-key is then its first set-up, so on.
+    brain.rooms.seen("bedroom", False, "pc", approves=True, guarded=False)
+    brain.rooms.set_can_approve("bedroom", False)
+    assert not brain.approvals.guarded()
+    brain.renew_password("bedroom")
+    assert brain.rooms.can_approve("bedroom") is True
+    # Adding a name already there is refused before its switch is touched.
+    brain.rooms.set_can_approve("bedroom", False)
+    with pytest.raises(ValueError, match="already"):
+        brain.add_satellite("bedroom")
+    assert brain.rooms.can_approve("bedroom") is False
+
+
+def test_a_satellite_whose_switch_cant_be_read_isnt_asked(brain, monkeypatch, caplog):
+    put_in_session(brain, "bedroom")
+    brain.sessions["bedroom"].satellite.approves = True
+
+    def broken(name):
+        raise OSError("disk")
+
+    monkeypatch.setattr(brain.rooms, "can_approve", broken)
+    assert brain._approvers() == []
+
+
+def test_an_approval_outcome_is_said_where_it_was_asked_else_sent_to_the_phone(brain, connect, caplog):
+    brain.ntfy = FakeNtfy()
+    serving(brain)
+    connect(brain)
+    connect(brain, "kitchen", KITCHEN)
+    bedroom, kitchen = connected(brain), connected(brain, "kitchen")
+
+    brain._say_approval_outcome("kitchen", "Okay, I won't.")
+    assert kitchen.announced == ["Okay, I won't."] and bedroom.announced == [] and brain.ntfy.sent == []
+
+    # With no satellite, the default one says it.
+    brain._say_approval_outcome(None, "No answer, so I haven't.")
+    assert bedroom.announced == ["No answer, so I haven't."]
+
+    # Not said to the end, it goes to the phone.
+    kitchen.said = False
+    brain._say_approval_outcome("kitchen", "Removed 'Dentist'.")
+    assert brain.ntfy.sent == [("phone", "Nova", "Removed 'Dentist'.")]
+
+    # Failing to be said, the same.
+    def fail(message, *args, **kwargs):
+        raise OSError("the satellite went mid-sentence")
+
+    kitchen.announce = fail
+    brain._say_approval_outcome("kitchen", "Okay, I won't.")
+    # Asked from a satellite which isn't connected, the default doesn't say it in its place.
+    brain._say_approval_outcome("study", "No answer, so I haven't.")
+    assert brain.ntfy.sent[1:] == [("phone", "Nova", "Okay, I won't."), ("phone", "Nova", "No answer, so I haven't.")]
+    assert bedroom.announced == ["No answer, so I haven't."]
+
+    # With no phone topic either, it's only logged - never raising, and never naming what was done.
+    brain.ntfy.phone = ""
+    with caplog.at_level(logging.WARNING):
+        brain._say_approval_outcome("study", "Removed 'Dentist'.")
+    assert "Dentist" not in caplog.text and "approval" in caplog.text.lower()
+
+    # A phone which can't be sent to doesn't raise either.
+    brain.ntfy.phone = "phone"
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("can't start a thread")
+
+    brain.ntfy.send_soon = broken
+    brain._say_approval_outcome("study", "Okay, I won't.")
+
+
+def test_stopping_the_brain_stops_the_approvals(stopping):
+    stopping.approvals = Recorder("approvals", stopping.closed)
+    stopping._clean_up()
+    # Before the sessions close, so nothing waiting runs once they've gone.
+    assert stopping.closed == ["clock", "approvals", "bedroom", "tts"]
+
+
+def test_every_session_gets_the_approvals(brain, connect, monkeypatch):
+    _real_sessions(monkeypatch)
+    serving(brain)
+    connect(brain)
+    connect(brain, "kitchen", KITCHEN)
+    for name in ("bedroom", "kitchen"):
+        assert connected(brain, name).actions.approvals is brain.approvals

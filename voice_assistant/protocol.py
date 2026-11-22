@@ -29,6 +29,7 @@ After the handshake, what a satellite sends the brain:
     computer_done  {"id": ..., "said"?: ..., "error"?: ..., "level"?: ..., "muted"?: ...}  (the
         answer to a computer: a sentence to say, or one saying why not, or the volume now - or
         for "mic", whether the microphone is muted now)
+    approval_answer  {"id": ..., "approved": true|false}  (the user's answer to an approval, once)
     shortcut_taken  {"taken": true|false}  (whether another program has the shortcut the satellite's
         app listens on, said each time that changes and as it connects)
     echo_ready  {"ready": true|false}  (whether its echo canceller has lined its speaker up with its
@@ -79,13 +80,17 @@ and what the brain sends a satellite:
         "item"?: ..., "url"?: ..., "name"?: ..., "direction"?: ..., "step"?: ..., "level"?: ...,
         "mute"?: ...}  (something to do on the computer itself, answered by computer_done; "mic"
         mutes or unmutes Windows' own microphone, sent only to a satellite which said system_volume)
+    approval  {"id": ..., "description": ...}  (ask for the user's OK to a big action, from
+        a satellite which said it approves)
+    approval_withdraw  {"id": ...}  (the request is settled or given up, so stop asking)
     restart
 
 The handshake comes first, and proves the satellite's password to the brain and the
 brain's to the satellite, without the password itself ever being sent:
 
     hello  {name, hostname, sample_rate, unclean, nonce, speaker?, push_to_talk?, machine?,
-            saves_notes?, media_controls?, opens?, system_volume?, conversations?}    (satellite)
+            saves_notes?, media_controls?, opens?, system_volume?, approves?,
+            conversations?}    (satellite)
     challenge  {nonce, proof}    (brain; or refused, and the connection is closed)
     proof  {proof}    (satellite, once the brain's proof is right)
     ready, or refused    (brain)
@@ -218,7 +223,7 @@ def _expect(stream: BinaryIO, kind: str, *fields: str) -> Dict:
 def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate: int, unclean: bool,
           speaker: Optional[str] = None, push_to_talk: bool = False, machine: Optional[str] = None,
           saves_notes: bool = False, media_controls: bool = False, opens: bool = False,
-          system_volume: bool = False, conversations: bool = False):
+          system_volume: bool = False, approves: bool = False, conversations: bool = False):
     """
     The satellite's side of the handshake.
 
@@ -243,6 +248,8 @@ def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate
             hello if False.
         system_volume: Whether it can set its computer's own volume - left out of the
             hello if False.
+        approves: Whether it can ask the user's OK to a big action and send back the
+            answer - left out of the hello if False.
         conversations: Whether it knows a conversation's messages - open recordings, the
             conversation on and off, and cut_in and echo_ready - left out of the hello if False.
 
@@ -268,6 +275,8 @@ def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate
         extra["opens"] = True
     if system_volume:
         extra["system_volume"] = True
+    if approves:
+        extra["approves"] = True
     if conversations:
         extra["conversations"] = True
     send(stream, "hello", name=name, hostname=hostname, sample_rate=sample_rate,
@@ -295,8 +304,8 @@ def admit(stream: BinaryIO, password_for: Callable[[str], Optional[str]]) -> Dic
         if it doesn't say, its machine, one of machine.MACHINES, and whether it saves
         notes. The last two are None and False if the hello leaves them out or says what
         makes no sense, which never keeps a satellite out: they are extras. So are whether
-        it opens things, whether it has system volume and whether it knows conversations,
-        each False in the same cases.
+        it opens things, whether it has system volume, whether it approves and whether it
+        knows conversations, each False in the same cases.
 
     Raises:
         Refused: The satellite is unknown or got the password wrong. It has been told so.
@@ -344,11 +353,12 @@ def admit(stream: BinaryIO, password_for: Callable[[str], Optional[str]]) -> Dic
         saves_notes = False
     opens = _flag(name, hello, "opens", "opens things")
     system_volume = _flag(name, hello, "system_volume", "has system volume")
+    approves = _flag(name, hello, "approves", "approves")
     conversations = _flag(name, hello, "conversations", "knows conversations")
     return {"name": name, "hostname": hostname, "sample_rate": sample_rate, "unclean": unclean,
             "speaker": speaker, "push_to_talk": push_to_talk, "machine": machine, "saves_notes": saves_notes,
             "media_controls": media_controls, "opens": opens, "system_volume": system_volume,
-            "conversations": conversations}
+            "approves": approves, "conversations": conversations}
 
 
 def _flag(name: str, hello: Dict, key: str, meaning: str) -> bool:

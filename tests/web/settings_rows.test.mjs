@@ -19,7 +19,7 @@ const HTML = web("settings.html");
 
 const BLOCKS = [...HTML.matchAll(/<div class="settings-of" data-settings="([a-z]+)"/g)].map((one) => one[1]);
 const SECTION_IDS = ["status", "music", "clock", "devices", "batteries", "displays", "journeys", "football",
-                     "calendars", "routines", "satellites", "sound", "claude", "conversation", "notifications", "memory", "keys",
+                     "calendars", "routines", "satellites", "approvals", "sound", "claude", "conversation", "notifications", "memory", "keys",
                      "else"];
 
 // What has the focus, and the top-level nodes of the page now being tested - which is what a node

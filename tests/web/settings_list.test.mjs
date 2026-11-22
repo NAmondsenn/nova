@@ -50,6 +50,7 @@ const view = (changes = {}) => ({
   quiet: { from: "23:00", until: "07:00" },
   memories: 12,
   keys: { set: 6, total: 11 },
+  approvals: { passkeys: 1, approvers: ["the PC"] },
   ...changes,
 });
 
@@ -61,7 +62,7 @@ test("the groups and sections are in the contract's order", () => {
   assert.equal(List.GROUPS.map((group) => `${group.id}:${group.name}`).join(" "), "now:Now home:Home daily:Daily nova:Nova");
   assert.equal(
     List.SECTIONS.map((section) => section.id).join(" "),
-    "status music clock devices batteries displays journeys football calendars routines satellites sound claude conversation notifications memory keys else",
+    "status music clock devices batteries displays journeys football calendars routines satellites approvals sound claude conversation notifications memory keys else",
   );
   const section = (id) => List.SECTIONS.find((one) => one.id === id);
   assert.equal(section("status").name, "Status");
@@ -323,6 +324,32 @@ test("the memory line counts what is remembered", () => {
 test("the keys line counts those set", () => {
   assert.equal(said("keys"), "6 of 11 set");
   assert.equal(said("keys", { keys: null }), "");
+});
+
+test("the approvals section is listed after satellites", () => {
+  const ids = List.SECTIONS.map((section) => section.id);
+  assert.equal(ids.indexOf("approvals"), ids.indexOf("satellites") + 1);
+  const section = List.SECTIONS.find((one) => one.id === "approvals");
+  assert.equal(`${section.name} ${section.group} ${section.icon}`, "Approvals nova i-key");
+});
+
+test("approvals line counts passkeys and names who can approve", () => {
+  assert.deepEqual(line("approvals", { approvals: { passkeys: 0, approvers: [] } }), { text: "No passkey yet", warn: true });
+  assert.deepEqual(line("approvals", { approvals: { passkeys: 1, approvers: [] } }), { text: "1 passkey", warn: false });
+  assert.equal(said("approvals", { approvals: { passkeys: 2, approvers: [] } }), "2 passkeys");
+  assert.equal(said("approvals"), "1 passkey, the PC");
+  assert.equal(said("approvals", { approvals: { passkeys: 3, approvers: ["the PC", "the Mac"] } }), "3 passkeys, the PC, the Mac");
+  // The PC alone is a way to approve, so nothing's the matter.
+  assert.deepEqual(line("approvals", { approvals: { passkeys: 0, approvers: ["the PC"] } }), { text: "No passkey, the PC", warn: false });
+  assert.deepEqual(line("approvals", { approvals: { npm: true } }), { text: "Only at the page's Tailscale address", warn: false });
+  assert.equal(said("approvals", { approvals: null }), "");
+});
+
+test("approvals settings keys belong to the approvals section", () => {
+  for (const key of ["approvals.trust_minutes", "approvals.wait_minutes", "approvals.album_count"]) {
+    assert.equal(List.sectionOf(key), "approvals", key);
+    assert.equal(List.subheadingOf(key), null, key);
+  }
 });
 
 test("Everything else has no line, and every section has one", () => {

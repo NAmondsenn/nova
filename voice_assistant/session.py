@@ -505,12 +505,14 @@ class Session:
                                       mover=lambda said: brain.move_music(self.satellite.name, said),
                                       elsewhere=self._elsewhere,
                                       spoken_name=lambda name: brain.spoken_name(name),
+                                      approvals=brain.approvals,
                                       settled=lambda: self.music.wait(),
                                       notes=self._save_note, notes_offered=lambda: bool(brain.notes_saved_on()),
                                       computer=ComputerControl(brain, satellite.name), device=self._device,
                                       at_pc=lambda: brain.rooms.machine(satellite.name) == "pc",
                                       pc_name=lambda: brain.pc_called(satellite.name),
-                                      microphone=self._mute_microphone, conversation=brain.open_conversation,
+                                      microphone=self._mute_microphone, rang=brain.find_my_rang,
+                                      conversation=brain.open_conversation,
                                       # A computer unmutes Windows' microphone for a conversation itself, as
                                       # for a press, so only a wake-word satellite's mute keeps one from starting.
                                       muted=lambda: self.muted and not self.satellite.push_to_talk,
@@ -522,11 +524,15 @@ class Session:
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.
         # The teams followed are given by every name they have, as they are left to Claude, not Assist.
         # Opening, closing and searching are only a computer's when the brain finds what's said there.
+        # Find My's devices are heard by their names in Home Assistant now, and a bare "found it" only
+        # once something was rung through it, anywhere in the house.
         self.intents = LocalIntents(clock=brain.clock, ntfy=brain.ntfy, home=self.home,
                                     activities=brain.calendar.activity_words if brain.calendar else None,
                                     football=brain.football.known_as if brain.football else None,
                                     wake_word=self.wake_word, names_satellite=brain.names_satellite,
                                     computer=ComputerHooks.for_satellite(brain, satellite.name),
+                                    find_my_names=self.home.find_my_names if self.home else None,
+                                    rang_lately=lambda: bool(brain.find_my_rang.lately()),
                                     conversation=brain.open_conversation, satellite=satellite.name)
 
         # The satellite as a device of its own in Home Assistant, over MQTT, or None

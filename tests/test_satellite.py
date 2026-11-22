@@ -1390,7 +1390,7 @@ def test_the_away_report_is_sent_on_connecting(brain, make, tmp_path):
                              "unclean": True, "speaker": None,
                              "push_to_talk": False, "machine": "pi", "saves_notes": False,
                              "media_controls": False, "opens": False, "system_volume": False,
-                             "conversations": True}]
+                             "approves": False, "conversations": True}]
 
 
 def test_the_satellite_tells_the_brain_its_spotify_speaker(brain, make):
@@ -3756,6 +3756,136 @@ def test_the_orb_is_closed_with_the_satellite(brain, make, pc, orbs):
     assert orb.shown[-1] == "hidden"
 
 
+class FakeWindowsHello:
+    """Stands in for WindowsHello: says whether it's available, and keeps what it's asked and cancelled."""
+
+    available = True
+    made = []
+
+    def __init__(self):
+        self.asked = []
+        self.cancelled = []
+        self.closed = False
+        self.answer = True
+        FakeWindowsHello.made.append(self)
+
+    def ask(self, id, description):
+        self.asked.append((id, description))
+        return self.answer
+
+    def cancel(self, id):
+        self.cancelled.append(id)
+
+    def withdrawn(self, id):
+        return id in self.cancelled
+
+    def close(self):
+        self.closed = True
+
+
+class NoWindowsHello(FakeWindowsHello):
+    available = False
+
+
+@pytest.fixture
+def hello(monkeypatch, pc):
+    """Has satellites take this for Windows with Hello, and gives the list of the fakes made."""
+    FakeWindowsHello.made = []
+    monkeypatch.setattr(satellite, "WindowsHello", FakeWindowsHello)
+    return FakeWindowsHello.made
+
+
+def test_the_hello_says_approves_with_hello_only(brain, make, monkeypatch, pc):
+    FakeWindowsHello.made = []
+    monkeypatch.setattr(satellite, "WindowsHello", NoWindowsHello)
+    made = pressable(brain, make)
+    assert brain.hellos[-1]["approves"] is False and made.hello is None
+    made.stop()
+    assert wait_for(lambda: made.exited)
+
+    monkeypatch.setattr(satellite, "WindowsHello", FakeWindowsHello)
+    made = pressable(brain, make)
+    assert brain.hellos[-1]["approves"] is True and made.hello is FakeWindowsHello.made[-1]
+    made.stop()
+    assert wait_for(lambda: made.exited)
+    assert FakeWindowsHello.made[-1].closed
+
+    # Not on Windows: no Hello is even looked for.
+    FakeWindowsHello.made = []
+    monkeypatch.setattr(satellite, "_on_windows", lambda: False)
+    pressable(brain, make)
+    assert brain.hellos[-1]["approves"] is False and FakeWindowsHello.made == []
+
+
+def test_an_approval_is_asked_and_answered(brain, make, hello):
+    made = pressable(brain, make)
+    brain.say("approval", id="approval-1", description="Remove 'Dentist', Tue 25 Nov 10:00")
+    assert wait_for(lambda: brain.messages("approval_answer"))
+    assert made.hello.asked == [("approval-1", "Remove 'Dentist', Tue 25 Nov 10:00")]
+    assert [{key: answer[key] for key in ("id", "approved")} for answer in brain.messages("approval_answer")] == \
+        [{"id": "approval-1", "approved": True}]
+
+    # The same approval again is never asked or answered twice.
+    brain.say("approval", id="approval-1", description="Remove 'Dentist', Tue 25 Nov 10:00")
+    made.hello.answer = False
+    brain.say("approval", id="approval-2", description="Remove 'Gym'")
+    assert wait_for(lambda: len(brain.messages("approval_answer")) == 2)
+    time.sleep(0.2)
+    assert [answer["id"] for answer in brain.messages("approval_answer")] == ["approval-1", "approval-2"]
+    assert brain.messages("approval_answer")[1]["approved"] is False
+    assert made.hello.asked == [("approval-1", "Remove 'Dentist', Tue 25 Nov 10:00"), ("approval-2", "Remove 'Gym'")]
+
+
+def test_no_answer_from_hello_sends_nothing(brain, make, hello):
+    # Hello busy, its reader missing, a fault: nothing is sent, so the brain goes on
+    # waiting for the phone rather than taking it as a refusal.
+    made = pressable(brain, make)
+    made.hello.answer = None
+    brain.say("approval", id="approval-1", description="Remove 'Dentist'")
+    assert wait_for(lambda: made.hello.asked)
+    time.sleep(0.2)
+    assert brain.messages("approval_answer") == []
+    made.hello.answer = False
+    brain.say("approval", id="approval-2", description="Remove 'Gym'")
+    assert wait_for(lambda: brain.messages("approval_answer"))
+    time.sleep(0.2)
+    assert [(answer["id"], answer["approved"]) for answer in brain.messages("approval_answer")] == \
+        [("approval-2", False)]
+
+
+def test_withdraw_cancels(brain, make, hello):
+    made = pressable(brain, make)
+    brain.say("approval_withdraw", id="approval-1")
+    assert wait_for(lambda: made.hello.cancelled == ["approval-1"])
+    # Its approval arriving after is answered with nothing: the brain has stopped waiting.
+    brain.say("approval", id="approval-1", description="Remove 'Dentist'")
+    brain.say("approval", id="approval-2", description="Remove 'Gym'")
+    assert wait_for(lambda: brain.messages("approval_answer"))
+    time.sleep(0.2)
+    assert [answer["id"] for answer in brain.messages("approval_answer")] == ["approval-2"]
+
+
+def test_no_hello_answers_nothing(brain, make, monkeypatch, pc, caplog):
+    monkeypatch.setattr(satellite, "WindowsHello", NoWindowsHello)
+    made = pressable(brain, make)
+    with caplog.at_level(logging.WARNING, logger=satellite.__name__):
+        brain.say("approval", id="approval-1", description="Remove 'Dentist'")
+        brain.say("approval_withdraw", id="approval-1")
+        assert wait_for(lambda: "approval" in caplog.text)
+    time.sleep(0.2)
+    assert brain.messages("approval_answer") == [] and made.hello is None
+    assert len([record for record in caplog.records if "approval" in record.getMessage()]) == 1
+
+
+def test_an_approval_without_an_id_answers_nothing(brain, make, hello, caplog):
+    made = pressable(brain, make)
+    with caplog.at_level(logging.WARNING, logger=satellite.__name__):
+        brain.say("approval", description="Remove 'Dentist'")
+        assert wait_for(lambda: "approval" in caplog.text)
+    time.sleep(0.2)
+    assert brain.messages("approval_answer") == [] and made.hello.asked == []
+
+
 # Nova's tray icon, its menu and its shortcut - see voice_assistant/tray.py
 
 class FakeTray:
@@ -4496,6 +4626,40 @@ def test_quit_while_recording_cleans_up_and_exits_with_quit_code(brain, make, pc
     # As it was before the press, and nothing left to say the satellite is running.
     assert made.system_volume.mic_muted is True and made.system_volume.closed
     assert not os.path.exists(satellite.RUNNING_MARK)
+
+
+class WaitingWindowsHello(FakeWindowsHello):
+    """Holds each prompt open until closed, which ends it with no, as the real WindowsHello's close does."""
+
+    def __init__(self):
+        super().__init__()
+        self.waiting = threading.Event()
+        self._released = threading.Event()
+
+    def ask(self, id, description):
+        self.asked.append((id, description))
+        self.waiting.set()
+        self._released.wait(5)
+        return False
+
+    def close(self):
+        self.closed = True
+        self._released.set()
+
+
+def test_quit_while_an_approval_waits_exits_with_the_quit_code_and_sends_no_answer(brain, make, pc, monkeypatch):
+    monkeypatch.setattr(satellite, "WindowsHello", WaitingWindowsHello)
+    made = tray_pressable(brain, make)
+    brain.say("approval", id="approval-1", description="Remove 'Dentist'")
+    assert wait_for(lambda: made.hello.waiting.is_set())
+    made.tray.on_choice("quit")
+    assert wait_for(lambda: made.exited)
+    assert made.exited == [satellite.QUIT_CODE]
+    # Cleaned up: Hello closed, which ends the prompt, and nothing left to say the satellite is running.
+    assert made.hello.closed and made.speaker.closed and not os.path.exists(satellite.RUNNING_MARK)
+    # The link was stopped before Hello was closed, so the prompt's ending never reaches the brain as an answer.
+    time.sleep(0.2)
+    assert brain.messages("approval_answer") == []
 
 
 def test_a_choice_nova_doesnt_know_is_ignored(brain, make, caplog):

@@ -1,8 +1,6 @@
-# 0038: Conversation mode
+# 0039: Conversation mode
 
-*Number: 0036 is used twice on this branch, by the PC as an app and by the PC knowing when you stop, which renumber to 0036 and 0037 when they deploy; this one takes 0038, so whoever merges should check the three still run on.*
-
-21 November 2026 · Asked for by the user in chat, the design approved ("yes I approve the design... I like it") · Design: [the spec](../superpowers/specs/2026-11-21-conversation-mode-design.md) · Plan: [the plan](../superpowers/plans/2026-11-21-conversation-mode.md) · Built; the measurements and his named deploys and hand checks (96 onwards) to come
+21 November 2026 · Asked for by the user in chat, the design approved ("yes I approve the design... I like it") · Design: [the spec](../superpowers/specs/2026-11-21-conversation-mode-design.md) · Plan: [the plan](../superpowers/plans/2026-11-21-conversation-mode.md) · Built; the measurements and his named deploys and hand checks (113 onwards) to come
 
 **Context.** Nova takes one request per "Hey Nova" (or per press at the PC). It listens again only after a question, at most three times, keeps the last five exchanges and forgets them after five minutes. That suits commands. It doesn't suit what he once did with another assistant by voice, with his hands busy: plan a whole thing in one long spoken session. He wanted an open conversation: he talks, Nova answers, he talks again with no wake word in between, and if Nova is speaking and he starts to talk, it stops so he can. He expects it now and then, for brainstorming, a run of questions or a run of tasks, and wants it because it is a good thing for an assistant to have. At the Pi and the PC alike, finished before the Mac satellite.
 
@@ -113,4 +111,4 @@
 | PC: his voice over a reply | | |
 | Brain: the voice's real-time factor with and without Nemotron, and its longest gap | | |
 
-**Setting it up (his named jobs, in order).** Push to GitHub main; pull as nova and restart `nova-backend`; the Pi's `update.sh`; then the PC's `scripts/deploy_pc.sh` (which unpacks the library, adding `zstandard`). Then the measurements, then the checks in the release checklist (96 onwards), warning before sound.
+**Setting it up (his named jobs, in order).** Push to GitHub main; pull as nova and restart `nova-backend`; the Pi's `update.sh`; then the PC's `scripts/deploy_pc.sh` (which unpacks the library, adding `zstandard`). Then the measurements, then the checks in the release checklist (113 onwards), warning before sound.

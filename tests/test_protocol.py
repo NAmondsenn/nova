@@ -6,6 +6,7 @@ anything which isn't a message is refused rather than read on for ever.
 
 import io
 import json
+import logging
 import socket
 import threading
 
@@ -114,7 +115,7 @@ def test_the_handshake_admits_a_satellite_which_knows_its_password():
                                 "sample_rate": 48000, "unclean": False, "speaker": None,
                                 "push_to_talk": False, "machine": None, "saves_notes": False,
                                 "media_controls": False, "opens": False, "system_volume": False,
-                                "conversations": False}
+                                "approves": False, "conversations": False}
     assert outcome["satellite"] is None
     assert sent == ["challenge", "ready"]
 
@@ -303,6 +304,22 @@ def test_admit_reads_opens_and_volume():
     assert admitted["opens"] is False and admitted["system_volume"] is False
 
 
+def test_approves_goes_in_the_hello_only_when_true():
+    assert _hello_sent(approves=True)["approves"] is True
+    for hello in (_hello_sent(), _hello_sent(approves=False)):
+        assert "approves" not in hello
+
+
+def test_admit_reads_approves_and_a_nonsense_one_as_false(caplog):
+    assert _admitted(approves=True)["approves"] is True
+    assert _admitted()["approves"] is False
+    with caplog.at_level(logging.WARNING):
+        admitted = _admitted(approves="yes")
+    # The satellite is let in all the same.
+    assert admitted["approves"] is False and admitted["name"] == "bedroom"
+    assert len([r for r in caplog.records if "approves" in r.getMessage()]) == 1
+
+
 def test_admit_bad_opens_is_false_not_refused():
     # An extra, like saves_notes: never the reason a satellite can't connect.
     for said in ("yes", 1, 0, None, ["x"]):
@@ -332,7 +349,8 @@ def test_a_hello_without_a_speaker_still_connects():
                                               "unclean": False, "speaker": None, "push_to_talk": False,
                                               "machine": None, "saves_notes": False,
                                               "media_controls": False, "opens": False,
-                                              "system_volume": False, "conversations": False}
+                                              "system_volume": False, "approves": False,
+                                              "conversations": False}
     # Up to 64 characters, of any language.
     assert _admitted(speaker="x" * 64)["speaker"] == "x" * 64
     assert _admitted(speaker="Cuisine de Zoë")["speaker"] == "Cuisine de Zoë"

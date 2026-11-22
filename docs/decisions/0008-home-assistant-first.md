@@ -141,7 +141,7 @@ The user's standing rules apply, especially two:
       - So do "turn off the PC's screen" and "lock my PC". The lock is the user's call, since it only makes things safer.
     - **How the buttons are found.** HASS.Agent's buttons are found by their device, the MQTT device that has a shutdown button. They're never found by the `windows_pc_` prefix, which the user can rename.
     - **What's never pressed.** HASS.Agent's other buttons (launching a web address, custom commands), and any Proxmox button.
-    - **Asking first.** Shutting down and restarting ask first - "Shut down the PC?" - and only a yes does it, the way Nova already asks about a reminder. Sleep, screen off and lock don't ask.
+    - **Asking first.** Shutting down and restarting used to ask first ("Shut down the PC?"). Since 20 Nov they act at once, with the chime (0037); a press which fails after the chime is only logged. Sleep, screen off and lock don't ask either.
     - **Not through Assist.** These go through Nova's own `button.press`. The Wake-on-LAN button isn't called "PC", and Assist would press any button that's exposed.
     - **Is it on?** Whether the PC is on comes from whether HASS.Agent's entities are available. So "is my PC on?" is answered locally, and "turn on my PC" while it's on says so.
     - **Phrasings.** These are local commands. Other wordings reach Claude's `pc_power(action)`.
@@ -199,7 +199,7 @@ The user's standing rules apply, especially two:
 | Lists: one thing added, ticked off (12) | Assist, then `todo.add_item` or `todo.update_item` | Works | Home Assistant's own lists | Never deletes |
 | Lists: several things (12) | Claude, then `todo.add_item` | Added as one item, as said | The same | The same |
 | Lists: reading (12) | `todo.get_items`, a read | Works | The same | Reads only |
-| The PC (13) | `button.press` on Wake-on-LAN's or HASS.Agent's buttons | Works - it's all on the local network | Home Assistant's own buttons | Named kinds only; never Proxmox's; shutting down and restarting ask first |
+| The PC (13) | `button.press` on Wake-on-LAN's or HASS.Agent's buttons | Works - it's all on the local network | Home Assistant's own buttons | Named kinds only; never Proxmox's; shutting down and restarting act at once with the chime (0037) |
 
 **Goals.**
 - The everyday things in Home Assistant work by voice, mostly without Claude, and many of them with the internet down.
@@ -221,7 +221,7 @@ The user's standing rules apply, especially two:
 - One of Nova's own commands caught by the wider Assist rule. For example, "turn off the microphone" would unmute Nova through its own switch in Home Assistant, and "turn off my alarm" would go to Assist.
 - An item put on the wrong list, or "Added" said when it wasn't. Several things put on as one item while Claude could have split them.
 - "Dim the lights" switching a light off.
-- The PC shut down or restarted without a yes.
+- The PC shut down or restarted by a word inside a longer sentence (it used to need a yes; since 20 Nov a whole spoken request acts at once, 0037).
 - "Sent" or "Ringing" said when Home Assistant didn't accept it.
 - An event added on the wrong day or at the wrong time, without Nova saying when.
 - Nova's Google sign-in able to change or delete events, or readable by anyone but Nova.
@@ -274,7 +274,7 @@ The user's standing rules apply, especially two:
   - items are ticked off, never deleted;
   - up to ten items are read out.
 - Calendar: no confirming, but Nova says back what it added. An event lasts an hour by default, and is all day if no time is given.
-- The PC: a yes is needed before shutting down or restarting, but not before sleep, screen off or lock. It goes through Nova's own button press, not Assist.
+- The PC: no yes is needed before shutting down, restarting, sleep, screen off or lock (shut down and restart asked first until 20 Nov; 0037). It goes through Nova's own button press, not Assist.
 - Proxmox's buttons are refused through Assist too, found by their integration.
 - A script's contents are checked by Nova before it runs, even through Assist. A script that builds its targets from a template isn't caught - it's the user's own, and they exposed it. Without an administrator's token, no script runs by voice.
 - "Ringing" and "Sent" are said once Home Assistant accepts the call. Nova can't know whether the device got it.

@@ -75,7 +75,7 @@ from voice_assistant.ha_guard import (REFUSED, RUNNABLE, WORKS_GUARDED, AssistMa
                                       names_guarded, refusal_for, runnables_named, sensitive, sensitive_words,
                                       split_words, why_not_run, why_target_refused)
 from voice_assistant.ha_registry import (HASS_AGENT_MAKER, PC_KINDS, HomeRegistry, HomeSocket, HomeSocketError,
-                                         Snapshot)
+                                         Snapshot, find_my_kind)
 from voice_assistant.logging_setup import TRANSCRIPT
 
 # Logger setup
@@ -107,7 +107,8 @@ DEFAULT_AGENT = "conversation.home_assistant"
 # device. Not notify.notify or notify.send_message, which could reach anything.
 # A button is only ever the PC's: one of HASS.Agent's in PC_KINDS, or a Wake-on-LAN one, as
 # the registry's snapshot shows it (see _pressable) - never Proxmox's, whose buttons shut
-# down and restart the hosts and their guests, and nothing at all without a snapshot.
+# down and restart the hosts and their guests, and nothing at all without a snapshot - or
+# Find My's Play sound and Stop sound, which ring a phone or a tag and stop it.
 # A light is never one of the PC's HASS.Agent commands made as a light (see _never_worked),
 # and a room with one is given as its other lights instead (see set_lights).
 # The one text box Nova writes is football's list of teams, FOOTBALL_BOX, and no other. The
@@ -473,6 +474,33 @@ APP_DEVICES_TEMPLATE = """
 {%- endfor -%}
 {{ found.devices | tojson }}
 """
+
+# The trackers of Find My's devices, by entity id - each one's state and when Google last saw it,
+# else when its state was last reported - and the state of each Play sound button, as one which
+# is unavailable presses to nothing. The ids are put in as JSON, checked as entity ids first.
+FIND_MY_TRACKERS_TEMPLATE = """
+{%- set found = namespace(trackers=[], buttons=[]) -%}
+{%- for entity in states.button if entity.entity_id in BUTTONS -%}
+  {%- set found.buttons = found.buttons + [[entity.entity_id, entity.state]] -%}
+{%- endfor -%}
+{%- for entity in states.device_tracker if entity.entity_id in TRACKERS -%}
+  {%- set seen = entity.attributes.get('last_seen') -%}
+  {%- set found.trackers = found.trackers + [{
+    'id': entity.entity_id,
+    'state': entity.state,
+    'seen': seen if seen is number else as_timestamp(seen, none),
+    'reported': (entity.last_reported or entity.last_updated) | as_timestamp
+  }] -%}
+{%- endfor -%}
+{{ {'trackers': found.trackers, 'buttons': found.buttons} | tojson }}
+"""
+
+# What a tracker says when it can't tell where its device is - when Find My's own tracker
+# says so, the one of where it was last seen is asked instead.
+TRACKER_UNKNOWN = ("unknown", "unavailable", "")
+# What a Play sound button's state is while the integration can't reach Google or the device. Not
+# "unknown", which is the state of a button never pressed (live, 21 Nov: the tag's).
+BUTTON_UNUSABLE = ("unavailable",)
 
 # What the settings page may switch, and run (ha_guard.RUNNABLE), by entity id. A light
 # can't let anyone in, whatever it's called; a script or scene could do anything, so its
@@ -1514,6 +1542,67 @@ class HomeAssistant:
                           "tracker": device["tracker"], "place": place})
         return found
 
+    def find_my_names(self) -> List[str]:
+        """
+        The names of Google Find My Device's devices which can be rung, e.g. ["Galaxy S25
+        Ultra", "Sam's Wallet"] - from the registry's snapshot alone, so it's quick enough
+        to ask with every request a local rule might take. Empty without a snapshot.
+        """
+        snapshot = self.snapshot()
+        if snapshot is None:
+            return []
+        return [name for name in (snapshot.device_name(device) for device in snapshot.find_my()) if name]
+
+    def find_my_devices(self) -> List[Dict]:
+        """
+        Every device of Google Find My Device's which can be rung - each with a Play sound
+        button of the googlefindmy integration's - with its buttons and where it is, for
+        devices.py. Found from the registry's snapshot, so a phone or tag added in Google
+        is found once it's in Home Assistant; none without a snapshot.
+
+        Returns:
+            One dict for each, with "device" (its id), "name" (the user's own name for it,
+            else its own), "play" and "stop" (its Play sound and Stop sound buttons, the
+            stop None if it hasn't got one) and "tracker" ({"state", "reported"}: e.g.
+            "home", and when Google last saw it, in epoch seconds or None - or None with no
+            tracker) and "ready" (whether its Play sound button can ring it now - not while
+            it's unavailable, as it is while Google can't be reached, when a press does
+            nothing yet Home Assistant answers as if it had). The tracker is the device's
+            own, else - while that can't tell - the one of where it was last seen. Never the
+            coordinates, which stay in Home Assistant.
+
+        Raises:
+            requests.RequestException: If Home Assistant couldn't be asked, or turned
+                the template down - see _template.
+            ValueError, KeyError, TypeError: If it didn't answer with JSON of the right shape.
+        """
+        snapshot = self.snapshot()
+        if snapshot is None:
+            return []
+        devices = snapshot.find_my()
+        ids = sorted({entity for kinds in devices.values() for kind, entity in kinds.items()
+                      if kind in ("tracker", "last_location") and re.fullmatch(r"device_tracker\.[a-z0-9_]+", entity)})
+        plays = sorted(kinds["play"] for kinds in devices.values() if re.fullmatch(r"button\.[a-z0-9_]+", kinds["play"]))
+        template = FIND_MY_TRACKERS_TEMPLATE.replace("BUTTONS", json.dumps(plays)).replace("TRACKERS", json.dumps(ids))
+        rendered = json.loads(self._template(template)) if devices else {"trackers": [], "buttons": []}
+        trackers = {}
+        for tracker in rendered["trackers"]:
+            trackers[tracker["id"]] = {"state": tracker["state"],
+                                       "reported": tracker["seen"] if tracker["seen"] is not None
+                                       else tracker["reported"]}
+        buttons = {button: state for button, state in rendered["buttons"]}
+        found = []
+        for device, kinds in devices.items():
+            tracker = trackers.get(kinds.get("tracker"))
+            if tracker is None or str(tracker["state"]).lower() in TRACKER_UNKNOWN:
+                tracker = trackers.get(kinds.get("last_location")) or tracker
+            # A button Home Assistant has no state for at all is no readier than an unavailable one.
+            state = buttons.get(kinds["play"])
+            found.append({"device": device, "name": snapshot.device_name(device) or device,
+                          "play": kinds["play"], "stop": kinds.get("stop"), "tracker": tracker,
+                          "ready": state is not None and str(state).lower() not in BUTTON_UNUSABLE})
+        return found
+
     def notify(self, service: str, message: str, title: Optional[str] = None, data: Optional[Dict] = None):
         """
         Sends a notification through one of the Home Assistant app's notify services - to
@@ -1869,7 +1958,8 @@ class HomeAssistant:
                 outside its own domain, or nothing to act on - or, for one in UNTARGETED,
                 any target at all, notify's own "target" included, at the top or in its
                 data - or returns doesn't match whether RETURNS has it - or, for a button,
-                anything but one of the PC's, one at a time (see _pressable) - or, for a
+                anything but one of the PC's or Find My's sound buttons, one at a time
+                (see _pressable) - or, for a
                 light, one Nova never works (see _never_worked) - or, for
                 todo.update_item, anything but marking a thing completed - or, for
                 input_text, anything but FOOTBALL_BOX alone - or, for shell_command, any
@@ -1938,28 +2028,32 @@ class HomeAssistant:
 
     def _pressable(self, entity_id: str) -> bool:
         """
-        Whether a button is one of the PC's that Nova may press: a HASS.Agent button of a
-        kind in PC_KINDS, or a Wake-on-LAN one, as the registry's snapshot shows it. Never
-        one of Proxmox's, nor HASS.Agent's others - its launchurl opens any web address on
-        the PC - and none at all without a snapshot, as nothing could vouch for it.
+        Whether a button is one that Nova may press: one of the PC's - a HASS.Agent button
+        of a kind in PC_KINDS, or a Wake-on-LAN one - or Find My's Play sound or Stop sound,
+        as the registry's snapshot shows it. Never one of Proxmox's, nor HASS.Agent's others
+        - its launchurl opens any web address on the PC - nor Find My's others, and none at
+        all without a snapshot, as nothing could vouch for it.
         """
         snapshot = self.snapshot()
         if snapshot is None or snapshot.platform(entity_id) in (None, "proxmoxve"):
             return False
         if entity_id in snapshot.wake_buttons():
             return True
+        entry = snapshot.entries.get(entity_id)
+        if entry is not None and find_my_kind(entry) in ("play", "stop"):
+            return True
         _, kind = snapshot.hass_agent_buttons().get(entity_id, (None, "other"))
         return kind in PC_KINDS
 
     def press(self, entity_id: str):
         """
-        Presses one of the PC's buttons - see _pressable.
+        Presses one of the PC's buttons, or Find My's Play sound or Stop sound - see _pressable.
 
         Args:
             entity_id: The button, e.g. "button.desk_pc_sleep".
 
         Raises:
-            NotAllowed: If it isn't one of the PC's buttons, or there's no snapshot to tell.
+            NotAllowed: If it isn't one of those, or there's no snapshot to tell.
             requests.RequestException: If Home Assistant couldn't be asked, or didn't press it.
         """
         self._call_service("button", "press", {"entity_id": entity_id})

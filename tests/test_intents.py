@@ -540,6 +540,78 @@ def test_what_the_find_device_rules_mustnt_catch_is_left_alone(text):
     assert not actions or all(action.tool != "find_device" for action in actions)
 
 
+# Google's Find My, by the names Home Assistant has for its devices - see devices.py.
+FIND_MY = ["Galaxy Phone 9", "Sam's Wallet", "Keys tag"]
+
+
+def _finding(text, names=FIND_MY, rang=False):
+    """The actions a request is handled with locally, with Find My's devices and whether one was rung lately."""
+    result = LocalIntents(home=HOME, find_my_names=lambda: names, rang_lately=lambda: rang).match(text)
+    return None if result is None else result["actions"]
+
+
+def test_find_my_devices_are_found_and_rung_by_their_names():
+    assert _finding("Find my wallet.") == [Action("find_device", {"device": "wallet", "ring": True})]
+    assert _finding("Ring my keys") == [Action("find_device", {"device": "keys", "ring": True})]
+    assert _finding("Ring my Sam's wallet") == [Action("find_device", {"device": "sam's wallet", "ring": True})]
+    assert _finding("Ring the galaxy phone") == [Action("find_device", {"device": "galaxy phone", "ring": True})]
+    # The app's words are still found as before.
+    assert _finding("Find my phone.") == [Action("find_device", {"device": "phone", "ring": True})]
+    # Anything which isn't a name's words is left alone, and with no Find My, a wallet is Claude's.
+    for text in ("Ring my mum", "Find my keys to the shed", "Where's my phone charger?", "Find my phone number"):
+        actions = _finding(text)
+        assert not actions or all(action.tool != "find_device" for action in actions), text
+    assert _finding("Find my wallet.", names=[]) is None
+    assert _actions("Find my wallet.") is None
+
+
+def test_find_mys_names_failing_leaves_the_apps_words(caplog):
+    def failing():
+        raise RuntimeError("no snapshot")
+    intents = LocalIntents(home=HOME, find_my_names=failing, rang_lately=lambda: False)
+    assert intents.match("Find my wallet") is None
+    assert intents.match("Ring my keys") is None
+    assert intents.match("Stop ringing my phone")["actions"] == [Action("stop_finding", {"device": "phone"})]
+    # Said once, until it works again.
+    assert caplog.text.count("Couldn't read Find My's devices' names") == 1
+
+
+def test_where_is_my_wallet_is_private():
+    # Found locally, by the private find_device - even while Nova listens for an answer - and never Claude's.
+    assert _finding("Where's my wallet?") == [Action("find_device", {"device": "wallet", "ring": False})]
+    intents = LocalIntents(home=HOME, find_my_names=lambda: FIND_MY)
+    assert intents.match("Where is my wallet", only=["find_device"])["actions"] == [
+        Action("find_device", {"device": "wallet", "ring": False})]
+
+
+@pytest.mark.parametrize("text, device", [
+    ("Stop ringing my phone.", "phone"), ("Stop ringing the wallet", "wallet"), ("stop ringing keys", "keys"),
+    ("Stop my phone ringing", "phone"), ("Stop the wallet.", "wallet"), ("Stop my phone", "phone"),
+    ("Found my wallet", "wallet"), ("I've found my phone!", "phone"), ("I have found my keys", "keys"),
+])
+def test_stopping_a_device_named_is_done_without_claude(text, device):
+    # Whether or not anything was rung, as one named is pressed to stop whatever rang it.
+    assert _finding(text) == [Action("stop_finding", {"device": device})]
+
+
+@pytest.mark.parametrize("text", ["Found it.", "I've found it", "I have found it", "Stop ringing."])
+def test_found_it_stops_it(text):
+    assert _finding(text, rang=True) == [Action("stop_finding")]
+    # With nothing rung lately, it's someone else's - a timer's, or Claude's.
+    assert _finding(text, rang=False) is None
+    assert _actions(text) is None
+
+
+@pytest.mark.parametrize("text", ["Stop", "stop.", "Stop the music", "Stop please"])
+def test_bare_stop_is_not_taken(text):
+    # It stays the stop word for alarms and the music, whatever was rung.
+    actions = _finding(text, rang=True)
+    assert not actions or all(action.tool != "stop_finding" for action in actions)
+    for text in ("Stop the timer", "Stop my alarm", "Stop listening", "Stop ringing my mum"):
+        actions = _finding(text, rang=True)
+        assert not actions or all(action.tool != "stop_finding" for action in actions), text
+
+
 @pytest.mark.parametrize("text, device", [
     ("Send that to my Mac.", "mac"), ("Put it on the tablet.", "tablet"), ("Text this to my laptop", "laptop"),
     ("Send it to my MacBook.", "macbook"), ("Put that on my iPad please.", "ipad"),
@@ -1200,8 +1272,8 @@ def test_power_words_only_whole(text, action):
             assert actions is None or all(action.tool != "pc_power" for action in actions)
 
 
-def test_shut_down_bare_asks():
-    # Through pc_power, whose question before shutting down is tested in test_pc - never press_pc_button.
+def test_shut_down_bare_goes_to_pc_power():
+    # Through pc_power, which presses straight away and confirms with the chime (see test_pc).
     assert _computer("Shut down.") == [Action("pc_power", {"action": "off"})]
     assert _computer("Restart.") == [Action("pc_power", {"action": "restart"})]
 

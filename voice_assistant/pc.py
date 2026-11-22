@@ -13,10 +13,10 @@ button: the only one, with one PC and one button, else the one chosen for it on 
 Whether it's on is whether any of HASS.Agent's own entities on it is available: while it's
 off, every one of them reads "unavailable" (live check 5).
 
-Shutting down and restarting ask first - "Shut down the PC?" - and only a yes said next, in
-the same conversation, does it (see Conversation.handle). The yes runs press_pc_button,
-which Claude isn't offered, so it can't skip the question. Sleep, screen off and lock don't
-ask, as each is undone by touching the PC.
+Every power command confirms with the success chime, not words (his words, 21 Nov): the
+words stay as the message, for the log and for when the chime is switched off. Shutting down
+and restarting don't ask first - the question and its press_pc_button are gone. Failures
+still speak. At the PC, the button is pressed only once the chime has played (decision 0034).
 
 Every press goes through HomeAssistant.press, whose own check of the snapshot is the last
 word on which buttons may be pressed.
@@ -29,7 +29,6 @@ from typing import Dict, List, Optional
 
 import requests
 
-from voice_assistant.actions import Action
 from voice_assistant.batteries import spoken_name
 from voice_assistant.choices import ChoiceStore
 from voice_assistant.ha_registry import PC_KINDS, Snapshot
@@ -41,12 +40,9 @@ logger = logging.getLogger(__name__)
 
 # The button each action presses, by HASS.Agent's kind.
 KINDS = {"off": "shutdown", "restart": "restart", "sleep": "sleep", "screen_off": "monitorsleep", "lock": "lock"}
-# What's asked before pressing, and said once agreed.
-ASKED = {"off": "Shut down the PC?", "restart": "Restart the PC?"}
-AGREED = {"off": "Shutting down the PC.", "restart": "Restarting the PC."}
-# What's said as the buttons which don't ask are pressed.
-PRESSED = {"sleep": "Putting your PC to sleep.", "screen_off": "Turning your PC's screen off.",
-           "lock": "Locking your PC."}
+# What's said as each button is pressed - kept for the log, and said if the chime's off.
+PRESSED = {"off": "Shutting down the PC.", "restart": "Restarting the PC.", "sleep": "Putting your PC to sleep.",
+           "screen_off": "Turning your PC's screen off.", "lock": "Locking your PC."}
 # Each kind as it's said, for a button the PC hasn't got.
 KIND_SAID = {"shutdown": "shutdown", "restart": "restart", "sleep": "sleep", "monitorsleep": "monitor sleep",
              "lock": "lock"}
@@ -135,7 +131,7 @@ def _named(pcs: List[PC], name: Optional[str]) -> List[PC]:
 
 
 class PCPower:
-    """Turns the user's PC on and off, asking first before shutting it down or restarting it."""
+    """Turns the user's PC on and off, and sleeps, locks or restarts it, confirming each with the chime."""
 
     def __init__(self, home: HomeAssistant, choices: ChoiceStore):
         """
@@ -244,18 +240,18 @@ class PCPower:
 
     def act(self, action: str, name: Optional[str] = None, defer: bool = False) -> Dict:
         """
-        Does what was asked of the PC - bar shutting down or restarting, which ask first.
+        Does what was asked of the PC, confirming a success with the chime.
 
         Args:
             action: "on", "off", "restart", "sleep", "screen_off", "lock" or "status".
             name: Which PC, as the user said it, or None - needed only with several.
-            defer: Whether to leave pressing sleep, screen off and lock until what's said of
-                it has been, as at the PC - checked first, so the reply is still true.
+            defer: Whether to leave pressing the button until the confirmation has been given
+                - the chime - as at the PC, checked first so the reply is still true.
 
         Returns:
-            {"success", "message"}, with "ask_first", the Action to run on a yes, for
-            "off" and "restart" with the PC on - or "after_said", for what defer leaves,
-            which presses the button and gives {"success", "message"} when called.
+            {"success", "message"}, with "chime" for a success which is confirmed by the
+            chime, and "after_said" for what defer leaves, which presses the button and gives
+            {"success", "message"} when called.
         """
         if action not in ("on", "status", *KINDS):
             return {"success": False, "message": "I didn't catch what to do with your PC."}
@@ -272,46 +268,23 @@ class PCPower:
                     return {"success": False, "message": "There's no Wake-on-LAN button for your PC in Home Assistant."}
                 return {"success": False, "message": "I don't know which Wake-on-LAN button wakes your PC yet. "
                                                      "Choose it on the settings page, under Calendars and lists."}
-            return self._press(pc.wake, "Wake-on-LAN", "Turning your PC on.")
-        if action in ASKED:
-            if not pc.on:
-                return {"success": False, "message": "Your PC's already off."}
-            # Not asked about a button that isn't there, which a yes couldn't press.
-            missing = self._missing(pc, action)
-            if missing:
-                return missing
-            return {"success": True, "message": ASKED[action],
-                    "ask_first": Action("press_pc_button", {"action": action, "name": name})}
+            return self._chimed(self._press(pc.wake, "Wake-on-LAN", "Turning your PC on."))
         if not pc.on:
-            return {"success": False, "message": "Your PC's off."}
+            return {"success": False,
+                    "message": "Your PC's already off." if action in ("off", "restart") else "Your PC's off."}
         missing = self._missing(pc, action)
         if missing:
             return missing
         button, kind = pc.buttons[KINDS[action]], KINDS[action]
         if defer:
-            return {"success": True, "message": PRESSED[action],
+            return {"success": True, "message": PRESSED[action], "chime": True,
                     "after_said": lambda: self._press(button, kind, PRESSED[action])}
-        return self._press(button, kind, PRESSED[action])
+        return self._chimed(self._press(button, kind, PRESSED[action]))
 
-    def press(self, action: str, name: Optional[str] = None) -> Dict:
-        """
-        Shuts the PC down or restarts it, once the user has said yes to act's question.
-
-        Args:
-            action: "off" or "restart".
-            name: Which PC, as the user said it, or None.
-
-        Returns:
-            {"success", "message"}.
-        """
-        if action not in ASKED:
-            return {"success": False, "message": "I didn't catch what to do with your PC."}
-        pc, _, reply = self._find(name)
-        if reply:
-            return reply
-        if not pc.on:
-            return {"success": False, "message": "Your PC's already off."}
-        return self._missing(pc, action) or self._press(pc.buttons[KINDS[action]], KINDS[action], AGREED[action])
+    @staticmethod
+    def _chimed(reply: Dict) -> Dict:
+        """A press's reply, confirmed by the chime if it worked - a failure is left to speak."""
+        return {**reply, "chime": True} if reply["success"] else reply
 
     @staticmethod
     def _missing(pc: PC, action: str) -> Optional[Dict]:

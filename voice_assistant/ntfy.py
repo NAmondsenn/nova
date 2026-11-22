@@ -233,10 +233,35 @@ class Ntfy:
         logger.info(f"Sent to {topic}: '{title or message}'", extra=TRANSCRIPT)
         return True
 
-    def send_soon(self, topic: str, message: str, title: str = "", priority: int = 0, click: str = ""):
-        """Sends a message on a thread of its own, for something which mustn't wait on the server."""
-        threading.Thread(target=self.send, args=(topic, message, title, priority, click), name="ntfy-send",
-                         daemon=True).start()
+    def send_soon(self, topic: str, message: str, title: str = "", priority: int = 0, click: str = "",
+                  waits: Sequence[float] = ()):
+        """
+        Sends a message on a thread of its own, for something which mustn't wait on the server.
+
+        Args:
+            topic, message, title, priority, click: As for send.
+            waits: The seconds to wait before each try again after one which failed, so
+                (1, 3) tries three times in all - for a message which matters, like an
+                approval, as a connection the server has dropped fails the first try
+                (seen 21 November: "Connection reset by peer"). Each failure is logged
+                once, by send; a stop ends the waiting.
+        """
+        threading.Thread(target=self._send_trying, args=(topic, message, title, priority, click, tuple(waits)),
+                         name="ntfy-send", daemon=True).start()
+
+    def _send_trying(self, topic: str, message: str, title: str, priority: int, click: str,
+                     waits: Sequence[float]) -> bool:
+        """send, tried again after each wait in `waits` while it fails. Returns whether it was sent."""
+        for wait in (None,) + tuple(waits):
+            if wait is not None:
+                if self._stopping.wait(wait):
+                    return False
+                logger.info(f"Trying to send to {topic} again")
+            if self.send(topic, message, title, priority, click):
+                return True
+        if waits:
+            logger.warning(f"Gave up sending to {topic} after {len(waits) + 1} tries")
+        return False
 
     # Listening
 

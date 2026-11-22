@@ -22,7 +22,9 @@ second port - settings_page.proxy_port - which answers only NPM's address, in
 settings_page.proxy_from. There, Tailscale's header is never trusted, whatever it says:
 before anything but the page's own files, the page's password has to be given, for a
 login kept in a cookie - see page_password.py. A login can do everything the tailnet
-can, but replacing the password also needs the current one.
+can, but replacing the password also needs the current one - except anything to do with
+approvals (see approvals.py): his passkeys, the phone's approval page, the "Can approve"
+switches and the approval settings are at the Tailscale address only, whatever the login.
 
 Keys are only ever written, never shown back - the page just says whether each is
 set, and a new one is used once Nova restarts, which the page can do. Settings are
@@ -34,15 +36,18 @@ where things go wrong, and the page says which each setting is.
 """
 
 import hashlib
+import hmac
 import json
 import logging
 import math
 import os
 import re
+import secrets
 import shutil
 import socket
 import threading
 import time
+import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from urllib.parse import parse_qs, urlsplit
@@ -51,6 +56,7 @@ import requests
 import yaml
 
 from voice_assistant import paths, satellite_names, shortcut, storage, timeline
+from voice_assistant.approvals import CANT_ASK, DIDNT_CHECK, NO_SUCH
 from voice_assistant.batteries import HOME_FAILURES
 from voice_assistant.clock import format_duration
 from voice_assistant.computers import match_app, plain as plain_app
@@ -61,8 +67,10 @@ from voice_assistant.google_calendar import READ_FAILURES, ClientRefused, Google
 from voice_assistant.music import _chosen, why_no_player
 from voice_assistant.ntfy import RETOPIC
 from voice_assistant.page_password import LOGIN_DAYS, Logins, PagePassword, WrongTries
+from voice_assistant.passkeys import LONGEST_NAME, MOST_PASSKEYS, Passkey
 from voice_assistant.spotify_controller import SpotifySignIn, SpotifySignInError, brains_speaker, spotify_oauth
 from voice_assistant.undo import UndoShelf
+from voice_assistant.webauthn import NotVerified, b64url, check_registration, from_b64url, rp_id
 
 # Logger setup
 logger = logging.getLogger(__name__)
@@ -74,11 +82,17 @@ FILES = {"/": ("settings.html", "text/html; charset=utf-8"),
          # The list's rules, which never touch the page - loaded before settings.js.
          "/settings_list.js": ("settings_list.js", "text/javascript; charset=utf-8"),
          "/settings.css": ("settings.css", "text/css; charset=utf-8"),
+         # The night sky behind the settings page and the phone's approval page.
+         "/sky.js": ("sky.js", "text/javascript; charset=utf-8"),
+         # Base64url for passkeys, used by the settings page and the phone's approval page.
+         "/base64url.js": ("base64url.js", "text/javascript; charset=utf-8"),
          "/icon.svg": ("icon.svg", "image/svg+xml"),
          # The Wrapped's story page - see wrapped.py - which asks /api/wrapped for what it shows.
          "/wrapped": ("wrapped.html", "text/html; charset=utf-8"),
          "/wrapped.js": ("wrapped.js", "text/javascript; charset=utf-8"),
          "/wrapped.css": ("wrapped.css", "text/css; charset=utf-8"),
+         # The phone's approval page's script - the page itself is at /approve/<request id>.
+         "/approve.js": ("approve.js", "text/javascript; charset=utf-8"),
          # Outfit, by The Outfit Project Authors, under the SIL Open Font License -
          # see web/Outfit-OFL.txt.
          "/Outfit.woff2": ("Outfit.woff2", "font/woff2")}
@@ -86,8 +100,9 @@ FILES = {"/": ("settings.html", "text/html; charset=utf-8"),
 # The files the page itself is made of, whose hash tells a page left open across an
 # update that it's out of date - see page_version. Not the Wrapped's: it is read once, as
 # it's opened, and asks for nothing after, so a change to it would only reload a settings
-# page for nothing.
-PAGE_FILES = ("settings.html", "settings_list.js", "settings.js", "settings.css")
+# page for nothing. The approval page's are, as it asks the brain for the request it shows.
+PAGE_FILES = ("settings.html", "settings_list.js", "settings.js", "settings.css", "sky.js", "base64url.js",
+              "approve.html", "approve.js")
 
 # Sent with every answer: nothing but the page's own files may run in it, no other
 # site may show it in a frame, and nothing is kept in a cache.
@@ -193,6 +208,10 @@ EDITABLE = [
      "next following)", "now"),
     ("new_music", "playlist", "Playlist for 'find me something new', which Nova makes each morning", "now"),
     ("new_music", "days", "Days of new music it holds", "now"),
+    # Read at each approval asked for - see approvals.py. Raising one needs an approval - see save_settings.
+    ("approvals", "trust_minutes", "Minutes one approval lasts", "now"),
+    ("approvals", "wait_minutes", "Minutes to wait for an answer", "now"),
+    ("approvals", "album_count", "Albums that make a download need approval", "now"),
 ]
 # How the page says which each is.
 NOW = "Used straight away"
@@ -278,6 +297,39 @@ LONGEST_CALLED = 30
 # The most short names for apps one computer can be given, and the longest one.
 MOST_APP_NAMES = 30
 LONGEST_APP_NAME = 40
+
+# Approvals - see approvals.py. Everything to do with them is at the page's Tailscale
+# address only: through NPM, a password stands between the internet and the page, but
+# approving a big action, or changing how one is approved, needs more than a password.
+APPROVAL_PATHS = ("/approve/", "/api/approvals", "/api/passkeys")
+# The phone's page's own script, matched exactly, as "/approve" alone would catch any path beginning so.
+APPROVE_SCRIPT = "/approve.js"
+# Nor is a satellite made, given a new password or removed there: a satellite's password
+# lets a PC in, and a PC can be one which approves.
+SATELLITE_KEYS = ("/api/satellites/add", "/api/satellites/password", "/api/satellites/remove")
+ONLY_TAILNET = "Approvals are only at the page's Tailscale address."
+# The phone's page, at the address its notification opens.
+APPROVE_PAGE = re.compile(r"/approve/[0-9a-f]{32}")
+REQUEST_ID = re.compile(r"[0-9a-f]{32}")
+NO_APPROVALS = "Approvals aren't set up."
+NEEDS_OK = "That needs your OK first, so nothing was changed."
+TOO_LONG = "Start again: that took too long."
+NOT_HTTPS = "Passkeys can only be added at the page's https address."
+DIDNT_CHECK_OUT = "That passkey didn't check out."
+ADDED_MEANWHILE = "Start again: another passkey was added meanwhile."
+# Said of a passkey begun free when a PC has since been let approve.
+GUARDED_MEANWHILE = "Start again: a way to approve was set up meanwhile."
+# The settings which say where the phone's approvals go: changing them could send his
+# requests somewhere he never sees, so they're guarded as the approval settings are.
+PHONE_ROUTE = (("ntfy", "phone"), ("ntfy", "url"))
+# How long a passkey's registration may take, from Add a passkey to the phone's answer.
+REGISTRATION_SECONDS = 120
+# The longest credential id WebAuthn allows.
+LONGEST_CREDENTIAL_ID = 1023
+# The authenticator data's flag for a new credential following its counter, and where
+# that credential's id length is: after the RP id hash, flags, counter and AAGUID.
+_ATTESTED = 0x40
+_CREDENTIAL_ID_AT = 32 + 1 + 4 + 16
 
 
 def _kind(default: Any) -> str:
@@ -434,6 +486,38 @@ def _held_back(held: int) -> str:
     return f" (and {held} more since the last time)" if held else ""
 
 
+def _attested_credential_id(authenticator_data: bytes) -> bytes:
+    """
+    The new credential's id, from the attested credential data a registration's
+    authenticator data carries after its counter - the authenticator's own word for it,
+    not what the page says it is.
+
+    Raises:
+        NotVerified: If there's none there, or it's cut short.
+    """
+    if len(authenticator_data) < _CREDENTIAL_ID_AT + 2 or not authenticator_data[32] & _ATTESTED:
+        raise NotVerified("no credential")
+    length = int.from_bytes(authenticator_data[_CREDENTIAL_ID_AT:_CREDENTIAL_ID_AT + 2], "big")
+    start = _CREDENTIAL_ID_AT + 2
+    if not 0 < length <= LONGEST_CREDENTIAL_ID or len(authenticator_data) < start + length:
+        raise NotVerified("bad credential id")
+    return authenticator_data[start:start + length]
+
+
+def _guarded_setting(key: Any) -> bool:
+    """Whether a setting's "section.name" is one of the approval settings, or where the phone's approvals go."""
+    key = str(key).strip().lower()
+    return key.startswith("approvals") or key in {f"{section}.{name}" for section, name in PHONE_ROUTE}
+
+
+def _names_approvals(body: Any) -> bool:
+    """Whether a save of settings sent by the page names any of the approval settings, or the phone's ntfy route."""
+    changes = body.get("changes") if isinstance(body, dict) else None
+    if not isinstance(changes, (dict, list)):
+        return False
+    return any(_guarded_setting(key) for key in changes)
+
+
 def page_version() -> str:
     """
     A short hash of the page's own files, for a page left open to tell it's been
@@ -528,6 +612,13 @@ class SettingsPage:
         # already have moved to the default and the one put back would ring nowhere.
         self._removing = threading.Lock()
         self._spotify = self._spotify_sign_in(running)
+        # The challenge of the passkey being added, the time it runs out, the origin it
+        # was asked for at, whether it was approved and the passkeys there then - one at
+        # a time, each used once.
+        self._registration: Optional[Tuple[bytes, float, str, bool, frozenset]] = None
+        self._registration_lock = threading.Lock()
+        self._adding_lock = threading.Lock()
+        self._now = time.monotonic
         self._server: Optional[ThreadingHTTPServer] = None
         self._proxy_server: Optional[ThreadingHTTPServer] = None
 
@@ -1264,10 +1355,16 @@ class SettingsPage:
             Dict with 'success' and a 'message' saying when each is used - and once
             saved, 'restart_needed', for whether any of it waits for a restart.
         """
+        if not isinstance(changes, dict):
+            return {"success": False, "message": "That didn't make sense."}
         editable = {f"{section}.{name}": (section, name, label, used) for section, name, label, used in EDITABLE}
         unknown = [key for key in changes if key not in editable]
         if unknown:
             return {"success": False, "message": f"The page can't change {', '.join(unknown)}."}
+        # Asked before the save lock is taken, as the wait can be minutes.
+        refused = self._approve_raises(changes, editable, who)
+        if refused:
+            return {"success": False, "message": refused}
         path = paths.CONFIG_FILE
         # The file read, written and the running settings changed under the one lock, so
         # two saves at once can't each leave the other out of either.
@@ -1346,6 +1443,60 @@ class SettingsPage:
             if unused:
                 message += " Some of it couldn't be used straight away."
         return {"success": True, "message": message, "restart_needed": restart_needed}
+
+    def _approve_raises(self, changes: Dict[str, Any], editable: Dict[str, Tuple[str, str, str, str]],
+                        who: str) -> Optional[str]:
+        """
+        Asks for approval of each approval setting raised above the one running - a
+        longer trust window or wait, or more albums before a download is big - as each
+        loosens what approval guards, and of a change to the phone's ntfy topic or
+        server, which could send his requests where he'd never see them. Lowering one
+        tightens it, so is free; and so is any change while no way to approve is set up,
+        or approvals could never be set up. With one set up but none reachable now, a
+        raise is refused; the phone's topic and server are still free then, as setting
+        them is how he gets a way back. One the save would refuse anyway is left for it
+        to refuse, without asking.
+
+        Returns:
+            None if the save may go ahead, else why not.
+        """
+        approvals = getattr(self.brain, "approvals", None)
+        if approvals is None:
+            return None
+        raised, rerouted = [], []
+        for key, given in changes.items():
+            section, name, label, _ = editable[key]
+            if (section, name) in PHONE_ROUTE:
+                running = self.running.section(section).get(name) if self.running is not None else None
+                if str(given if given is not None else "").strip() != str(running if running is not None else "").strip():
+                    rerouted.append(label)
+                continue
+            if section != "approvals":
+                continue
+            default = self.defaults[section][name]
+            try:
+                value = _from_page(given, default)
+            except (TypeError, ValueError):
+                continue
+            if limit_problem(section, name, value):
+                continue
+            running = self.running.section(section).get(name, default) if self.running is not None else default
+            if _number(value) is not None and _number(running) is not None and _number(value) > _number(running):
+                raised.append((label, value))
+        if not (raised or rerouted) or not approvals.guarded():
+            return None
+        if not approvals.ways():
+            if raised:
+                logger.info(f"Settings page: {who} wasn't let raise {raised[0][0]}, as no way to approve could be asked")
+                return CANT_ASK
+            return None
+        for description in [f"Change '{label}' to {value}" for label, value in raised] + [
+                f"Change '{label}'" for label in rerouted]:
+            if not approvals.ask(description, fresh=True):
+                logger.info(f"Settings page: {who} wasn't let {description[0].lower()}{description[1:]}, "
+                            f"without an approval")
+                return NEEDS_OK
+        return None
 
     def _apply(self, changes: Dict[Tuple[str, str], Any]) -> List[Tuple[str, str]]:
         """
@@ -2521,6 +2672,289 @@ class SettingsPage:
         logger.info(f"Settings page: {who} removed the {name} clock")
         return {"success": True, "message": f"Removed the {name} clock."}
 
+    # Approvals - at the Tailscale address only, which the handler sees to
+
+    def _approval_parts(self):
+        """The brain's approval service and passkeys - None for either on a brain without them."""
+        return getattr(self.brain, "approvals", None), getattr(self.brain, "passkeys", None)
+
+    def _approve_change(self, approvals, description: str, who: str, without: Optional[str] = None) -> Optional[str]:
+        """
+        Asks a fresh approval of a change to how approval works, whenever a way to
+        approve is set up - a passkey, or a satellite let approve, reachable now or not.
+        With none set up the change is free, or approvals could never be set up; with
+        one set up but none reachable now it's refused, never let through.
+
+        Args:
+            approvals: The approval service.
+            description: What it will do, as he'll be shown it.
+            who: The Tailscale login asking, for the log.
+            without: A passkey id which mustn't count or answer, e.g. the one being removed.
+
+        Returns:
+            None if it may go ahead, else why not.
+        """
+        if not approvals.guarded(without):
+            return None
+        if not approvals.ways(without):
+            logger.info(f"Settings page: {who} wasn't let {description[0].lower()}{description[1:]}, "
+                        f"as no way to approve could be asked")
+            return CANT_ASK
+        if not approvals.ask(description, without=without, fresh=without is None):
+            logger.info(f"Settings page: {who} wasn't let {description[0].lower()}{description[1:]}, "
+                        f"without an approval")
+            return NEEDS_OK
+        return None
+
+    def approvals_state(self) -> Dict:
+        """
+        The Approvals section: his passkeys (never their keys), each satellite which said
+        it can approve with its "Can approve" switch, when the trust window closes, and
+        the recent approvals.
+        """
+        approvals, passkeys = self._approval_parts()
+        if approvals is None or passkeys is None:
+            return {"passkeys": [], "satellites": [], "trusted_until": None, "recent": []}
+        rooms = self.brain.rooms
+        # Each with what it's called when said - "the PC" - as the page names who can approve.
+        satellites = [{"name": name, "spoken": self.brain.spoken_name(name),
+                       "connected": self.brain.session_for(name) is not None, "can_approve": rooms.can_approve(name)}
+                      for name in self._satellite_names() or [] if rooms.approves(name)]
+        return {"passkeys": [{"id": each.id, "name": each.name, "added": each.added} for each in passkeys.all()],
+                "satellites": satellites, "trusted_until": approvals.trusted_until(), "recent": approvals.recent()}
+
+    def approval_request(self, id) -> Dict:
+        """
+        A request, for the phone's approval page: what it's for, and while it's open, its
+        challenge, the passkeys which may answer it and their relying party id.
+
+        Args:
+            id: The request's id, from the page's address.
+        """
+        unknown = {"state": "unknown", "description": "", "credentials": [], "rp_id": None}
+        approvals, passkeys = self._approval_parts()
+        if approvals is None or passkeys is None or not isinstance(id, str) or not REQUEST_ID.fullmatch(id):
+            return unknown
+        request = approvals.lookup(id)
+        if request is None:
+            return unknown
+        if request.outcome in ("approved", "refused"):
+            return {**unknown, "state": "answered", "description": request.description}
+        if request.outcome is not None:
+            return {**unknown, "state": "expired", "description": request.description}
+        keys = [each for each in (passkeys.get(credential) for credential in request.credentials) if each]
+        try:
+            # The newest's, as the notification opens the page at its origin.
+            rp = rp_id(max(keys, key=lambda each: each.added).origin) if keys else None
+        except NotVerified:
+            rp = None
+        return {"state": "open", "description": request.description, "challenge": b64url(request.challenge),
+                "credentials": list(request.credentials), "rp_id": rp}
+
+    def answer_approval(self, id, credential_id, client_data, authenticator_data, signature, who: str) -> Dict:
+        """
+        Approves a request with the passkey's answer from the phone's page. Every part is
+        base64url text, decoded here within its bounds, so nothing else reaches the check.
+
+        Args:
+            id: The request's id.
+            credential_id: The id of the credential the authenticator answered with.
+            client_data, authenticator_data, signature: The assertion, as the browser gave it.
+            who: The Tailscale login answering, for the log.
+        """
+        approvals, passkeys = self._approval_parts()
+        if approvals is None or passkeys is None:
+            return {"success": False, "message": NO_APPROVALS}
+        if not isinstance(id, str) or not REQUEST_ID.fullmatch(id):
+            return {"success": False, "message": NO_SUCH}
+        try:
+            from_b64url(credential_id)
+            decoded = [from_b64url(part) for part in (client_data, authenticator_data, signature)]
+        except NotVerified:
+            return {"success": False, "message": DIDNT_CHECK}
+        result = approvals.answer_by_passkey(id, credential_id, *decoded)
+        if result.get("success"):
+            logger.info(f"Settings page: {who} approved a request with a passkey")
+        return result
+
+    def refuse_approval(self, id, who: str) -> Dict:
+        """Refuses a request from the phone's page, which needs no passkey."""
+        approvals, _ = self._approval_parts()
+        if approvals is None:
+            return {"success": False, "message": NO_APPROVALS}
+        if not isinstance(id, str) or not REQUEST_ID.fullmatch(id):
+            return {"success": False, "message": NO_SUCH}
+        result = approvals.refuse_by_phone(id)
+        if result.get("success"):
+            logger.info(f"Settings page: {who} refused a request")
+        return result
+
+    def begin_passkey(self, origin, who: str) -> Dict:
+        """
+        Starts adding a passkey: a challenge for the browser's navigator.credentials.create,
+        kept for REGISTRATION_SECONDS and used once. Once he has a passkey, another needs an
+        approval first, if there's a way to give one - else the first could be outvoted by
+        anyone who reached the page.
+
+        Args:
+            origin: The page's origin, from the request's Origin header - https only.
+            who: The Tailscale login adding it, for the log.
+
+        Returns:
+            Dict with 'success' and, if it did, 'challenge', 'rp_id', 'user_id' and
+            'exclude' (the passkeys he has, so the same one isn't added twice) - else 'message'.
+        """
+        approvals, passkeys = self._approval_parts()
+        if approvals is None or passkeys is None:
+            return {"success": False, "message": NO_APPROVALS}
+        try:
+            rp = rp_id(origin)
+        except NotVerified:
+            return {"success": False, "message": NOT_HTTPS}
+        keys = passkeys.all()
+        if len(keys) >= MOST_PASSKEYS:
+            return {"success": False, "message": f"Nova keeps at most {MOST_PASSKEYS} passkeys."}
+        # Free only while no way to approve is set up at all - no passkey, and no satellite
+        # let approve, asleep or not - so the first is never free once the PC approves.
+        approved = approvals.guarded()
+        refused = self._approve_change(approvals, "Add a passkey", who)
+        if refused:
+            return {"success": False, "message": refused}
+        challenge = secrets.token_bytes(32)
+        with self._registration_lock:
+            self._registration = (challenge, self._now() + REGISTRATION_SECONDS, origin, approved,
+                                  frozenset(each.id for each in keys))
+        # A fresh user id each time, so a new passkey never takes another's place on a phone.
+        return {"success": True, "challenge": b64url(challenge), "rp_id": rp,
+                "user_id": b64url(secrets.token_bytes(16)), "exclude": [each.id for each in keys]}
+
+    def finish_passkey(self, name, credential_id, client_data, authenticator_data, public_key, algorithm,
+                       origin, who: str) -> Dict:
+        """
+        Adds the passkey the browser made, once it checks out against the challenge
+        begin_passkey gave, at the same origin. Its credential id is the one the
+        authenticator data carries, which the page's must match.
+
+        Args:
+            name: What he calls it, e.g. "Phone".
+            credential_id, client_data, authenticator_data, public_key: base64url, as the browser gave them.
+            algorithm: ES256 or RS256, from getPublicKeyAlgorithm.
+            origin: The page's origin, from the request's Origin header.
+            who: The Tailscale login adding it, for the log.
+        """
+        approvals, passkeys = self._approval_parts()
+        if approvals is None or passkeys is None:
+            return {"success": False, "message": NO_APPROVALS}
+        name = name.strip() if isinstance(name, str) else ""
+        # No control, format or other hidden characters, which could make one name look like another.
+        if not 0 < len(name) <= LONGEST_NAME or any(unicodedata.category(each).startswith("C") for each in name):
+            return {"success": False, "message": f"Give it a name of up to {LONGEST_NAME} letters."}
+        try:
+            rp_id(origin)
+        except NotVerified:
+            return {"success": False, "message": NOT_HTTPS}
+        with self._registration_lock:
+            begun, self._registration = self._registration, None
+        if begun is None or self._now() >= begun[1]:
+            return {"success": False, "message": TOO_LONG}
+        challenge, _, begun_at, approved, there = begun
+        try:
+            if origin != begun_at:
+                raise NotVerified("another origin")
+            if type(algorithm) is not int:
+                raise NotVerified("bad algorithm")
+            posted_id = from_b64url(credential_id)
+            client_data, authenticator_data, public_key = (
+                from_b64url(part) for part in (client_data, authenticator_data, public_key))
+            counter = check_registration(challenge, origin, client_data, authenticator_data, public_key, algorithm)
+            made_id = _attested_credential_id(authenticator_data)
+            if not hmac.compare_digest(made_id, posted_id):
+                raise NotVerified("another credential id")
+        except NotVerified as e:
+            # A few words, with nothing secret in them.
+            logger.warning(f"Settings page: a passkey {who} was adding didn't check out ({e})")
+            return {"success": False, "message": DIDNT_CHECK_OUT}
+        # Checked and added as one, so two registrations begun free can't both add.
+        with self._adding_lock:
+            # Begun free as he had no passkey, it's only free while that's still so: one
+            # added since needs to approve this one.
+            if not approved and any(each.id not in there for each in passkeys.all()):
+                logger.info(f"Settings page: a passkey {who} was adding wasn't added, as another was added first")
+                return {"success": False, "message": ADDED_MEANWHILE}
+            if not approved and approvals.guarded():
+                logger.info(f"Settings page: a passkey {who} was adding wasn't added, as a way to approve "
+                            f"was set up first")
+                return {"success": False, "message": GUARDED_MEANWHILE}
+            problem = passkeys.add(Passkey(id=b64url(made_id), name=name, public_key=b64url(public_key),
+                                           algorithm=algorithm, counter=counter, origin=origin, added=time.time()))
+        if problem:
+            return {"success": False, "message": problem}
+        logger.info(f"Settings page: {who} added the passkey {name}")
+        return {"success": True, "message": f"Added {name}."}
+
+    def remove_passkey(self, id, who: str) -> Dict:
+        """
+        Removes a passkey. While another way to approve is left, that way has to approve it
+        - the passkey itself can't - so a lost phone can't be removed by whoever has it; the
+        last way can be removed alone, or he could never start again.
+
+        Args:
+            id: Its credential id.
+            who: The Tailscale login removing it, for the log.
+        """
+        approvals, passkeys = self._approval_parts()
+        if approvals is None or passkeys is None:
+            return {"success": False, "message": NO_APPROVALS}
+        try:
+            id = b64url(from_b64url(id))
+        except NotVerified:
+            return {"success": False, "message": "There's no such passkey."}
+        passkey = passkeys.get(id)
+        if passkey is None:
+            return {"success": False, "message": "There's no such passkey."}
+        refused = self._approve_change(approvals, f"Remove the passkey '{passkey.name}'", who, without=id)
+        if refused:
+            return {"success": False, "message": refused}
+        if not passkeys.remove(id):
+            return {"success": False, "message": "There's no such passkey."}
+        logger.info(f"Settings page: {who} removed the passkey {passkey.name}")
+        return {"success": True, "message": f"Removed {passkey.name}."}
+
+    def set_can_approve(self, name, on, who: str) -> Dict:
+        """
+        Lets a satellite which said it can approve be asked to, or stops it. Letting one
+        needs an approval first, if there's a way to give one; stopping one is free.
+
+        Args:
+            name: The satellite, as the page sent it.
+            on: Whether it may.
+            who: The Tailscale login asking, for the log.
+        """
+        approvals, _ = self._approval_parts()
+        if approvals is None:
+            return {"success": False, "message": NO_APPROVALS}
+        if not (isinstance(name, str) and isinstance(on, bool)):
+            return {"success": False, "message": "That didn't make sense."}
+        names = self._satellite_names()
+        if names is None:
+            return {"success": False, "message": SATELLITES_UNREADABLE}
+        if name not in names:
+            return {"success": False, "message": f"There's no satellite called {name}."}
+        rooms = self.brain.rooms
+        if not rooms.approves(name):
+            return {"success": False, "message": f"{name} can't approve."}
+        if on and not rooms.can_approve(name):
+            refused = self._approve_change(approvals, f"Let {self.brain.spoken_name(name)} approve", who)
+            if refused:
+                return {"success": False, "message": refused}
+        try:
+            rooms.set_can_approve(name, on)
+        except OSError as e:
+            logger.error(f"Settings page: couldn't save whether the {name} satellite approves: {e}")
+            return {"success": False, "message": "That couldn't be saved."}
+        logger.info(f"Settings page: {who} {'let' if on else 'stopped'} the {name} satellite approve")
+        return {"success": True, "message": f"{name} can approve now." if on else f"{name} won't be asked to approve now."}
+
     # The page's password, for NPM
 
     def _try_password(self, typed: str, device: str) -> Optional[str]:
@@ -2692,6 +3126,13 @@ ACTIONS: Dict[str, Callable[[SettingsPage, Dict, str], Dict]] = {
     "/api/displays/key": lambda page, body, who: page.new_display_key(body["id"], who),
     "/api/displays/remove": lambda page, body, who: page.remove_display(body["id"], who),
     "/api/logout-everywhere": lambda page, body, who: page.log_out_everywhere(who),
+    # Approvals - a missing part is left to be refused as one which doesn't check out.
+    "/api/approvals/answer": lambda page, body, who: page.answer_approval(
+        body["id"], body.get("credential_id"), body.get("client_data"), body.get("authenticator_data"),
+        body.get("signature"), who),
+    "/api/approvals/refuse": lambda page, body, who: page.refuse_approval(body["id"], who),
+    "/api/approvals/can-approve": lambda page, body, who: page.set_can_approve(body["name"], body["on"], who),
+    "/api/passkeys/remove": lambda page, body, who: page.remove_passkey(body["id"], who),
 }
 
 
@@ -2751,7 +3192,7 @@ class _Handler(BaseHTTPRequestHandler):
             # E.g. "http://[x", which can't be split - nothing anyone is let in to.
             url = None
         path = url.path if url else None
-        if not self._let_in(page, path):
+        if self._approvals_through_npm(path) or not self._let_in(page, path):
             return
         if url is None:
             self._send_json({"success": False, "message": "That didn't make sense."}, 400)
@@ -2766,7 +3207,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"route": self.server.route, "password_set": page.password.is_set(),
                              "logged_in": self.logged_in, "page": page.page_version})
         elif path == "/api/state":
-            self._send_json(page.state(satellite))
+            state = page.state(satellite)
+            if self.server.route == "npm":
+                state["settings"] = [each for each in state["settings"] if not _guarded_setting(each["key"])]
+            self._send_json(state)
         elif path == "/api/live":
             self._send_json(page.live(satellite))
         elif path == "/api/music":
@@ -2783,6 +3227,13 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(page.calendars_state())
         elif path == "/api/home-choices":
             self._send_json(page.home_choices_state())
+        elif APPROVE_PAGE.fullmatch(path):
+            with open(os.path.join(WEB_FOLDER, "approve.html"), "rb") as file:
+                self._send(200, file.read(), "text/html; charset=utf-8")
+        elif path == "/api/approvals":
+            self._send_json(page.approvals_state())
+        elif path == "/api/approvals/request":
+            self._send_json(page.approval_request((parse_qs(url.query).get("id") or [None])[0]))
         elif path == "/api/wrapped":
             found = page.wrapped_state((parse_qs(url.query).get("key") or [None])[0])
             if found is None:
@@ -2808,11 +3259,12 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         page = self.server.page
-        if not self._let_in(page, self.path) or not self._from_the_page():
+        if (self._approvals_through_npm(self.path) or not self._let_in(page, self.path)
+                or not self._from_the_page()):
             return
         # The cookie a change sets, if it logs in or out.
         self.cookie: Optional[str] = None
-        action = ACTIONS.get(self.path) or self._LOGIN_ACTIONS.get(self.path)
+        action = ACTIONS.get(self.path) or self._OWN_ACTIONS.get(self.path)
         if action is None:
             self._send_json({"success": False, "message": "That isn't something the page does."}, 400)
             return
@@ -2826,7 +3278,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             body = json.loads(self.rfile.read(int(length)) or b"{}")
-            if self.path in self._LOGIN_ACTIONS:
+            if self.server.route == "npm" and self.path == "/api/settings" and _names_approvals(body):
+                self._send_json({"success": False, "message": ONLY_TAILNET}, 403)
+                return
+            if self.path in self._OWN_ACTIONS:
                 result = action(self, page, body)
             else:
                 result = action(page, body, self.login)
@@ -2838,6 +3293,23 @@ class _Handler(BaseHTTPRequestHandler):
             result = {"success": False, "message": "Couldn't save that."}
             self.cookie = None
         self._send_json(result, cookie=self.cookie)
+
+    def _approvals_through_npm(self, path: Optional[str]) -> bool:
+        """
+        Refuses anything to do with approvals through NPM, or with a satellite's password,
+        before anything is read or changed, whatever its login: they're at the page's
+        Tailscale address only.
+
+        Returns:
+            Whether it was refused.
+        """
+        if self.server.route != "npm" or path is None:
+            return False
+        bare = path.split("?")[0]
+        if not bare.startswith(APPROVAL_PATHS) and bare != APPROVE_SCRIPT and bare not in SATELLITE_KEYS:
+            return False
+        self._send_json({"success": False, "message": ONLY_TAILNET}, 403)
+        return True
 
     def _let_in(self, page: SettingsPage, path: Optional[str]) -> bool:
         """
@@ -2903,7 +3375,8 @@ class _Handler(BaseHTTPRequestHandler):
         age = LOGIN_DAYS * 86400 if token else 0
         return f"{LOGIN_COOKIE}={token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={age}"
 
-    # The changes which log in or out, which need more of the request than ACTIONS are given.
+    # The changes which need more of the request than ACTIONS are given: logging in or out,
+    # and adding a passkey.
 
     def _log_in(self, page: SettingsPage, body: Dict) -> Dict:
         if self.server.route != "npm":
@@ -2929,7 +3402,18 @@ class _Handler(BaseHTTPRequestHandler):
             self.cookie = self._login_cookie(token)
         return result
 
-    _LOGIN_ACTIONS = {"/api/login": _log_in, "/api/logout": _log_out, "/api/page-password": _set_page_password}
+    # Adding a passkey, which needs the page's origin, as the browser says it in its Origin header.
+
+    def _begin_passkey(self, page: SettingsPage, body: Dict) -> Dict:
+        return page.begin_passkey(self.headers.get("Origin"), self.login)
+
+    def _finish_passkey(self, page: SettingsPage, body: Dict) -> Dict:
+        return page.finish_passkey(body["name"], body.get("credential_id"), body.get("client_data"),
+                                   body.get("authenticator_data"), body.get("public_key"), body.get("algorithm"),
+                                   self.headers.get("Origin"), self.login)
+
+    _OWN_ACTIONS = {"/api/login": _log_in, "/api/logout": _log_out, "/api/page-password": _set_page_password,
+                    "/api/passkeys/begin": _begin_passkey, "/api/passkeys/finish": _finish_passkey}
 
     def _from_the_page(self) -> bool:
         """

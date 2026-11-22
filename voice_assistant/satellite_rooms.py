@@ -23,11 +23,16 @@ from voice_assistant.storage import load_json, save_json
 
 logger = logging.getLogger(__name__)
 
+# The machines with a screen and a sensor he is at, which are let approve by default -
+# but only as the first way set up: see seen.
+APPROVING_MACHINES = ("pc", "mac")
+
 
 def _blank() -> Dict:
     """Returns the entry of a satellite nothing is known of, with every field the file keeps."""
     return {"push_to_talk": False, "area": None, "machine": None, "saves_notes": False, "called": [],
-            "opens_things": True, "app_names": {}, "pc_device": None, "shortcut": shortcut.DEFAULT}
+            "opens_things": True, "app_names": {}, "pc_device": None,
+            "approves": False, "can_approve": None, "shortcut": shortcut.DEFAULT}
 
 
 def _shortcut(stored: Any) -> str:
@@ -93,6 +98,9 @@ class SatelliteRooms:
                               "opens_things": each.get("opens_things") is not False,
                               "app_names": _aliases(each.get("app_names")),
                               "pc_device": each.get("pc_device") if isinstance(each.get("pc_device"), str) else None,
+                              "approves": each.get("approves") is True,
+                              # None is no switch stored yet: no, until its hello stores one.
+                              "can_approve": each["can_approve"] if isinstance(each.get("can_approve"), bool) else None,
                               # Not there before shortcuts, which is the default rather than none.
                               "shortcut": _shortcut(each["shortcut"]) if "shortcut" in each else shortcut.DEFAULT}
                        for name, each in stored.items()}
@@ -104,10 +112,17 @@ class SatelliteRooms:
         except (OSError, TypeError) as e:
             logger.error(f"Could not save the satellites' rooms: {e}")
 
-    def seen(self, name: str, push_to_talk: bool, machine: Optional[str] = None, saves_notes: bool = False):
+    def seen(self, name: str, push_to_talk: bool, machine: Optional[str] = None, saves_notes: bool = False,
+             approves: bool = False, guarded: bool = True):
         """
         Notes what a satellite said it is as it connected. What it says now replaces
         what it said before, so a satellite which no longer says its machine is unknown.
+
+        The first time a PC or Mac says it approves - or one already known says it's
+        now a PC or Mac - its "Can approve" is stored: on only if no way to approve was
+        set up then, as the first way he sets up; else off until he switches it on with
+        an approval. Otherwise anything with a satellite's password could say it's the
+        PC and be asked, and answer, for itself.
 
         Args:
             name: The satellite's name.
@@ -115,15 +130,25 @@ class SatelliteRooms:
             machine: What kind of computer it runs on, one of machine.MACHINES - None if
                 it doesn't say.
             saves_notes: Whether it saves notes in a Downloads folder.
+            approves: Whether it can ask for a fingerprint to approve a big action.
+            guarded: Whether a way to approve is set up already - see Approvals.guarded.
+                Taken as yes unless the caller says, so a "Can approve" is never on by mistake.
         """
-        said = {"push_to_talk": push_to_talk, "machine": machine, "saves_notes": saves_notes}
+        said = {"push_to_talk": push_to_talk, "machine": machine, "saves_notes": saves_notes,
+                "approves": approves}
         with self._lock:
             each = self._known.get(name)
-            if each is not None and all(each[key] == value for key, value in said.items()):
+            first = approves and machine in APPROVING_MACHINES and (
+                each is None or not isinstance(each.get("can_approve"), bool)
+                or each.get("machine") not in APPROVING_MACHINES)
+            if each is not None and not first and all(each[key] == value for key, value in said.items()):
                 return
             if each is None:
                 each = self._known[name] = _blank()
             each.update(said)
+            if first:
+                each["can_approve"] = not guarded
+                logger.info(f"The {name} satellite {'may' if not guarded else 'may not yet'} approve")
             self._save()
 
     def set_area(self, name: str, area: Optional[str]):
@@ -188,6 +213,55 @@ class SatelliteRooms:
         """
         self._set_field(name, "opens_things", on)
 
+    def set_can_approve(self, name: str, on: bool):
+        """
+        Notes whether he lets a satellite ask for his approval, as the settings page saves it.
+
+        Args:
+            name: The satellite's name.
+            on: Whether it may.
+
+        Raises:
+            OSError: If it couldn't be saved.
+        """
+        self._set_field(name, "can_approve", on)
+
+    def forget_approval(self, name: str, guarded: Optional[bool]):
+        """
+        Undoes a satellite's "Can approve" as its password is renewed, or it's added or
+        removed: a new password is a new satellite, which mustn't inherit the PC's
+        switch, or anyone who could make one could connect a fake saying it's the PC
+        and approves, and be asked, and answer, for itself. As seen's first time, it's
+        on only if no way to approve is set up at that moment, else off until he
+        switches it on with an approval - and only for a PC or Mac, as seen has it: any
+        other is left with none stored, a no. A removed one forgets it entirely, so it's
+        stored afresh by its next hello. One nothing is known of is left alone - its
+        hello stores it. Memory is changed before the file, so a satellite the file
+        can't be written for is still not asked while the brain runs.
+
+        Args:
+            name: The satellite's name.
+            guarded: Whether a way to approve is set up now - see Approvals.guarded - or
+                None if it's being removed.
+
+        Raises:
+            OSError: If it couldn't be saved, so the caller can stop short of re-keying.
+        """
+        with self._lock:
+            each = self._known.get(name)
+            if each is None:
+                return
+            if guarded is None:
+                each.update(approves=False, can_approve=None)
+            elif each.get("machine") in APPROVING_MACHINES:
+                each["can_approve"] = not guarded
+            else:
+                # Not a PC or Mac, so never on by the first set-up rule: none stored, a no.
+                each["can_approve"] = None
+            logger.info(f"The {name} satellite {'may' if each['can_approve'] else 'may not'} approve "
+                        f"until it's switched")
+            save_json(self.path, self._known, indent=2)
+
     def set_app_names(self, name: str, names: Dict[str, str]):
         """
         Notes the short names he has given a satellite's apps, as the settings page saves them.
@@ -251,6 +325,31 @@ class SatelliteRooms:
         """Returns whether he lets a satellite open apps and pages - True unless he turned it off, and for one not known."""
         with self._lock:
             return self._known.get(name, {}).get("opens_things", True)
+
+    def approves(self, name: str) -> bool:
+        """Returns whether a satellite said it can ask for approval - False for one not known."""
+        with self._lock:
+            return self._known.get(name, {}).get("approves", False)
+
+    def can_approve(self, name: str) -> bool:
+        """
+        Returns whether a satellite is asked to approve big actions: its switch, as stored
+        when it first said it's a PC or Mac which approves, or as he set it on the settings
+        page - else no, for one never stored either way.
+        """
+        with self._lock:
+            return self._known.get(name, {}).get("can_approve") is True
+
+    def approving(self, among: Iterable[str]) -> List[str]:
+        """
+        Args:
+            among: The satellites to look through, e.g. every one which may connect.
+
+        Returns:
+            Those which said they can approve and which he lets, connected or not - each
+            is a way to approve, even asleep, so a change to how approval works needs one.
+        """
+        return [name for name in among if self.approves(name) and self.can_approve(name)]
 
     def app_names(self, name: str) -> Dict[str, str]:
         """Returns the short names he has given a satellite's apps, as plain name to app name - none if never given any."""

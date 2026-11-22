@@ -390,15 +390,19 @@ def test_a_short_quiet_dip_mid_sentence_doesnt_end_it():
 
 
 def test_neither_rule_ends_it_before_a_real_word():
+    # A loud burst Silero calls speech - a voice in a video, say - sets how loud "he" is from
+    # the press, and the background after it is far quieter, so without the wait for a word
+    # the voice drop would end it at about 1s. He starts at 2.0s; his first word is heard at 2.2s.
     feed = AudioFeed()
-    for length, value in [(2.0, 1500), (0.5, 8000), (3.0, 1500)]:
+    for length, value in [(0.3, 8000), (1.7, 1500), (0.5, 8000), (3.0, 1500)]:
         feed.feed(seconds(length, value))
     words, report = FakeWords(2.2), {}
 
     audio = record(feed, listen_from=0, voice_drop=TWELVE_DB,
                    words_quiet=words.quiet_words, heard=words.heard, report=report)
 
-    assert len(audio) / RATE > 2.5
+    # Ended once he has finished: 0.15s of the background to show, then 0.6s of it.
+    assert 3.1 <= len(audio) / RATE <= 3.3
     assert report["ended_by"] == "voice drop"
 
 
@@ -635,6 +639,49 @@ def test_no_new_words_cant_end_it_before_his_loudness_is_known():
     assert report["words_quiet"] > 2.5
     assert len(audio) / RATE == pytest.approx(3.0, abs=0.05)
     assert report["ended_by"] == "limit"
+
+
+def test_a_background_silero_is_unsure_of_counts_as_quiet_only_once_the_voice_has_dropped():
+    # Silero's margin: 0.4 is neither speech, for how loud he is, nor quiet, for its own rule.
+    def heard(*parts, voice_drop=TWELVE_DB):
+        feed = AudioFeed()
+        for length, value in parts:
+            feed.feed(seconds(length, value))
+        words, report = FakeWords(0.3), {}
+        audio = record_until_silence(feed, MarginDetector(), listen_from=0, silence_duration=0.6,
+                                     speech_timeout=0.9, timeout=4.0, voice_drop=voice_drop,
+                                     words_quiet=words.quiet_words, heard=words.heard, report=report)
+        return len(audio) / RATE, report["ended_by"]
+
+    # Below the voice drop's line it ends the recording - by the voice drop, not as silence.
+    length, ended_by = heard((1.0, 8000), (3.0, 1500))
+    assert 1.6 <= length <= 1.8 and ended_by == "voice drop"
+
+    # Without the voice drop it's never quiet enough for Silero's own rule.
+    length, ended_by = heard((1.0, 8000), (3.0, 1500), voice_drop=None)
+    assert length == pytest.approx(4.0, abs=0.05) and ended_by == "limit"
+
+    # And above the line it starts the quiet again, so the quiet counts from the last of it:
+    # the 4000 ends at 1.7s, then 0.15s of the background to show and 0.6s of it.
+    length, ended_by = heard((1.0, 8000), (0.4, 1500), (0.3, 4000), (3.0, 1500))
+    assert length == pytest.approx(2.42, abs=0.06) and ended_by == "voice drop"
+
+
+def test_a_voice_which_starts_quiet_and_grows_isnt_ended_by_its_quiet_start():
+    # How loud he is so far is the loudest he has been yet, so his first, quiet words never
+    # count as a drop from how loud he gets later. Each step is 6 dB up.
+    feed = AudioFeed()
+    for length, value in [(0.4, 1500), (0.4, 3000), (0.4, 6000), (0.6, 12000), (1.0, 0)]:
+        feed.feed(seconds(length, value))
+    words, report = FakeWords(0.2), {}
+
+    audio = record(feed, listen_from=0, voice_drop=TWELVE_DB, words_quiet=words.quiet_words,
+                   heard=words.heard, report=report)
+
+    # 1.8s of him, then Silero's own 0.6s of quiet.
+    assert len(audio) / RATE == pytest.approx(2.4, abs=0.1)
+    assert report["ended_by"] == "silence"
+    assert report["loudness"] == pytest.approx(12000 / 32768, abs=0.005)
 
 
 def test_the_report_is_numbers_only():

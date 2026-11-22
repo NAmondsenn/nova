@@ -864,7 +864,7 @@ class LLMHandler:
                         "model_text": response_text, "reads": read_so_far, "plain": not actions})
 
             # A download the user's words didn't ask for is only offered, by Nova's own
-            # offer_download, which only asks - for a plain yes, as pc_power only asks. After
+            # offer_download, which only asks - for a plain yes. After
             # the history, which keeps Claude's own call, as it made it: the answer it's shown
             # is the question.
             if not asked_to_download and any(action.tool == "download_music" for action in actions):

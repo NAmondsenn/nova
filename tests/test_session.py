@@ -35,6 +35,7 @@ from voice_assistant.clock import Clock
 from voice_assistant.config import Config
 from voice_assistant.computers import ComputerControl, Computers
 from voice_assistant.conversation import Reply
+from voice_assistant.devices import RangLately
 from voice_assistant.lists import Lists
 from voice_assistant.media_watch import MediaWatcher
 from voice_assistant.navidrome import NavidromePlayer
@@ -286,7 +287,9 @@ def brain(tmp_path, monkeypatch, make_config):
                            routines=Routines(path=str(tmp_path / "routines.json")), ntfy=None, weather=None,
                            batteries=None, lists=None, pc=None, registry=None, calendar=None, media=None,
                            downloads=None, football=None, listening=None, wrapped_store=None, usage=None, new_music_playlist=None,
-                           playlist_changes=None, journeys=None, last_change=LastChange(), open_conversation=None,
+                           approvals=None,
+                           playlist_changes=None, journeys=None, last_change=LastChange(), find_my_rang=RangLately(),
+                           open_conversation=None,
                            tts=FakePiper(), stt=FakeSpeechToText(), sounds_folder=Path(paths.SOUNDS_DIR))
 
 
