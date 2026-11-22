@@ -4953,6 +4953,60 @@ def test_a_session_let_go_of_leaves_the_next_conversation_at_its_satellite_alone
     assert given[-1] == []
 
 
+def _let_go_of_mid_turn(brain, connect, make_session, start):
+    """
+    A session whose satellite drops and connects again while its "let's talk" turn is still being answered: the
+    brain lets it go - closing it and its satellite, and ending any conversation on there, which is none - and
+    then the turn's own start runs, as start(session) does it. Returns the session once its turn is over.
+    """
+    session, pi = _a_session_with_conversations(brain, connect, make_session)
+    here = session.satellite.name
+
+    class LetGoOfMidTurn(ScriptedConversation):
+        def handle(self, text, follow_up=False, timeline=None):
+            self.heard.append((text, follow_up))
+            # As Brain._let_go does.
+            session.close()
+            session.satellite.close()
+            brain.open_conversation.end("gone", satellite=here)
+            start(session)
+            return Reply(say="Go ahead.")
+
+    session.conversation = LetGoOfMidTurn()
+    brain.stt.texts = ["Let's talk."]
+    thread = running(session)
+    pi.wake(said())
+    thread.join(TURNS)
+    assert not thread.is_alive() and session.conversation.heard == [("Let's talk.", False)]
+    return session
+
+
+def test_a_session_let_go_of_cant_start_a_conversation(brain, connect, make_session):
+    # Nothing would be heard - and nothing would end it, so the switch would show it on, the room's other
+    # satellite be kept quiet and the next request there drop into it, with nobody listening.
+    results = []
+    _let_go_of_mid_turn(brain, connect, make_session,
+                        lambda session: results.append(session.actions.execute(Action("start_conversation"))))
+    assert not results[0].ok
+    assert brain.open_conversation.satellite is None
+
+
+def test_a_conversation_a_session_let_go_of_started_itself_is_ended(brain, connect, make_session):
+    # Its start was past the check as the session was let go of, and nothing else would end it.
+    _let_go_of_mid_turn(brain, connect, make_session, lambda session: session.actions.start_conversation())
+    assert brain.open_conversation.satellite is None
+
+
+def test_a_conversation_a_session_let_go_of_started_is_left_to_a_newer_session_which_began_it(
+        brain, connect, make_session):
+    # Asked for there again, the newer session has taken it up as its own, so it's that one's to end.
+    newer = make_session(connect(conversations=True)[0])
+    newer._conversing = True
+    brain.session_for = lambda name: newer
+    session = _let_go_of_mid_turn(brain, connect, make_session, lambda session: session.actions.start_conversation())
+    assert brain.open_conversation.on_at(session.satellite.name)
+
+
 def test_a_turn_which_goes_wrong_ends_the_conversation_and_says_so(brain, connect, make_session, monkeypatch):
     # Rather than every turn after it going wrong the same way, one straight after another.
     session, pi = _in_a_conversation(brain, connect, make_session, Reply(say="Okay."))

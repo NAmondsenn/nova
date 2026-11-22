@@ -4144,7 +4144,7 @@ def test_start_conversation_says_so_when_it_was_switched_off_since_it_was_offere
     executor, conversation = _talking("pc", settings=settings)
     # Between the tool being offered and run - the race start() answers "off" for.
     method = ActionExecutor.tools()["start_conversation"]
-    executor.conversation = SimpleNamespace(start=lambda satellite: "off")
+    executor.conversation = SimpleNamespace(start=lambda satellite, by=None: "off")
     result = method(executor)
     assert (result.ok, result.say) == (False, "Conversations are switched off.")
 

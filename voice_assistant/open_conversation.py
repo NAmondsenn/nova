@@ -57,9 +57,10 @@ class OpenConversation:
         self._lock = threading.Lock()
         self._reset(None)
 
-    def _reset(self, satellite: Optional[str]):
-        """Starts afresh at a satellite, or with none on (None). Call with the lock held."""
+    def _reset(self, satellite: Optional[str], by: Optional[object] = None):
+        """Starts afresh at a satellite, or with none on (None), started by `by`. Call with the lock held."""
         self._satellite = satellite
+        self._by = by
         self._exchanges: List[Dict] = []
         self._not_for_me = 0
         self._bigger = False
@@ -136,9 +137,15 @@ class OpenConversation:
         with self._lock:
             return satellite is not None and self._satellite == satellite
 
-    def start(self, satellite: str) -> str:
+    def start(self, satellite: str, by: Optional[object] = None) -> str:
         """
         Starts a conversation at a satellite, if none is on and they are allowed.
+
+        Args:
+            satellite: Where.
+            by: Whatever started it - the ActionExecutor of the session whose turn asked - so a
+                session let go of can tell one it started itself from a newer session's (see
+                end). None for nothing in particular.
 
         Returns:
             "started", "already here" (one is on at this satellite), "elsewhere" (one is on
@@ -150,11 +157,11 @@ class OpenConversation:
                 return "off"
             if self._satellite is not None:
                 return "already here" if self._satellite == satellite else "elsewhere"
-            self._reset(satellite)
+            self._reset(satellite, by)
         self._tell_changed()
         return "started"
 
-    def end(self, reason: str, satellite: Optional[str] = None) -> bool:
+    def end(self, reason: str, satellite: Optional[str] = None, by: Optional[object] = None) -> bool:
         """
         Ends the conversation, handing what was said in it to the `ended` step.
 
@@ -164,13 +171,18 @@ class OpenConversation:
             satellite: Where it is to be ended. If given and the conversation is on
                 elsewhere, it is left be - a satellite going just as one starts at another
                 can't end that one.
+            by: If given, it is ended only if this started it (see start), so a session let
+                go of ends only one it started itself.
 
         Returns:
-            False if none was on (there, if given), when nothing is called.
+            False if none was on (there, if given, and started by `by`, if given), when
+            nothing is called.
         """
         cap = self._cap()
         with self._lock:
             if self._satellite is None or satellite not in (None, self._satellite):
+                return False
+            if by is not None and self._by is not by:
                 return False
             exchanges = self._exchanges[-cap:]
             self._ended_at[self._satellite] = self._now()

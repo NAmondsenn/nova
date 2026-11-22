@@ -2657,7 +2657,9 @@ class ActionExecutor:
     def start_conversation(self):
         if self.muted():
             return ActionResult(False, MICROPHONE_MUTED)
-        started = self.conversation.start(self.satellite)
+        # Started by this executor, so a session let go of can tell one its own turn started from a newer
+        # session's - see Session._leave_conversation.
+        started = self.conversation.start(self.satellite, by=self)
         if started == "off":
             # Switched off since the tool was offered.
             return ActionResult(False, UNAVAILABLE["conversation"])

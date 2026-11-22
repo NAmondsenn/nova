@@ -517,8 +517,9 @@ class Session:
                                       # for a press, so only a wake-word satellite's mute keeps one from starting.
                                       muted=lambda: self.muted and not self.satellite.push_to_talk,
                                       # One not updated since the brain was would have its turns as ordinary
-                                      # listens, so none starts there.
-                                      converses=lambda: self.satellite.can_converse)
+                                      # listens, so none starts there - nor at one whose session has been let
+                                      # go of, still answering a turn, where nothing would hear or end it.
+                                      converses=lambda: self.satellite.can_converse and not self._closed.is_set())
 
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.
@@ -1403,6 +1404,12 @@ class Session:
             # Let go of by the brain, which ends its conversation itself (see Brain._let_go) - and which
             # may have replaced it with a new session for the same satellite by now, whose own
             # conversation this mustn't end: that one's open listen would be left holding the microphone.
+            # Only one this session's own turn started after it was let go of - its start already past
+            # the check which refuses it now - is ended here, as nothing else would: unless a newer
+            # session has begun it as its own, asked for there again meanwhile.
+            newer = self.brain.session_for(self.satellite.name)
+            if newer is None or newer is self or not newer._conversing:
+                self.brain.open_conversation.end("gone", satellite=self.satellite.name, by=self.actions)
             return
         self.brain.open_conversation.end("gone", satellite=self.satellite.name)
         if self.satellite.connected and not self._closed.is_set():
