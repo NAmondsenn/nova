@@ -191,7 +191,7 @@ conversation:
   # to 0.8. Used straight away.
   dip_level: 0.3
   # The model which answers when Nova moves up from the quick one for harder thinking:
-  # claude-sonnet-5-5 or claude-opus-5-5. Opus thinks harder, and costs more and is slower.
+  # claude-sonnet-5-5 or claude-opus-5-5. The second thinks harder, and costs more and is slower.
   # Its requests use medium effort and up to 4096 tokens, where the usual model's use low and
   # 1024. Its prices are usage.bigger_input_price and usage.bigger_output_price: change those
   # with this. Used straight away.
