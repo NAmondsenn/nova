@@ -5,6 +5,7 @@ against a fake satellite over a socketpair, which reads what the brain sends wit
 real protocol. Needs numpy installed (as it is on the Pi), and is skipped anywhere it isn't.
 """
 
+import itertools
 import json
 import logging
 import select
@@ -606,6 +607,38 @@ def test_an_ordinary_listen_is_still_asked_for_as_it_always_was(talker):
     assert wait_for(lambda: fake.messages("pong"))
     # Dropped past its cap, as it always was.
     assert feed.position == round(recording.MAX_FEED_SECONDS * 16000)
+
+
+def test_a_wakes_feed_has_no_limit_only_in_a_conversation_there(talker):
+    satellite, fake, serving = talker
+    piece = np.full(protocol.MAX_AUDIO // 2, 7, dtype=np.int16)
+    wakes = itertools.count(1)
+
+    def wake_and_send():
+        made = next(wakes)
+        fake.say("wake", talked_over=True, recording=f"wake-{made}")
+        wake = satellite.wakes.get(timeout=2)
+        for _ in range(9):
+            fake.say("audio", piece.tobytes())
+        # Everything sent before it has been taken once it is answered.
+        fake.say("ping")
+        assert wait_for(lambda: len(fake.messages("pong")) == made)
+        return wake["feed"]
+
+    # Capped as it always was, outside a conversation.
+    feed = wake_and_send()
+    assert not feed.open and feed.position == round(recording.MAX_FEED_SECONDS * 16000)
+
+    # In one there, a turn the wake word or a press begins - over a reply, say - is as long as the satellite,
+    # told it is on, lets it be.
+    assert satellite.set_conversation(True) is True
+    feed = wake_and_send()
+    assert feed.open and not feed.ended and feed.position == 9 * len(piece)
+
+    # And capped again once it has ended.
+    assert satellite.set_conversation(False) is True
+    feed = wake_and_send()
+    assert not feed.open and feed.position == round(recording.MAX_FEED_SECONDS * 16000)
 
 
 def test_a_satellite_which_doesnt_know_conversations_is_never_sent_them(pair):

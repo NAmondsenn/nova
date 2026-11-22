@@ -937,7 +937,10 @@ class Satellite:
                     # Made before the brain hears of the wake, which it could answer with
                     # stop_listening straight away.
                     recording_id = f"wake-{next(self._wake_ids)}"
-                    recording = self._recording = _Recording(recording_id)
+                    # In a conversation here it's a turn of it - begun over a reply, say - which the
+                    # brain gives the conversation's longest turn, so it's as open as one the brain
+                    # asked for, or the cap would cut it off first.
+                    recording = self._recording = _Recording(recording_id, open=self._conversing)
                     recording.from_press = pressed
                     self._turn_open = False
                     # Any press which came while this was being set up is this one's, so
@@ -1202,7 +1205,8 @@ class Satellite:
         with self._waking, self._lock:
             recording = self._recording
             # Not an open one, which a conversation's replies are meant to play over: the
-            # brain made it so after the press, and a press over the reply cuts in on it.
+            # brain made it so after the press, or the press came in a conversation, and a
+            # press over the reply cuts in on it.
             listening = (recording is not None and recording.from_press and not recording.open
                          and not recording.is_set())
         if listening:

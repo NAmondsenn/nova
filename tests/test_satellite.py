@@ -4795,6 +4795,47 @@ def test_an_open_recording_runs_past_the_cap(brain, make):
     assert len(brain.messages("audio_end")) == 1
 
 
+@pytest.mark.parametrize("pressed", [False, True])
+def test_in_a_conversation_a_recording_begun_by_the_wake_word_or_a_press_runs_past_the_cap(brain, make, pressed):
+    made = pressable(brain, make) if pressed else make()
+
+    def begin():
+        if pressed:
+            made._pressed()
+        else:
+            assert wait_for(lambda: connected(made) and made.wake.listening)
+            made.wake.say()
+
+    # Outside a conversation it ends at the cap, as ever.
+    begin()
+    assert wait_for(lambda: brain.messages("audio_end"))
+    assert brain.messages("audio_end") == [{"type": "audio_end", "reason": "limit"}]
+    assert audio_sent(brain) == satellite.LIMIT_SECONDS * RATE
+    sent = len(brain.recordings())
+    assert wait_for(lambda: made._recording is None)
+
+    # In one here it is a turn of the conversation, which the brain gives the conversation's longest
+    # turn, so it goes on past the cap as an open listen does, until the brain stops it.
+    conversation(brain)
+    assert wait_for(lambda: made._conversing)
+    begin()
+    assert wait_for(lambda: audio_sent(brain, sent) >= 2 * satellite.LIMIT_SECONDS * RATE, seconds=15)
+    assert len(brain.messages("audio_end")) == 1
+    assert made._recording is not None and made._recording.open and not made._recording.is_set()
+    brain.say("stop_listening", recording=brain.messages("wake")[-1]["recording"])
+    assert wait_for(lambda: made._recording is None)
+    assert len(brain.messages("audio_end")) == 1
+
+    # And once it has ended, at the cap again.
+    conversation(brain, on=False)
+    assert wait_for(lambda: not made._conversing)
+    sent = len(brain.recordings())
+    begin()
+    assert wait_for(lambda: len(brain.messages("audio_end")) == 2)
+    assert brain.messages("audio_end")[-1] == {"type": "audio_end", "reason": "limit"}
+    assert audio_sent(brain, sent) == satellite.LIMIT_SECONDS * RATE
+
+
 def test_an_open_listen_stops_nothing_and_plays_nothing(brain, make):
     made = pressable(brain, make)
     brain.say("play_stream", id="music-1", rate=44100, channels=2, volume=0.5, kind="music", paused=False)

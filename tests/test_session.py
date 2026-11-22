@@ -5982,12 +5982,14 @@ def test_a_turn_begun_over_a_reply_by_the_wake_word_or_a_press_has_the_conversat
         brain, connect, make_session, monkeypatch, pressed):
     # With no voice cut-in - before the PC's echo canceller is ready, say - the wake word or a press over a reply
     # starts the next turn as a request, from the moment before it. It's still a turn of the conversation, which
-    # a thinking pause mustn't end, nor its length cut off at 15 seconds.
-    given = []
+    # the brain's recorder is given the conversation's pause and longest turn for, and whose feed has no cap, as
+    # an open listen's hasn't. That the satellite doesn't cut it off at its own cap is test_satellite.py's.
+    given, feeds = [], []
     real = session_module.record_until_silence
 
     def recording(*args, **kwargs):
         given.append(kwargs)
+        feeds.append(args[0])
         return real(*args, **kwargs)
 
     monkeypatch.setattr(session_module, "record_until_silence", recording)
@@ -5998,6 +6000,7 @@ def test_a_turn_begun_over_a_reply_by_the_wake_word_or_a_press_has_the_conversat
     assert session.conversation.heard[2] == ("What about Tuesday?", False)
     turn = given[2]
     assert (turn["silence_duration"], turn["timeout"], turn["no_words_after"]) == (1.5, 90, 1.5)
+    assert feeds[2].open
     # The rest as for any wake word: as long to start, and the moment before it kept but not listened to.
     assert (turn["speech_timeout"], turn["keep_before"], turn.get("open_wait")) == (3.0, 0.3, None)
     _ended(session)

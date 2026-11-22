@@ -590,6 +590,9 @@ class RemoteSatellite:
         # Whether its echo canceller is taking Nova's own sound out, as it last said - False
         # until it does, so each connection starts as if nothing had been said.
         self.echo_ready: bool = False
+        # Whether it has been told a conversation is on there, as set_conversation last said - so a
+        # wake's feed is as open as the recording the satellite then sends for it.
+        self.conversing: bool = False
         # Set by the brain: called with (this satellite's name, its apps as [{"id", "name",
         # "kind"}]) and (its name, its open windows' names) each time the satellite sends them.
         self.on_apps: Optional[Callable[[str, List[Dict]], None]] = None
@@ -752,6 +755,7 @@ class RemoteSatellite:
         """
         if not self.can_converse:
             return False
+        self.conversing = on
         return self.send("conversation", on=on)
 
     def stop_listening(self, feed: AudioFeed):
@@ -1034,8 +1038,10 @@ class RemoteSatellite:
         if isinstance(pre_roll, bool) or not isinstance(pre_roll, int) or not 0 <= pre_roll <= protocol.MAX_AUDIO // 2:
             pre_roll = None
         recording = message.get("recording")
+        # In a conversation there the satellite sends it open, with no cap, as it's a turn of it - see
+        # Satellite._begin - so the feed has none either.
         wake = {"talked_over": bool(message.get("talked_over")), "pre_roll": pre_roll,
-                "feed": self._new_feed(recording if isinstance(recording, str) else None)}
+                "feed": self._new_feed(recording if isinstance(recording, str) else None, open=self.conversing)}
         # Only when it was, so a wake word's is as it was before presses were said.
         if message.get("pressed") is True:
             wake["pressed"] = True
