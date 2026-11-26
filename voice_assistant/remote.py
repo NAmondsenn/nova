@@ -17,11 +17,12 @@ import collections
 import itertools
 import json
 import logging
+import math
 import os
 import queue
 import threading
 from time import monotonic
-from typing import Callable, Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
@@ -82,6 +83,15 @@ MOST_TITLE_SENT = 4 * MOST_TITLE
 # brain runs for the reason _playback_ids is, so a late answer from the last connection
 # is never taken for one to a note on this.
 _note_ids = itertools.count(1)
+
+# Numbers for the updates the brain sends a satellite, counted for the same reason, so a
+# late answer about the last connection's update is never taken for one about this.
+_update_ids = itertools.count(1)
+
+# The most reasons a satellite may give for an update needing the user, and the longest
+# each part of one - a satellite is not trusted to keep the settings page short.
+MOST_NEEDS_YOU = 3
+MOST_NEEDS_YOU_TEXT = 200
 
 # Numbers for the requests the brain makes of a satellite's computer, counted for the same reason.
 _computer_ids = itertools.count(1)
@@ -593,6 +603,19 @@ class RemoteSatellite:
         # Whether it has been told a conversation is on there, as set_conversation last said - so a
         # wake's feed is as uncapped as the recording the satellite then sends for it.
         self.conversing: bool = False
+        # What it said of its code and updates, as admit passes them on: the commit it runs
+        # (40 hex digits), whether it takes an update, in what format ("zip" or "bundle"),
+        # and the (its nonce, the brain's nonce) of this connection, which an update's proof
+        # is bound to - None and False from a satellite which doesn't say.
+        self.version: Optional[str] = hello.get("version")
+        self.updates: bool = bool(hello.get("updates", False))
+        self.update_format: Optional[str] = hello.get("update_format")
+        self.nonces: Optional[Tuple[str, str]] = tuple(hello["nonces"]) if hello.get("nonces") else None
+        # Set by the brain: called with (this satellite's name, how its update went, as
+        # {"version", "ok", "error"?, "needs_you"?}) and with (its name, the version) as it
+        # starts installing, which is the last it says before it restarts.
+        self.on_update_result: Optional[Callable[[str, Dict], None]] = None
+        self.on_update_installing: Optional[Callable[[str, str], None]] = None
         # Set by the brain: called with (this satellite's name, its apps as [{"id", "name",
         # "kind"}]) and (its name, its open windows' names) each time the satellite sends them.
         self.on_apps: Optional[Callable[[str, List[Dict]], None]] = None
@@ -649,6 +672,8 @@ class RemoteSatellite:
             "windows": self._windows,
             "computer_done": self._computer_done,
             "approval_answer": self._approval_answer,
+            "update_result": self._update_result,
+            "update_installing": self._update_installing,
         }
 
     @property
@@ -991,6 +1016,35 @@ class RemoteSatellite:
             with self._notes_lock:
                 del self._note_waits[id]
 
+    def send_update(self, version: str, format: str, archive: bytes, proof: str, retry: bool) -> bool:
+        """
+        Sends the satellite an update: an offer, the archive in chunks, then the end.
+
+        The archive goes in pieces of at most protocol.UPDATE_CHUNK, each a payload, as
+        no message may carry more than protocol.MAX_AUDIO.
+
+        Args:
+            version: The commit it is of - 40 hex digits.
+            format: "zip" or "bundle", as the satellite said it takes.
+            archive: The code itself.
+            proof: The HMAC the satellite checks before it writes anything.
+            retry: Whether this is the second go at the same version.
+
+        Returns:
+            False, as soon as any send fails - the satellite has gone.
+        """
+        id = f"update-{next(_update_ids)}"
+        size = len(archive)
+        chunks = math.ceil(size / protocol.UPDATE_CHUNK)
+        if not self.send("update_offer", id=id, version=version, format=format, size=size, chunks=chunks,
+                         proof=proof, retry=retry):
+            return False
+        for index in range(chunks):
+            piece = archive[index * protocol.UPDATE_CHUNK:(index + 1) * protocol.UPDATE_CHUNK]
+            if not self.send("update_chunk", piece, id=id, index=index):
+                return False
+        return self.send("update_end", id=id)
+
     def restart(self) -> bool:
         """
         Has the satellite restart - Home Assistant's Restart button.
@@ -1117,6 +1171,35 @@ class RemoteSatellite:
         if waiting is not None:
             waiting.answer = answer
             waiting.arrived.set()
+
+    def _update_result(self, message: Dict, payload: bytes):
+        """How the satellite's update went, kept only if it is well formed - else logged and dropped."""
+        version, ok, error, needs = message.get("version"), message.get("ok"), message.get("error"), message.get("needs_you")
+        valid = isinstance(version, str) and protocol.COMMIT.fullmatch(version) and isinstance(ok, bool)
+        if valid and needs is not None:
+            valid = (isinstance(needs, list) and len(needs) <= MOST_NEEDS_YOU
+                     and all(isinstance(each, dict) and isinstance(each.get("why"), str)
+                             and isinstance(each.get("command"), str) for each in needs))
+        if not valid:
+            logger.warning(f"The {self.name} satellite sent an update_result which was dropped")
+            return
+        result = {"version": version, "ok": ok}
+        if isinstance(error, str):
+            result["error"] = error[:protocol.MOST_UPDATE_ERROR]
+        if needs is not None:
+            result["needs_you"] = [{"why": each["why"][:MOST_NEEDS_YOU_TEXT], "command": each["command"][:MOST_NEEDS_YOU_TEXT]}
+                                   for each in needs]
+        if self.on_update_result is not None:
+            self.on_update_result(self.name, result)
+
+    def _update_installing(self, message: Dict, payload: bytes):
+        """The satellite saying it has begun installing a version, from which it restarts."""
+        version = message.get("version")
+        if not (isinstance(version, str) and protocol.COMMIT.fullmatch(version)):
+            logger.warning(f"The {self.name} satellite sent an update_installing which was dropped")
+            return
+        if self.on_update_installing is not None:
+            self.on_update_installing(self.name, version)
 
     def _list_from_payload(self, what: str, payload: bytes) -> Optional[list]:
         """The JSON list a satellite sent as a payload - None, with a warning, if it didn't say it opens or this isn't one."""

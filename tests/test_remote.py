@@ -1615,3 +1615,121 @@ def test_a_pc_prompt_left_at_a_timeout_is_withdrawn(pair, tmp_path):
         assert service.wait(request) == "timeout"
     finally:
         service.stop()
+
+
+VERSION = "a" * 40
+
+
+def test_the_hello_s_version_and_nonces_are_kept():
+    ours, theirs = socket.socketpair()
+    try:
+        said = RemoteSatellite(satellite_link.Stream(ours), dict(
+            HELLO, version=VERSION, updates=True, update_format="zip", nonces=("1" * 32, "2" * 32)))
+        assert said.version == VERSION and said.updates is True and said.update_format == "zip"
+        assert said.nonces == ("1" * 32, "2" * 32)
+        silent = RemoteSatellite(satellite_link.Stream(ours), dict(HELLO))
+        assert silent.version is None and silent.updates is False
+        assert silent.update_format is None and silent.nonces is None
+    finally:
+        ours.close()
+        theirs.close()
+
+
+def test_an_update_goes_in_chunks_inside_a_payload(pair):
+    satellite, fake, serving = pair
+    archive = bytes(range(256)) * (600 * 4)
+    assert len(archive) == 600 * 1024
+    assert satellite.send_update(VERSION, "zip", archive, "p" * 64, True) is True
+    assert wait_for(lambda: fake.messages("update_end"))
+    offer, = fake.messages("update_offer")
+    assert set(offer) - {"type", "bytes"} == set(protocol.FROZEN_UPDATE_MESSAGES["update_offer"]["fields"])
+    assert (offer["version"], offer["format"], offer["size"], offer["chunks"], offer["retry"]) == (
+        VERSION, "zip", len(archive), 3, True)
+    chunks = fake.messages("update_chunk")
+    assert [chunk["index"] for chunk in chunks] == [0, 1, 2]
+    assert all(set(chunk) - {"type", "bytes"} == {"id", "index"} for chunk in chunks)
+    pieces = fake.payloads("update_chunk")
+    assert all(len(piece) <= protocol.UPDATE_CHUNK for piece in pieces)
+    assert b"".join(pieces) == archive
+    end, = fake.messages("update_end")
+    assert {offer["id"]} == {chunk["id"] for chunk in chunks} == {end["id"]}
+    assert offer["id"].startswith("update-")
+
+
+class BreaksAfter(Breakable):
+    """A stream which takes some writes, then fails as a hung-up connection does."""
+
+    def __init__(self, good):
+        super().__init__()
+        self.good = good
+        self.written = 0
+
+    def write(self, data):
+        if self.written >= self.good:
+            raise BrokenPipeError("hung up")
+        self.written += 1
+
+
+def test_a_lost_satellite_stops_the_update_part_way():
+    stream = BreaksAfter(2)
+    satellite = RemoteSatellite(stream, dict(HELLO))
+    archive = b"x" * (3 * protocol.UPDATE_CHUNK)
+    assert satellite.send_update(VERSION, "zip", archive, "p" * 64, False) is False
+    # The offer and one chunk went; nothing was tried after the failure.
+    assert stream.written == 2
+
+
+def say_update_result(fake, **fields):
+    fake.say("update_result", **{"version": VERSION, "ok": True, **fields})
+
+
+def test_an_update_result_reaches_the_brain(pair):
+    satellite, fake, serving = pair
+    got = []
+    satellite.on_update_result = lambda name, result: got.append((name, result))
+    needs = [{"why": "git is old", "command": "sudo apt install git"}]
+    say_update_result(fake, ok=False, error="it broke", needs_you=needs)
+    assert wait_for(lambda: got)
+    assert got == [("bedroom", {"version": VERSION, "ok": False, "error": "it broke", "needs_you": needs})]
+
+
+@pytest.mark.parametrize("fields", [
+    {"version": "nope"},
+    {"version": VERSION.upper()},
+    {"ok": "yes"},
+    {"ok": 1},
+    {"needs_you": "run it"},
+    {"needs_you": [{"why": "a", "command": 5}]},
+    {"needs_you": [{"why": "a", "command": "b"}] * 4},
+])
+def test_a_nonsense_update_result_is_dropped(pair, caplog, fields):
+    satellite, fake, serving = pair
+    got = []
+    satellite.on_update_result = lambda name, result: got.append(result)
+    with caplog.at_level(logging.WARNING):
+        say_update_result(fake, **fields)
+        fake.say("ping")
+        assert wait_for(lambda: fake.messages("pong"))
+    assert got == []
+    assert "update_result" in caplog.text
+
+
+def test_a_long_error_is_cut(pair):
+    satellite, fake, serving = pair
+    got = []
+    satellite.on_update_result = lambda name, result: got.append(result)
+    needs = [{"why": "w" * 500, "command": "c" * 500}]
+    say_update_result(fake, ok=False, error="e" * 1000, needs_you=needs)
+    assert wait_for(lambda: got)
+    assert got[0]["error"] == "e" * protocol.MOST_UPDATE_ERROR
+    assert got[0]["needs_you"] == [{"why": "w" * 200, "command": "c" * 200}]
+
+
+def test_installing_reaches_the_brain(pair):
+    satellite, fake, serving = pair
+    got = []
+    satellite.on_update_installing = lambda name, version: got.append((name, version))
+    fake.say("update_installing", version="nope")
+    fake.say("update_installing", version=VERSION)
+    assert wait_for(lambda: got)
+    assert got == [("bedroom", VERSION)]
