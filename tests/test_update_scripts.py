@@ -387,7 +387,7 @@ def test_a_changed_unit_file_is_ready_and_needs_you_for_root(tmp_path):
     process, folder, status = run_brain_script(tmp_path, clone)
     assert status["state"] == "ready" and git(clone, "rev-parse", "HEAD") == two
     assert len(status["needs_you"]) == 1
-    assert status["needs_you"][0]["command"] == f"sudo bash {clone}/update.sh --no-pull"
+    assert [n["command"] for n in status["needs_you"]] == [f"sudo bash {clone}/update.sh --no-pull"]
     assert (folder / "previous").read_text().strip() == one
 
 
@@ -396,7 +396,34 @@ def test_a_changed_system_package_list_needs_you_for_root(tmp_path):
     publish(seed, origin, "two", {"setup.sh": SETUP_STUB.replace("python3-venv", "python3-venv sox")})
     process, folder, status = run_brain_script(tmp_path, clone)
     assert status["state"] == "ready"
-    assert status["needs_you"][0]["command"] == f"sudo bash {clone}/update.sh --no-pull"
+    # update.sh never installs system packages; setup.sh does.
+    assert [n["command"] for n in status["needs_you"]] == [f"sudo bash {clone}/setup.sh"]
+    assert "system packages" in status["needs_you"][0]["why"]
+
+
+def test_both_a_unit_and_the_package_list_changed_needs_you_twice_setup_first(tmp_path):
+    seed, origin, clone, one = brain_world(tmp_path)
+    publish(seed, origin, "two", {"nova-takeback.service": "changed",
+                                  "setup.sh": SETUP_STUB.replace("python3-venv", "python3-venv sox")})
+    process, folder, status = run_brain_script(tmp_path, clone)
+    assert status["state"] == "ready"
+    assert [n["command"] for n in status["needs_you"]] == [f"sudo bash {clone}/setup.sh",
+                                                           f"sudo bash {clone}/update.sh --no-pull"]
+
+
+def test_the_request_is_removed_even_when_nothing_else_can_run(tmp_path):
+    seed, origin, clone, one = brain_world(tmp_path)
+    data = tmp_path / "data"
+    (data / "update").mkdir(parents=True)
+    (data / "update" / "request").write_text("")
+    # Not a clone at all, so the script stops at once - but the request must not stay.
+    env = dict(os.environ, NOVA_DATA=str(data), HOME=str(tmp_path))
+    subprocess.run(["bash", str(BRAIN_SCRIPT)], cwd=tmp_path, env=env, capture_output=True)
+    assert not (data / "update" / "request").exists()
+
+
+def test_a_tag_called_main_isnt_taken_for_the_branch():
+    assert "fetch -q origin refs/heads/main" in BRAIN_SCRIPT.read_text()
 
 
 def test_a_change_elsewhere_in_setup_sh_needs_no_root(tmp_path):
@@ -506,7 +533,7 @@ def test_the_take_back_only_takes_a_commit_id_and_starts_the_brain_again(tmp_pat
 
 
 @pytest.mark.parametrize("hostile", ["--hard\n", "HEAD~1\n", "abc123\n", "$(touch pwned)\n", "ONE;touch pwned\n",
-                                     "ONEONE\n", "ONE\nONE\n"[:0] + "\n", "ABCDEF" + "0" * 34 + "\n"])
+                                     "ONEONE\n", "\n", "ABCDEF" + "0" * 34 + "\n"])
 def test_the_take_back_refuses_anything_but_forty_hex_digits(tmp_path, hostile):
     done, data, clone, one, two = _takeback_run(tmp_path, hostile)
     assert git(clone, "rev-parse", "HEAD") == two
@@ -526,3 +553,14 @@ def test_the_take_back_doesnt_follow_a_link(tmp_path):
     again = subprocess.run(["/bin/sh", "-c", done.args[2]], capture_output=True, text=True, cwd=tmp_path)
     assert again.returncode == 0 and git(clone, "rev-parse", "HEAD") == two
     assert not (data / "taken_back").exists()
+
+
+def test_the_take_back_only_moves_along_the_clones_own_history(tmp_path):
+    done, data, clone, one, two = _takeback_run(tmp_path, None)
+    git(clone, "checkout", "-q", "-b", "side", one)
+    side = brain_commit(clone, "side")
+    git(clone, "checkout", "-q", "main")
+    (data / "previous").write_text(side + "\n")
+    again = subprocess.run(["/bin/sh", "-c", done.args[2]], capture_output=True, text=True, cwd=tmp_path)
+    assert again.returncode == 0 and git(clone, "rev-parse", "HEAD") == two
+    assert not (data / "taken_back").exists() and (data / "previous").exists()

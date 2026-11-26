@@ -16,16 +16,17 @@
 
 set -uo pipefail
 
-project="$(git rev-parse --show-toplevel)" || exit 1
 data="${NOVA_DATA:-${HOME}/.local/share/nova}"
 folder="${data}/update"
-status_file="${folder}/brain.json"
+# First of all, before anything that can fail, so a failure can't leave the request for
+# the path unit to start this again for ever - and a second request made while this runs
+# starts the next run.
+rm -f -- "${folder}/request"
+project="$(git rev-parse --show-toplevel)" || exit 1
 python="${project}/venv/bin/python"
 [ -x "$python" ] || python="python3"
 
 mkdir -p -m 700 "$folder"
-# First, so a second request made while this runs starts the next run, not a loop.
-rm -f -- "${folder}/request"
 
 from=$(git -C "$project" rev-parse HEAD) || exit 1
 to=""
@@ -33,7 +34,7 @@ to=""
 # Writes brain.json atomically (a temporary file moved into place), so the brain never
 # reads it half written. The texts are arguments to python, never put in its code, so no
 # quote in one can change what runs. Arguments: the state, then optionally an error, then
-# optionally a why and a command for something he must do.
+# any number of a why and a command for something he must do.
 write_status() {
     "$python" -I -c '
 import datetime, json, os, sys
@@ -42,8 +43,10 @@ result = {"state": state, "from": source, "to": target,
           "at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
 if error:
     result["error"] = error[:300]
-if len(sys.argv) > 7:
-    result["needs_you"] = [{"why": sys.argv[6][:200], "command": sys.argv[7][:300]}]
+rest = sys.argv[6:]
+if rest:
+    result["needs_you"] = [{"why": why[:200], "command": command[:300]}
+                           for why, command in zip(rest[0::2], rest[1::2])]
 path = os.path.join(folder, "brain.json")
 with open(path + ".tmp", "w") as file:
     json.dump(result, file)
@@ -70,7 +73,7 @@ refuse() {
 
 write_status checking
 
-if ! git -C "$project" fetch -q origin main; then
+if ! git -C "$project" fetch -q origin refs/heads/main; then
     write_status failed "Couldn't fetch the update from GitHub."
     exit 1
 fi
@@ -130,22 +133,29 @@ write_previous || take_back "The update couldn't note where to go back to."
 
 # A commit which changes what only root can install still restarts into the new code, and
 # says what to run: a unit template, or the system packages setup.sh installs.
-needs_root=false
+needs_units=false
 if [ -n "$(git -C "$project" diff --name-only "${from}..HEAD" -- nova-backend.service nova-update.service \
     nova-update.path nova-takeback.service)" ]; then
-    needs_root=true
+    needs_units=true
 fi
 packages() {
     git -C "$project" show "${1}:setup.sh" 2> /dev/null | awk '/^install_system_packages\(\) \{/,/^\}/'
 }
+needs_packages=false
 if [ "$(packages "$from")" != "$(packages HEAD)" ]; then
-    needs_root=true
+    needs_packages=true
 fi
 
-trap - HUP INT TERM
-if [ "$needs_root" = true ]; then
-    write_status ready "" "The update changes the system's own files, which only root can install." \
-        "sudo bash ${project}/update.sh --no-pull"
-else
-    write_status ready
+# update.sh never installs system packages, so they are setup.sh's; the units are
+# update.sh's. Ready is written before the trap goes, so a signal in between takes the
+# code back rather than leaving it moved with no word said.
+notes=()
+if [ "$needs_packages" = true ]; then
+    notes+=("The update needs system packages installed, which only root can do." "sudo bash ${project}/setup.sh")
 fi
+if [ "$needs_units" = true ]; then
+    notes+=("The update changes the system's own service files, which only root can install." \
+        "sudo bash ${project}/update.sh --no-pull")
+fi
+write_status ready "" "${notes[@]}"
+trap - HUP INT TERM

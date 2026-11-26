@@ -7,7 +7,8 @@
 # A template, installed by setup.sh as root with __USER__, __HOME__ and
 # __PROJECT_DIRECTORY__ filled in. Root's, so the brain's user can't change what it does;
 # the file it reads is the brain's to write, so the git step runs as that user alone,
-# and takes nothing but exactly 40 hex digits from it. The reset keeps local changes
+# and takes nothing but exactly 40 hex digits from it, and only one in the clone's own
+# history, so the brain can only move the clone back along it. The reset keeps local changes
 # (--keep), and only when it worked is taken_back written and previous removed; a refused
 # one leaves previous for the brain to show. The "$$" is systemd's way of writing "$".
 Description=Take the brain's last update back after it failed to start
@@ -22,6 +23,7 @@ ExecStart=-/usr/sbin/runuser -u __USER__ -- /bin/sh -c 'd="__HOME__/.local/share
     read -r from < "$$d/previous"; \
     case "$$from" in ""|*[!0-9a-f]*) exit 0;; esac; \
     [ "$${#from}" = 40 ] || exit 0; \
+    git -C "__PROJECT_DIRECTORY__" merge-base --is-ancestor "$$from" HEAD || exit 0; \
     git -C "__PROJECT_DIRECTORY__" reset -q --keep "$$from" || exit 0; \
     rm -f "$$d/taken_back.tmp"; \
     echo "$$from" > "$$d/taken_back.tmp" && mv -f "$$d/taken_back.tmp" "$$d/taken_back"; \
