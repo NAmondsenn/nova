@@ -21,7 +21,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
-from voice_assistant.actions import LET_ME_THINK, Action, ActionExecutor, ActionResult, Choice, confirm
+from voice_assistant.actions import (LET_ME_THINK, PC_NOT_IN_A_ROUTINE, Action, ActionExecutor, ActionResult, Choice,
+                                     confirm)
 from voice_assistant.clock_ringing import Where, heard_in
 from voice_assistant.devices import told_claude
 from voice_assistant.journeys import told_claude as journey_told_claude
@@ -350,6 +351,10 @@ class Conversation:
             # A turn nobody answered leaves the exchange it was to replace as it was.
             if earlier is not None and (not result.get("success") or result.get("not_for_me")):
                 self.llm.put_back(earlier)
+                # Its reply, talked over, still stands, so Claude is told so after all - see
+                # _asked_of_the_bigger_model.
+                if self.talked_over:
+                    self.llm.note(TALKED_OVER_NOTE)
         elif local:
             timeline.note(local_intent=True)
         else:
@@ -491,6 +496,11 @@ class Conversation:
             return text, None
         if not self.llm.history or not self.llm.history[-1].get("plain"):
             return None
+        # The reply the user may have talked over is the one the answer replaces, so they've missed
+        # nothing of it - and noted, it would head the request asked again, whose reply before it
+        # nobody talked over.
+        if self.talked_over:
+            self.llm.unnote(TALKED_OVER_NOTE)
         earlier = self.llm.take_back()
         return earlier["user"], earlier
 
@@ -579,8 +589,15 @@ class Conversation:
         # to have landed first.
         self.music.wait()
         refused = ActionExecutor.routine_refusals() if in_routine else {}
-        return [ActionResult(False, refused[action.tool]) if action.tool in refused else self.actions.execute(action)
-                for action in actions]
+        results = [ActionResult(False, refused[action.tool]) if action.tool in refused else self.actions.execute(action)
+                   for action in actions]
+        if not in_routine:
+            return results
+        # Shutting down or restarting the PC asks first in a conversation, and a routine's question
+        # is never answered (see handle), so it's left undone and said so rather than asked.
+        return [ActionResult(False, PC_NOT_IN_A_ROUTINE)
+                if result.ok and isinstance(result.ask_first, Action) and result.ask_first.tool == "press_pc_button"
+                else result for result in results]
 
     def run_routine(self, routine: Dict, timeline: Optional[Timeline] = None) -> Reply:
         """

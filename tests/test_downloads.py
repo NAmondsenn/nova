@@ -1649,6 +1649,16 @@ def test_two_albums_go_ahead_and_the_third_asks(approving, clock, set_up):
     assert reply["message"].startswith("That needs your OK")
 
 
+def test_how_an_albums_approval_ended_is_noted_for_claude(approving, clock, set_up):
+    # Said in a gap, as any approval's outcome is, so "okay, done" could otherwise have Claude ask again.
+    downloads, fake = approving(FakeSoulSync(), FakeLibrary(clock), settings=set_up)
+    _two_albums_before(downloads)
+    notes = []
+    downloads.download("Rumours by Fleetwood Mac", "album", "kitchen", ended=notes.append)
+    downloads.request("Tusk by Fleetwood Mac", "album", "kitchen", ended=notes.append)
+    assert fake.ended == [notes.append, notes.append]
+
+
 def test_albums_further_apart_than_the_trust_minutes_dont_add_up(approving, clock, set_up):
     downloads, fake = approving(FakeSoulSync(), FakeLibrary(clock), settings=set_up)
     _two_albums_before(downloads)

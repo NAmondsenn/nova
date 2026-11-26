@@ -2204,6 +2204,37 @@ def test_a_routine_run_by_itself_waits_its_turn_and_is_said_as_an_announcement(b
     assert happened == ["held", "started", "let go"] and session.activity == "idle"
 
 
+def test_a_routine_run_by_itself_leaves_whats_noted_for_the_users_next_turn(brain, make_session):
+    # That they began over Nova's last reply, say, which is about their next message, not a step of the routine.
+    session = make_session()
+    session.music = SimpleNamespace(hold=lambda: None, release=lambda after=0: None)
+
+    def run(routine):
+        session.llm.remember("what's the weather", "It's sunny.")
+        return Reply()
+
+    session.conversation = SimpleNamespace(start=lambda: None, run_routine=run)
+    session.llm.note("The user began speaking before your last reply had finished.")
+    session.run_routine({"name": "Good morning", "steps": ["what's the weather"]})
+    assert "notes" not in session.llm.history[-1]
+    session.llm.remember("thanks", "Okay.")
+    assert session.llm.history[-1]["notes"] == ["The user began speaking before your last reply had finished."]
+
+
+def test_a_line_said_first_isnt_said_over_a_request_already_begun(brain, connect, make_session):
+    # "Let me think about that." while the wake word's recording is under way at the Pi, which doesn't stop a reply
+    # over it as a computer stops one over a press's - it would be said over the user's words.
+    session = make_session(connect()[0])
+    said = []
+    session._say = lambda message, **kwargs: said.append(message)
+    session.satellite.wakes.put({"talked_over": False, "pre_roll": 0, "feed": AudioFeed()})
+    session._say_first("Let me think about that.")
+    assert said == []
+    session.satellite.wakes.get_nowait()
+    session._say_first("Let me think about that.")
+    assert said == ["Let me think about that."]
+
+
 # For the settings page
 
 def test_a_volume_beep_from_the_settings_page_stops_the_last_one(make_session):
@@ -6054,6 +6085,17 @@ def test_by_default_the_voice_cuts_in_at_a_computer(brain, connect, make_session
     assert _fades(pi, reply) == [(0.21, 0.05)] and _stopped(pi, reply)
     assert session.conversation.heard[2] == ("Hang on, what about Tuesday?", False)
     _ended(session)
+
+
+def test_a_question_asked_first_goes_when_the_conversation_ends(brain, connect, make_session):
+    # "Shut down the PC?" asked in its last turn: nothing said once it's over may answer it.
+    session, pi = _in_a_conversation(brain, connect, make_session)
+    session._play_sound = lambda *args, **kwargs: None
+    session._conversing = True
+    session.conversation.asked_first = Action("press_pc_button", {"action": "off"})
+    brain.open_conversation.end("said", satellite=session.satellite.name)
+    assert session._conversation_goes_on() is False
+    assert session.conversation.asked_first is None
 
 
 def test_talk_over_set_to_the_wake_word_or_a_press(brain, connect, make_session):

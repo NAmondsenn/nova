@@ -785,6 +785,29 @@ def test_a_note_made_while_claude_is_asked_is_for_the_next_message(llm):
     assert sent[-1]["content"].startswith("(The user refused \"Remove 'Dentist'\", so it was not done.)\n[")
 
 
+def test_a_note_is_held_once_and_can_be_let_go_of(llm):
+    # Two talked-over turns in a row, neither kept, say.
+    llm.note(STOPPED)
+    llm.note(STOPPED)
+    llm.remember("what time is it", "It's 7:36 PM.")
+    assert llm.history[-1]["notes"] == [STOPPED]
+    llm.note(STOPPED)
+    llm.unnote(STOPPED)
+    llm.unnote(STOPPED)
+    llm.remember("thanks", "Okay.")
+    assert "notes" not in llm.history[-1]
+
+
+def test_notes_held_wait_out_what_isnt_the_users(llm):
+    # A routine run by itself, whose steps aren't the user's next message.
+    llm.note(STOPPED)
+    with llm.notes_held():
+        llm.remember("what's the weather", "It's sunny.")
+    assert "notes" not in llm.history[-1]
+    llm.remember("thanks", "Okay.")
+    assert llm.history[-1]["notes"] == [STOPPED]
+
+
 def test_an_exchange_remembered_locally_takes_the_note_too(llm):
     llm.note(STOPPED)
     llm.remember("what time is it", "It's 7:36 PM.")

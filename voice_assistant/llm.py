@@ -18,6 +18,7 @@ import os
 import re
 import time
 import logging
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Callable, Dict, List, Optional, Sequence
 import anthropic
@@ -266,9 +267,35 @@ class LLMHandler:
         as the user's words, which stay as they were in the history's "user".
 
         Args:
-            text: The note, a sentence.
+            text: The note, a sentence. One already held isn't held twice - two talked-over turns
+                in a row, neither kept, say.
         """
-        self._notes.append(text)
+        if text not in self._notes:
+            self._notes.append(text)
+
+    def unnote(self, text: str):
+        """
+        Lets go of a note held for the next message, if it is, as it no longer holds.
+
+        Args:
+            text: The note.
+        """
+        if text in self._notes:
+            self._notes.remove(text)
+
+    @contextmanager
+    def notes_held(self):
+        """
+        Holds back the notes for the user's next message while something which isn't theirs is
+        asked - a routine run by itself - so they wait for the user's next message rather than
+        heading one of its steps.
+        """
+        held = list(self._notes)
+        del self._notes[:len(held)]
+        try:
+            yield
+        finally:
+            self._notes[:0] = held
 
     @staticmethod
     def _noted(notes: Sequence[str], text: str) -> str:

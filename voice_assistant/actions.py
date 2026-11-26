@@ -89,6 +89,9 @@ MICROPHONE_MUTED = "The microphone's muted."
 # What's said when a routine's step asks for one: run by itself, at its time or from the settings page, a
 # routine would leave one on with nobody there and no turns to end it - and the room's other satellite quiet.
 NOT_IN_A_ROUTINE = "A routine can't start a conversation."
+# What's said when a routine's step would shut down or restart the PC during a conversation there, which asks
+# first: nobody answers a routine's question, so it's left undone.
+PC_NOT_IN_A_ROUTINE = "A routine can't shut down or restart the PC during a conversation."
 # What's said when one is asked for at a satellite which doesn't know a conversation's messages - one not
 # updated since the brain was - where its turns would be ordinary listens, and it would mute Windows'
 # microphone again at the end of each.
@@ -1051,7 +1054,7 @@ class ActionExecutor:
         },
     )
     def download_music(self, query: Optional[str] = None, search_type: Optional[str] = None):
-        return self.downloads.download(query, search_type, self.satellite)
+        return self.downloads.download(query, search_type, self.satellite, ended=self.noted)
 
     # Only ever run by the conversation, on the user's yes to an offer to download - so
     # Claude, which isn't offered it, can't skip looking in Navidrome first, nor download
@@ -1064,7 +1067,7 @@ class ActionExecutor:
         search_type={"type": "string", "enum": ["track", "album"], "description": "What it names, if anything."},
     )
     def request_download(self, query: Optional[str] = None, search_type: Optional[str] = None):
-        return self.downloads.request(query, search_type, self.satellite)
+        return self.downloads.request(query, search_type, self.satellite, ended=self.noted)
 
     # Run in place of Claude's download_music when the user's own words never asked for a
     # download (see LLMHandler.process_query) - "okay" to "Do you want me to download it?"

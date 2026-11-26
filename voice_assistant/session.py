@@ -1390,6 +1390,10 @@ class Session:
                 return True
             ended_by, self._ended_by = self._ended_by, None
         self._conversing = False
+        # A question asked in its last turn ("Shut down the PC?") goes with it, so nothing said
+        # once it's over can answer it.
+        with self._conversation_lock:
+            self.conversation.asked_first = None
         logger.info(f"The conversation on the {self.satellite.name} satellite is over")
         self.satellite.set_conversation(False)
         if ended_by in UNASKED_ENDS:
@@ -2472,6 +2476,12 @@ class Session:
         Args:
             message: What to say.
         """
+        # Not over the user, who has begun their next request by the wake word or a press while this
+        # was being worked out - whose reply won't be said either (see _say). Not stopped by it at the
+        # Pi, as a press's recording stops a reply at a computer, it would be said over their words.
+        if not self.satellite.wakes.empty():
+            logger.info("Woken again before a line was said first, so it isn't")
+            return
         self._say(message)
         # The answer is still being waited for.
         self.activity = "thinking"
@@ -3038,7 +3048,8 @@ class Session:
                     # A conversation of its own, which drops what a typed question left open
                     # would do - so what's typed next is a fresh request, not its answer.
                     self._drop_typed_question()
-                    with self._conversation_lock:
+                    # What's held for Claude with the user's next message waits for it, rather than heading a step.
+                    with self._conversation_lock, self.llm.notes_held():
                         if in_gap:
                             with self.conversation.aside():
                                 reply = self.conversation.run_routine(routine)

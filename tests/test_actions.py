@@ -1284,6 +1284,19 @@ def test_how_a_removal_ended_is_noted_for_claude_here():
     assert approvals.ended == [notes.append]
 
 
+def test_a_downloads_approval_is_noted_for_claude_here_too():
+    asked, notes = [], []
+    downloads = SimpleNamespace(
+        download=lambda query, kind, satellite, asked_for=True, ended=None: asked.append(ended) or {
+            "success": True, "message": "That needs your OK. Check your phone."},
+        request=lambda query, kind, satellite, ended=None: asked.append(ended) or {
+            "success": True, "message": "That needs your OK. Check your phone."})
+    executor = ActionExecutor(downloads=downloads, satellite="kitchen", noted=notes.append)
+    executor.execute(Action("download_music", {"query": "Rumours", "search_type": "album"}))
+    executor.execute(Action("request_download", {"query": "Tusk", "search_type": "album"}))
+    assert asked == [notes.append, notes.append]
+
+
 def test_no_match_is_said_without_asking():
     for said in ("I can't find the optician on your calendar.",
                  "I found 2: Dentist on Monday, at 9 AM; and Dentist on Thursday, at 3 PM. Which one?"):

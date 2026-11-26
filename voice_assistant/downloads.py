@@ -532,7 +532,7 @@ class Downloads:
                 "ask_first": Action("request_download", {"query": query, "search_type": search_type})}
 
     def download(self, query: Optional[str], search_type: Optional[str], satellite: Optional[str],
-                 asked: bool = True) -> Dict:
+                 asked: bool = True, ended: Optional[Callable[[str], None]] = None) -> Dict:
         """
         Asks SoulSync for a song or album, for "download X" - unless Navidrome already
         has the song, when that's said instead, and nothing is requested. An album
@@ -548,6 +548,8 @@ class Downloads:
             asked: Whether the user's own words asked for a download - "download X",
                 "get me X". If not, as when Claude takes an "okay" to an offer for a yes,
                 it's only offered, for a plain yes.
+            ended: Given what to tell Claude of how an album's approval ended, once it has
+                after waiting - see Approvals.gate - or None.
 
         Returns:
             Dict with 'success' and 'message' - and 'later', True, once it's requested,
@@ -556,9 +558,10 @@ class Downloads:
             or 'ask_first', the request on a yes, when it's offered: Navidrome has only
             a clean version of it, or it wasn't asked for in words.
         """
-        return self._ask(query, search_type, satellite, look=True, asked=asked)
+        return self._ask(query, search_type, satellite, look=True, asked=asked, ended=ended)
 
-    def request(self, query: Optional[str], search_type: Optional[str], satellite: Optional[str]) -> Dict:
+    def request(self, query: Optional[str], search_type: Optional[str], satellite: Optional[str],
+                ended: Optional[Callable[[str], None]] = None) -> Dict:
         """
         Asks SoulSync for a song or album on the user's yes to an offer - as download
         does, but without looking in Navidrome again, which was done to make the offer.
@@ -569,14 +572,15 @@ class Downloads:
             query: What to download, as the offer was made for it.
             search_type: As the offer was made for it.
             satellite: The satellite that asked, which is told how it went - or None.
+            ended: As download's.
 
         Returns:
             As download.
         """
-        return self._ask(query, search_type, satellite, look=False, asked=True)
+        return self._ask(query, search_type, satellite, look=False, asked=True, ended=ended)
 
     def _ask(self, query: Optional[str], search_type: Optional[str], satellite: Optional[str],
-             look: bool, asked: bool) -> Dict:
+             look: bool, asked: bool, ended: Optional[Callable[[str], None]] = None) -> Dict:
         """
         What download and request share: what stops the request, if anything does,
         else the request, started.
@@ -587,6 +591,7 @@ class Downloads:
             satellite: The satellite that asked, or None.
             look: Whether to look in Navidrome for it first.
             asked: Whether to request it, or - not asked for in words - only offer to.
+            ended: As download's.
 
         Returns:
             As download.
@@ -613,7 +618,7 @@ class Downloads:
             return self._offered(query, search_type, wanted)
         started = self.start(wanted, satellite, unless_large=True)
         if started is None:
-            return self._ask_for_albums(wanted, satellite)
+            return self._ask_for_albums(wanted, satellite, ended)
         if not started:
             # Asked for elsewhere since it was checked.
             return already
@@ -652,7 +657,8 @@ class Downloads:
         self._album_starts = [started for started in self._album_starts if started > since]
         return len(self._album_starts)
 
-    def _ask_for_albums(self, wanted: Wanted, satellite: Optional[str]) -> Dict:
+    def _ask_for_albums(self, wanted: Wanted, satellite: Optional[str],
+                        ended: Optional[Callable[[str], None]] = None) -> Dict:
         """
         Asks approval to start an album which makes a large download, with the albums
         before it in the album minutes.
@@ -660,6 +666,7 @@ class Downloads:
         Args:
             wanted: The album.
             satellite: The satellite that asked, which is told how it went - or None.
+            ended: Given what to tell Claude of how the approval ended - see Approvals.gate.
 
         Returns:
             What the gate gives; a refusal when there's no way to approve.
@@ -675,7 +682,7 @@ class Downloads:
             return {"success": True, "message": f"Downloading {wanted.name}.", "later": True}
 
         return self._approvals.gate(f"Download the album {wanted.name} ({count} albums in {self._album_minutes()} "
-                                    f"minutes)", do, satellite)
+                                    f"minutes)", do, satellite, ended=ended)
 
     def _is_waiting(self, wanted: Wanted) -> bool:
         """Whether the same request is already waiting."""

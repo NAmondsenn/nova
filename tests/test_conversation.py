@@ -99,7 +99,12 @@ class FakeLLM:
         pass
 
     def note(self, text):
-        self.notes.append(text)
+        if text not in self.notes:
+            self.notes.append(text)
+
+    def unnote(self, text):
+        if text in self.notes:
+            self.notes.remove(text)
 
     def take_back(self):
         return self.history.pop()
@@ -1028,7 +1033,7 @@ def test_claudes_restart_just_chimes_too(tmp_path):
     assert home.pressed == ["button.desk_again"]
 
 
-def _pc_talk(tmp_path, *replies, at_pc=False):
+def _pc_talk(tmp_path, *replies, at_pc=False, **settings):
     """As _pc_conversation, in an open conversation at the satellite the actions are for."""
     home = FakePCHome()
     talk = OpenConversation(lambda: {"enabled": True})
@@ -1036,7 +1041,8 @@ def _pc_talk(tmp_path, *replies, at_pc=False):
     actions = AskingActions(home=home, pc=PCPower(home, ChoiceStore(str(tmp_path / "pcs.json"), {"wake": {}})),
                             satellite="desk", conversation=talk, at_pc=lambda: at_pc)
     llm = FakeLLM(*replies)
-    return _conversation(intents=LocalIntents(), llm=llm, actions=actions, conversing=lambda: True), home, llm
+    return (_conversation(intents=LocalIntents(), llm=llm, actions=actions, conversing=lambda: True, **settings),
+            home, llm)
 
 
 def test_in_a_conversation_shutting_down_asks_first_and_only_a_yes_does_it(tmp_path):
@@ -1075,6 +1081,16 @@ def test_at_the_pc_the_yes_presses_once_the_chime_has_played(tmp_path):
     assert reply.sounds == [("success_chime.wav", "general")] and home.pressed == []
     assert [after() for after in reply.after] == [{"success": True, "message": "Shutting down the PC."}]
     assert home.pressed == ["button.desk_off"]
+
+
+def test_a_routines_step_in_a_conversation_leaves_shutting_down_undone(tmp_path):
+    # Its question would never be answered, as a routine's never is - and one run by itself has nobody there.
+    routine = {"name": "Night", "phrases": ["night night"], "steps": ["shut down the pc", "restart the pc"]}
+    conversation, home, llm = _pc_talk(tmp_path, routines=FakeRoutines(routine))
+    reply = conversation.handle("night night")
+    assert reply.say == ("A routine can't shut down or restart the PC during a conversation. "
+                         "A routine can't shut down or restart the PC during a conversation.")
+    assert not reply.listen_again and home.pressed == [] and conversation.asked_first is None
 
 
 def test_with_the_chime_off_it_says_shutting_down(tmp_path):
@@ -1170,9 +1186,9 @@ class AskedDownloads(Downloads):
         super().__init__(config, lambda satellite, message: None, soulsync=lambda: None, library=library)
         self.requested, self.started = [], []
 
-    def request(self, query, search_type, satellite):
+    def request(self, query, search_type, satellite, ended=None):
         self.requested.append((query, search_type, satellite))
-        return super().request(query, search_type, satellite)
+        return super().request(query, search_type, satellite, ended=ended)
 
     def start(self, wanted, satellite, unless_large=False):
         with self._lock:
@@ -1606,6 +1622,29 @@ def test_think_harder_alone_answers_the_last_turn_again():
     assert llm.history == [{"user": "hello", "assistant": "Hi.", "plain": True},
                            {"user": "help me plan my week", "assistant": "Monday, the gym; Tuesday, the library.",
                             "plain": True}]
+
+
+def test_think_harder_said_over_a_reply_isnt_noted_as_talked_over(tmp_path):
+    # The reply talked over is the one the answer replaces, so noted it would head the request asked again,
+    # telling Claude the reply before that was talked over. Real notes, from the handler itself.
+    llm = LLMHandler(api_key=None)
+    llm.client = SimpleNamespace(messages=None)
+    asked = []
+    llm.process_query = lambda text, **kwargs: asked.append(list(llm._notes)) or {
+        "response": "Monday, the gym.", "actions": [], "success": True}
+    llm.history = [dict(EARLIER)]
+    conversation = _conversation(intents=FakeIntents({"think harder": _bigger()}), llm=llm)
+    conversation.start(talked_over=True)
+    conversation.handle("think harder")
+    assert asked == [[]]
+
+    # Asked again with no answer, the reply stands, talked over, and Claude is told so after all.
+    llm.process_query = lambda text, **kwargs: {"response": "Sorry, that didn't work.", "actions": [],
+                                                "success": False}
+    llm.history = [dict(EARLIER)]
+    conversation.start(talked_over=True)
+    conversation.handle("think harder")
+    assert llm.history == [EARLIER] and llm._notes == [TALKED_OVER_NOTE]
 
 
 def test_think_harder_alone_with_nothing_said_before_only_moves_up():
