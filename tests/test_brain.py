@@ -295,7 +295,8 @@ class Satellite:
     """
 
     def __init__(self, brain, name="bedroom", password=BEDROOM, unclean=False, away=NOTHING_AWAY, push_to_talk=False,
-                 machine=None, saves_notes=False, media_controls=False, opens=False, approves=False):
+                 machine=None, saves_notes=False, media_controls=False, opens=False, approves=False,
+                 version=None, update_format=None):
         self.socket = socket.create_connection(("127.0.0.1", brain.port), timeout=5)
         self.stream = self.socket.makefile("rwb")
         self.lock = threading.Lock()
@@ -303,9 +304,11 @@ class Satellite:
         # Set once the brain has let it go.
         self.gone = threading.Event()
         try:
-            protocol.greet(self.stream, name, f"{name}-pi", password, 48000, unclean, push_to_talk=push_to_talk,
-                           machine=machine, saves_notes=saves_notes, media_controls=media_controls, opens=opens,
-                           approves=approves)
+            # Kept, as an update's proof is bound to them.
+            self.nonces = protocol.greet(self.stream, name, f"{name}-pi", password, 48000, unclean,
+                                         push_to_talk=push_to_talk, machine=machine, saves_notes=saves_notes,
+                                         media_controls=media_controls, opens=opens, approves=approves,
+                                         version=version, update_format=update_format)
         except BaseException:
             # As satellite_link does, so the brain sees it hang up.
             self.socket.close()
@@ -4807,3 +4810,34 @@ def test_every_session_gets_the_approvals(brain, connect, monkeypatch):
     connect(brain, "kitchen", KITCHEN)
     for name in ("bedroom", "kitchen"):
         assert connected(brain, name).actions.approvals is brain.approvals
+
+
+def test_a_satellite_behind_is_sent_the_brains_commit_as_it_connects(make_brain, tmp_path, monkeypatch, passwords):
+    import subprocess
+    from voice_assistant import update_archive
+    from voice_assistant.updates import Updates
+    repo = tmp_path / "brain-code"
+    repo.mkdir()
+    commits = []
+    for number in range(2):
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@t"]
+        subprocess.run(git + ["init", "-q"], cwd=repo, check=True) if number == 0 else None
+        (repo / "file.txt").write_text(f"version {number}\n" * 50)
+        subprocess.run(git + ["add", "."], cwd=repo, check=True)
+        subprocess.run(git + ["commit", "-q", "-m", str(number)], cwd=repo, check=True)
+        commits.append(subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True,
+                                      text=True).stdout.strip())
+    monkeypatch.setattr(brain_module, "Updates", lambda project, version, password_for, folder:
+                        Updates(str(repo), commits[1], password_for, folder))
+    brain = make_brain()
+    serving(brain)
+    satellite = Satellite(brain, version=commits[0], update_format="zip")
+    try:
+        assert wait_for(lambda: satellite.messages("update_end"))
+        offer, = satellite.messages("update_offer")
+        archive = b"".join(payload for message, payload in satellite.received if message["type"] == "update_chunk")
+        assert (offer["version"], offer["format"], offer["size"]) == (commits[1], "zip", len(archive))
+        assert update_archive.zip_commit(archive) == commits[1]
+        assert offer["proof"] == protocol.update_proof(BEDROOM, *satellite.nonces, commits[1], "zip", archive)
+    finally:
+        satellite.go()

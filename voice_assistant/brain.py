@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
-from voice_assistant import logging_setup, paths, protocol, satellite_names, storage, watchdog
+from voice_assistant import code_version, logging_setup, paths, protocol, satellite_names, storage, watchdog
 from voice_assistant.approvals import Approvals
 from voice_assistant.batteries import HOME_FAILURES, BatteryChoices, BatteryWatcher
 from voice_assistant.choices import ChoiceStore
@@ -79,6 +79,7 @@ from voice_assistant.settings_page import SettingsPage
 from voice_assistant.soulsync import SoulSync, SoulSyncAdmin
 from voice_assistant.text_to_speech import TextToSpeech
 from voice_assistant.undo import LastChange
+from voice_assistant.updates import Updates
 from voice_assistant.usage import UsageLog
 from voice_assistant.usage_device import UsageDevice
 from voice_assistant.weather import Weather
@@ -316,6 +317,11 @@ class Brain:
         except Exception as e:
             logger.error(f"Couldn't read the satellites' passwords: {e}")
             self._names_seen = []
+
+        # Which commit each satellite runs against the brain's own, and the update each is offered
+        # as it connects - see Updates. The brain's commit is read once, as it starts.
+        self.updates = Updates(paths.PROJECT_DIRECTORY, code_version.running_version(), self.passwords.get,
+                               os.path.join(paths.DATA_DIR, "update"))
 
         # What's known of each satellite - whether it records on a press, and its room in
         # Home Assistant - which outlasts its connection. Made before any session, as
@@ -1370,6 +1376,8 @@ class Brain:
         # Before it's read, so no list it sends is missed.
         satellite.on_apps = self.computers.set_apps
         satellite.on_windows = self.computers.set_windows
+        satellite.on_update_result = self.updates.result
+        satellite.on_update_installing = self.updates.installing
         # Read from the start, so the satellite's pings are answered while its session is made.
         reading = threading.Thread(target=satellite.serve, daemon=True, name=f"satellite-{name}")
         reading.start()
@@ -1378,6 +1386,11 @@ class Brain:
             session = self._start_session(satellite, password)
             if session is not None and self._catch_up(session, hello_at):
                 self._satellites_changed(but=session)
+                self.updates.seen(satellite)
+                # On a thread of its own, as making and sending an archive takes a while and
+                # the session mustn't wait for it.
+                threading.Thread(target=self.updates.offer, args=(satellite,), daemon=True,
+                                 name=f"update-{name}").start()
                 session.run()
         except Exception:
             logger.exception(f"The {name} satellite's session failed")
@@ -1804,8 +1817,23 @@ class Brain:
         # and may have a conversation of its own.
         self._conversation_gone(name)
         self.computers.gone(name)
+        self.updates.gone(name)
         self._satellites_changed()
         self._quiet_nudge.set()
+
+    def offer_all(self, retry: bool = True) -> List[str]:
+        """
+        Offers the brain's commit to each connected satellite which is behind.
+
+        Args:
+            retry: Whether this is the second go at the same version.
+
+        Returns:
+            The names of the satellites it was sent to.
+        """
+        with self._lock:
+            satellites = [session.satellite for session in self.sessions.values()]
+        return [satellite.name for satellite in satellites if self.updates.offer(satellite, retry)]
 
     def _give_out_orphans(self):
         """
