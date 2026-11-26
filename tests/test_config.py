@@ -416,6 +416,7 @@ IN_AND_OUT = {
     # 0 is no following.
     ("new_music", "follow_top_artists"): ([0, 25, 50], [-1, 51, 2.5, True]),
     ("new_music", "days"): ([1, 14, 60], [0, 61, 2.5, True]),
+    ("updates", "idle_wait_minutes"): ([1, 10, 60], [0, 61, 2.5, True]),
     ("new_music", "playlist"): (["New Music", "", "  ", "Mix 2"], ["!!!", "\U0001F3B5", 5]),
 }
 
@@ -442,6 +443,13 @@ def test_satellite_trigger_is_one_of_two(config_with):
     with pytest.raises(ConfigError) as caught:
         config_with("satellite:\n  trigger: button\n")
     assert "'satellite.trigger' should be one of wake_word, push_to_talk, not 'button'" in str(caught.value)
+
+
+def test_the_idle_wait_is_held_to_one_to_sixty():
+    assert limit_problem("updates", "idle_wait_minutes", 0) == "should be a whole number from 1 to 60"
+    assert limit_problem("updates", "idle_wait_minutes", 61) == "should be a whole number from 1 to 60"
+    assert limit_problem("updates", "idle_wait_minutes", 2.5)
+    assert limit_problem("updates", "idle_wait_minutes", 10) is None
 
 
 def test_the_download_settings_have_their_limits():

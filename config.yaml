@@ -63,6 +63,12 @@ music:
   song_download_minutes: 10
   album_download_minutes: 30
 
+updates:
+  # How long "Update Nova" waits for Nova to be free - nothing playing, no timer ringing and
+  # no conversation going - before it gives up and says so, so it never cuts in on him. Read
+  # when an update starts, so a change is used straight away. A whole number, 1 to 60.
+  idle_wait_minutes: 10
+
 navidrome:
   # Navidrome's address, e.g. "http://navidrome.local:4533", and the user Nova signs in
   # as. The password goes in ~/.config/nova/.env as NAVIDROME_PASSWORD.

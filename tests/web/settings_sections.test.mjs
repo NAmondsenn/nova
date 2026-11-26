@@ -104,7 +104,7 @@ function descendants(node) {
 }
 
 const SECTION_IDS = ["status", "music", "clock", "devices", "batteries", "displays", "journeys", "football",
-                     "calendars", "routines", "satellites", "approvals", "sound", "claude", "conversation", "notifications", "memory", "keys",
+                     "calendars", "routines", "satellites", "approvals", "updates", "sound", "claude", "conversation", "notifications", "memory", "keys",
                      "else"];
 
 // What /api/state says, with nothing in it.

@@ -107,6 +107,9 @@ LIMITS: Dict[Tuple[str, str], Limit] = {
     # more than an hour for a song, or four for an album, is a download which has stalled.
     ("music", "song_download_minutes"): Limit("number", 1, 60, True),
     ("music", "album_download_minutes"): Limit("number", 1, 240, True),
+    # Under a minute an update would give up before a song or a conversation could finish, and past
+    # an hour Nova would sit waiting for a quiet moment which is not coming.
+    ("updates", "idle_wait_minutes"): Limit("number", 1, 60, True),
     # Under 10 seconds would only hammer Home Assistant. A look at least once a minute keeps inside
     # football_watch.GAP, the five minutes what was last seen of a match may be old and still be compared
     # with - past it only a match starting would ever be said - and inside the shortest time before

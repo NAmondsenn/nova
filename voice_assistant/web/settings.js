@@ -553,6 +553,7 @@ async function load() {
   drawIfChanged("displays", [state.displays.list, satellites.map((satellite) => [satellite.name, satellite.default])],
     () => showDisplays(state.displays.list));
   drawIfChanged("keys", state.keys, showKeys);
+  drawIfChanged("updates", state.updates, showUpdates);
   drawIfChanged("settings", state.settings, showSettings);
   showSettingsProblem(state.settings_problem);
   document.getElementById("restart").hidden = !state.restart_needed;
@@ -563,6 +564,143 @@ async function load() {
   }
   noticeVersion(state.page);
   drawList();
+}
+
+// Updates
+
+// How often the state is asked for, in milliseconds: soon again while an update runs, so the
+// button and the rows follow it, and otherwise as STATE_EVERY says.
+const UPDATING_EVERY = 3000;
+
+// Whether the last look found an update going on.
+let updatesRunning = false;
+
+function stateEvery() {
+  return updatesRunning ? UPDATING_EVERY : STATE_EVERY;
+}
+
+// What each state of a machine's update is called, and the colour of the dot beside it.
+const UPDATE_STATES = {
+  current: ["Up to date", "good"],
+  behind: ["Behind", "warning"],
+  updating: ["Updating", "warning"],
+  failed: ["Failed", "bad"],
+  needs_you: ["Needs you", "bad"],
+  old: ["Old: update by hand once", "off"],
+};
+
+// A commit's date, "2026-11-20", as "20 Nov", or "" if it isn't one.
+function commitDate(text) {
+  const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(text || ""));
+  if (!parts) return "";
+  const date = new Date(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3]));
+  return date.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+}
+
+// The brain's state, from whether an update runs and how the last one went: its own code is
+// the newest there is, so it is never "behind".
+function brainUpdateState(updates) {
+  if (updates.running) return { state: "updating", reason: null, commands: [] };
+  const last = updates.last || {};
+  if (last.state === "failed" || last.state === "needs_you") {
+    const needs = Array.isArray(last.needs_you) ? last.needs_you : [];
+    const commands = needs.length ? needs.map((one) => one.command) : [last.command];
+    return { state: last.state, reason: last.reason, commands: commands.filter(Boolean) };
+  }
+  return { state: "current", reason: null, commands: [] };
+}
+
+// Every machine's update state, the brain first, as the list reads it.
+function updateMachines(updates) {
+  const brain = brainUpdateState(updates);
+  return [{ name: "brain", state: brain.state },
+          ...(updates.versions.satellites || []).map((one) => ({ name: one.name, state: one.state }))];
+}
+
+// A command to run, in a line of its own with a Copy button. Copied from the line's own text, as
+// the password is - and where the browser gives no clipboard, which it only does over HTTPS, it is
+// selected, to be copied from there.
+function commandLine(command) {
+  const line = element("div", undefined, "command");
+  const code = element("code", command);
+  const copy = element("button", "Copy", "button quiet");
+  copy.type = "button";
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(code.textContent);
+      copy.textContent = "Copied";
+    } catch (error) {
+      const range = document.createRange();
+      range.selectNodeContents(code);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      toast("Couldn't copy it, so it's selected - copy it from there.", false);
+    }
+  });
+  line.append(code, copy);
+  return line;
+}
+
+// One machine's row: its name, its commit and date, and its state in words - with, for one which
+// needs him, why and each command to run. Everything a satellite sent goes in as text.
+function updateRow(machine) {
+  const [word, mood] = UPDATE_STATES[machine.state] || ["Unknown", "off"];
+  const row = element("li");
+  const what = element("span", undefined, "what");
+  what.append(machine.name);
+  if (machine.away) what.append(element("span", "Away", "badge"));
+  const version = machine.short ? [machine.short, commitDate(machine.date)].filter(Boolean).join(", ") : "Version not known";
+  what.append(element("span", version, "detail version"));
+  const state = element("span", undefined, "detail state");
+  state.append(dot(mood));
+  const needs = machine.state === "needs_you";
+  const failed = machine.state === "failed";
+  state.append(failed && machine.reason ? `${word}: ${machine.reason}` : needs ? `${word}:` : word);
+  what.append(state);
+  if (needs && machine.reason) what.append(element("span", machine.reason, "detail"));
+  for (const command of machine.commands) what.append(commandLine(command));
+  row.append(what);
+  return row;
+}
+
+// The Updates section, from what the state says of it: each machine, when the last update was and
+// the button, which is off while one runs. Nothing is shown of a brain which has not said.
+function showUpdates(updates) {
+  updatesRunning = Boolean(updates && updates.running);
+  const button = document.getElementById("updates-button");
+  const last = document.getElementById("updates-last");
+  if (!updates) {
+    document.getElementById("updates-machines").replaceChildren();
+    button.disabled = true;
+    last.hidden = true;
+    last.textContent = "";
+    return;
+  }
+  const brain = brainUpdateState(updates);
+  const machines = [{ name: "Brain", state: brain.state, reason: brain.reason, commands: brain.commands,
+                      short: updates.versions.brain.short, date: updates.versions.brain.date, away: false }];
+  for (const one of updates.versions.satellites || []) {
+    machines.push({ name: one.name, state: one.state, reason: one.reason, commands: one.command ? [one.command] : [],
+                    short: one.short, date: one.date, away: !one.connected });
+  }
+  document.getElementById("updates-machines").replaceChildren(...machines.map(updateRow));
+  button.disabled = Boolean(updates.running);
+  button.textContent = updates.running ? "Updating..." : "Update Nova";
+  const at = updates.last && updates.last.at ? new Date(updates.last.at) : null;
+  const known = at && !Number.isNaN(at.getTime());
+  last.hidden = !known;
+  if (known) {
+    const day = dayOf(at);
+    last.textContent = `Last updated ${day === "Today" || day === "Yesterday" ? day.toLowerCase() : day} at ${clockTime(at)}`;
+  } else {
+    last.textContent = "";
+  }
+}
+
+// Update Nova: sent, said as the other buttons say theirs, and the page looked at again.
+function setUpUpdates() {
+  document.getElementById("updates-button").addEventListener("click", () => change("/api/update", {}));
 }
 
 // Whether Stop's been pressed and the brain's not yet answered. The quick check can
@@ -3441,6 +3579,7 @@ function currentView() {
     google: worked.calendars && calendars ? (!calendars.available ? "off" : calendars.signed_in ? "in" : "out") : null,
     spotify: worked.music && music ? (!music.spotify ? "off" : music.spotify.signed_in ? "in" : "out") : null,
     routines: state ? state.routines.length : null,
+    updates: state && state.updates ? { machines: updateMachines(state.updates) } : null,
     satellites: readable ? state.satellites.map((one) => ({ name: one.name, connected: Boolean(one.connected),
                                                             isDefault: Boolean(one.default) })) : null,
     voice: Number.isFinite(volume) ? Math.round(volume) : null,
@@ -4043,7 +4182,8 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  every(STATE_EVERY, load);
+  setUpUpdates();
+  every(stateEvery, load);
   every(LIVE_EVERY, live);
   every(MUSIC_EVERY, loadMusic);
   every(HOME_EVERY, loadHome);

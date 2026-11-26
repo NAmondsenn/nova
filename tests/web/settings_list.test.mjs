@@ -51,6 +51,7 @@ const view = (changes = {}) => ({
   memories: 12,
   keys: { set: 6, total: 11 },
   approvals: { passkeys: 1, approvers: ["the PC"] },
+  updates: { machines: [{ name: "brain", state: "current" }, { name: "pi", state: "current" }] },
   ...changes,
 });
 
@@ -62,7 +63,7 @@ test("the groups and sections are in the contract's order", () => {
   assert.equal(List.GROUPS.map((group) => `${group.id}:${group.name}`).join(" "), "now:Now home:Home daily:Daily nova:Nova");
   assert.equal(
     List.SECTIONS.map((section) => section.id).join(" "),
-    "status music clock devices batteries displays journeys football calendars routines satellites approvals sound claude conversation notifications memory keys else",
+    "status music clock devices batteries displays journeys football calendars routines satellites approvals updates sound claude conversation notifications memory keys else",
   );
   const section = (id) => List.SECTIONS.find((one) => one.id === id);
   assert.equal(section("status").name, "Status");
@@ -523,4 +524,31 @@ test("a section is found from its hash only when the hash is one", () => {
   assert.equal(List.fromHash(""), null);
   assert.equal(List.fromHash("music"), null);
   assert.equal(List.fromHash(undefined), null);
+});
+
+test("the updates section is in the nova group and holds the updates keys", () => {
+  const section = List.SECTIONS.find((one) => one.id === "updates");
+  assert.equal(`${section.name} ${section.group} ${section.icon}`, "Updates nova i-server");
+  assert.equal(List.sectionOf("updates.idle_wait_minutes"), "updates");
+  assert.equal(List.subheadingOf("updates.idle_wait_minutes"), null);
+});
+
+test("the updates line says how many machines are behind, or what needs him", () => {
+  assert.equal(said("updates"), "All up to date");
+  assert.equal(said("updates", { updates: null }), "");
+  const machines = (...states) => ({ updates: { machines: states.map((state, at) => ({ name: `m${at}`, state })) } });
+  assert.deepEqual(line("updates", machines("current", "behind")), { text: "1 behind", warn: false });
+  assert.equal(said("updates", machines("behind", "behind", "updating")), "2 behind, 1 updating");
+  assert.deepEqual(line("updates", machines("current", "failed")), { text: "The m1 needs you for its update", warn: true });
+});
+
+test("a machine whose update failed or needs him is flagged, the brain as well as a satellite", () => {
+  const flagged = (...states) => plain(List.attention(view({
+    updates: { machines: states.map(([name, state]) => ({ name, state })) } }), NOW))
+    .filter((one) => one.section === "updates").map((one) => one.text);
+  assert.deepEqual(flagged(["brain", "current"], ["pi", "behind"]), []);
+  assert.deepEqual(flagged(["brain", "current"], ["pi", "failed"]), ["The pi needs you for its update"]);
+  assert.deepEqual(flagged(["brain", "needs_you"], ["pc", "needs_you"]),
+    ["The brain needs you for its update", "The pc needs you for its update"]);
+  assert.deepEqual(plain(List.attention(view({ updates: null }), NOW)).filter((one) => one.section === "updates"), []);
 });

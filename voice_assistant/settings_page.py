@@ -124,6 +124,8 @@ EDITABLE = [
     ("music", "song_download_minutes", "Minutes to wait for a song to download", "now"),
     ("music", "album_download_minutes", "Minutes to wait for an album to download", "now"),
     ("soulsync", "url", "SoulSync's address", "now"),
+    # Read when an update starts - see brain_update.py - so straight away.
+    ("updates", "idle_wait_minutes", "Minutes to wait for Nova to be free before updating", "now"),
     # Read at each song, so straight away - see docs/decisions/0022. The thresholds were set
     # from a test on real songs, so they stay in config.yaml.
     ("clean_check", "swap_tries", "Tries to swap a clean song", "now"),
@@ -841,6 +843,8 @@ class SettingsPage:
                 "journeys": self.brain.journeys.used() if self.brain.journeys is not None else None,
                 "settings": settings,
                 "settings_problem": problem,
+                # Each machine's version, how the last update went, and whether one is going on.
+                "updates": self.updates_state(),
                 "restart_needed": self._restart_needed(saved),
                 "page": self.page_version}
 
@@ -2051,6 +2055,38 @@ class SettingsPage:
         logger.info(f"Settings page: {who} asked to stop the library check")
         return self.brain.clean_check.stop()
 
+    def updates_state(self) -> Optional[Dict]:
+        """
+        The Updates section: each machine's version and state, how the brain's last update
+        went, and whether one is going on now.
+
+        Returns:
+            {"versions": ..., "last": ..., "running": ...} as Updates.versions,
+            BrainUpdate.outcome and BrainUpdate.running give them, or None while the brain
+            has neither.
+        """
+        updates, update = self.brain.updates, self.brain.update
+        if updates is None or update is None:
+            return None
+        # An unreadable satellites file is said elsewhere on the page, and here as none to list.
+        return {"versions": updates.versions(self._satellite_names() or []), "last": update.outcome(),
+                "running": update.running}
+
+    def start_update(self, who: str) -> Dict:
+        """
+        The Updates section's Update Nova: the brain, then every satellite behind, brought
+        to the newest code. See BrainUpdate.start.
+
+        Args:
+            who: The login pressing it, for the log.
+
+        Returns:
+            {"success": True, "message": ...}, what Nova would say of it - including that
+            one is already going.
+        """
+        logger.info(f"Settings page: {who} started an update")
+        return {"success": True, "message": self.brain.update.start(None)}
+
     def run(self, entity_id: str, who: str, satellite: Optional[str] = None, confirmed: bool = False) -> Dict:
         """
         Runs a script or sets a scene - see HomeAssistant.run, whose guard still decides.
@@ -3102,6 +3138,7 @@ ACTIONS: Dict[str, Callable[[SettingsPage, Dict, str], Dict]] = {
     "/api/football/unfollow": lambda page, body, who: page.unfollow_football(body["name"], who),
     "/api/clean/check": lambda page, body, who: page.start_clean_check(who),
     "/api/clean/stop": lambda page, body, who: page.stop_clean_check(who),
+    "/api/update": lambda page, body, who: page.start_update(who),
     "/api/run": lambda page, body, who: page.run(
         body["id"], who, body.get("satellite"), body.get("confirmed", False)),
     "/api/routines": lambda page, body, who: page.save_routine(body["routine"], who),

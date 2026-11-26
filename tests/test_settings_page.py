@@ -296,6 +296,7 @@ class FakeBrain:
         self.known = list(sessions) if known is None else known
         self.clock, self.memory = FakeClock(), FakeMemory()
         self.ntfy = self.stt = self.routines = self.batteries = self.config = self.calendar = None
+        self.updates = self.update = None
         self.home = self.lists = self.weather = self.pc = None
         self.football = self.football_watcher = self.wrapped_store = self.journeys = None
         self.displays, self.display_server = NoDisplays(), None
@@ -3741,6 +3742,116 @@ def test_the_page_shows_the_library_check_and_starts_and_stops_it(files, caplog)
         page.stop()
     assert f"Settings page: {LOGIN} asked to check the library for clean songs" in caplog.text
     assert f"Settings page: {LOGIN} asked to stop the library check" in caplog.text
+
+
+# Updates
+
+class FakeUpdates:
+    """Stands in for what is known of each machine's version - see updates.py - as it says it."""
+
+    VERSIONS = {"brain": {"version": "b" * 40, "short": "bbbbbbb", "date": "2026-11-26"},
+                "satellites": [
+                    {"name": "pi", "version": "a" * 40, "short": "aaaaaaa", "date": "2026-11-20", "connected": True,
+                     "state": "behind", "reason": None, "command": None},
+                    {"name": "pc", "version": None, "short": None, "date": None, "connected": False,
+                     "state": "needs_you", "reason": "Needs a new package", "command": "pip install thing"}]}
+
+    def __init__(self):
+        self.asked = []
+
+    def versions(self, known):
+        self.asked.append(list(known))
+        return self.VERSIONS
+
+
+class FakeBrainUpdate:
+    """Stands in for the brain's own update - see brain_update.py - with the outcome it kept."""
+
+    OUTCOME = {"state": "done", "at": "2026-11-26T09:30:00+00:00", "from": "a" * 40, "to": "b" * 40,
+               "reason": None, "command": None, "needs_you": []}
+
+    def __init__(self, running=False):
+        self.running = running
+        self.started = []
+
+    def outcome(self):
+        return dict(self.OUTCOME)
+
+    def start(self, asked_at):
+        self.started.append(asked_at)
+        return "Updating. I'll be back in a minute."
+
+
+def test_the_updates_section_lists_every_machine_and_its_state(files):
+    updates, update = FakeUpdates(), FakeBrainUpdate(running=True)
+    page = _page(known=["pi", "pc"], updates=updates, update=update)
+    shown = page.state()["updates"]
+    assert shown == {"versions": FakeUpdates.VERSIONS, "last": FakeBrainUpdate.OUTCOME, "running": True}
+    # Every satellite he has, in the order the brain lists them.
+    assert updates.asked == [["pi", "pc"]]
+    assert _page().state()["updates"] is None
+
+
+def test_update_nova_starts_one_and_says_who(files, caplog):
+    caplog.set_level(logging.INFO)
+    update = FakeBrainUpdate()
+    page = _page(updates=FakeUpdates(), update=update)
+    assert page.start_update(LOGIN) == {"success": True, "message": "Updating. I'll be back in a minute."}
+    # Asked at the settings page, not at a satellite.
+    assert update.started == [None]
+    assert f"Settings page: {LOGIN} started an update" in caplog.text
+    page.start()
+    try:
+        assert _ask(page, "/api/update", {})[0] == 403
+        assert update.started == [None]
+        assert json.loads(_ask(page, "/api/update", {}, X_Nova="page")[2]) == {
+            "success": True, "message": "Updating. I'll be back in a minute."}
+        assert update.started == [None, None]
+    finally:
+        page.stop()
+
+
+def test_update_nova_works_through_the_proxy_with_its_login(files, monkeypatch):
+    monkeypatch.setattr(page_module, "STOP_CHECK", 0.02)
+    update = FakeBrainUpdate()
+    page = _npm_page(files, password=PASSWORD)
+    page.brain.updates, page.brain.update = FakeUpdates(), update
+    page.start()
+    try:
+        assert _through_npm(page, "/api/update", {}, X_Nova="page")[0] == 401
+        assert update.started == []
+        _, token = _log_in(page)
+        status, _, body = _through_npm(page, "/api/update", {}, cookie=token, X_Nova="page")
+        assert (status, json.loads(body)["success"]) == (200, True)
+        assert update.started == [None]
+        assert _through_npm(page, "/api/state", cookie=token)[0] == 200
+    finally:
+        page.stop()
+
+
+def test_the_idle_wait_is_a_setting_used_straight_away(files):
+    page, running = _running(files)
+    shown = {setting["key"]: setting for setting in page.state()["settings"]}["updates.idle_wait_minutes"]
+    assert shown["label"] == "Minutes to wait for Nova to be free before updating"
+    assert shown["used"] == NOW
+    assert (shown["value"], shown["min"], shown["max"], shown["whole"]) == (10, 1, 60, True)
+    assert page.save_settings({"updates.idle_wait_minutes": "15"}, LOGIN)["success"]
+    assert running.section("updates")["idle_wait_minutes"] == 15
+    for bad in ("0", "61", "2.5"):
+        assert not page.save_settings({"updates.idle_wait_minutes": bad}, LOGIN)["success"]
+    assert running.section("updates")["idle_wait_minutes"] == 15
+
+
+def test_the_updates_section_is_in_the_list():
+    with open(os.path.join(page_module.WEB_FOLDER, "settings_list.js")) as file:
+        script = file.read()
+    starts = {name: re.findall(r'"([a-z_]+\.)"', keys)
+              for name, keys in re.findall(r'^\s*\{ id: "([a-z]+)", .* starts: (\[.*?\]) \},$', script, re.M)}
+    assert starts["updates"] == ["updates."]
+    assert '{ id: "updates", name: "Updates", group: "nova", icon: "i-server"' in script
+    with open(os.path.join(page_module.WEB_FOLDER, "settings.html")) as file:
+        html = file.read()
+    assert 'id="section-updates"' in html and 'id="updates-button"' in html
 
 
 # The lists, sending, the weather and the PCs

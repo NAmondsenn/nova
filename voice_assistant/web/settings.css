@@ -2191,3 +2191,86 @@ p.login { color: var(--moon); }
     transform: scale(1.6);
   }
 }
+
+/* The Updates section: each machine as a row - its name, its commit and date, and how its update
+   is, with a command to run in a line of its own - and under them the button and when the last
+   update was. The commands wrap rather than push the row wider than a phone. */
+.updates li { align-items: flex-start; padding: 13px 16px; }
+
+.updates .detail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--dusk);
+  font-size: 13px;
+}
+
+.updates .detail.state { color: var(--moon); font-size: 14px; margin-top: 2px; }
+
+.updates .badge {
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 1px var(--field-edge);
+  color: var(--dusk);
+  font-size: 12px;
+}
+
+.updates .command {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.updates .command code {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 12px;
+  border: 1px solid var(--field-edge);
+  border-radius: var(--field-round);
+  background: var(--field);
+  color: var(--moon);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.updates .command .button {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.update-now {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 14px 16px;
+}
+
+.update-now p { margin: 0; }
+
+.update-now .entry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.update-now .about {
+  flex: 1 1 200px;
+  color: var(--dusk);
+}
+
+.update-now .how {
+  color: var(--dusk);
+  font-size: 13px;
+  text-wrap: pretty;
+}
+
+.update-now .button {
+  min-width: 44px;
+  min-height: 44px;
+}

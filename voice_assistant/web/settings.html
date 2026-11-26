@@ -373,6 +373,21 @@
           <div class="settings-of" data-settings="approvals" hidden></div>
         </section>
 
+        <!-- Every machine's version and state: the brain, then each satellite, and the button which brings
+             them all to the newest code. Drawn from what /api/state says of the updates. -->
+        <section id="section-updates" data-section="updates" aria-labelledby="updates-title">
+          <h2 class="heading" id="updates-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-server"></use></svg>Updates</h2>
+          <ul class="list updates" id="updates-machines"></ul>
+          <div class="panel update-now">
+            <div class="entry">
+              <p class="about" id="updates-last" hidden></p>
+              <button type="button" class="button" id="updates-button" disabled>Update Nova</button>
+            </div>
+            <p class="how">Brings the brain and every satellite to the newest code. Nova waits until it is free, so it never cuts in on you.</p>
+          </div>
+          <div class="settings-of" data-settings="updates" hidden></div>
+        </section>
+
         <section id="section-sound" data-section="sound" aria-labelledby="sound-title">
           <h2 class="heading" id="sound-title" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-sound"></use></svg><span class="title">Sound and voice<span class="whose" hidden></span></span></h2>
           <div class="tiles single" id="volumes"></div>

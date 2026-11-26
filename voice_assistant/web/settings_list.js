@@ -34,6 +34,7 @@
     { id: "routines", name: "Routines", group: "daily", icon: "i-routine", starts: [] },
     { id: "satellites", name: "Satellites", group: "nova", icon: "i-microphone", starts: ["computer."] },
     { id: "approvals", name: "Approvals", group: "nova", icon: "i-key", starts: ["approvals."] },
+    { id: "updates", name: "Updates", group: "nova", icon: "i-server", starts: ["updates."] },
     { id: "sound", name: "Sound and voice", group: "nova", icon: "i-sound", starts: ["voice.", "sounds.", "thresholds."] },
     // Claude's own two settings of a thread's length are named in full, as the rest of "conversation." is the
     // Conversation section's, which comes after.
@@ -109,6 +110,10 @@
     }
     return newest;
   };
+
+  // The machines whose update failed or waits on him, and what the list says of one.
+  const needsYou = (machines) => machines.filter((machine) => machine.state === "failed" || machine.state === "needs_you");
+  const updateNeed = (machine) => `The ${machine.name} needs you for its update`;
 
   // Each row's line: what it says and whether it is marked as a warning. A part of the view
   // which is null (not loaded, or couldn't be read) gives an empty line.
@@ -193,6 +198,22 @@
       const passkeys = approvals.passkeys ? count(approvals.passkeys, "passkey", "passkeys") : "No passkey";
       return { text: [passkeys, ...approvers].join(", ") };
     },
+    // How far each machine is from the newest code: what needs him first, else who is behind or
+    // being updated.
+    updates: (view) => {
+      const machines = view.updates && view.updates.machines;
+      if (!machines) return { text: "" };
+      const needing = needsYou(machines);
+      if (needing.length) return { text: updateNeed(needing[0]), warn: true };
+      const behind = machines.filter((machine) => machine.state === "behind").length;
+      const updating = machines.filter((machine) => machine.state === "updating").length;
+      const old = machines.filter((machine) => machine.state === "old").length;
+      const parts = [];
+      if (behind) parts.push(`${behind} behind`);
+      if (updating) parts.push(`${updating} updating`);
+      if (old) parts.push(`${old} to update by hand`);
+      return { text: parts.length ? parts.join(", ") : "All up to date" };
+    },
     sound: (view) => ({ text: view.voice == null ? "" : `Voice at ${view.voice}%` }),
     claude: (view) => {
       if (view.webSearch == null) return { text: "" };
@@ -251,6 +272,9 @@
     }
     if (view.google === "out") found.push({ section: "calendars", text: "Sign in to Google" });
     if (view.spotify === "out") found.push({ section: "music", text: "Sign in to Spotify" });
+    for (const machine of needsYou((view.updates && view.updates.machines) || [])) {
+      found.push({ section: "updates", text: updateNeed(machine) });
+    }
     const problem = recentProblem(view, now);
     if (problem) found.push({ section: "status", text: `A problem at ${clockAt(problem.at)}` });
     return found;
