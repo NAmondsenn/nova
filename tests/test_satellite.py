@@ -1386,11 +1386,14 @@ def test_the_away_report_is_sent_on_connecting(brain, make, tmp_path):
     # Not dismissed, and still ringing - so the brain takes the ringing over.
     assert brain.messages("away") == [{"type": "away", "rang": ["alarm-1@1729587600"], "dismissed": [],
                                        "ringing": ["alarm-1@1729587600"]}]
+    nonces = brain.hellos[0].pop("nonces")
+    assert len(nonces) == 2 and nonces[0] != nonces[1] and all(isinstance(n, str) for n in nonces)
     assert brain.hellos == [{"name": "bedroom", "hostname": socket.gethostname(), "sample_rate": 48000,
                              "unclean": True, "speaker": None,
                              "push_to_talk": False, "machine": "pi", "saves_notes": False,
                              "media_controls": False, "opens": False, "system_volume": False,
-                             "approves": False, "conversations": True}]
+                             "approves": False, "conversations": True,
+                             "version": None, "updates": False, "update_format": None}]
 
 
 def test_the_satellite_tells_the_brain_its_spotify_speaker(brain, make):
