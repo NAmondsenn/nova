@@ -113,7 +113,12 @@
 
   // The machines whose update failed or waits on him, and what the list says of one.
   const needsYou = (machines) => machines.filter((machine) => machine.state === "failed" || machine.state === "needs_you");
-  const updateNeed = (machine) => `The ${machine.name} needs you for its update`;
+  // `spoken` is how the page says the machine mid-sentence, "the PC", so it is capitalised to start one.
+  const updateNeed = (machine) => {
+    const spoken = String(machine.spoken || machine.name || "");
+    return `${spoken.charAt(0).toUpperCase()}${spoken.slice(1)} needs you for its update`;
+  };
+  const DIDNT_START = "Nova's update didn't start";
 
   // Each row's line: what it says and whether it is marked as a warning. A part of the view
   // which is null (not loaded, or couldn't be read) gives an empty line.
@@ -205,6 +210,7 @@
       if (!machines) return { text: "" };
       const needing = needsYou(machines);
       if (needing.length) return { text: updateNeed(needing[0]), warn: true };
+      if (machines.some((machine) => machine.state === "busy")) return { text: DIDNT_START, warn: true };
       const behind = machines.filter((machine) => machine.state === "behind").length;
       const updating = machines.filter((machine) => machine.state === "updating").length;
       const old = machines.filter((machine) => machine.state === "old").length;
@@ -274,6 +280,9 @@
     if (view.spotify === "out") found.push({ section: "music", text: "Sign in to Spotify" });
     for (const machine of needsYou((view.updates && view.updates.machines) || [])) {
       found.push({ section: "updates", text: updateNeed(machine) });
+    }
+    if (((view.updates && view.updates.machines) || []).some((machine) => machine.state === "busy")) {
+      found.push({ section: "updates", text: DIDNT_START });
     }
     const problem = recentProblem(view, now);
     if (problem) found.push({ section: "status", text: `A problem at ${clockAt(problem.at)}` });

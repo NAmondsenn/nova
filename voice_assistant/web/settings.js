@@ -608,7 +608,7 @@ function brainUpdateState(updates) {
   // Anything left for him is his to do, even after an update which worked and restarted Nova.
   if (needs.length || last.state === "failed" || last.state === "needs_you") {
     const commands = needs.length ? needs.map((one) => one.command) : [last.command];
-    return { state: needs.length ? "needs_you" : last.state, reason: last.reason, commands: commands.filter(Boolean) };
+    return { state: needs.length ? "needs_you" : last.state, reason: last.reason || (needs[0] && needs[0].why) || null, commands: commands.filter(Boolean) };
   }
   if (last.state === "busy") return { state: "busy", reason: last.reason, commands: [] };
   return { state: "current", reason: null, commands: [] };
@@ -617,8 +617,22 @@ function brainUpdateState(updates) {
 // Every machine's update state, the brain first, as the list reads it.
 function updateMachines(updates) {
   const brain = brainUpdateState(updates);
-  return [{ name: "brain", state: brain.state },
-          ...(updates.versions.satellites || []).map((one) => ({ name: one.name, state: one.state }))];
+  return [{ name: "brain", spoken: "the brain", state: brain.state },
+          ...(updates.versions.satellites || []).map((one) => ({
+            name: one.name, spoken: updateSpoken(one.name), state: one.state }))];
+}
+
+// How the page says a satellite mid-sentence, "the PC" or the name he gave it, from what the state
+// says of the satellites - or, for one it hasn't, its own name with PC and Pi in their usual case.
+function updateSpoken(name) {
+  const known = satellites.find((one) => one.name === name);
+  if (known) return spokenOf(known);
+  return { pc: "PC", pi: "Pi", mac: "Mac" }[name] || name;
+}
+
+// The same to start a sentence or a row.
+function updateName(name) {
+  return capitalised(updateSpoken(name));
 }
 
 // A command to run, in a line of its own with a Copy button. Copied from the line's own text, as
@@ -658,11 +672,12 @@ function updateRow(machine) {
   what.append(element("span", version, "detail version"));
   const state = element("span", undefined, "detail state");
   state.append(dot(mood));
-  const needs = machine.state === "needs_you";
-  const reasoned = machine.state === "failed" || machine.state === "busy";
-  state.append(reasoned && machine.reason ? `${word}: ${machine.reason}` : needs ? `${word}:` : word);
+  state.append(word);
   what.append(state);
-  if (needs && machine.reason) what.append(element("span", machine.reason, "detail"));
+  // Why, on the line beneath the state - not run on after it.
+  if (["failed", "busy", "needs_you"].includes(machine.state) && machine.reason) {
+    what.append(element("span", machine.reason, "detail"));
+  }
   for (const command of machine.commands) what.append(commandLine(command));
   row.append(what);
   return row;
@@ -685,7 +700,7 @@ function showUpdates(updates) {
   const machines = [{ name: "Brain", state: brain.state, reason: brain.reason, commands: brain.commands,
                       version: updates.versions.brain.version, short: updates.versions.brain.short, date: updates.versions.brain.date, away: false }];
   for (const one of updates.versions.satellites || []) {
-    machines.push({ name: one.name, state: one.state, reason: one.reason, commands: one.command ? [one.command] : [],
+    machines.push({ name: updateName(one.name), state: one.state, reason: one.reason, commands: one.command ? [one.command] : [],
                     version: one.version, short: one.short, date: one.date, away: !one.connected });
   }
   document.getElementById("updates-machines").replaceChildren(...machines.map(updateRow));

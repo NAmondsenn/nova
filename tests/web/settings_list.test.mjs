@@ -51,7 +51,7 @@ const view = (changes = {}) => ({
   memories: 12,
   keys: { set: 6, total: 11 },
   approvals: { passkeys: 1, approvers: ["the PC"] },
-  updates: { machines: [{ name: "brain", state: "current" }, { name: "pi", state: "current" }] },
+  updates: { machines: [{ spoken: "the brain", state: "current" }, { spoken: "the Pi", state: "current" }] },
   ...changes,
 });
 
@@ -536,7 +536,7 @@ test("the updates section is in the nova group and holds the updates keys", () =
 test("the updates line says how many machines are behind, or what needs him", () => {
   assert.equal(said("updates"), "All up to date");
   assert.equal(said("updates", { updates: null }), "");
-  const machines = (...states) => ({ updates: { machines: states.map((state, at) => ({ name: `m${at}`, state })) } });
+  const machines = (...states) => ({ updates: { machines: states.map((state, at) => ({ spoken: `the m${at}`, state })) } });
   assert.deepEqual(line("updates", machines("current", "behind")), { text: "1 behind", warn: false });
   assert.equal(said("updates", machines("behind", "behind", "updating")), "2 behind, 1 updating");
   assert.deepEqual(line("updates", machines("current", "failed")), { text: "The m1 needs you for its update", warn: true });
@@ -544,11 +544,18 @@ test("the updates line says how many machines are behind, or what needs him", ()
 
 test("a machine whose update failed or needs him is flagged, the brain as well as a satellite", () => {
   const flagged = (...states) => plain(List.attention(view({
-    updates: { machines: states.map(([name, state]) => ({ name, state })) } }), NOW))
+    updates: { machines: states.map(([spoken, state]) => ({ spoken, state })) } }), NOW))
     .filter((one) => one.section === "updates").map((one) => one.text);
-  assert.deepEqual(flagged(["brain", "current"], ["pi", "behind"]), []);
-  assert.deepEqual(flagged(["brain", "current"], ["pi", "failed"]), ["The pi needs you for its update"]);
-  assert.deepEqual(flagged(["brain", "needs_you"], ["pc", "needs_you"]),
-    ["The brain needs you for its update", "The pc needs you for its update"]);
+  assert.deepEqual(flagged(["the brain", "current"], ["the Pi", "behind"]), []);
+  assert.deepEqual(flagged(["the brain", "current"], ["the Pi", "failed"]), ["The Pi needs you for its update"]);
+  assert.deepEqual(flagged(["the brain", "needs_you"], ["the PC", "needs_you"]),
+    ["The brain needs you for its update", "The PC needs you for its update"]);
   assert.deepEqual(plain(List.attention(view({ updates: null }), NOW)).filter((one) => one.section === "updates"), []);
+});
+
+test("an update which didn't start is on the line and in attention, not all up to date", () => {
+  const busy = { updates: { machines: [{ spoken: "the brain", state: "busy" }, { spoken: "the Pi", state: "current" }] } };
+  assert.deepEqual(line("updates", busy), { text: "Nova's update didn't start", warn: true });
+  const found = plain(List.attention(view(busy), NOW)).filter((one) => one.section === "updates").map((one) => one.text);
+  assert.deepEqual(found, ["Nova's update didn't start"]);
 });

@@ -118,6 +118,9 @@ const DONE = { ...NONE, state: "done", at: new Date().toISOString() };
 
 const updates = (changes = {}) => ({ versions: { brain: BRAIN, satellites: [PI, PC] }, last: DONE, running: false, ...changes });
 
+// The detail lines of a row, in order.
+const details = (row) => all(row, "span").filter((span) => /detail/.test(span.className)).map((span) => span.textContent);
+
 // What a row says, as its own text and the code lines in it.
 const rows = (shown) => all(shown.node("updates-machines"), "li");
 const said = (row) => row.textContent;
@@ -132,11 +135,11 @@ test("the brain is listed first, then each satellite by name, with its commit, d
   assert.match(lines[0], /bbbbbbb/);
   assert.match(lines[0], /26 Nov/);
   assert.match(lines[0], /Up to date/);
-  assert.match(lines[1], /^pi/);
+  assert.match(lines[1], /^Pi/);
   assert.match(lines[1], /aaaaaaa/);
   assert.match(lines[1], /20 Nov/);
   assert.match(lines[1], /Behind/);
-  assert.match(lines[2], /^pc/);
+  assert.match(lines[2], /^PC/);
   assert.match(lines[2], /Up to date/);
 });
 
@@ -156,7 +159,10 @@ test("each state of a satellite is said in words", () => {
     return rows(shown)[1];
   };
   assert.match(said(row({ state: "updating" })), /Updating/);
-  assert.match(said(row({ state: "failed", reason: "It wouldn't start" })), /Failed: It wouldn't start/);
+  assert.match(said(row({ state: "failed", reason: "It wouldn't start" })), /Failed/);
+  assert.doesNotMatch(said(row({ state: "failed", reason: "It wouldn't start" })), /Failed:/);
+  // The reason on a line beneath the state, not run on after it.
+  assert.deepEqual(details(row({ state: "failed", reason: "It wouldn't start" })).slice(-2), ["Failed", "It wouldn't start"]);
   assert.match(said(row({ state: "old" })), /Old: update by hand once/);
   const needs = row({ state: "needs_you", reason: "A package is missing", command: "pip install thing" });
   assert.match(said(needs), /Needs you/);
@@ -172,7 +178,7 @@ test("the brain's row follows the last outcome, with each thing it needs as its 
   };
   assert.match(said(brain(DONE)), /Up to date/);
   assert.match(said(brain(NONE)), /Up to date/);
-  assert.match(said(brain({ ...DONE, state: "failed", reason: "Tests failed", command: null })), /Failed: Tests failed/);
+  assert.match(said(brain({ ...DONE, state: "failed", reason: "Tests failed", command: null })), /Failed/);
   assert.match(said(brain(DONE, true)), /Updating/);
   const needs = brain({ ...DONE, state: "needs_you", reason: "New package", command: "sudo apt install x",
                          needs_you: [{ why: "New package", command: "sudo apt install x" },
@@ -275,7 +281,8 @@ test("an update which didn't start says so with its reason, and the time is Last
   const shown = page();
   const busy = { ...DONE, state: "busy", reason: "Nova was busy for 10 minutes, so the update didn't start." };
   shown.context.showUpdates(updates({ last: busy }));
-  assert.match(said(rows(shown)[0]), /Didn't start: Nova was busy for 10 minutes/);
+  assert.match(said(rows(shown)[0]), /Didn't start/);
+  assert.deepEqual(details(rows(shown)[0]).slice(-2), ["Didn't start", busy.reason]);
   assert.doesNotMatch(said(rows(shown)[0]), /Up to date/);
   assert.match(shown.node("updates-last").textContent, /^Last tried /);
   shown.context.showUpdates(updates({ last: { ...DONE, state: "failed", reason: "Broke" } }));
@@ -294,4 +301,28 @@ test("the list reads the brain as needing him when its update left things for hi
   assert.equal(machines(left)[0].state, "needs_you");
   assert.equal(machines(DONE)[0].state, "current");
   assert.equal(machines({ ...DONE, state: "busy", reason: "Busy" })[0].state, "busy");
+});
+
+test("a needs-you state has no colon, and a brain with no reason of its own gives the first thing's why", () => {
+  const shown = page();
+  shown.context.showUpdates(updates({ last: { ...DONE, needs_you: [
+    { why: "New unit", command: "sudo systemctl enable y" }] } }));
+  assert.deepEqual(details(rows(shown)[0]).slice(-2), ["Needs you", "New unit"]);
+  assert.doesNotMatch(said(rows(shown)[0]), /Needs you:/);
+});
+
+test("satellites are named as the rest of the page names them, or capitalised with PC and Pi in the right case", () => {
+  const shown = page();
+  vm.runInContext('satellites = [{ name: "bedroom", spoken: "the PC" }]', shown.context);
+  assert.equal(shown.context.updateName("bedroom"), "The PC");
+  assert.equal(shown.context.updateName("pc"), "PC");
+  assert.equal(shown.context.updateName("pi"), "Pi");
+  assert.equal(shown.context.updateName("lounge"), "Lounge");
+  shown.context.showUpdates(updates({ versions: { brain: BRAIN, satellites: [{ ...PI, name: "bedroom" }, PC] } }));
+  assert.match(said(rows(shown)[1]), /^The PC/);
+  assert.match(said(rows(shown)[2]), /^PC/);
+  const machines = JSON.parse(JSON.stringify(shown.context.updateMachines(updates({ versions: {
+    brain: BRAIN, satellites: [{ ...PI, name: "bedroom" }] } }))));
+  assert.equal(machines[1].spoken, "the PC");
+  assert.equal(machines[0].spoken, "the brain");
 });
