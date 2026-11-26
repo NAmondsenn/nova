@@ -29,6 +29,9 @@ from voice_assistant.notes import NoteRefused
 from voice_assistant.press import PressListener
 from voice_assistant.screen_orb import LINGER
 from voice_assistant.shortcut import Shortcut
+from voice_assistant.update_install import InstallRefused
+from voice_assistant.update_receive import NOT_FROM_THE_BRAIN, WRONG_FORMAT
+from voice_assistant.update_state import UpdateState
 from voice_assistant.wake_clips import WakeClips
 from voice_assistant.windows_media import UNCHANGED
 
@@ -354,6 +357,11 @@ def make(tmp_path, monkeypatch, make_config):
     # Never the real data folder: running the satellite leaves a mark there.
     monkeypatch.setattr(satellite, "RUNNING_MARK", str(tmp_path / "running"))
     monkeypatch.setattr(satellite, "MIC_MUTE_FILE", str(tmp_path / "mic_muted_until.json"))
+    monkeypatch.setattr(satellite, "UPDATE_FOLDER", str(tmp_path / "update"))
+    # Not this checkout's own commit, which would change with every commit and say it
+    # updates as a bundle: a satellite which can't update, unless a test says otherwise.
+    monkeypatch.setattr(satellite.code_version, "running_version", lambda: None)
+    monkeypatch.setattr(satellite.code_version, "update_format", lambda: None)
     monkeypatch.setattr(satellite, "Microphone", FakeMicrophone)
     monkeypatch.setattr(satellite, "Speaker", FakeSpeaker)
     monkeypatch.setattr(satellite, "WakeWordDetector", FakeWake)
@@ -5321,3 +5329,298 @@ def test_an_open_listen_while_one_is_going_carries_it_on_and_sends_nothing_twice
     sent = len(brain.recordings())
     time.sleep(0.3)
     assert len(brain.recordings()) == sent and made._recording is None
+
+
+# Updates - see docs/superpowers/plans for "update once, everything updates". The running
+# commit, the one the brain offers and one after that.
+OLD = "1" * 40
+NEW = "2" * 40
+NEWER = "3" * 40
+
+
+class FakeInstalls(list):
+    """Stands in for install_bundle and install_zip: keeps what each was given, as it ran."""
+
+    def __init__(self, brain):
+        super().__init__()
+        self.brain = brain
+        # Raised by the next install, if set.
+        self.refuse = None
+
+    def _ran(self, entry, folder, version):
+        # What the brain had been told, and what was noted as begun, by the time it ran.
+        entry["told"] = wait_for(lambda: self.brain.messages("update_installing"), 1)
+        entry["pending"] = UpdateState(folder)._read("pending.json")
+        self.append(entry)
+        if self.refuse is not None:
+            raise self.refuse
+
+    def bundle(self, project, folder, version, archive, run=None):
+        self._ran({"format": "bundle", "folder": folder, "version": version, "archive": archive}, folder, version)
+
+    def zip(self, project, folder, version, previous, archive, run=None):
+        self._ran({"format": "zip", "folder": folder, "version": version, "previous": previous,
+                   "archive": archive}, folder, version)
+
+
+@pytest.fixture
+def updates(brain, monkeypatch):
+    """Has satellites run commit OLD and update by bundle, and gives what they installed."""
+    installs = FakeInstalls(brain)
+    monkeypatch.setattr(satellite.code_version, "running_version", lambda: OLD)
+    monkeypatch.setattr(satellite.code_version, "update_format", lambda: "bundle")
+    monkeypatch.setattr(satellite, "install_bundle", installs.bundle)
+    monkeypatch.setattr(satellite, "install_zip", installs.zip)
+    monkeypatch.setattr(satellite, "UPDATE_LOOK", 0.02)
+    return installs
+
+
+def archive_of(size, seed=1):
+    return bytes((i * 7 + seed) % 256 for i in range(size))
+
+
+def send_update(brain, version, archive, update_id="u1", retry=False, fmt="bundle", upto=None, tamper=False,
+                end=True):
+    """Sends an update as the brain does, proved for the satellite's latest connection."""
+    satellite_nonce, brain_nonce = brain.hellos[-1]["nonces"]
+    proof = protocol.update_proof(PASSWORD, satellite_nonce, brain_nonce, version, fmt, archive)
+    if tamper:
+        archive = bytes([archive[0] ^ 1]) + archive[1:]
+    pieces = [archive[i:i + protocol.UPDATE_CHUNK] for i in range(0, len(archive), protocol.UPDATE_CHUNK)]
+    brain.say("update_offer", id=update_id, version=version, format=fmt, size=len(archive), chunks=len(pieces),
+              proof=proof, retry=retry)
+    for index, piece in enumerate(pieces[:upto]):
+        brain.say("update_chunk", piece, id=update_id, index=index)
+    if end:
+        brain.say("update_end", id=update_id)
+
+
+def updatable(brain, make, **sections):
+    made = make(**sections)
+    assert wait_for(lambda: connected(made))
+    return made
+
+
+def results(brain):
+    return [{key: value for key, value in message.items() if key != "type"} for message in brain.messages("update_result")]
+
+
+def test_the_update_folder_is_in_the_data_folder():
+    # The folder UpdateState, the installers and their helpers all share - install.ps1's $data\update on the PC.
+    assert satellite.UPDATE_FOLDER == os.path.join(paths.DATA_DIR, "update")
+
+
+def test_the_hello_says_the_satellites_commit(brain, make, updates):
+    updatable(brain, make)
+    hello = brain.hellos[0]
+    assert (hello["version"], hello["updates"], hello["update_format"]) == (OLD, True, "bundle")
+
+
+def test_a_verified_update_installs_once_free(brain, make, updates, tmp_path):
+    made = updatable(brain, make)
+    brain.say("play_stream", id="reply-1", rate=22050, channels=1, volume=1.0, kind="reply", paused=False)
+    assert wait_for(lambda: made._busy() == "speaking")
+    archive = archive_of(protocol.UPDATE_CHUNK + 10)
+    send_update(brain, NEW, archive)
+    time.sleep(0.3)
+    # Not while Nova speaks.
+    assert updates == [] and brain.messages("update_installing") == []
+    brain.say("stream_end", id="reply-1")
+    assert wait_for(lambda: updates)
+    assert brain.messages("update_installing") == [{"type": "update_installing", "version": NEW}]
+    [installed] = updates
+    # The brain told it was installing, and the update noted as begun, before the installer ran.
+    assert installed["told"] is True
+    assert installed["pending"]["version"] == NEW and installed["pending"]["previous"] == OLD
+    assert (installed["format"], installed["version"], installed["archive"]) == ("bundle", NEW, archive)
+    assert installed["folder"] == str(tmp_path / "update")
+    assert results(brain) == []
+
+
+def test_a_zip_update_is_given_the_version_it_replaces(brain, make, updates, monkeypatch):
+    monkeypatch.setattr(satellite.code_version, "update_format", lambda: "zip")
+    updatable(brain, make)
+    send_update(brain, NEW, archive_of(100), fmt="zip")
+    assert wait_for(lambda: updates)
+    assert (updates[0]["format"], updates[0]["version"], updates[0]["previous"]) == ("zip", NEW, OLD)
+
+
+def test_music_doesnt_hold_an_update_back(brain, make, updates):
+    made = updatable(brain, make)
+    brain.say("play_stream", id="song-1", rate=44100, channels=2, volume=1.0, kind="music", paused=False)
+    assert wait_for(lambda: "song-1" in made._playing)
+    send_update(brain, NEW, archive_of(100))
+    assert wait_for(lambda: updates)
+    assert made._busy() is None
+
+
+def test_what_holds_an_update_back(make, updates):
+    made = make(start=False)
+    assert made._busy() is None
+    made._recording = satellite._Recording("wake-1")
+    assert made._busy() == "recording"
+    made._recording = None
+    made._conversing = True
+    assert made._busy() == "conversation"
+    made._conversing = False
+    made._approving = 1
+    assert made._busy() == "approval"
+    made._approving = 0
+    made.ringer = types.SimpleNamespace(ringing=True)
+    assert made._busy() == "ringing"
+
+
+def test_an_approval_holds_an_update_back_while_it_is_asked(brain, make, hello, updates):
+    made = pressable(brain, make)
+    seen = []
+    made.hello.ask = lambda id, description: seen.append(made._busy()) or True
+    brain.say("approval", id="approval-1", description="Remove 'Gym'")
+    assert wait_for(lambda: brain.messages("approval_answer"))
+    assert seen == ["approval"] and made._busy() is None
+
+
+def test_a_refused_update_is_reported_and_not_installed(brain, make, updates):
+    updatable(brain, make)
+    send_update(brain, NEW, archive_of(100), tamper=True)
+    assert wait_for(lambda: results(brain))
+    assert results(brain) == [{"version": NEW, "ok": False, "error": NOT_FROM_THE_BRAIN}]
+    time.sleep(0.1)
+    assert updates == [] and brain.messages("update_installing") == []
+
+
+def test_an_offer_to_a_satellite_which_cant_update_is_answered(brain, make, updates, monkeypatch):
+    monkeypatch.setattr(satellite.code_version, "update_format", lambda: None)
+    updatable(brain, make)
+    send_update(brain, NEW, archive_of(100))
+    assert wait_for(lambda: results(brain))
+    assert results(brain) == [{"version": NEW, "ok": False, "error": WRONG_FORMAT}]
+    assert updates == []
+
+
+def failed_before(tmp_path, needs_you=True):
+    """Writes failed.json for NEW as the installers' scripts do: the whole result."""
+    result = {"version": NEW, "ok": False, "error": "There are changes on the Pi that aren't in git."}
+    if needs_you:
+        result["needs_you"] = [{"why": "Local changes.", "command": "git -C ~/Home-Assistant status"}]
+    (tmp_path / "update").mkdir(exist_ok=True)
+    (tmp_path / "update" / "failed.json").write_text(json.dumps(result))
+    return result
+
+
+def test_a_version_that_failed_before_is_answered_not_installed(brain, make, updates, tmp_path):
+    failed = failed_before(tmp_path)
+    updatable(brain, make)
+    send_update(brain, NEW, archive_of(100))
+    assert wait_for(lambda: results(brain))
+    # The whole result, so a needs-you keeps its command.
+    assert results(brain) == [failed]
+    time.sleep(0.1)
+    assert updates == []
+
+
+def test_a_retry_offer_installs_a_version_that_failed_before(brain, make, updates, tmp_path):
+    failed_before(tmp_path)
+    updatable(brain, make)
+    send_update(brain, NEW, archive_of(100), retry=True)
+    assert wait_for(lambda: updates)
+    assert updates[0]["version"] == NEW and results(brain) == []
+
+
+def test_a_transfer_cut_off_installs_nothing(brain, make, updates):
+    made = updatable(brain, make)
+    first = archive_of(protocol.UPDATE_CHUNK + 10, seed=1)
+    send_update(brain, NEW, first, update_id="u1", upto=1, end=False)
+    assert wait_for(lambda: made._receiver is not None)
+    brain.drop()
+    assert wait_for(lambda: not connected(made))
+    brain.up = True
+    assert wait_for(lambda: connected(made) and len(brain.hellos) == 2)
+    # The end of the first, late, on the new connection is no transfer of its own.
+    brain.say("update_chunk", first[protocol.UPDATE_CHUNK:], id="u1", index=1)
+    brain.say("update_end", id="u1")
+    second = archive_of(protocol.UPDATE_CHUNK + 10, seed=2)
+    send_update(brain, NEW, second, update_id="u2")
+    assert wait_for(lambda: updates)
+    time.sleep(0.1)
+    assert [installed["archive"] for installed in updates] == [second]
+    assert results(brain) == []
+
+
+def test_an_offer_while_one_installs_is_ignored(brain, make, updates):
+    made = updatable(brain, make)
+    brain.say("play_stream", id="reply-1", rate=22050, channels=1, volume=1.0, kind="reply", paused=False)
+    assert wait_for(lambda: made._busy() == "speaking")
+    send_update(brain, NEW, archive_of(100), update_id="u1")
+    assert wait_for(lambda: made._installing)
+    send_update(brain, NEWER, archive_of(100, seed=3), update_id="u2")
+    time.sleep(0.1)
+    brain.say("stream_end", id="reply-1")
+    assert wait_for(lambda: updates)
+    time.sleep(0.2)
+    assert [installed["version"] for installed in updates] == [NEW]
+
+
+def test_an_install_refused_is_noted_and_reported(brain, make, updates, tmp_path):
+    updatable(brain, make)
+    needs = {"why": "The PC has no update task yet, so it needs one deploy by hand.",
+             "command": "bash scripts/deploy_pc.sh"}
+    updates.refuse = InstallRefused("The update task couldn't be started.", needs)
+    send_update(brain, NEW, archive_of(100))
+    assert wait_for(lambda: results(brain))
+    expected = {"version": NEW, "ok": False, "error": "The update task couldn't be started.", "needs_you": [needs]}
+    assert results(brain) == [expected]
+    state = UpdateState(str(tmp_path / "update"))
+    assert wait_for(lambda: state.result_to_send() is None)
+    assert state._read("pending.json") is None
+    assert state.failed_result(NEW) == expected
+
+
+def test_an_install_which_breaks_is_reported_and_the_next_can_go(brain, make, updates, caplog):
+    updatable(brain, make)
+    updates.refuse = RuntimeError("disk on fire")
+    send_update(brain, NEW, archive_of(100), update_id="u1")
+    assert wait_for(lambda: results(brain))
+    [result] = results(brain)
+    assert result["version"] == NEW and result["ok"] is False and "RuntimeError" in result["error"]
+    assert "disk on fire" in caplog.text
+    updates.refuse = None
+    send_update(brain, NEWER, archive_of(100), update_id="u2", retry=True)
+    assert wait_for(lambda: len(updates) == 2)
+
+
+def test_the_new_code_confirms_and_reports_as_it_connects(brain, make, updates, tmp_path):
+    state = UpdateState(str(tmp_path / "update"))
+    state.begin(OLD, "0" * 40)
+    updatable(brain, make)
+    assert wait_for(lambda: results(brain))
+    assert results(brain) == [{"version": OLD, "ok": True, "needs_you": []}]
+    assert (tmp_path / "update" / "confirmed").read_text() == OLD
+    assert wait_for(lambda: state.result_to_send() is None)
+
+
+def test_a_result_unsent_is_sent_on_the_next_connection(brain, make, updates, tmp_path, monkeypatch):
+    state = UpdateState(str(tmp_path / "update"))
+    state.note_result({"version": OLD, "ok": True, "needs_you": []})
+    refused = []
+
+    class FirstResultLost(satellite.SatelliteLink):
+        """A link on which the first update_result doesn't go."""
+
+        def send(self, kind, payload=b"", /, **fields):
+            if kind == "update_result" and not refused:
+                refused.append(fields)
+                return False
+            return super().send(kind, payload, **fields)
+
+    monkeypatch.setattr(satellite, "SatelliteLink", FirstResultLost)
+    made = updatable(brain, make)
+    assert wait_for(lambda: refused)
+    time.sleep(0.1)
+    # Kept, as the brain never had it.
+    assert state.result_to_send() == {"version": OLD, "ok": True, "needs_you": []}
+    brain.drop()
+    assert wait_for(lambda: not connected(made))
+    brain.up = True
+    assert wait_for(lambda: results(brain))
+    assert results(brain) == [{"version": OLD, "ok": True, "needs_you": []}]
+    assert wait_for(lambda: state.result_to_send() is None)

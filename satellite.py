@@ -28,7 +28,7 @@ from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 
-from voice_assistant import paths, pc_apps, pc_windows, protocol, shortcut, storage, watchdog
+from voice_assistant import code_version, paths, pc_apps, pc_windows, protocol, shortcut, storage, watchdog
 from voice_assistant.app_menu import AppState
 from voice_assistant.computers import MIC_MUTE_MINUTES, NOT_A_WEB_ADDRESS, safe_url, url_host
 from voice_assistant.config import Config, ConfigError
@@ -46,6 +46,9 @@ from voice_assistant.screen_orb import PLACES, OrbStates, ScreenOrb
 from voice_assistant.speaker import BLOCK_SECONDS, Playback, Speaker
 from voice_assistant.timeline import Timeline
 from voice_assistant.tray import Tray
+from voice_assistant.update_install import InstallRefused, install_bundle, install_zip
+from voice_assistant.update_receive import WRONG_FORMAT, UpdateReceiver, UpdateRefused, Verified
+from voice_assistant.update_state import UpdateState
 from voice_assistant.wake_clips import WakeClips, clip_start
 from voice_assistant.wake_word import WakeWordDetector
 from voice_assistant.windows_hello import WindowsHello
@@ -66,6 +69,16 @@ MIC_MUTE_FILE = os.path.join(paths.DATA_DIR, "mic_muted_until.json")
 # Whose presence says Nova isn't to start when he signs in. The app's menu makes and removes it,
 # and the launcher which starts Nova at logon looks for it - see scripts/windows/launcher.pyw.
 NO_LOGON_MARK = os.path.join(paths.DATA_DIR, "no_logon_start")
+
+# Where a satellite keeps what it knows of its updates (see update_state.py), and where the
+# installers put what they install from - the same folder, as their helpers look for the
+# confirmed file in it. On the PC it is %LOCALAPPDATA%\nova\data\update, as the launcher
+# sets NOVA_DATA to %LOCALAPPDATA%\nova\data, which is where install.ps1 puts update_pc.ps1.
+UPDATE_FOLDER = os.path.join(paths.DATA_DIR, "update")
+
+# The seconds between looks at whether the satellite is free to install an update it has
+# been sent. A constant so the tests can shorten it.
+UPDATE_LOOK = 2.0
 
 # The seconds between looks at Windows' microphone while there's a tray, so a mute by hand
 # reaches its icon. A constant so the tests can shorten it.
@@ -292,6 +305,11 @@ def _whole(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _commit_or_none(value) -> Optional[str]:
+    """A commit id the brain sent, or None for anything else."""
+    return value if isinstance(value, str) and protocol.COMMIT.fullmatch(value) else None
+
+
 def _machine_and_notes() -> Tuple[Optional[str], bool]:
     """
     What to say in the hello of this machine, and whether it saves notes.
@@ -436,6 +454,9 @@ class Satellite:
                 hello.close()
         self._approvals_asked: "collections.deque[str]" = collections.deque(maxlen=APPROVALS_KEPT)
         self._approvals_lock = threading.Lock()
+        # How many approvals are being asked of Hello right now, under _approvals_lock - an
+        # update waits for none, as restarting would take the prompt away from under him.
+        self._approving = 0
         # Windows' microphone, muted by Nova until a time, when it comes back on by itself - or
         # None. Held open says a press has unmuted it for its recording, to be muted again when
         # the recording ends. Both under _mic_lock, held while Windows is asked, so the press,
@@ -531,6 +552,21 @@ class Satellite:
         self._echo_lock = threading.Lock()
         self._echo_told: Optional[bool] = None
 
+        # The commit this code is and how it can be updated, said in every hello so the
+        # brain can tell whether this satellite is behind it and offer it the update.
+        self.version = code_version.running_version()
+        self.update_format = code_version.update_format()
+        self.update_state = UpdateState(UPDATE_FOLDER)
+        # The transfer being received, made afresh for each offer on the connection it came
+        # on, with the version it offers - or None. Only the link's thread changes them,
+        # and the chunk handler reads them without a lock, so a chunk never waits.
+        self._receiver: Optional[UpdateReceiver] = None
+        self._receiving: Optional[str] = None
+        # Whether an update is being installed - from waiting for the satellite to be free
+        # until the installer has taken it over - under _update_lock, so only one ever is.
+        self._update_lock = threading.Lock()
+        self._installing = False
+
         # What to exit with, once the main loop has been asked to stop - see stop().
         self._exit_code: Optional[int] = None
         # Set once shutting down, so a second signal can't cut the cleanup short.
@@ -560,6 +596,9 @@ class Satellite:
             "approval_withdraw": self._approval_withdraw,
             "restart": self._restart,
             "conversation": self._take_conversation,
+            "update_offer": self._guard_update(self._update_offer),
+            "update_chunk": self._guard_update(self._update_chunk),
+            "update_end": self._guard_update(self._update_end),
         }
 
         # What the app's tray shows and its menu works from, besides the microphone above and
@@ -620,7 +659,8 @@ class Satellite:
                                       machine=self.machine, saves_notes=self.saves_notes,
                                       media_controls=self.media is not None, opens=self.opens,
                                       system_volume=self.system_volume is not None,
-                                      approves=self.hello is not None, conversations=True)
+                                      approves=self.hello is not None, conversations=True,
+                                      version=self.version, update_format=self.update_format)
             self.link.start()
             threading.Thread(target=self._ring_when_due, daemon=True, name="fallback").start()
             if self.system_volume is not None:
@@ -1820,7 +1860,14 @@ class Satellite:
         meanwhile, and so wants none, or Hello gave no answer (anything but verified or
         his own Cancel), when the brain goes on waiting for the phone.
         """
-        approved = self.hello.ask(id, description)
+        # Counted while Hello asks, so an update waits for the answer - see _busy.
+        with self._approvals_lock:
+            self._approving += 1
+        try:
+            approved = self.hello.ask(id, description)
+        finally:
+            with self._approvals_lock:
+                self._approving -= 1
         if approved is None or self.hello.withdrawn(id):
             return
         self.link.send("approval_answer", id=id, approved=approved)
@@ -2099,6 +2146,243 @@ class Satellite:
         logger.info("Restarting, as the brain asked")
         self.stop(1)
 
+    def _update_offer(self, message: Dict, payload: bytes):
+        """
+        The brain offering an update: a receiver is made for it, bound to this connection's
+        nonces, which drops any transfer before it - the newest offer wins. Refused at once,
+        with update_result, if this satellite can't be updated or the offer makes no sense;
+        ignored, with a log, while an update is already being installed.
+        """
+        version = _commit_or_none(message.get("version"))
+        with self._update_lock:
+            installing = self._installing
+        if installing:
+            logger.info(f"The brain offered update {code_version.short(version)} while one is being "
+                        f"installed, so it was ignored")
+            return
+        self._receiver = self._receiving = None
+        nonces = self.link.nonces
+        # Never a receiver without a way to install what it receives, or without the
+        # nonces its proof is bound to.
+        if self.update_format is None or nonces is None:
+            self._refuse_update(version, WRONG_FORMAT)
+            return
+        receiver = UpdateReceiver(self.password, self.update_format)
+        try:
+            receiver.offer(message, nonces)
+        except UpdateRefused as refused:
+            self._refuse_update(version, refused.reason)
+            return
+        self._receiver, self._receiving = receiver, version
+        logger.info(f"Receiving update {code_version.short(version)} from the brain")
+
+    def _update_chunk(self, message: Dict, payload: bytes):
+        """
+        The next piece of the update being received. Kept in memory and nothing more, as
+        the brain gives each chunk a short time to be sent: nothing here touches the disk
+        or waits for a lock.
+        """
+        receiver, version = self._receiver, self._receiving
+        if receiver is None:
+            logger.debug("Ignoring an update chunk, as no update is being received")
+            return
+        try:
+            receiver.chunk(message, payload)
+        except UpdateRefused as refused:
+            self._receiver = self._receiving = None
+            self._refuse_update(version, refused.reason)
+
+    def _update_end(self, message: Dict, payload: bytes):
+        """
+        The last of the update: its proof is checked, and if it came from the brain it is
+        installed once the satellite is free, on a thread of its own - unless it is a
+        version which failed here before and the brain hasn't asked to try it again, when
+        the brain is sent how it went then instead.
+        """
+        receiver, version = self._receiver, self._receiving
+        if receiver is None:
+            logger.debug("Ignoring the end of an update, as none is being received")
+            return
+        try:
+            verified = receiver.end(message)
+        except UpdateRefused as refused:
+            self._receiver = self._receiving = None
+            self._refuse_update(version, refused.reason)
+            return
+        # The end of a transfer which an offer since has replaced.
+        if verified is None:
+            return
+        self._receiver = self._receiving = None
+        if not verified.retry:
+            failed = self.update_state.failed_result(verified.version)
+            if failed is not None:
+                logger.info(f"Update {code_version.short(verified.version)} failed here before, so it "
+                            f"wasn't installed again")
+                self.link.send("update_result", **failed)
+                return
+        with self._update_lock:
+            if self._installing:
+                logger.info(f"Update {code_version.short(verified.version)} came while one is being "
+                            f"installed, so it was ignored")
+                return
+            self._installing = True
+        threading.Thread(target=self._install_when_free, args=(verified,), daemon=True, name="update").start()
+
+    def _guard_update(self, handler: Callable[[Dict, bytes], None]) -> Callable[[Dict, bytes], None]:
+        """
+        Wraps an update handler so anything unexpected in it is logged with its reason and
+        reported to the brain as a failed update, rather than leaving the brain waiting.
+
+        Args:
+            handler: One of the update handlers.
+
+        Returns:
+            The handler, guarded.
+        """
+        def guarded(message: Dict, payload: bytes):
+            # The version being received, as the handler may forget it before it fails.
+            version = _commit_or_none(message.get("version")) or self._receiving
+            try:
+                handler(message, payload)
+            except Exception as error:
+                logger.exception(f"Taking an update from the brain failed ({error})")
+                self._receiver = self._receiving = None
+                self._refuse_update(version, f"The satellite couldn't take the update, as something went "
+                                             f"wrong ({type(error).__name__}).")
+        return guarded
+
+    def _refuse_update(self, version: Optional[str], reason: str):
+        """
+        Tells the brain an update wasn't taken, and why. Not noted as a failure, as nothing
+        was installed: the brain may offer the same version again, which may go.
+
+        Args:
+            version: The commit offered, or None if the offer didn't name one - when only
+                the log hears of it, as the brain would drop a result without a version.
+            reason: The error to send.
+        """
+        if version is None:
+            logger.warning(f"Refused an update which named no commit: {reason}")
+            return
+        logger.warning(f"Refused update {code_version.short(version)}: {reason}")
+        self.link.send("update_result", version=version, ok=False, error=reason)
+
+    def _busy(self) -> Optional[str]:
+        """
+        What the satellite is doing which an update mustn't cut short, as installing one
+        restarts it. Music isn't one: it is noted and resumes where it was.
+
+        Returns:
+            "recording", "speaking" (anything the brain plays but music), "ringing",
+            "conversation" or "approval" - or None, when it is free.
+        """
+        with self._lock:
+            recording = self._recording is not None
+            speaking = any(playing.kind != "music" for playing in self._playing.values())
+        if recording:
+            return "recording"
+        if speaking:
+            return "speaking"
+        if self.ringer.ringing:
+            return "ringing"
+        if self._conversing:
+            return "conversation"
+        with self._approvals_lock:
+            approving = self._approving
+        if approving:
+            return "approval"
+        return None
+
+    def _install_when_free(self, verified: Verified):
+        """
+        Installs a verified update once the satellite is free: the brain is told it is
+        installing, the update is noted as begun, and the installer for its format takes it
+        over - from which the satellite is restarted on the new code. Run on a thread of
+        its own; an install the installer refuses, or anything unexpected, is noted and
+        reported to the brain as a failed update.
+
+        Args:
+            verified: The update, proved to have come from the brain.
+        """
+        version = verified.version
+        try:
+            held_by = None
+            while True:
+                busy = self._busy()
+                if busy is None:
+                    break
+                if busy != held_by:
+                    logger.info(f"Update {code_version.short(version)} waits until the satellite is free "
+                                f"({busy})")
+                    held_by = busy
+                # Given up on if the satellite stops meanwhile: the brain offers it again.
+                if self._finished.wait(UPDATE_LOOK):
+                    return
+            logger.info(f"Installing update {code_version.short(version)}")
+            self.link.send("update_installing", version=version)
+            # Before the installer, so the new code finds it and confirms itself.
+            self.update_state.begin(version, self.version)
+            try:
+                if verified.format == "zip":
+                    install_zip(paths.PROJECT_DIRECTORY, UPDATE_FOLDER, version, self.version, verified.archive)
+                else:
+                    install_bundle(paths.PROJECT_DIRECTORY, UPDATE_FOLDER, version, verified.archive)
+            except InstallRefused as refused:
+                logger.warning(f"Update {code_version.short(version)} wasn't installed: {refused.reason}")
+                result = {"version": version, "ok": False, "error": refused.reason}
+                if refused.needs_you:
+                    result["needs_you"] = [refused.needs_you]
+                self._update_failed(result)
+                return
+            logger.info(f"Update {code_version.short(version)} is with its installer, which restarts the satellite")
+        except Exception as error:
+            logger.exception(f"Installing update {code_version.short(version)} failed ({error})")
+            self._update_failed({"version": version, "ok": False,
+                                 "error": f"The update failed on the satellite, as something went wrong "
+                                          f"({type(error).__name__})."})
+        finally:
+            with self._update_lock:
+                self._installing = False
+
+    def _update_failed(self, result: Dict):
+        """
+        Notes an update which didn't go - so the same version isn't installed again unless
+        the brain says to retry - forgets it as pending, and tells the brain, which is then
+        not told again.
+
+        Args:
+            result: The update_result to send: version, ok False, error and any needs_you.
+        """
+        try:
+            self.update_state.note_result(result)
+            self.update_state.clear_pending()
+        except Exception:
+            logger.exception("Couldn't note how the update went")
+        if self.link.send("update_result", **result):
+            try:
+                self.update_state.sent()
+            except Exception:
+                logger.exception("Couldn't forget the update's result once sent")
+
+    def _report_update(self):
+        """
+        As the brain is reached: confirms an update this code is the new version of - which
+        the installer's helper waits for before it keeps it - and sends the brain how the
+        last update went, if it hasn't been told. Forgotten only once sent.
+        """
+        try:
+            if self.update_state.confirm(self.version):
+                logger.info(f"Running update {code_version.short(self.version)}, so it is confirmed")
+            result = self.update_state.result_to_send()
+            if result is None:
+                return
+            # Only the result's own fields, whatever else the file holds.
+            fields = {key: result[key] for key in ("version", "ok", "error", "needs_you") if key in result}
+            if self.link.send("update_result", **fields):
+                self.update_state.sent()
+        except Exception:
+            logger.exception("Couldn't confirm or report the last update")
+
     def _follow(self, id: str, playing: _FromBrain):
         """Keeps one of the brain's playbacks by its id, and reports on it until it ends."""
         with self._lock:
@@ -2174,7 +2458,11 @@ class Satellite:
             self._orb_states.lost()
             self._forget_the_brain()
             self._tray_changed()
+            # A transfer is bound to the connection it came on, so it can't go on on the next.
+            self._receiver = self._receiving = None
             return
+        # First, as the new code's helper is waiting for it to confirm itself.
+        self._report_update()
         # A new brain, or the same one started again, has neither list yet.
         self._connection += 1
         self._apps_wanted.set()

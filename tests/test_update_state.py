@@ -3,6 +3,7 @@ Update State Test
 What a satellite remembers about its updates.
 """
 
+import json
 import os
 
 from voice_assistant.update_state import UpdateState
@@ -73,3 +74,22 @@ def test_a_bad_notes_file_never_stops_a_confirm(tmp_path):
     needs = state.result_to_send()["needs_you"]
     assert len(needs) == 2
     assert len(needs[1]["why"]) == 200 and len(needs[1]["command"]) == 200
+
+
+def test_a_failed_result_is_kept_whole_for_its_version(tmp_path):
+    state = UpdateState(str(tmp_path))
+    assert state.failed_result("a" * 40) is None
+    needs = [{"why": "Local changes.", "command": "git -C ~/Home-Assistant status"}]
+    state.note_result({"version": "a" * 40, "ok": False, "error": "It broke.", "needs_you": needs})
+    # The whole result, so replaying it keeps the command.
+    assert state.failed_result("a" * 40) == {"version": "a" * 40, "ok": False, "error": "It broke.",
+                                             "needs_you": needs}
+    assert state.failed_result("b" * 40) is None
+    # As the installers' scripts write it, and with what makes no sense left out.
+    (tmp_path / "failed.json").write_text(json.dumps({"version": "b" * 40, "ok": False, "error": "x"}))
+    assert state.failed_result("b" * 40) == {"version": "b" * 40, "ok": False, "error": "x"}
+    (tmp_path / "failed.json").write_text(json.dumps({"version": "b" * 40, "ok": True, "error": 5,
+                                                      "needs_you": [{"why": 1}, "no"]}))
+    assert state.failed_result("b" * 40) == {"version": "b" * 40, "ok": False}
+    (tmp_path / "failed.json").write_text("{broken")
+    assert state.failed_result("b" * 40) is None

@@ -62,6 +62,36 @@ class UpdateState:
             return failed["error"]
         return None
 
+    def failed_result(self, version: str) -> Optional[Dict]:
+        """
+        The whole result noted for this version in failed.json, to send again in place of
+        installing it, so a needs-you keeps its command.
+
+        Args:
+            version: The commit offered.
+
+        Returns:
+            {version, ok: False, error?, needs_you?} if failed.json is for this version,
+            else None. Only what makes sense is kept, as the file may be the installer
+            script's or damaged: an error which is text, and needs-you lines which each
+            have a why and a command.
+        """
+        failed = self._read("failed.json")
+        if not failed or failed.get("version") != version:
+            return None
+        result: Dict = {"version": version, "ok": False}
+        if isinstance(failed.get("error"), str):
+            result["error"] = failed["error"]
+        needs_you = failed.get("needs_you")
+        if isinstance(needs_you, list):
+            kept = [{"why": each["why"][:_TEXT_MOST], "command": each["command"][:_TEXT_MOST]}
+                    for each in needs_you
+                    if isinstance(each, dict) and isinstance(each.get("why"), str)
+                    and isinstance(each.get("command"), str)]
+            if kept:
+                result["needs_you"] = kept[:_NEEDS_YOU_MOST]
+        return result
+
     def begin(self, version: str, previous: Optional[str]) -> None:
         """Notes an update begun: the version going in and the one it replaces."""
         storage.save_json(self._path("pending.json"),
@@ -106,11 +136,13 @@ class UpdateState:
         return True
 
     def note_result(self, result: Dict) -> None:
-        """Keeps a result to send; a failure is also kept as the latest in failed.json."""
+        """
+        Keeps a result to send; a failure is also kept whole as the latest in failed.json,
+        as the installers' scripts keep theirs, so failed_result can give its needs-you too.
+        """
         storage.save_json(self._path("result.json"), result)
         if not result.get("ok"):
-            storage.save_json(self._path("failed.json"),
-                              {"version": result.get("version"), "error": result.get("error")})
+            storage.save_json(self._path("failed.json"), result)
 
     def result_to_send(self) -> Optional[Dict]:
         """The result the brain hasn't been told yet, else None."""
