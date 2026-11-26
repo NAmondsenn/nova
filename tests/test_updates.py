@@ -6,6 +6,7 @@ connection's nonces, and keeps how each satellite's update is going for the sett
 
 import os
 import subprocess
+import threading
 
 import pytest
 
@@ -87,9 +88,12 @@ def test_no_offer_while_the_brains_code_has_moved_under_it(repo, tmp_path):
     updates, commits = make(repo, tmp_path)
     _commit(repo[0], 4)
     assert updates.paused()
-    satellite = FakeSatellite(version=commits[0])
+    # A zip, which would be made and sent for the brain's own commit if nothing stopped it.
+    satellite = FakeSatellite(version=commits[0], format="zip")
+    updates.seen(satellite)
     assert updates.offer(satellite) is False
     assert satellite.sent == []
+    assert updates.versions(["pi"])["satellites"][0]["state"] == "behind"
 
 
 def test_no_offer_without_a_password(repo, tmp_path):
@@ -129,9 +133,58 @@ def test_a_zip_is_made_once_and_only_the_last_four_bundles_are_kept(repo, tmp_pa
     for name in ("pi", "pc"):
         updates.offer(FakeSatellite(name=name, version=commits[0], format="zip"))
     assert len(made) == 1
-    for base in (None, commits[0], commits[1], None, commits[0], commits[1]):
+    bases = [f"{number}" * 40 for number in range(5)]
+    for base in bases:
         updates._archive("bundle", base)
-    assert len(updates._bundles) <= 4
+    assert list(updates._bundles) == [(commits[2], base) for base in bases[1:]]
+
+
+def test_a_second_offer_while_one_is_being_sent_is_refused(repo, tmp_path):
+    updates, commits = make(repo, tmp_path)
+    sending, release = threading.Event(), threading.Event()
+
+    class Slow(FakeSatellite):
+        def send_update(self, *arguments):
+            sending.set()
+            release.wait(5)
+            return super().send_update(*arguments)
+
+    satellite = Slow(version=commits[0], format="zip")
+    first = threading.Thread(target=updates.offer, args=(satellite,))
+    first.start()
+    try:
+        assert sending.wait(5)
+        assert updates.offer(satellite) is False
+    finally:
+        release.set()
+        first.join(5)
+    assert len(satellite.sent) == 1
+    # Once it is done another may be made.
+    assert updates.offer(satellite) is True
+
+
+def test_an_archive_which_fails_after_the_brains_code_moved_isnt_the_satellites_failure(repo, tmp_path,
+                                                                                         monkeypatch):
+    updates, commits = make(repo, tmp_path)
+
+    def moved_then_broken(*arguments):
+        _commit(repo[0], 4)
+        raise update_archive.ArchiveError("HEAD moved")
+
+    monkeypatch.setattr("voice_assistant.updates.make_bundle", moved_then_broken)
+    satellite = FakeSatellite(version=commits[0])
+    updates.seen(satellite)
+    assert updates.offer(satellite) is False
+    assert updates.versions(["pi"])["satellites"][0]["state"] == "behind"
+
+
+def test_a_lost_transfer_is_logged_and_marked_failed(repo, tmp_path, caplog):
+    updates, commits = make(repo, tmp_path)
+    satellite = FakeSatellite(version=commits[0], format="zip", sends=False)
+    with caplog.at_level("WARNING"):
+        assert updates.offer(satellite) is False
+    assert "went while its update was being sent" in caplog.text
+    assert updates.versions(["pi"])["satellites"][0]["state"] == "failed"
 
 
 def test_results_show_as_states(repo, tmp_path):

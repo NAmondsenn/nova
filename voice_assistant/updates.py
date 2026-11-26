@@ -54,6 +54,9 @@ class Updates:
         # How each satellite's update is going: {"state", "reason", "command"}.
         self._states: Dict[str, Dict] = {}
         self._known: Dict[str, Dict] = {}
+        # The satellites an offer is being made or sent to, so two archives are never
+        # interleaved on one connection.
+        self._offering: set = set()
         try:
             loaded = storage.load_json(self._path(), {})
             if isinstance(loaded, dict):
@@ -147,25 +150,49 @@ class Updates:
         """
         name = satellite.name
         if (not satellite.updates or satellite.update_format not in protocol.UPDATE_FORMATS
-                or self.version is None or satellite.version == self.version or self.paused()
-                or satellite.nonces is None):
+                or self.version is None or satellite.version == self.version):
+            return False
+        if self.paused():
+            logger.info(f"Not offering the {name} satellite an update, as the brain's code has moved and it "
+                        f"hasn't restarted")
+            return False
+        if satellite.nonces is None:
+            logger.warning(f"Not offering the {name} satellite an update, as its connection has no nonces")
             return False
         password = self.password_for(name)
         if not password:
+            logger.warning(f"Not offering the {name} satellite an update, as the brain has no password for it")
+            return False
+        with self._lock:
+            if name in self._offering:
+                busy = True
+            else:
+                busy = False
+                self._offering.add(name)
+        if busy:
+            logger.info(f"Not offering the {name} satellite an update, as one is already being sent to it")
             return False
         try:
-            archive = self._archive(satellite.update_format, satellite.version)
-        except ArchiveError as e:
-            logger.warning(f"Couldn't make the {name} satellite's update: {e}")
-            self._set(name, "failed", "The brain couldn't make the update")
-            return False
-        proof = protocol.update_proof(password, *satellite.nonces, self.version, satellite.update_format, archive)
-        self._set(name, "updating")
-        logger.info(f"Offered the {name} satellite {code_version.short(self.version)}")
-        if not satellite.send_update(self.version, satellite.update_format, archive, proof, retry):
-            self._set(name, "failed", "The connection went while the update was being sent")
-            return False
-        return True
+            try:
+                archive = self._archive(satellite.update_format, satellite.version)
+            except ArchiveError as e:
+                logger.warning(f"Couldn't make the {name} satellite's update: {e}")
+                # Not the satellite's failure if the brain's code moved while it was made.
+                if not self.paused():
+                    self._set(name, "failed", "The brain couldn't make the update")
+                return False
+            proof = protocol.update_proof(password, *satellite.nonces, self.version, satellite.update_format,
+                                          archive)
+            self._set(name, "updating")
+            logger.info(f"Offered the {name} satellite {code_version.short(self.version)}")
+            if not satellite.send_update(self.version, satellite.update_format, archive, proof, retry):
+                logger.warning(f"The {name} satellite went while its update was being sent")
+                self._set(name, "failed", "The connection went while the update was being sent")
+                return False
+            return True
+        finally:
+            with self._lock:
+                self._offering.discard(name)
 
     def result(self, name: str, message: Dict) -> None:
         """
