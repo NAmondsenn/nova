@@ -27,6 +27,8 @@ $ErrorActionPreference = 'Stop'
 
 # How long the new code has to reconnect, in seconds.
 $confirmWait = 180
+# How long to wait while the satellite says it is busy, in seconds, before stopping it anyway.
+$holdMost = 600
 
 $folder = $PSScriptRoot
 $base = Join-Path $env:LOCALAPPDATA 'nova'
@@ -34,6 +36,8 @@ $app = Join-Path $base 'app'
 $venv = Join-Path $app 'venv'
 $snapshot = Join-Path $folder 'previous'
 $confirmedFile = Join-Path $folder 'confirmed'
+# Kept by the satellite while it is busy - a reply, a ringing alarm - so it isn't stopped part way through.
+$holdFile = Join-Path $folder 'hold'
 
 $version = ''
 $previous = ''
@@ -120,6 +124,9 @@ try {
         if (-not $version -or -not $source) { throw 'job.json has no version or source' }
         . (Join-Path $folder 'stop_nova.ps1')
         $wasRunning = @(Find-Running).Count -gt 0
+        $waited = 0
+        while ((Test-Path -LiteralPath $holdFile) -and $waited -lt $holdMost) { Start-Sleep -Seconds 2; $waited += 2 }
+        if (Test-Path -LiteralPath $holdFile) { Write-Host "Nova was still busy after $holdMost seconds, so it is stopped anyway." }
         Stop-Nova
         Save-Snapshot
         # From here the code on the PC is being replaced, so a failure restores it.

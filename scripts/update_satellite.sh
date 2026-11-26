@@ -110,7 +110,9 @@ fi
 rm -f -- "${folder}/confirmed"
 # From /dev/null, so a step that wants a password gets none rather than waiting for one
 # nobody can type, and fails - which update.sh takes the code back from itself.
-output=$(NOVA_UPDATED_FROM="$previous" NOVA_UPDATE_NOTES="${folder}/notes" \
+# NOVA_UPDATE_HOLD is where the satellite says it is busy, which update.sh waits on before
+# stopping it.
+output=$(NOVA_UPDATED_FROM="$previous" NOVA_UPDATE_NOTES="${folder}/notes" NOVA_UPDATE_HOLD="${folder}/hold" \
     bash "${project}/update.sh" --no-pull 2>&1 < /dev/null)
 status=$?
 if [ "$status" != 0 ]; then

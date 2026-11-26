@@ -90,6 +90,15 @@ def test_a_failed_result_is_kept_whole_for_its_version(tmp_path):
     assert state.failed_result("b" * 40) == {"version": "b" * 40, "ok": False, "error": "x"}
     (tmp_path / "failed.json").write_text(json.dumps({"version": "b" * 40, "ok": True, "error": 5,
                                                       "needs_you": [{"why": 1}, "no"]}))
-    assert state.failed_result("b" * 40) == {"version": "b" * 40, "ok": False}
+    assert state.failed_result("b" * 40) == {"version": "b" * 40, "ok": False, "needs_you": []}
     (tmp_path / "failed.json").write_text("{broken")
     assert state.failed_result("b" * 40) is None
+
+
+def test_a_result_is_cleaned_to_its_own_fields():
+    from voice_assistant.update_state import clean_result
+    assert clean_result({"version": "a" * 40, "ok": True, "type": "x", "error": "e" * 400,
+                         "needs_you": [{"why": "w", "command": "c", "more": 1}, 5]}) == \
+        {"version": "a" * 40, "ok": True, "error": "e" * 300, "needs_you": [{"why": "w", "command": "c"}]}
+    for junk in ({"ok": True}, {"version": "not a commit", "ok": True}, {"version": "a" * 40, "ok": "yes"}):
+        assert clean_result(junk) is None

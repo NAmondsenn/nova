@@ -48,7 +48,7 @@ from voice_assistant.timeline import Timeline
 from voice_assistant.tray import Tray
 from voice_assistant.update_install import InstallRefused, install_bundle, install_zip
 from voice_assistant.update_receive import WRONG_FORMAT, UpdateReceiver, UpdateRefused, Verified
-from voice_assistant.update_state import UpdateState
+from voice_assistant.update_state import UpdateState, clean_result
 from voice_assistant.wake_clips import WakeClips, clip_start
 from voice_assistant.wake_word import WakeWordDetector
 from voice_assistant.windows_hello import WindowsHello
@@ -77,8 +77,14 @@ NO_LOGON_MARK = os.path.join(paths.DATA_DIR, "no_logon_start")
 UPDATE_FOLDER = os.path.join(paths.DATA_DIR, "update")
 
 # The seconds between looks at whether the satellite is free to install an update it has
-# been sent. A constant so the tests can shorten it.
+# been sent, and then at whether it is busy while the installer gets ready to stop it. A
+# constant so the tests can shorten it.
 UPDATE_LOOK = 2.0
+
+# Kept in the update folder, holding what the satellite is doing, while it is busy after
+# an installer has taken an update over, so the installer waits before stopping it - see
+# update.sh's wait_for_hold and update_pc.ps1.
+HOLD_FILE = "hold"
 
 # The seconds between looks at Windows' microphone while there's a tray, so a mute by hand
 # reaches its icon. A constant so the tests can shorten it.
@@ -563,9 +569,14 @@ class Satellite:
         self._receiver: Optional[UpdateReceiver] = None
         self._receiving: Optional[str] = None
         # Whether an update is being installed - from waiting for the satellite to be free
-        # until the installer has taken it over - under _update_lock, so only one ever is.
+        # on - under _update_lock, so only one ever is. It stays True once the installer has
+        # taken the update over, as the installer then stops this process, and a second
+        # install meanwhile would undo the first; a new process starts it False.
         self._update_lock = threading.Lock()
         self._installing = False
+        # Held across noting or reading a result and sending it, so the install thread and
+        # the link's thread never send one result twice or forget one unsent.
+        self._result_lock = threading.Lock()
 
         # What to exit with, once the main loop has been asked to stop - see stop().
         self._exit_code: Optional[int] = None
@@ -2273,14 +2284,19 @@ class Satellite:
         restarts it. Music isn't one: it is noted and resumes where it was.
 
         Returns:
-            "recording", "speaking" (anything the brain plays but music), "ringing",
-            "conversation" or "approval" - or None, when it is free.
+            "recording", "thinking" (the brain working on a reply), "speaking" (anything
+            the brain plays but music), "ringing", "conversation" or "approval" - or None,
+            when it is free.
         """
         with self._lock:
             recording = self._recording is not None
+            # The brain working on what was said, whose reply hasn't come yet.
+            thinking = self._turn_open
             speaking = any(playing.kind != "music" for playing in self._playing.values())
         if recording:
             return "recording"
+        if thinking:
+            return "thinking"
         if speaking:
             return "speaking"
         if self.ringer.ringing:
@@ -2297,14 +2313,16 @@ class Satellite:
         """
         Installs a verified update once the satellite is free: the brain is told it is
         installing, the update is noted as begun, and the installer for its format takes it
-        over - from which the satellite is restarted on the new code. Run on a thread of
-        its own; an install the installer refuses, or anything unexpected, is noted and
-        reported to the brain as a failed update.
+        over - from which the satellite is restarted on the new code. Until the installer
+        stops it, the satellite goes on holding the installer off whenever it is busy (see
+        _hold_while_busy). Run on a thread of its own; an install the installer refuses, or
+        anything unexpected, is noted and reported to the brain as a failed update.
 
         Args:
             verified: The update, proved to have come from the brain.
         """
         version = verified.version
+        handed_off = False
         try:
             held_by = None
             while True:
@@ -2317,11 +2335,15 @@ class Satellite:
                     held_by = busy
                 # Given up on if the satellite stops meanwhile: the brain offers it again.
                 if self._finished.wait(UPDATE_LOOK):
+                    logger.info(f"The satellite is stopping, so update {code_version.short(version)} "
+                                f"wasn't installed")
                     return
             logger.info(f"Installing update {code_version.short(version)}")
             self.link.send("update_installing", version=version)
             # Before the installer, so the new code finds it and confirms itself.
             self.update_state.begin(version, self.version)
+            # One left by a satellite stopped while busy would hold this installer off for nothing.
+            self._set_hold(None)
             try:
                 if verified.format == "zip":
                     install_zip(paths.PROJECT_DIRECTORY, UPDATE_FOLDER, version, self.version, verified.archive)
@@ -2334,6 +2356,7 @@ class Satellite:
                     result["needs_you"] = [refused.needs_you]
                 self._update_failed(result)
                 return
+            handed_off = True
             logger.info(f"Update {code_version.short(version)} is with its installer, which restarts the satellite")
         except Exception as error:
             logger.exception(f"Installing update {code_version.short(version)} failed ({error})")
@@ -2341,8 +2364,49 @@ class Satellite:
                                  "error": f"The update failed on the satellite, as something went wrong "
                                           f"({type(error).__name__})."})
         finally:
-            with self._update_lock:
-                self._installing = False
+            # Only once nothing is being installed: after a hand-off, this process is
+            # stopped by the installer, and the next starts with nothing installing.
+            if not handed_off:
+                with self._update_lock:
+                    self._installing = False
+        if handed_off:
+            self._hold_while_busy()
+
+    def _hold_while_busy(self):
+        """
+        Keeps the hold file while the satellite is busy and removes it while it is free,
+        looking every UPDATE_LOOK seconds, until the satellite stops - which the installer
+        does, once there is no hold or it has waited long enough.
+        """
+        held: Optional[str] = None
+        while True:
+            busy = self._busy()
+            if busy != held:
+                self._set_hold(busy)
+                held = busy
+            if self._finished.wait(UPDATE_LOOK):
+                return
+
+    def _set_hold(self, busy: Optional[str]):
+        """
+        Writes the hold file, atomically, holding what the satellite is doing - or removes
+        it for None. Never raises: a hold that can't be kept only means the installer
+        doesn't wait, which the satellite can't help.
+
+        Args:
+            busy: What _busy said, or None.
+        """
+        path = os.path.join(UPDATE_FOLDER, HOLD_FILE)
+        try:
+            if busy is None:
+                try:
+                    os.remove(path)
+                except FileNotFoundError:
+                    pass
+            else:
+                storage.save_text(path, busy)
+        except Exception:
+            logger.exception("Couldn't keep the update's hold file")
 
     def _update_failed(self, result: Dict):
         """
@@ -2353,16 +2417,17 @@ class Satellite:
         Args:
             result: The update_result to send: version, ok False, error and any needs_you.
         """
-        try:
-            self.update_state.note_result(result)
-            self.update_state.clear_pending()
-        except Exception:
-            logger.exception("Couldn't note how the update went")
-        if self.link.send("update_result", **result):
+        with self._result_lock:
             try:
-                self.update_state.sent()
+                self.update_state.note_result(result)
+                self.update_state.clear_pending()
             except Exception:
-                logger.exception("Couldn't forget the update's result once sent")
+                logger.exception("Couldn't note how the update went")
+            if self.link.send("update_result", **result):
+                try:
+                    self.update_state.sent()
+                except Exception:
+                    logger.exception("Couldn't forget the update's result once sent")
 
     def _report_update(self):
         """
@@ -2371,15 +2436,20 @@ class Satellite:
         last update went, if it hasn't been told. Forgotten only once sent.
         """
         try:
-            if self.update_state.confirm(self.version):
-                logger.info(f"Running update {code_version.short(self.version)}, so it is confirmed")
-            result = self.update_state.result_to_send()
-            if result is None:
-                return
-            # Only the result's own fields, whatever else the file holds.
-            fields = {key: result[key] for key in ("version", "ok", "error", "needs_you") if key in result}
-            if self.link.send("update_result", **fields):
-                self.update_state.sent()
+            with self._result_lock:
+                if self.update_state.confirm(self.version):
+                    logger.info(f"Running update {code_version.short(self.version)}, so it is confirmed")
+                stored = self.update_state.result_to_send()
+                if stored is None:
+                    return
+                # Only the result's own fields, whatever else the file holds.
+                result = clean_result(stored)
+                if result is None:
+                    # The brain would drop it, so sending it on every connection is no use.
+                    logger.warning("The last update's result made no sense, so it was dropped")
+                    self.update_state.sent()
+                elif self.link.send("update_result", **result):
+                    self.update_state.sent()
         except Exception:
             logger.exception("Couldn't confirm or report the last update")
 

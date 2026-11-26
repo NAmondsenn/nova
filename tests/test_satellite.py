@@ -5460,6 +5460,10 @@ def test_what_holds_an_update_back(make, updates):
     made._recording = satellite._Recording("wake-1")
     assert made._busy() == "recording"
     made._recording = None
+    # The brain working on what was said, before the reply comes.
+    made._turn_open = True
+    assert made._busy() == "thinking"
+    made._turn_open = False
     made._conversing = True
     assert made._busy() == "conversation"
     made._conversing = False
@@ -5624,3 +5628,64 @@ def test_a_result_unsent_is_sent_on_the_next_connection(brain, make, updates, tm
     assert wait_for(lambda: results(brain))
     assert results(brain) == [{"version": OLD, "ok": True, "needs_you": []}]
     assert wait_for(lambda: state.result_to_send() is None)
+
+
+def test_a_second_offer_after_the_hand_off_installs_nothing(brain, make, updates, tmp_path):
+    made = updatable(brain, make)
+    send_update(brain, NEW, archive_of(100), update_id="u1")
+    assert wait_for(lambda: updates)
+    # The brain offering it again - from a reconnect before the installer stopped the
+    # satellite, say - mustn't start a second install, whose refusal would undo the first.
+    send_update(brain, NEW, archive_of(100), update_id="u2")
+    time.sleep(0.3)
+    assert len(updates) == 1 and results(brain) == [] and made._installing
+    assert UpdateState(str(tmp_path / "update"))._read("pending.json")["version"] == NEW
+
+
+def test_the_satellite_holds_the_installer_off_while_busy_after_the_hand_off(brain, make, updates, tmp_path):
+    hold = tmp_path / "update" / "hold"
+    # One left by a satellite which stopped while busy is no reason to wait.
+    hold.parent.mkdir()
+    hold.write_text("speaking")
+    made = updatable(brain, make)
+    send_update(brain, NEW, archive_of(100))
+    assert wait_for(lambda: updates)
+    assert wait_for(lambda: not hold.exists())
+    brain.say("play_stream", id="reply-1", rate=22050, channels=1, volume=1.0, kind="reply", paused=False)
+    assert wait_for(lambda: hold.exists())
+    assert hold.read_text() == "speaking"
+    brain.say("stream_end", id="reply-1")
+    assert wait_for(lambda: not hold.exists())
+    assert made._busy() is None
+
+
+def test_an_update_waiting_is_given_up_when_the_satellite_stops(brain, make, updates, caplog):
+    caplog.set_level(logging.INFO, logger="satellite")
+    made = updatable(brain, make)
+    brain.say("play_stream", id="reply-1", rate=22050, channels=1, volume=1.0, kind="reply", paused=False)
+    assert wait_for(lambda: made._busy() == "speaking")
+    send_update(brain, NEW, archive_of(100))
+    assert wait_for(lambda: made._installing)
+    made.stop()
+    assert wait_for(lambda: made.exited)
+    assert wait_for(lambda: not made._installing)
+    assert updates == [] and "stopping, so update 2222222 wasn't installed" in caplog.text
+
+
+def test_only_a_results_own_fields_are_sent(brain, make, updates, tmp_path):
+    (tmp_path / "update").mkdir()
+    (tmp_path / "update" / "result.json").write_text(json.dumps(
+        {"version": OLD, "ok": True, "type": "ping", "extra": 1,
+         "needs_you": [{"why": "w", "command": "c"}, 5]}))
+    updatable(brain, make)
+    assert wait_for(lambda: results(brain))
+    assert results(brain) == [{"version": OLD, "ok": True, "needs_you": [{"why": "w", "command": "c"}]}]
+
+
+def test_a_result_which_makes_no_sense_is_dropped_not_sent(brain, make, updates, tmp_path):
+    (tmp_path / "update").mkdir()
+    (tmp_path / "update" / "result.json").write_text(json.dumps({"ok": "yes"}))
+    updatable(brain, make)
+    assert wait_for(lambda: not (tmp_path / "update" / "result.json").exists())
+    time.sleep(0.1)
+    assert results(brain) == []

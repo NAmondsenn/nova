@@ -327,3 +327,13 @@ def test_the_deploy_command_still_fits_after_sharing_the_stop():
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + encoded
     assert len(command) < CMD_LONGEST
+
+
+def test_the_helper_waits_while_the_satellite_holds_it_off():
+    code = helper_code()
+    assert "$holdFile = Join-Path $folder 'hold'" in code
+    assert "$holdMost = 600" in code
+    wait = code.index("while ((Test-Path -LiteralPath $holdFile) -and $waited -lt $holdMost)")
+    assert "Start-Sleep -Seconds 2; $waited += 2" in code[wait:wait + 200]
+    # Before the first stop, which is the one that would cut the satellite off.
+    assert wait < code.index("        Stop-Nova\n")

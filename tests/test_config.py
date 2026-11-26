@@ -841,6 +841,46 @@ def test_update_says_what_it_updated_from_when_it_starts_again_on_the_new_code()
     assert text.index('export NOVA_UPDATED_FROM="$before"') < text.index('exec bash "${PROJECT_DIRECTORY}/update.sh"')
 
 
+def _run_hold(tmp_path, remove_after=None, hold=True):
+    """
+    Runs update.sh's hold block with sleep stood in for, so nothing really waits: each
+    sleep is counted, and the hold file goes after remove_after of them, if given.
+    """
+    marker = tmp_path / "hold"
+    marker.write_text("speaking")
+    block = _update_block((Path(__file__).parent.parent / "update.sh").read_text(), "update hold")
+    script = ('slept=0\nsleep() { slept=$((slept + 1)); echo "sleep $1" >> "$LOG"; '
+              'if [ -n "$REMOVE_AFTER" ] && [ "$slept" -ge "$REMOVE_AFTER" ]; then rm -f "$MARKER"; fi; }\n'
+              + block + 'wait_for_hold\necho "status $?"\n')
+    env = {**os.environ, "LOG": str(tmp_path / "sleeps"), "MARKER": str(marker),
+           "REMOVE_AFTER": str(remove_after or "")}
+    env.pop("NOVA_UPDATE_HOLD", None)
+    if hold:
+        env["NOVA_UPDATE_HOLD"] = str(marker)
+    done = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+    sleeps = (tmp_path / "sleeps").read_text().splitlines() if (tmp_path / "sleeps").exists() else []
+    return done, sleeps
+
+
+def test_update_waits_for_a_busy_satellite_before_stopping_it(tmp_path):
+    text = (Path(__file__).parent.parent / "update.sh").read_text()
+    assert "\nwait_for_hold\nstop_service\n" in text
+    done, sleeps = _run_hold(tmp_path, remove_after=3)
+    assert "status 0" in done.stdout and sleeps == ["sleep 2"] * 3
+    assert "stopped anyway" not in done.stderr
+
+
+def test_update_stops_a_satellite_busy_for_ten_minutes_anyway(tmp_path):
+    done, sleeps = _run_hold(tmp_path)
+    assert "status 0" in done.stdout and len(sleeps) == 300
+    assert "still busy after 600 seconds, so it is stopped anyway" in done.stderr
+
+
+def test_update_waits_for_nothing_unless_told_where_to_look(tmp_path):
+    done, sleeps = _run_hold(tmp_path, hold=False)
+    assert "status 0" in done.stdout and sleeps == []
+
+
 @pytest.mark.parametrize("role, shown", [
     ("brain", "root_do journalctl -u nova-backend -n 12 --no-pager -o cat"),
     ("satellite", "journalctl --user-unit voice-assistant -n 12 --no-pager -o cat"),

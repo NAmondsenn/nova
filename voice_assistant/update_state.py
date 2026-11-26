@@ -17,7 +17,7 @@ import os
 import time
 from typing import Dict, Optional
 
-from voice_assistant import storage
+from voice_assistant import protocol, storage
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,34 @@ logger = logging.getLogger(__name__)
 _NEEDS_YOU_MOST = 3
 # Longest a why or a command is kept, so a damaged notes file can't make a huge result.
 _TEXT_MOST = 200
+
+
+def clean_result(stored: Dict) -> Optional[Dict]:
+    """
+    A result as read from a file, cut down to what update_result carries, as the file may
+    be an installer script's, an older version's or damaged.
+
+    Args:
+        stored: What the file held.
+
+    Returns:
+        {version, ok, error?, needs_you?}: an error kept only if it is text (cut to
+        protocol.MOST_UPDATE_ERROR), and needs-you lines only those with a why and a
+        command - or None if there is no commit id or no ok, which the brain would drop.
+    """
+    version, ok = stored.get("version"), stored.get("ok")
+    if not (isinstance(version, str) and protocol.COMMIT.fullmatch(version) and isinstance(ok, bool)):
+        return None
+    result: Dict = {"version": version, "ok": ok}
+    if isinstance(stored.get("error"), str):
+        result["error"] = stored["error"][:protocol.MOST_UPDATE_ERROR]
+    needs_you = stored.get("needs_you")
+    if isinstance(needs_you, list):
+        result["needs_you"] = [{"why": each["why"][:_TEXT_MOST], "command": each["command"][:_TEXT_MOST]}
+                               for each in needs_you
+                               if isinstance(each, dict) and isinstance(each.get("why"), str)
+                               and isinstance(each.get("command"), str)][:_NEEDS_YOU_MOST]
+    return result
 
 
 class UpdateState:
@@ -72,25 +100,14 @@ class UpdateState:
 
         Returns:
             {version, ok: False, error?, needs_you?} if failed.json is for this version,
-            else None. Only what makes sense is kept, as the file may be the installer
-            script's or damaged: an error which is text, and needs-you lines which each
-            have a why and a command.
+            else None - cleaned by clean_result, as the file may be the installer
+            script's or damaged.
         """
         failed = self._read("failed.json")
         if not failed or failed.get("version") != version:
             return None
-        result: Dict = {"version": version, "ok": False}
-        if isinstance(failed.get("error"), str):
-            result["error"] = failed["error"]
-        needs_you = failed.get("needs_you")
-        if isinstance(needs_you, list):
-            kept = [{"why": each["why"][:_TEXT_MOST], "command": each["command"][:_TEXT_MOST]}
-                    for each in needs_you
-                    if isinstance(each, dict) and isinstance(each.get("why"), str)
-                    and isinstance(each.get("command"), str)]
-            if kept:
-                result["needs_you"] = kept[:_NEEDS_YOU_MOST]
-        return result
+        # A failure, whatever the file says of ok.
+        return clean_result({**failed, "ok": False})
 
     def begin(self, version: str, previous: Optional[str]) -> None:
         """Notes an update begun: the version going in and the one it replaces."""

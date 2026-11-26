@@ -21,7 +21,7 @@ SETUP = ROOT / "setup.sh"
 # update.sh as the clone has it: notes how it was run, and either confirms, fails, or does nothing.
 STUB = """#!/bin/bash
 folder=$(dirname "$NOVA_UPDATE_NOTES")
-echo "$* from=$NOVA_UPDATED_FROM head=$(git -C "$(dirname "$0")" rev-parse HEAD)" >> "$folder/stub.log"
+echo "$* from=$NOVA_UPDATED_FROM head=$(git -C "$(dirname "$0")" rev-parse HEAD) hold=$NOVA_UPDATE_HOLD" >> "$folder/stub.log"
 case "$STUB_MODE" in
     confirm) git -C "$(dirname "$0")" rev-parse HEAD > "$folder/confirmed" ;;
     dirty) echo mine > "$(dirname "$0")/file" ;;
@@ -240,3 +240,10 @@ def test_a_failure_is_kept_in_failed_json_for_the_brains_next_offer(tmp_path):
     bundle = bundle_of(brain, tmp_path)
     process, folder, result = run_script(tmp_path, pi, two, bundle, mode="fail")
     assert UpdateState(str(folder)).failed_before(two) == result["error"]
+
+
+def test_update_sh_is_told_where_the_satellite_holds_it_off(tmp_path):
+    brain, pi, one, two = setup_world(tmp_path)
+    process, folder, result = run_script(tmp_path, pi, two, bundle_of(brain, tmp_path))
+    assert result is None
+    assert f"hold={folder}/hold" in (folder / "stub.log").read_text()

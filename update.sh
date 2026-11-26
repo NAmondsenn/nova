@@ -186,7 +186,26 @@ except Exception as e:
 settings_check || exit 1
 steps_finished
 
+# A satellite updated by its brain (scripts/update_satellite.sh says where) keeps this file
+# while it is busy - a reply, a ringing alarm - so it isn't stopped part way through. It is
+# waited for at most 10 minutes, then Nova is stopped anyway.
+# BEGIN update hold
+wait_for_hold() {
+    local waited=0
+    [ -n "${NOVA_UPDATE_HOLD:-}" ] || return 0
+    while [ -e "$NOVA_UPDATE_HOLD" ]; do
+        if [ "$waited" -ge 600 ]; then
+            echo "Nova was still busy after ${waited} seconds, so it is stopped anyway." >&2
+            return 0
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+}
+# END update hold
+
 step "Restarting"
+wait_for_hold
 stop_service
 install_service
 start_service
