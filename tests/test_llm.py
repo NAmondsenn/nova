@@ -736,6 +736,72 @@ def test_exchanges_remember_when_they_happened(llm):
     assert "at" in llm.history[-1]
 
 
+# Notes for Claude about the user's next message
+
+STOPPED = "The user began speaking before your last reply had finished, so they may not have heard the end of it."
+
+
+def test_a_note_heads_the_next_message_and_stays_in_the_history_as_written(llm, caplog):
+    llm.client = FakeClient([_reply("It's 7:36 PM."), _reply("Okay.")])
+    llm.note(STOPPED)
+    with caplog.at_level("DEBUG"):
+        llm.process_query("what time is it")
+    asked = llm.client.requests[0]["messages"][-1]["content"]
+    assert asked.startswith(f"({STOPPED})\n[") and asked.endswith("] what time is it")
+    # Not the user's words, as the log and everything else of Nova's has them.
+    assert llm.history[-1]["user"] == "what time is it" and "began speaking" not in caplog.text
+    # The next request is sent it as it was written, so what came before is unchanged, and isn't noted again.
+    llm.process_query("thanks")
+    sent = llm.client.requests[1]["messages"]
+    assert sent[0] == {"role": "user", "content": f"({STOPPED})\nwhat time is it"}
+    assert "began speaking" not in sent[-1]["content"]
+
+
+def test_a_note_waits_for_a_message_which_is_kept(llm):
+    # Speech from a film, or a request which failed, is never kept, so the note goes with the next one which is.
+    llm.client = FakeClient([_reply("", _tool("not_for_me")), _reply("Paris.")])
+    llm.note(STOPPED)
+    assert llm.process_query("you won't get away with this")["not_for_me"]
+    llm.process_query("what's the capital of France")
+    assert llm.client.requests[1]["messages"][-1]["content"].startswith(f"({STOPPED})\n")
+    assert llm.history[-1]["notes"] == [STOPPED]
+
+
+def test_an_exchange_remembered_locally_takes_the_note_too(llm):
+    llm.note(STOPPED)
+    llm.remember("what time is it", "It's 7:36 PM.")
+    llm.client = FakeClient(_reply("Okay."))
+    llm.process_query("thanks")
+    assert llm.client.requests[0]["messages"][0]["content"] == f"({STOPPED})\nwhat time is it"
+
+
+def test_an_exchange_taken_back_to_ask_again_keeps_its_notes(llm):
+    # "Think harder" asks the last request again of the bigger model, and its answer replaces the exchange.
+    llm.client = FakeClient([_reply("Paris."), _reply("Paris, on the Seine.")])
+    llm.note(STOPPED)
+    llm.process_query("what's the capital of France")
+    earlier = llm.take_back()
+    assert llm.history == []
+    llm.process_query(earlier["user"])
+    assert llm.history[-1]["notes"] == [STOPPED] and llm.history[-1]["assistant"] == "Paris, on the Seine."
+    # Put back when nothing replaced it, they go with it and no further.
+    llm.history = [earlier]
+    llm.put_back(llm.take_back())
+    assert llm.history == [earlier]
+    llm.client = FakeClient(_reply("Okay."))
+    llm.process_query("thanks")
+    assert "began speaking" not in llm.client.requests[0]["messages"][-1]["content"]
+
+
+def test_notes_go_when_everything_said_before_them_is_forgotten(llm):
+    llm.history = [{"user": "play that one", "assistant": "Which one?", "at": 0.0}]
+    llm.note(STOPPED)
+    llm.forget_stale_history(now=1000.0)
+    llm.client = FakeClient(_reply("It's 7:36 PM."))
+    llm.process_query("what time is it")
+    assert llm.client.requests[0]["messages"][-1]["content"].startswith("[")
+
+
 def test_offline_claude_isnt_waited_on(llm, monkeypatch):
     # With the network cable out, a request used to wait out its timeout and retry -
     # over half a minute - before saying anything.

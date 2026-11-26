@@ -16,7 +16,7 @@ from voice_assistant.actions import Action, ActionExecutor, ActionResult
 from voice_assistant.approvals import pending_said
 from voice_assistant.choices import ChoiceStore
 from voice_assistant.clock import Clock
-from voice_assistant.conversation import LIGHTS_TIMEOUT, Conversation, Reply
+from voice_assistant.conversation import LIGHTS_TIMEOUT, TALKED_OVER_NOTE, Conversation, Reply
 from voice_assistant.downloads import NOT_SET_UP, ON_ITS_WAY, Downloads
 from voice_assistant.google_calendar import Removal
 from voice_assistant.ha_registry import Entry, Snapshot
@@ -92,9 +92,20 @@ class FakeLLM:
         self.devices = []
         # The exchanges it keeps, which each answer it gives adds to, as the real one's do.
         self.history = []
+        # What it was noted to be told with the next request - see LLMHandler.note.
+        self.notes = []
 
     def forget_stale_history(self):
         pass
+
+    def note(self, text):
+        self.notes.append(text)
+
+    def take_back(self):
+        return self.history.pop()
+
+    def put_back(self, earlier):
+        self.history.append(earlier)
 
     def process_query(self, text, context=None, lights=None, read=None, playing=(), device=None):
         self.devices.append(device)
@@ -632,6 +643,23 @@ def test_a_request_said_over_a_reply_is_answered_as_usual():
     conversation = _conversation(llm=llm)
     conversation.start(talked_over=True)
     assert conversation.handle("what's the capital of France").say == "Paris."
+
+
+def test_claude_is_told_a_request_began_over_its_last_reply():
+    # By the voice, the wake word or a press alike, each of which starts the request talked over.
+    llm = FakeLLM(_answer("Paris."), _answer("Berlin."))
+    conversation = _conversation(llm=llm)
+    conversation.start(talked_over=True)
+    assert llm.notes == [TALKED_OVER_NOTE]
+    assert TALKED_OVER_NOTE == ("The user began speaking before your last reply had finished, so they may not "
+                                "have heard the end of it.")
+    # Not what was said, which is the user's words alone.
+    conversation.handle("what's the capital of France")
+    assert llm.asked == ["what's the capital of France"]
+    # Nor a request begun afresh.
+    conversation.start()
+    conversation.handle("and Germany?")
+    assert llm.notes == [TALKED_OVER_NOTE]
 
 
 def test_stop_said_after_the_reply_has_finished_is_still_a_command():

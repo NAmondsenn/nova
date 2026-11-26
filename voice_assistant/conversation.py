@@ -59,6 +59,11 @@ DECLINED = {"no", "nope", "nah", "no thanks", "no thank you", "don't", "dont", "
             "stop", "cancel", "cancel that", "cancel it", "leave it", "no leave it", "never mind", "nevermind",
             "not now", "no not now"}
 
+# What Claude is told with a request begun over its last reply - by the voice, the wake word or a press - as
+# nothing else in its history says the reply was stopped part way, so it might build on words never heard.
+TALKED_OVER_NOTE = ("The user began speaking before your last reply had finished, so they may not have heard "
+                    "the end of it.")
+
 # The tools of an open conversation's own phrases, whose local rules are matched even in the
 # answer to a question while one is on - as at any other turn of it, where "that's all" ends it,
 # and "think harder" moves it up to the bigger model.
@@ -197,6 +202,8 @@ class Conversation:
         # Earlier conversations are only remembered for a few minutes, so this
         # morning's "play that one" doesn't colour tonight's "yes".
         self.llm.forget_stale_history()
+        if talked_over:
+            self.llm.note(TALKED_OVER_NOTE)
 
     @contextmanager
     def aside(self):
@@ -340,7 +347,7 @@ class Conversation:
             result = self._ask_claude(text, in_routine=in_routine)
             # A turn nobody answered leaves the exchange it was to replace as it was.
             if earlier is not None and (not result.get("success") or result.get("not_for_me")):
-                self.llm.history.append(earlier)
+                self.llm.put_back(earlier)
         elif local:
             timeline.note(local_intent=True)
         else:
@@ -482,7 +489,7 @@ class Conversation:
             return text, None
         if not self.llm.history or not self.llm.history[-1].get("plain"):
             return None
-        earlier = self.llm.history.pop()
+        earlier = self.llm.take_back()
         return earlier["user"], earlier
 
     def _ask_claude(self, text: str, in_routine: bool = False) -> Dict:

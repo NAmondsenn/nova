@@ -202,6 +202,8 @@ class LLMHandler:
         # Whether a conversation was on here when the history was last used or added to, to
         # notice that it's ended - see _settle_history.
         self._was_talking = False
+        # What Claude is to be told with the user's next message, which their words can't say - see note.
+        self._notes: List[str] = []
 
         # Web search is opt-in per query rather than always on, so ordinary replies
         # aren't slowed down or billed by unnecessary searches.
@@ -252,11 +254,54 @@ class LLMHandler:
                     turn["at"] = max(turn.get("at", ended), ended)
         return talking
 
+    def note(self, text: str):
+        """
+        Notes something for Claude about the user's next message which their words can't tell
+        it - that they began it over Nova's last reply, say. It's kept until that message goes
+        into the history, and is then written at the head of it, in round brackets on a line of
+        its own, and stays there as written, so the history sent before it never changes and
+        the API's cache of it holds. It's Claude's alone: never in what's logged, shown or said
+        as the user's words, which stay as they were in the history's "user".
+
+        Args:
+            text: The note, a sentence.
+        """
+        self._notes.append(text)
+
+    @staticmethod
+    def _noted(notes: Sequence[str], text: str) -> str:
+        """A user's message as Claude is sent it, with the notes for it at its head, one to a line."""
+        return "".join(f"({note})\n" for note in notes) + text
+
+    def take_back(self) -> Dict:
+        """
+        Takes the latest exchange out of the history, to be asked again - its notes held for
+        the exchange which replaces it, as they are about the same message.
+
+        Returns:
+            The exchange.
+        """
+        earlier = self.history.pop()
+        self._notes[:0] = earlier.get("notes", [])
+        return earlier
+
+    def put_back(self, earlier: Dict):
+        """
+        Puts back an exchange take_back took out, when nothing replaced it - with its notes,
+        which are no longer held for the next.
+
+        Args:
+            earlier: The exchange.
+        """
+        del self._notes[:len(earlier.get("notes", []))]
+        self.history.append(earlier)
+
     def _keep(self, turn: Dict):
         """
         Adds an exchange to the history, which keeps only so many: the last history_length,
         or in a conversation the last conversation.history_exchanges, read as they are set
-        now - so the history doesn't grow indefinitely.
+        now - so the history doesn't grow indefinitely. Any notes for its message go with it
+        (see note).
 
         Args:
             turn: The exchange.
@@ -264,6 +309,8 @@ class LLMHandler:
         talking = self._settle_history()
         if talking:
             turn["talked"] = True
+        if self._notes:
+            turn["notes"], self._notes = self._notes, []
         self.history.append(turn)
         cap = self.history_length
         if talking:
@@ -380,7 +427,7 @@ class LLMHandler:
         Returns:
             The messages, in order.
         """
-        messages = [{"role": "user", "content": turn["user"]}]
+        messages = [{"role": "user", "content": LLMHandler._noted(turn.get("notes", ()), turn["user"])}]
         reads = turn.get("reads") or []
         if reads:
             uses = [{"type": "tool_use", "id": f"toolu_read_{number}_{index}", "name": read["name"], "input": read["input"]}
@@ -667,7 +714,9 @@ class LLMHandler:
                 messages[-1] = self._marked_for_caching(messages[-1])
             # Adds the current user query to the messages list, after the details which
             # change from one request to the next - see _system_prompt.
-            messages.append({"role": "user", "content": self._situation(now, context, lights, playing, device) + text})
+            # Any notes for it at its head, as the history will have them.
+            messages.append({"role": "user", "content": self._noted(
+                self._notes, self._situation(now, context, lights, playing, device) + text)})
 
             # The tools are always offered, so the model decides what the user meant
             # rather than a keyword match guessing at it.
@@ -1089,6 +1138,10 @@ class LLMHandler:
         kept = [turn for turn in self.history if now - turn.get("at", now) <= self.history_max_age]
         if len(kept) < len(self.history):
             logger.info(f"Forgot {len(self.history) - len(kept)} old exchange(s)")
+            # Notes held for the next message are about what was said before it, so they go
+            # once all of that has.
+            if not kept:
+                self._notes = []
         self.history = kept
 
     def remember(self, user_text: str, reply: str):
