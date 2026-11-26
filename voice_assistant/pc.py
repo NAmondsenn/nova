@@ -15,8 +15,11 @@ off, every one of them reads "unavailable" (live check 5).
 
 Every power command confirms with the success chime, not words (his words, 21 Nov): the
 words stay as the message, for the log and for when the chime is switched off. Shutting down
-and restarting don't ask first - the question and its press_pc_button are gone. Failures
-still speak. At the PC, the button is pressed only once the chime has played (decision 0034).
+and restarting don't ask first, as a deliberate "Hey Nova" or press came before them - except
+in a conversation, where none need, so a stray remark could: there they ask - "Shut down the
+PC?" - and only a yes said next does it (see Conversation.handle). The yes runs
+press_pc_button, which Claude isn't offered, so it can't skip the question. Failures still
+speak. At the PC, the button is pressed only once the chime has played (decision 0034).
 
 Every press goes through HomeAssistant.press, whose own check of the snapshot is the last
 word on which buttons may be pressed.
@@ -29,6 +32,7 @@ from typing import Dict, List, Optional
 
 import requests
 
+from voice_assistant.actions import Action
 from voice_assistant.batteries import spoken_name
 from voice_assistant.choices import ChoiceStore
 from voice_assistant.ha_registry import PC_KINDS, Snapshot
@@ -40,6 +44,8 @@ logger = logging.getLogger(__name__)
 
 # The button each action presses, by HASS.Agent's kind.
 KINDS = {"off": "shutdown", "restart": "restart", "sleep": "sleep", "screen_off": "monitorsleep", "lock": "lock"}
+# What's asked before shutting down or restarting in a conversation.
+ASKED = {"off": "Shut down the PC?", "restart": "Restart the PC?"}
 # What's said as each button is pressed - kept for the log, and said if the chime's off.
 PRESSED = {"off": "Shutting down the PC.", "restart": "Restarting the PC.", "sleep": "Putting your PC to sleep.",
            "screen_off": "Turning your PC's screen off.", "lock": "Locking your PC."}
@@ -238,7 +244,7 @@ class PCPower:
             return None, None, {"success": False, "message": f"Which PC, {', '.join(names[:-1])} or {names[-1]}?"}
         return fits[0], snapshot, None
 
-    def act(self, action: str, name: Optional[str] = None, defer: bool = False) -> Dict:
+    def act(self, action: str, name: Optional[str] = None, defer: bool = False, ask: bool = False) -> Dict:
         """
         Does what was asked of the PC, confirming a success with the chime.
 
@@ -247,11 +253,13 @@ class PCPower:
             name: Which PC, as the user said it, or None - needed only with several.
             defer: Whether to leave pressing the button until the confirmation has been given
                 - the chime - as at the PC, checked first so the reply is still true.
+            ask: Whether shutting down or restarting asks first, as in a conversation.
 
         Returns:
             {"success", "message"}, with "chime" for a success which is confirmed by the
             chime, and "after_said" for what defer leaves, which presses the button and gives
-            {"success", "message"} when called.
+            {"success", "message"} when called - or, asking first, the question, with
+            "ask_first", the Action a yes runs.
         """
         if action not in ("on", "status", *KINDS):
             return {"success": False, "message": "I didn't catch what to do with your PC."}
@@ -272,9 +280,13 @@ class PCPower:
         if not pc.on:
             return {"success": False,
                     "message": "Your PC's already off." if action in ("off", "restart") else "Your PC's off."}
+        # Not asked about a button that isn't there, which a yes couldn't press.
         missing = self._missing(pc, action)
         if missing:
             return missing
+        if ask and action in ASKED:
+            return {"success": True, "message": ASKED[action],
+                    "ask_first": Action("press_pc_button", {"action": action, "name": name})}
         button, kind = pc.buttons[KINDS[action]], KINDS[action]
         if defer:
             return {"success": True, "message": PRESSED[action], "chime": True,

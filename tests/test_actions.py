@@ -2913,16 +2913,19 @@ class FakePC:
 
     def __init__(self):
         self.asked = []
+        # Whether each was to ask first, as in a conversation.
+        self.asking = []
 
-    def act(self, action, name=None, defer=False):
+    def act(self, action, name=None, defer=False, ask=False):
         self.asked.append(("act", action, name))
+        self.asking.append(ask)
         return {"success": True, "message": "Locking your PC.", "chime": True}
 
 
 def test_the_pcs_power_words_are_deferred_only_at_a_pc():
     pc = FakePC()
-    pc.act = lambda action, name=None, defer=False: {"success": True, "message": "Locking your PC.",
-                                                    "after_said": (lambda: {"success": True}) if defer else None}
+    pc.act = lambda action, name=None, defer=False, ask=False: {
+        "success": True, "message": "Locking your PC.", "after_said": (lambda: {"success": True}) if defer else None}
     assert ActionExecutor(pc=pc).execute(Action("pc_power", {"action": "lock"})).after_said is None
     result = ActionExecutor(pc=pc, at_pc=lambda: True).execute(Action("pc_power", {"action": "lock"}))
     assert (result.say, result.after_said()) == ("Locking your PC.", {"success": True})
@@ -2942,15 +2945,34 @@ def test_a_power_word_at_one_of_two_pcs_is_that_ones():
     assert pc.asked[-1] == ("act", "off", "Gaming PC")
 
 
-def test_pc_power_never_asks_and_press_pc_button_is_gone():
-    assert "press_pc_button" not in ActionExecutor.tools()
+def test_pc_power_asks_first_only_in_a_conversation_here():
+    # Outside one a deliberate wake word or press came first; in one none need, so a stray remark could shut it down.
+    pc = FakePC()
+    conversation = OpenConversation(lambda: {"enabled": True})
+    executor = ActionExecutor(pc=pc, satellite="pc", conversation=conversation)
+    result = executor.execute(Action("pc_power", {"action": "off"}, from_model=True))
+    assert (result.ok, result.ask_first, result.confirm) == (True, None, "chime")
+    conversation.start("bedroom")
+    executor.execute(Action("pc_power", {"action": "off"}, from_model=True))
+    conversation.end("said", satellite="bedroom")
+    conversation.start("pc")
+    executor.execute(Action("pc_power", {"action": "restart"}))
+    assert pc.asking == [False, False, True]
+
+
+def test_claude_cant_press_the_pcs_button_itself():
     pc = FakePC()
     executor = ActionExecutor(pc=pc)
     assert "press_pc_button" not in {schema["name"] for schema in executor.tool_schemas()}
-    assert executor.execute(Action("press_pc_button", {"action": "off"})).ok is False
-    result = executor.execute(Action("pc_power", {"action": "off"}, from_model=True))
-    assert (result.ok, result.ask_first, result.confirm) == (True, None, "chime")
-    assert pc.asked == [("act", "off", None)]
+    result = executor.execute(Action("press_pc_button", {"action": "off"}, from_model=True))
+    assert (result.ok, result.say) == (False, "Sorry, I can't do that.")
+    assert pc.asked == []
+    # The yes, which only the conversation gives - at the PC pressed once the chime has played. Nothing else.
+    assert executor.execute(Action("press_pc_button", {"action": "off"})).confirm == "chime"
+    ActionExecutor(pc=pc, at_pc=lambda: True, pc_name=lambda: "Desk PC").execute(
+        Action("press_pc_button", {"action": "restart", "name": "Desk PC"}))
+    assert executor.execute(Action("press_pc_button", {"action": "sleep"})).ok is False
+    assert pc.asked == [("act", "off", None), ("act", "restart", "Desk PC")] and pc.asking == [False, False]
 
 
 def test_the_pc_needs_home_assistant():

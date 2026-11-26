@@ -257,9 +257,11 @@ class Conversation:
                 if result.ok and result.confirm == "later":
                     # "Gooba requested." comes once SoulSync has it.
                     return Reply()
-                # As if asked for outright: the mic's own sound, rather than "Microphone off.".
+                # As if asked for outright: the mic's own sound, rather than "Microphone off.", and
+                # at the PC its shutdown pressed once the chime has played.
                 sounds, messages = confirm([result], self.chime_enabled)
-                return Reply(say=" ".join(messages), sounds=sounds)
+                after = [result.after_said] if result.ok and result.after_said else []
+                return Reply(say=" ".join(messages), sounds=sounds, after=after)
             # Anything else is a fresh request, and nothing is done.
 
         # Answering the assistant's own "shall I turn that reminder off?". Checked

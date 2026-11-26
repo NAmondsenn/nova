@@ -176,6 +176,25 @@ def test_shutting_down_and_restarting_press_straight_away_with_the_chime(tmp_pat
     assert not hasattr(power, "press")
 
 
+def test_in_a_conversation_shutting_down_and_restarting_ask_first(tmp_path):
+    power, home = _power(tmp_path, _snapshot(_pc()))
+    for action, asked in (("off", "Shut down the PC?"), ("restart", "Restart the PC?")):
+        result = power.act(action, "desk", defer=True, ask=True)
+        assert (result["success"], result["message"]) == (True, asked)
+        assert (result["ask_first"].tool, result["ask_first"].params) == ("press_pc_button",
+                                                                          {"action": action, "name": "desk"})
+        assert "chime" not in result and "after_said" not in result
+    # The rest don't, as each is undone by touching the PC.
+    assert power.act("lock", ask=True) == {"success": True, "message": "Locking your PC.", "chime": True}
+    assert home.pressed == ["button.desk_locked"]
+    # Nor is one asked which couldn't be done.
+    stripped = {kind: entity for kind, entity in DESK_BUTTONS.items() if kind != "Shutdown"}
+    power, home = _power(tmp_path, _snapshot(_pc(buttons=stripped)))
+    assert "ask_first" not in power.act("off", ask=True)
+    power, home = _power(tmp_path, _snapshot(_pc()), on=False)
+    assert power.act("off", ask=True) == {"success": False, "message": "Your PC's already off."}
+
+
 def test_turning_on_presses_wake_on_lan(tmp_path):
     power, home = _power(tmp_path, _snapshot(_pc()), on=False)
     assert power.act("on") == {"success": True, "message": "Turning your PC on.", "chime": True}

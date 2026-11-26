@@ -1028,6 +1028,55 @@ def test_claudes_restart_just_chimes_too(tmp_path):
     assert home.pressed == ["button.desk_again"]
 
 
+def _pc_talk(tmp_path, *replies, at_pc=False):
+    """As _pc_conversation, in an open conversation at the satellite the actions are for."""
+    home = FakePCHome()
+    talk = OpenConversation(lambda: {"enabled": True})
+    talk.start("desk")
+    actions = AskingActions(home=home, pc=PCPower(home, ChoiceStore(str(tmp_path / "pcs.json"), {"wake": {}})),
+                            satellite="desk", conversation=talk, at_pc=lambda: at_pc)
+    llm = FakeLLM(*replies)
+    return _conversation(intents=LocalIntents(), llm=llm, actions=actions, conversing=lambda: True), home, llm
+
+
+def test_in_a_conversation_shutting_down_asks_first_and_only_a_yes_does_it(tmp_path):
+    # No wake word or press need come before it there, so a remark not meant for Nova could shut the PC down.
+    conversation, home, llm = _pc_talk(tmp_path)
+    reply = conversation.handle("Shut down the PC.")
+    assert (reply.say, reply.listen_again) == ("Shut down the PC?", True)
+    assert home.pressed == []
+    reply = conversation.handle("yes", follow_up=True)
+    assert reply.sounds == [("success_chime.wav", "general")] and home.pressed == ["button.desk_off"]
+    assert llm.asked == []
+
+    conversation, home, llm = _pc_talk(tmp_path, _answer("It's sunny."), _answer("Okay."))
+    conversation.handle("Restart the PC.")
+    assert conversation.handle("no", follow_up=True).say == "Okay, I'll leave it."
+    # Anything else leaves it, and is a fresh request - after which a yes is nobody's.
+    conversation.handle("Restart the PC.")
+    assert conversation.handle("what's the weather", follow_up=True).say == "It's sunny."
+    conversation.handle("yes", follow_up=True)
+    assert home.pressed == [] and llm.asked == ["what's the weather", "yes"]
+
+
+def test_in_a_conversation_claudes_restart_asks_first_too(tmp_path):
+    conversation, home, llm = _pc_talk(
+        tmp_path, _answer("Okay.", Action("pc_power", {"action": "restart"}, from_model=True)))
+    assert conversation.handle("could you reboot the thing on my desk").say == "Restart the PC?"
+    assert home.pressed == []
+    conversation.handle("go on", follow_up=True)
+    assert home.pressed == ["button.desk_again"]
+
+
+def test_at_the_pc_the_yes_presses_once_the_chime_has_played(tmp_path):
+    conversation, home, llm = _pc_talk(tmp_path, at_pc=True)
+    conversation.handle("Shut down the PC.")
+    reply = conversation.handle("yes", follow_up=True)
+    assert reply.sounds == [("success_chime.wav", "general")] and home.pressed == []
+    assert [after() for after in reply.after] == [{"success": True, "message": "Shutting down the PC."}]
+    assert home.pressed == ["button.desk_off"]
+
+
 def test_with_the_chime_off_it_says_shutting_down(tmp_path):
     home = FakePCHome()
     actions = AskingActions(home=home, pc=PCPower(home, ChoiceStore(str(tmp_path / "pcs.json"), {"wake": {}})))

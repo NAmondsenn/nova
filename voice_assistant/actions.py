@@ -3072,7 +3072,8 @@ class ActionExecutor:
 
     @tool(
         "Turn the user's PC on, shut it down, restart it, put it or its screen to sleep, lock it, or say whether "
-        "it's on. What happens is confirmed for you, so just reply 'Okay.'",
+        "it's on. What happens is confirmed for you, so just reply 'Okay.' In a conversation, shutting down and "
+        "restarting ask the user first, for you.",
         needs="pc",
         required=["action"],
         action={"type": "string", "enum": ["on", "off", "restart", "sleep", "screen_off", "lock", "status"]},
@@ -3083,7 +3084,25 @@ class ActionExecutor:
         # With no PC named, at a PC it's that one.
         if at_pc and not name:
             name = self.pc_name()
-        return self.pc.act(action or "", name or None, defer=at_pc)
+        # Outside a conversation a deliberate wake word or press came first. In one here none need, so a remark not
+        # meant for Nova could shut the PC down: there shutting down and restarting ask first.
+        talking = self.conversation is not None and self.conversation.on_at(self.satellite)
+        return self.pc.act(action or "", name or None, defer=at_pc, ask=talking)
+
+    # Only ever run by the conversation, on the user's yes to pc_power's question - so Claude,
+    # which isn't offered it, can't shut the PC down in a conversation without one.
+    @tool(
+        "Shut down or restart the PC, once the user has said yes.",
+        needs="pc",
+        required=["action"],
+        for_model=False,
+        action={"type": "string", "enum": ["off", "restart"]},
+        name={"type": "string", "description": "Which PC, as the user said it, or left out."},
+    )
+    def press_pc_button(self, action: Optional[str] = None, name: Optional[str] = None):
+        if action not in ("off", "restart"):
+            return {"success": False, "message": "I didn't catch what to do with your PC."}
+        return self.pc.act(action, name or None, defer=self.at_pc())
 
     # Journeys - see journeys.py
 
