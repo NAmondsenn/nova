@@ -4929,10 +4929,9 @@ def test_music_playing_before_an_update_plays_on_where_it_was(moving, connect, m
     brain.keep_music_for_update()
 
     # Only what was playing is handed over, after its pause on the way lands.
+    assert [event for event in moving.happened if event[1] == "bedroom"] == [("wait", "bedroom"),
+                                                                           ("hand_over", "bedroom")]
     assert moving.moved() == [("hand_over", "bedroom")]
-    assert ("wait", "bedroom") in moving.happened
-    kept = brain.music_resume._read()
-    assert set(kept) == {"bedroom"}
 
     # The brain is back and the Pi connects: its music carries on once it's settled, and only once.
     brain.sessions.clear()
@@ -4968,7 +4967,8 @@ def test_music_which_cant_be_handed_over_is_skipped_and_logged(moving, caplog):
     with caplog.at_level(logging.WARNING, logger="voice_assistant.brain"):
         moving.brain.keep_music_for_update()
 
-    assert set(moving.brain.music_resume._read()) == {"pc"}
+    assert moving.brain.music_resume.take("bedroom") is None
+    assert moving.brain.music_resume.take("pc") == {"queue": ["a song from pc"]}
     assert any("bedroom" in record.message and "the queue broke" in record.message for record in caplog.records)
 
 
@@ -5004,4 +5004,65 @@ def test_a_satellite_installing_keeps_its_music_for_its_return(moving, connect, 
     # Kept before the installing is noted, and the other satellites' music is left alone.
     assert noted == [("bedroom", "a" * 40)]
     assert moving.moved() == [("hand_over", "bedroom")]
-    assert set(brain.music_resume._read()) == {"bedroom"}
+    assert brain.music_resume.take("pc") is None
+    assert brain.music_resume.take("bedroom") == {"queue": ["a song from bedroom"]}
+
+
+def test_an_install_refused_after_it_began_plays_the_music_on(moving, connect, monkeypatch):
+    brain = moving.brain
+    player = MovingPlayer("bedroom", moving.happened, True, True)
+    _with_player(monkeypatch, player)
+    serving(brain)
+    satellite = connect(brain)
+    connected(brain)
+    moving.happened.clear()
+    satellite.say("update_installing", version="a" * 40)
+    assert wait_for(lambda: moving.moved() == [("hand_over", "bedroom")])
+
+    # The satellite kept its session: its install failed, so it never restarts and
+    # nothing else would carry the music on.
+    satellite.say("update_result", version="a" * 40, ok=False, error="It was refused")
+
+    assert wait_for(lambda: [event for event in moving.moved() if event[0] == "take_over"])
+    assert brain.music_resume.take("bedroom") is None
+
+
+def test_a_successful_install_leaves_the_music_for_the_return(moving, connect, monkeypatch):
+    brain = moving.brain
+    player = MovingPlayer("bedroom", moving.happened, True, True)
+    _with_player(monkeypatch, player)
+    serving(brain)
+    satellite = connect(brain)
+    connected(brain)
+    satellite.say("update_installing", version="a" * 40)
+    assert wait_for(lambda: moving.moved() == [("hand_over", "bedroom")])
+
+    satellite.say("update_result", version="a" * 40, ok=True)
+    time.sleep(0.2)
+
+    assert moving.moved() == [("hand_over", "bedroom")]
+    assert brain.music_resume.take("bedroom") == {"queue": ["a song from bedroom"]}
+
+
+def test_music_is_handed_back_if_it_cant_be_kept(moving, monkeypatch):
+    moving.add("bedroom", music=True, playing=True)
+
+    def full(name, state):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(moving.brain.music_resume, "keep", full)
+    moving.brain.keep_music_for_update()
+
+    assert [event[:2] for event in moving.moved()] == [("hand_over", "bedroom"), ("take_over", "bedroom")]
+
+
+def test_music_kept_for_a_restart_which_doesnt_happen_plays_on(moving, monkeypatch):
+    player = moving.add("bedroom", music=True, playing=True)
+    brain = moving.brain
+    brain.keep_music_for_update()
+    assert player.playing is False
+
+    brain.resume_kept_music()
+
+    assert player.playing is True
+    assert brain.music_resume.take("bedroom") is None

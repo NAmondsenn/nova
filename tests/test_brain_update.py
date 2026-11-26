@@ -42,6 +42,7 @@ class FakeBrain:
         self.behind = []
         self.offers = 0
         self.kept = 0
+        self.resumed = 0
         self.restarts = 0
         self.service = True
         self._lock = threading.Lock()
@@ -65,6 +66,9 @@ class FakeBrain:
 
     def keep_music_for_update(self):
         self.kept += 1
+
+    def resume_kept_music(self):
+        self.resumed += 1
 
     def restart_for_update(self):
         self.restarts += 1
@@ -552,3 +556,37 @@ def test_a_restart_which_breaks_says_the_new_code_waits_for_the_next(folder):
     assert outcome["command"] == "sudo systemctl restart nova-backend"
     assert brain.said == [("kitchen", "The update needs you: the settings page says what to run.")]
     assert not (folder / "asked.json").exists()
+
+
+def test_a_restart_which_breaks_plays_the_kept_music_on(folder):
+    brain = FakeBrain()
+
+    def broken():
+        raise RuntimeError("no timer")
+
+    brain.restart_for_update = broken
+    update = make(brain, folder)
+    updater(folder, "checking", "ready")
+    update.start("kitchen")
+    assert wait_for(lambda: not update.running)
+    assert brain.kept == 1 and brain.resumed == 1
+
+
+def test_a_brain_which_isnt_a_service_plays_its_kept_music_on(folder):
+    brain = FakeBrain()
+    brain.service = False
+    update = make(brain, folder)
+    updater(folder, "checking", "ready")
+    update.start("kitchen")
+    assert wait_for(lambda: not update.running)
+    assert brain.kept == 1 and brain.resumed == 1
+
+
+def test_a_restarting_brain_leaves_its_kept_music_for_after(folder):
+    brain = FakeBrain()
+    update = make(brain, folder)
+    updater(folder, "checking", "ready")
+    update.start("kitchen")
+    assert wait_for(lambda: brain.restarts == 1)
+    time.sleep(0.1)
+    assert brain.kept == 1 and brain.resumed == 0

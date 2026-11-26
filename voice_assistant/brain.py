@@ -1385,7 +1385,7 @@ class Brain:
         # Before it's read, so no list it sends is missed.
         satellite.on_apps = self.computers.set_apps
         satellite.on_windows = self.computers.set_windows
-        satellite.on_update_result = self.updates.result
+        satellite.on_update_result = self._update_result
         satellite.on_update_installing = self._update_installing
         # Read from the start, so the satellite's pings are answered while its session is made.
         reading = threading.Thread(target=satellite.serve, daemon=True, name=f"satellite-{name}")
@@ -1846,6 +1846,30 @@ class Brain:
         except Exception as e:
             logger.warning(f"The {name} satellite couldn't carry on its music after the update: {e}")
 
+    def _update_result(self, name: str, message: Dict) -> None:
+        """
+        Called when a satellite says how its update went: if it failed, the satellite keeps its
+        session and never restarts, so the music kept for its return is played on now; then
+        the result is noted. A good result leaves the music for its return, after the restart.
+
+        Args:
+            name: The satellite's name.
+            message: Its update_result.
+        """
+        if not message.get("ok"):
+            with self._lock:
+                session = self.sessions.get(name)
+            if session is not None and session.satellite.connected:
+                self._resume_music(session)
+        self.updates.result(name, message)
+
+    def resume_kept_music(self) -> None:
+        """Plays on the music kept for every connected satellite, for an update's restart which didn't happen."""
+        with self._lock:
+            sessions = list(self.sessions.values())
+        for session in sessions:
+            self._resume_music(session)
+
     def _update_installing(self, name: str, version: str) -> None:
         """
         Called when a satellite says it is installing an update: keeps its music, to carry on
@@ -2205,9 +2229,10 @@ class Brain:
             names: The satellites to keep it for - the one which is installing - or None for
                 every connected one, as the brain's own restart has.
         """
+        wanted = None if names is None else set(names)
         with self._lock:
             sessions = [(name, session) for name, session in self.sessions.items()
-                        if names is None or name in set(names)]
+                        if wanted is None or name in wanted]
         for name, session in sessions:
             player = session.music_player
             if not hasattr(player, "hand_over"):
@@ -2218,7 +2243,12 @@ class Brain:
                     continue
                 state = player.hand_over()
                 if state is not None:
-                    self.music_resume.keep(name, state)
+                    try:
+                        self.music_resume.keep(name, state)
+                    except Exception:
+                        # Not kept, so nothing would carry it on: it plays on where it is.
+                        player.take_over(state)
+                        raise
                     logger.info(f"Kept the {name} satellite's music, to carry on after the update")
             except Exception as e:
                 logger.warning(f"Couldn't keep the {name} satellite's music for the update: {e}")

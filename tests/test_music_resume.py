@@ -3,6 +3,7 @@ Music Resume Test
 The music kept for a satellite across an update, carried on once.
 """
 
+import logging
 import time
 
 from voice_assistant import music_resume
@@ -50,3 +51,19 @@ def test_a_missing_or_broken_file_reads_as_nothing(tmp_path):
     assert kept.take("bedroom") is None
     kept.keep("bedroom", STATE)
     assert kept.take("bedroom") == STATE
+
+
+def test_a_clock_gone_backwards_is_too_old_and_a_dropped_entry_is_logged(tmp_path, monkeypatch, caplog):
+    kept = MusicResume(str(tmp_path / "music.json"))
+    now = time.time()
+    monkeypatch.setattr(music_resume.time, "time", lambda: now)
+    kept.keep("bedroom", STATE)
+    kept.keep("pc", STATE)
+
+    monkeypatch.setattr(music_resume.time, "time", lambda: now - 5)
+    assert kept.take("bedroom") is None
+    monkeypatch.setattr(music_resume.time, "time", lambda: now + 700)
+    with caplog.at_level(logging.INFO, logger="voice_assistant.music_resume"):
+        assert kept.take("pc") is None
+    assert any("pc" in record.message and "700" in record.message and "too long" in record.message
+               for record in caplog.records)

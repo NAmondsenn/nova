@@ -310,6 +310,7 @@ class BrainUpdate:
         except Exception:
             # Not "still on the old version": the new code is on disk, and starts at the next restart.
             logger.exception("Couldn't restart into the brain's new code")
+            self._resume_music()
             self._remove("asked.json")
             self._keep("needs_you", RESTART_BROKE, [{"why": RESTART_BROKE, "command": RESTART_COMMAND}], source,
                        target)
@@ -318,10 +319,18 @@ class BrainUpdate:
         if restarting:
             logger.info(f"Restarting into the brain's new code ({code_version.short(target)})")
             return True
+        self._resume_music()
         self._remove("asked.json")
         self._keep("needs_you", NOT_A_SERVICE, [{"why": NOT_A_SERVICE, "command": RESTART_COMMAND}], source, target)
         self._say(asked_at, NEEDS_YOU)
         return False
+
+    def _resume_music(self) -> None:
+        """Plays on the music kept for a restart which isn't going to happen, never raising."""
+        try:
+            self.brain.resume_kept_music()
+        except Exception:
+            logger.exception("Couldn't carry on the music kept for the update")
 
     def _status(self) -> Tuple[Optional[Tuple[int, int]], Dict]:
         """

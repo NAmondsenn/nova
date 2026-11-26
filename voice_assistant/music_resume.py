@@ -87,7 +87,11 @@ class MusicResume:
             state = entry["state"]
         except (KeyError, TypeError):
             return None
-        if not isinstance(state, dict) or age > RESUME_WITHIN:
+        if not isinstance(state, dict):
+            return None
+        # A negative age is a clock which has gone backwards, so no telling how long ago it was.
+        if not 0 <= age <= RESUME_WITHIN:
+            logger.info(f"The {name} satellite's music was kept {age:.0f} s ago, too long to carry on")
             return None
         return state
 
