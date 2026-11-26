@@ -268,7 +268,19 @@ def test_the_helper_restores_and_restarts_without_confirmation():
     assert "command = 'bash scripts/deploy_pc.sh'" in code
     # Every path ends with Nova started: the outer catch starts it too.
     assert code.count("Start-ScheduledTask -TaskName 'Nova start'") == 3
-    assert "$touched -or $wasRunning" in code
+
+
+def test_the_helper_never_starts_nova_over_one_still_running():
+    # A failure before the code was touched - the hold wait, or a Stop-Nova which threw -
+    # can leave the old satellite running, and a second start over it would run two.
+    code = helper_code()
+    assert "$touched -or $wasRunning" not in code
+    gone = function_body(read(HELPER), "Test-NovaGone")
+    assert "@(Find-Running).Count -eq 0" in gone
+    # When it can't tell - stop_nova.ps1 never loaded - it says no.
+    assert "catch { $false }" in gone
+    failed = code[code.index("if ($failure) {"):]
+    assert failed.count("if ($touched -or ($wasRunning -and (Test-NovaGone))) {") == 2
 
 
 def test_the_helper_snapshots_the_venv_only_when_the_packages_change():

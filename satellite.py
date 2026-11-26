@@ -86,6 +86,16 @@ UPDATE_LOOK = 2.0
 # update.sh's wait_for_hold and update_pc.ps1.
 HOLD_FILE = "hold"
 
+# The longest an installer has, in seconds from the hand-off, to restart the satellite: the
+# installers' own wait for the hold to go (600 seconds, in update.sh and update_pc.ps1), and
+# five minutes more. One which hasn't by then never will - its helper broke before stopping
+# the satellite, say - so the update is given up and reported, rather than this satellite
+# holding every later update off for ever. A constant so the tests can shorten it.
+HANDOFF_LONGEST = 600 + 300
+
+# What the brain is told when that happens and the installer left no result of its own.
+HANDOFF_LAPSED = "The installer didn't restart the satellite, so the update didn't happen."
+
 # The seconds between looks at Windows' microphone while there's a tray, so a mute by hand
 # reaches its icon. A constant so the tests can shorten it.
 MIC_WATCH = 2.0
@@ -571,7 +581,8 @@ class Satellite:
         # Whether an update is being installed - from waiting for the satellite to be free
         # on - under _update_lock, so only one ever is. It stays True once the installer has
         # taken the update over, as the installer then stops this process, and a second
-        # install meanwhile would undo the first; a new process starts it False.
+        # install meanwhile would undo the first; a new process starts it False, and so does
+        # an installer which hasn't stopped it by HANDOFF_LONGEST.
         self._update_lock = threading.Lock()
         self._installing = False
         # Held across noting or reading a result and sending it, so the install thread and
@@ -2357,6 +2368,7 @@ class Satellite:
                 self._update_failed(result)
                 return
             handed_off = True
+            deadline = time.monotonic() + HANDOFF_LONGEST
             logger.info(f"Update {code_version.short(version)} is with its installer, which restarts the satellite")
         except Exception as error:
             logger.exception(f"Installing update {code_version.short(version)} failed ({error})")
@@ -2370,13 +2382,19 @@ class Satellite:
                 with self._update_lock:
                     self._installing = False
         if handed_off:
-            self._hold_while_busy()
+            self._hold_while_busy(version, deadline)
 
-    def _hold_while_busy(self):
+    def _hold_while_busy(self, version: str, deadline: float):
         """
         Keeps the hold file while the satellite is busy and removes it while it is free,
         looking every UPDATE_LOOK seconds, until the satellite stops - which the installer
-        does, once there is no hold or it has waited long enough.
+        does, once there is no hold or it has waited long enough. If it is still running
+        at the deadline, the installer never will stop it, and the update is given up (see
+        _handoff_lapsed).
+
+        Args:
+            version: The commit handed to the installer.
+            deadline: The time.monotonic() by which the installer should have stopped it.
         """
         held: Optional[str] = None
         while True:
@@ -2386,6 +2404,41 @@ class Satellite:
                 held = busy
             if self._finished.wait(UPDATE_LOOK):
                 return
+            if time.monotonic() >= deadline:
+                self._handoff_lapsed(version)
+                return
+
+    def _handoff_lapsed(self, version: str):
+        """
+        Gives up an update whose installer took it over but never restarted the satellite:
+        the hold goes, the brain is sent the installer's own result if it left one - by the
+        same path as on connecting - or else told the installer didn't restart it, which is
+        noted so the same version isn't installed again unless the brain says to retry; the
+        update is forgotten as pending, and the next one can be installed.
+
+        Args:
+            version: The commit handed to the installer.
+        """
+        logger.warning(f"Update {code_version.short(version)} was handed to its installer "
+                       f"{HANDOFF_LONGEST / 60:g} minutes ago, but the installer didn't restart the "
+                       f"satellite, so the update is given up")
+        self._set_hold(None)
+        try:
+            with self._result_lock:
+                left = self.update_state.result_to_send()
+        except Exception:
+            logger.exception("Couldn't read whether the installer left a result")
+            left = None
+        if left is not None:
+            self._report_update()
+        else:
+            self._update_failed({"version": version, "ok": False, "error": HANDOFF_LAPSED})
+        try:
+            self.update_state.clear_pending()
+        except Exception:
+            logger.exception("Couldn't forget the update given up as pending")
+        with self._update_lock:
+            self._installing = False
 
     def _set_hold(self, busy: Optional[str]):
         """

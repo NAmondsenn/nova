@@ -15,9 +15,9 @@
 # the brain (voice_assistant/update_state.py). Nothing is written to result.json when it goes
 # well, as the new code writes that too.
 #
-# Whatever goes wrong, Nova is left started: a failure restores the snapshot, writes the
-# failed result (result.json for the brain, failed.json so the same commit isn't offered
-# again for ever), and starts the old code. If even the restore fails, whatever is there is
+# Whatever goes wrong, Nova is left running, though never started over one still running: a
+# failure restores the snapshot, writes the failed result (result.json for the brain,
+# failed.json so the same commit isn't offered again for ever), and starts the old code. If even the restore fails, whatever is there is
 # started, with a result which says what to run. Every write is to a temporary name moved into
 # place, so nothing is read half written.
 #
@@ -110,6 +110,12 @@ function Restore-Snapshot {
     }
 }
 
+# Whether Nova is no longer running, so starting it won't run a second satellite over the
+# first. False when it can't tell, as when stop_nova.ps1 was never loaded.
+function Test-NovaGone {
+    try { @(Find-Running).Count -eq 0 } catch { $false }
+}
+
 function Test-Confirmed {
     (Test-Path -LiteralPath $confirmedFile) -and ("$(Get-Content -LiteralPath $confirmedFile -Raw)".Trim() -eq $version)
 }
@@ -165,13 +171,15 @@ try {
         # Before the old code starts, so the result is there when it reconnects.
         try { Write-Failure $failure $needsYou }
         catch { Write-Host "Couldn't write the result: $($_.Exception.Message)" }
-        if ($touched -or $wasRunning) { Start-ScheduledTask -TaskName 'Nova start' }
+        # The old satellite is started only if the code was touched or it was stopped - never
+        # over one still running, as after a failure before it was stopped.
+        if ($touched -or ($wasRunning -and (Test-NovaGone))) { Start-ScheduledTask -TaskName 'Nova start' }
     }
 }
 catch {
     # Whatever else went wrong, a satellite that was running, or was being replaced, is started.
     Write-Host "Update helper failed: $($_.Exception.Message)"
-    if ($touched -or $wasRunning) {
+    if ($touched -or ($wasRunning -and (Test-NovaGone))) {
         try { Start-ScheduledTask -TaskName 'Nova start' } catch { }
     }
 }

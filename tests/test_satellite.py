@@ -5659,6 +5659,48 @@ def test_the_satellite_holds_the_installer_off_while_busy_after_the_hand_off(bra
     assert made._busy() is None
 
 
+def test_a_hand_off_whose_installer_never_restarts_the_satellite_is_given_up(brain, make, updates, tmp_path,
+                                                                             monkeypatch, caplog):
+    # The installer took the update over but never stopped the satellite - its helper broke
+    # before it did, say - so after the longest an installer can take, the satellite stops
+    # waiting for it, tells the brain, and can be updated again.
+    monkeypatch.setattr(satellite, "HANDOFF_LONGEST", 0.3, raising=False)
+    made = updatable(brain, make)
+    send_update(brain, NEW, archive_of(100), update_id="u1")
+    assert wait_for(lambda: updates)
+    brain.say("play_stream", id="reply-1", rate=22050, channels=1, volume=1.0, kind="reply", paused=False)
+    hold = tmp_path / "update" / "hold"
+    assert wait_for(lambda: hold.exists())
+    assert wait_for(lambda: results(brain), 2)
+    expected = {"version": NEW, "ok": False,
+                "error": "The installer didn't restart the satellite, so the update didn't happen."}
+    assert results(brain) == [expected]
+    assert wait_for(lambda: not made._installing)
+    # Even while busy, as the installer's own wait for the hold is long over.
+    assert not hold.exists()
+    state = UpdateState(str(tmp_path / "update"))
+    assert state._read("pending.json") is None and state.failed_result(NEW) == expected
+    assert "didn't restart the satellite" in caplog.text
+    brain.say("stream_end", id="reply-1")
+    send_update(brain, NEWER, archive_of(100), update_id="u2")
+    assert wait_for(lambda: len(updates) == 2)
+
+
+def test_a_hand_off_given_up_sends_the_installers_own_result(brain, make, updates, tmp_path, monkeypatch):
+    monkeypatch.setattr(satellite, "HANDOFF_LONGEST", 0.3, raising=False)
+    made = updatable(brain, make)
+    send_update(brain, NEW, archive_of(100))
+    assert wait_for(lambda: updates)
+    # What an installer which failed, but couldn't restart the satellite, left.
+    own = {"version": NEW, "ok": False, "error": "The new code's packages wouldn't install."}
+    UpdateState(str(tmp_path / "update")).note_result(own)
+    assert wait_for(lambda: results(brain), 2)
+    assert results(brain) == [own]
+    assert wait_for(lambda: not made._installing)
+    state = UpdateState(str(tmp_path / "update"))
+    assert state._read("pending.json") is None and state.result_to_send() is None
+
+
 def test_an_update_waiting_is_given_up_when_the_satellite_stops(brain, make, updates, caplog):
     caplog.set_level(logging.INFO, logger="satellite")
     made = updatable(brain, make)
