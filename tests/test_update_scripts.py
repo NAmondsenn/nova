@@ -9,7 +9,9 @@ why in result.json, if anything goes wrong. And that setup.sh's needs_you notes 
 
 import json
 import os
+import signal
 import subprocess
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -22,6 +24,7 @@ folder=$(dirname "$NOVA_UPDATE_NOTES")
 echo "$* from=$NOVA_UPDATED_FROM head=$(git -C "$(dirname "$0")" rev-parse HEAD)" >> "$folder/stub.log"
 case "$STUB_MODE" in
     confirm) git -C "$(dirname "$0")" rev-parse HEAD > "$folder/confirmed" ;;
+    dirty) echo mine > "$(dirname "$0")/file" ;;
     fail) echo "first line"; echo "It broke here, at the last step"; exit 3 ;;
 esac
 """
@@ -58,7 +61,7 @@ def bundle_of(repo, tmp_path, name="nova.bundle"):
     return path
 
 
-def run_script(tmp_path, pi, version, bundle, mode="confirm"):
+def run_script(tmp_path, pi, version, bundle, mode="confirm", seed_confirmed=None):
     bin_directory = tmp_path / "bin"
     bin_directory.mkdir(exist_ok=True)
     systemctl = bin_directory / "systemctl"
@@ -66,6 +69,8 @@ def run_script(tmp_path, pi, version, bundle, mode="confirm"):
     systemctl.chmod(0o755)
     folder = tmp_path / "updates"
     folder.mkdir(exist_ok=True)
+    if seed_confirmed:
+        (folder / "confirmed").write_text(seed_confirmed)
     env = dict(os.environ, PATH=f"{bin_directory}:{os.environ['PATH']}", NOVA_CONFIRM_WAIT="2",
                STUB_MODE=mode)
     process = subprocess.run(["bash", str(SCRIPT), str(pi), version, str(bundle), str(folder)],
@@ -114,6 +119,8 @@ def test_local_changes_need_you_and_change_nothing(tmp_path):
                                      "command": f"cd {pi} && git status"}]}
     assert not (folder / "stub.log").exists()
     assert not bundle.exists()
+    # Nothing changed, but the old code is restarted so it reconnects and sends the result.
+    assert "--user restart voice-assistant" in calls(tmp_path)
 
 
 def test_a_clone_gone_its_own_way_needs_you(tmp_path):
@@ -171,3 +178,65 @@ def test_needs_you_goes_to_the_notes_file(tmp_path):
                            capture_output=True, text=True,
                            env=dict(os.environ, HOME=str(tmp_path), NOVA_CONFIG=str(tmp_path / "c")))
     assert again.returncode == 0
+
+
+def test_a_stale_confirmed_file_does_not_confirm_the_new_code(tmp_path):
+    brain, pi, one, two = setup_world(tmp_path)
+    bundle = bundle_of(brain, tmp_path)
+    process, folder, result = run_script(tmp_path, pi, two, bundle, mode="silent", seed_confirmed=two)
+    assert result["ok"] is False
+    assert git(pi, "rev-parse", "HEAD") == one
+
+
+def test_a_refused_take_back_says_so_and_still_restarts(tmp_path):
+    brain, pi, one, two = setup_world(tmp_path)
+    bundle = bundle_of(brain, tmp_path)
+    process, folder, result = run_script(tmp_path, pi, two, bundle, mode="dirty")
+    assert git(pi, "rev-parse", "HEAD") == two
+    assert result["error"] == "The new code couldn't be taken back."
+    assert result["needs_you"] == [{"why": "The new code couldn't be taken back.",
+                                    "command": f"cd {pi} && git reset --keep {one}"}]
+    assert "--user restart voice-assistant" in calls(tmp_path)
+
+
+def test_with_nothing_to_go_back_to_it_does_not_claim_a_take_back(tmp_path):
+    brain, pi, one, two = setup_world(tmp_path)
+    git(pi, "pull", "-q")
+    bundle = bundle_of(brain, tmp_path)
+    process, folder, result = run_script(tmp_path, pi, two, bundle, mode="silent")
+    assert "taken back" not in result["error"]
+    assert "--user restart voice-assistant" in calls(tmp_path)
+
+
+def test_being_stopped_part_way_takes_the_code_back(tmp_path):
+    brain, pi, one, two = setup_world(tmp_path)
+    bundle = bundle_of(brain, tmp_path)
+    folder = tmp_path / "updates"
+    folder.mkdir()
+    bin_directory = tmp_path / "bin"
+    bin_directory.mkdir()
+    systemctl = bin_directory / "systemctl"
+    systemctl.write_text(f'#!/bin/bash\necho "$*" >> "{tmp_path / "systemctl.log"}"\n')
+    systemctl.chmod(0o755)
+    env = dict(os.environ, PATH=f"{bin_directory}:{os.environ['PATH']}", NOVA_CONFIRM_WAIT="30",
+               STUB_MODE="silent")
+    process = subprocess.Popen(["bash", str(SCRIPT), str(pi), two, str(bundle), str(folder)], env=env,
+                               stdin=subprocess.DEVNULL)
+    for _ in range(100):
+        if (folder / "stub.log").exists():
+            break
+        time.sleep(0.1)
+    process.send_signal(signal.SIGTERM)
+    process.wait(timeout=10)
+    assert git(pi, "rev-parse", "HEAD") == one
+    result = json.loads((folder / "result.json").read_text())
+    assert result["error"] == "The update was stopped part way, so it was taken back."
+    assert "--user restart voice-assistant" in calls(tmp_path)
+
+
+def test_a_failure_is_kept_in_failed_json_for_the_brains_next_offer(tmp_path):
+    from voice_assistant.update_state import UpdateState
+    brain, pi, one, two = setup_world(tmp_path)
+    bundle = bundle_of(brain, tmp_path)
+    process, folder, result = run_script(tmp_path, pi, two, bundle, mode="fail")
+    assert UpdateState(str(folder)).failed_before(two) == result["error"]

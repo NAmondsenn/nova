@@ -57,8 +57,25 @@ def install_bundle(project: str, folder: str, version: str, archive: bytes,
     """
     os.makedirs(folder, exist_ok=True)
     bundle = os.path.join(folder, "nova.bundle")
-    with open(bundle, "wb") as file:
-        file.write(archive)
+    script = os.path.join(folder, "update_satellite.sh")
+    try:
+        # Temporary names moved into place, so nothing reads a half-written file.
+        with open(bundle + ".tmp", "wb") as file:
+            file.write(archive)
+        os.replace(bundle + ".tmp", bundle)
+        _check_and_start(project, folder, version, bundle, script, run)
+    except InstallRefused:
+        # A bundle nothing will use is not left lying about.
+        try:
+            os.remove(bundle)
+        except OSError:
+            pass
+        raise
+
+
+def _check_and_start(project: str, folder: str, version: str, bundle: str, script: str,
+                     run: Callable) -> None:
+    """The checks and the start of install_bundle, once the bundle is written."""
     try:
         listed = run(["git", "-C", project, "bundle", "list-heads", bundle, "HEAD"],
                      capture_output=True, text=True, timeout=RUN_TIMEOUT)
@@ -69,9 +86,9 @@ def install_bundle(project: str, folder: str, version: str, archive: bytes,
     if not heads or heads[0] != version:
         logger.warning("The update's bundle isn't commit %s", version[:12])
         raise InstallRefused("The update's code isn't the commit it said.")
-    script = os.path.join(folder, "update_satellite.sh")
     try:
-        shutil.copyfile(SCRIPT, script)
+        shutil.copyfile(SCRIPT, script + ".tmp")
+        os.replace(script + ".tmp", script)
     except OSError as error:
         logger.warning("Couldn't copy the installer: %s", error)
         raise InstallRefused("The installer couldn't be copied, so the update wasn't started.")

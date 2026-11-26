@@ -74,3 +74,10 @@ def test_a_failed_systemd_run_is_refused(tmp_path):
     with pytest.raises(update_install.InstallRefused):
         update_install.install_bundle(str(tmp_path), str(tmp_path / "updates"), version, archive,
                                       run=Runs(code=1))
+
+
+def test_a_refused_bundle_is_removed(tmp_path):
+    version, archive = make_bundle(tmp_path)
+    with pytest.raises(update_install.InstallRefused):
+        update_install.install_bundle(str(tmp_path), str(tmp_path / "updates"), "b" * 40, archive, run=Runs())
+    assert not (tmp_path / "updates" / "nova.bundle").exists()
