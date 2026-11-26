@@ -19,6 +19,7 @@ import pytest
 np = pytest.importorskip("numpy")
 
 from voice_assistant import protocol, recording, remote, satellite_link
+from voice_assistant.config import LIMITS
 from voice_assistant.remote import RemoteSatellite
 
 HELLO = {"name": "bedroom", "hostname": "pi", "sample_rate": 48000, "unclean": False}
@@ -630,10 +631,15 @@ def test_a_wakes_feed_has_no_limit_only_in_a_conversation_there(talker):
     assert not feed.open and feed.position == round(recording.MAX_FEED_SECONDS * 16000)
 
     # In one there, a turn the wake word or a press begins - over a reply, say - is as long as the satellite,
-    # told it is on, lets it be.
+    # told it is on, lets it be, up to the longest turn which can be set. It isn't open, which keeps only the
+    # last of what it's fed: its start is still there however long it waits to be read, through a long think.
     assert satellite.set_conversation(True) is True
     feed = wake_and_send()
-    assert feed.open and not feed.ended and feed.position == 9 * len(piece)
+    assert not feed.open and not feed.ended and feed.position == 9 * len(piece)
+    assert 9 * len(piece) > 2 * recording.OPEN_KEEP_SECONDS * 16000
+    assert (feed.listen(start=0).read(len(piece)) == 7).all()
+    longest = LIMITS[("conversation", "longest_turn")].high
+    assert recording.MAX_TURN_FEED_SECONDS * 16000 >= longest * 16000 + protocol.MAX_AUDIO // 2
 
     # And capped again once it has ended.
     assert satellite.set_conversation(False) is True

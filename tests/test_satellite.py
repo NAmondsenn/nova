@@ -4821,7 +4821,9 @@ def test_in_a_conversation_a_recording_begun_by_the_wake_word_or_a_press_runs_pa
     begin()
     assert wait_for(lambda: audio_sent(brain, sent) >= 2 * satellite.LIMIT_SECONDS * RATE, seconds=15)
     assert len(brain.messages("audio_end")) == 1
-    assert made._recording is not None and made._recording.open and not made._recording.is_set()
+    assert made._recording is not None and made._recording.uncapped and not made._recording.is_set()
+    # Uncapped, not open: it ends as any wake's or press's does.
+    assert not made._recording.open
     brain.say("stop_listening", recording=brain.messages("wake")[-1]["recording"])
     assert wait_for(lambda: made._recording is None)
     assert len(brain.messages("audio_end")) == 1
@@ -4834,6 +4836,41 @@ def test_in_a_conversation_a_recording_begun_by_the_wake_word_or_a_press_runs_pa
     assert wait_for(lambda: len(brain.messages("audio_end")) == 2)
     assert brain.messages("audio_end")[-1] == {"type": "audio_end", "reason": "limit"}
     assert audio_sent(brain, sent) == satellite.LIMIT_SECONDS * RATE
+
+
+def test_in_a_conversation_a_press_while_nova_thinks_is_an_ordinary_press(brain, make):
+    # With the voice cut-in off - before the echo canceller is ready, say - a press made while Nova is thinking
+    # is the user's turn as any press is, only uncapped: a line Nova says without listening ("Let me think about
+    # that.") is stopped by it rather than said over them, and a second press ends the turn rather than cutting in.
+    made = pressable(brain, make)
+    start_conversation(brain, made)
+    made._pressed()
+    assert wait_for(lambda: len(brain.recordings()) >= 1)
+    brain.say("play_stream", id="reply-1", rate=22050, channels=1, volume=0.8, kind="reply", paused=False)
+    brain.say("stream_audio", np.array([1, 2, 3], np.int16).tobytes(), id="reply-1")
+    assert wait_for(lambda: brain.messages("played"))
+    assert brain.messages("played")[0]["id"] == "reply-1" and brain.messages("played")[0]["stopped"]
+    made._pressed()
+    assert wait_for(lambda: brain.messages("audio_end"))
+    assert brain.messages("audio_end") == [{"type": "audio_end", "reason": "pressed"}]
+    assert brain.messages("cut_in") == []
+
+
+def test_a_conversations_end_crossing_a_wake_leaves_its_recording_for_the_brain_to_end(brain, make):
+    # The wake word said just as the conversation ended elsewhere is still a request, which the brain answers - not
+    # a recording of the conversation's own, ended with nothing said.
+    made = make()
+    assert wait_for(lambda: connected(made) and made.wake.listening)
+    conversation(brain)
+    assert wait_for(lambda: made._conversing)
+    made.wake.say()
+    assert wait_for(lambda: len(brain.recordings()) >= 1)
+    conversation(brain, on=False)
+    assert wait_for(lambda: not made._conversing)
+    time.sleep(0.2)
+    assert made._recording is not None and not made._recording.is_set()
+    brain.say("stop_listening", recording=brain.messages("wake")[-1]["recording"])
+    assert wait_for(lambda: made._recording is None)
 
 
 def test_an_open_listen_stops_nothing_and_plays_nothing(brain, make):

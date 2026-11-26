@@ -27,7 +27,7 @@ import numpy as np
 
 from voice_assistant import protocol
 from voice_assistant.notes import MOST_TITLE
-from voice_assistant.recording import AudioFeed
+from voice_assistant.recording import MAX_FEED_SECONDS, MAX_TURN_FEED_SECONDS, AudioFeed
 
 logger = logging.getLogger(__name__)
 
@@ -591,7 +591,7 @@ class RemoteSatellite:
         # until it does, so each connection starts as if nothing had been said.
         self.echo_ready: bool = False
         # Whether it has been told a conversation is on there, as set_conversation last said - so a
-        # wake's feed is as open as the recording the satellite then sends for it.
+        # wake's feed is as uncapped as the recording the satellite then sends for it.
         self.conversing: bool = False
         # Set by the brain: called with (this satellite's name, its apps as [{"id", "name",
         # "kind"}]) and (its name, its open windows' names) each time the satellite sends them.
@@ -1038,10 +1038,11 @@ class RemoteSatellite:
         if isinstance(pre_roll, bool) or not isinstance(pre_roll, int) or not 0 <= pre_roll <= protocol.MAX_AUDIO // 2:
             pre_roll = None
         recording = message.get("recording")
-        # In a conversation there the satellite sends it open, with no cap, as it's a turn of it - see
-        # Satellite._begin - so the feed has none either.
+        # In a conversation there the satellite sends it with no cap, as it's a turn of it - see
+        # Satellite._begin - so the feed keeps as much as the longest turn.
         wake = {"talked_over": bool(message.get("talked_over")), "pre_roll": pre_roll,
-                "feed": self._new_feed(recording if isinstance(recording, str) else None, open=self.conversing)}
+                "feed": self._new_feed(recording if isinstance(recording, str) else None,
+                                       uncapped=self.conversing)}
         # Only when it was, so a wake word's is as it was before presses were said.
         if message.get("pressed") is True:
             wake["pressed"] = True
@@ -1174,7 +1175,7 @@ class RemoteSatellite:
         else:
             logger.warning(f"The {self.name} satellite sent shortcut_taken without true or false: {ascii(taken)[:40]}")
 
-    def _new_feed(self, recording: Optional[str], open: bool = False) -> AudioFeed:
+    def _new_feed(self, recording: Optional[str], open: bool = False, uncapped: bool = False) -> AudioFeed:
         """
         Starts a feed for the recording the satellite is about to send, ending any before it.
 
@@ -1182,11 +1183,13 @@ class RemoteSatellite:
             recording: What the satellite knows it by, e.g. "wake-3" - or None, from one
                 which doesn't say.
             open: Whether it is a conversation's - see listen.
+            uncapped: Whether it is a conversation's turn begun by the wake word or a press,
+                which keeps as much as the longest turn rather than an ordinary request.
 
         Returns:
             The feed. Already ended if the satellite isn't connected.
         """
-        feed = AudioFeed(open=open)
+        feed = AudioFeed(max_seconds=MAX_TURN_FEED_SECONDS if uncapped else MAX_FEED_SECONDS, open=open)
         with self._feed_lock:
             # Checked under the lock, which _lost takes once it's no longer connected,
             # so a feed is never left waiting on a satellite which has gone.

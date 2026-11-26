@@ -224,7 +224,7 @@ class _FromBrain:
 class _Recording(threading.Event):
     """One recording being sent to the brain - set once the brain says the user has stopped."""
 
-    def __init__(self, recording_id: Optional[str], open: bool = False):
+    def __init__(self, recording_id: Optional[str], open: bool = False, uncapped: bool = False):
         """
         Args:
             recording_id: What the brain knows it by: "wake-3", say, for one the wake word
@@ -232,9 +232,13 @@ class _Recording(threading.Event):
                 "listen-3" - None for an answer to a brain which doesn't number them.
             open: Whether it is a conversation's, which has no limit on its length and
                 ends only when the brain stops it, the brain is lost or the satellite exits.
+            uncapped: Whether it has no limit on its length though it isn't open - a turn of
+                a conversation begun by the wake word or a press, which the brain gives the
+                conversation's longest turn, and which otherwise ends as any wake's does.
         """
         super().__init__()
         self.open = open
+        self.uncapped = uncapped
         # Every number the brain may stop it by. A listen which comes while it's being
         # sent adds its own, as this recording is that answer - see Satellite._begin.
         self.ids = set() if recording_id is None else {recording_id}
@@ -938,9 +942,10 @@ class Satellite:
                     # stop_listening straight away.
                     recording_id = f"wake-{next(self._wake_ids)}"
                     # In a conversation here it's a turn of it - begun over a reply, say - which the
-                    # brain gives the conversation's longest turn, so it's as open as one the brain
-                    # asked for, or the cap would cut it off first.
-                    recording = self._recording = _Recording(recording_id, open=self._conversing)
+                    # brain gives the conversation's longest turn, so it has no cap, or the cap would
+                    # cut it off first. It isn't open, though: a second press ends it, and a reply
+                    # starting over a press's is stopped, as at any other press.
+                    recording = self._recording = _Recording(recording_id, uncapped=self._conversing)
                     recording.from_press = pressed
                     self._turn_open = False
                     # Any press which came while this was being set up is this one's, so
@@ -1000,7 +1005,7 @@ class Satellite:
 
         Returns:
             Why it ended: "stopped" by the brain, "pressed" by the key, at the "limit", or
-            "dropped" with the connection. An open recording has no limit.
+            "dropped" with the connection. An open or uncapped recording has no limit.
         """
         # Opened for the recording, push-to-talk, and closed again once it's over.
         self.microphone.hold()
@@ -1015,9 +1020,10 @@ class Satellite:
                 start = max(start, self.microphone.position)
             reader = self.microphone.listen(start=start)
             for size in sizes:
-                # An open recording has no limit, which the brain may lift part way through
-                # - see _listen - so it's looked at each time.
-                audio = reader.read(size if stopped.open else min(size, limit - sent))
+                # An open or uncapped recording has no limit, which the brain may lift part way
+                # through - see _listen - so it's looked at each time.
+                uncapped = stopped.open or stopped.uncapped
+                audio = reader.read(size if uncapped else min(size, limit - sent))
                 self._exit_if_asked()
                 if stopped.is_set():
                     if not stopped.pressed:
@@ -1029,7 +1035,7 @@ class Satellite:
                     logger.warning("Lost the brain part way through a recording")
                     return "dropped"
                 sent += len(audio)
-                if sent >= limit and not stopped.open:
+                if sent >= limit and not uncapped:
                     with self._lock:
                         # Unless the brain said the user had stopped while this last
                         # piece was being sent - when it opened the turn itself, and
@@ -1205,8 +1211,7 @@ class Satellite:
         with self._waking, self._lock:
             recording = self._recording
             # Not an open one, which a conversation's replies are meant to play over: the
-            # brain made it so after the press, or the press came in a conversation, and a
-            # press over the reply cuts in on it.
+            # brain made it so after the press, and a press over the reply cuts in on it.
             listening = (recording is not None and recording.from_press and not recording.open
                          and not recording.is_set())
         if listening:

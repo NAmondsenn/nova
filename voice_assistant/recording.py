@@ -370,6 +370,12 @@ STALL_SECONDS = 2.0
 # ever. In practice the satellite stops at the request's own limit, pre-roll included.
 MAX_FEED_SECONDS = 40.0
 
+# The most the feed of a conversation's turn begun by the wake word or a press keeps, in
+# seconds: the longest turn which can be set (300, see config.LIMITS) and the most pre-roll
+# a wake may say it starts with (10). It keeps all of it, as an ordinary feed does, so a turn
+# whose feed isn't read until a long think is over still has its start.
+MAX_TURN_FEED_SECONDS = 310.0
+
 # How much an open feed keeps, in seconds - far more than a turn's few seconds of
 # pre-roll, which the brain asks for from just behind the present, and a bounded amount
 # however long a conversation lasts. More is let go of in one go, so up to twice this is held.
