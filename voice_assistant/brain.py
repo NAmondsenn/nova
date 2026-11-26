@@ -24,7 +24,7 @@ import socketserver
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -60,6 +60,7 @@ from voice_assistant.media_watch import MediaWatcher
 from voice_assistant.memory import Memory
 from voice_assistant.music_device import MusicDevice
 from voice_assistant.music_folder import MusicFolder
+from voice_assistant.music_resume import MusicResume
 from voice_assistant.new_music import NewMusicPlaylist
 from voice_assistant.notes import NO_NOTES
 from voice_assistant.ntfy import RETOPIC, Ntfy
@@ -327,6 +328,9 @@ class Brain:
         # same folder as the updater's, and the commit Updates read, so both agree on what runs.
         self.update = BrainUpdate(self, self.updates.version, os.path.join(paths.DATA_DIR, "update"),
                                   lambda: self.config.section("updates"))
+        # The music each satellite was playing as an update restarted it or the brain, to carry on
+        # where it was - in the update folder, as it must outlast the brain's own restart.
+        self.music_resume = MusicResume(os.path.join(paths.DATA_DIR, "update", "music.json"))
 
         # What's known of each satellite - whether it records on a press, and its room in
         # Home Assistant - which outlasts its connection. Made before any session, as
@@ -1382,7 +1386,7 @@ class Brain:
         satellite.on_apps = self.computers.set_apps
         satellite.on_windows = self.computers.set_windows
         satellite.on_update_result = self.updates.result
-        satellite.on_update_installing = self.updates.installing
+        satellite.on_update_installing = self._update_installing
         # Read from the start, so the satellite's pings are answered while its session is made.
         reading = threading.Thread(target=satellite.serve, daemon=True, name=f"satellite-{name}")
         reading.start()
@@ -1811,7 +1815,49 @@ class Brain:
         # "I'm updated." at the satellite he asked at, if the brain has just restarted into
         # an update - said on a thread of its own, so this session isn't held up.
         self.update.caught_up(satellite.name)
+        self._resume_music(session)
         return True
+
+    def _resume_music(self, session: Session) -> None:
+        """
+        Has a satellite's player carry on with the music kept for it before an update, if
+        any was kept within MusicResume's RESUME_WITHIN. What was kept is taken out
+        whatever happens, so it is resumed once at most. A failure is logged, with why,
+        and the music dropped: it was only ever a convenience.
+
+        Args:
+            session: The satellite's session, settled.
+        """
+        name = session.satellite.name
+        try:
+            state = self.music_resume.take(name)
+            if state is None:
+                return
+            player = session.music_player
+            if not hasattr(player, "take_over"):
+                logger.warning(f"The {name} satellite can't carry on the music kept for it: its player can't take over")
+                return
+            taken = player.take_over(state)
+            if isinstance(taken, dict) and not taken.get("success"):
+                logger.warning(f"The {name} satellite couldn't carry on its music after the update: "
+                               f"{taken.get('message')}")
+            else:
+                logger.info(f"The {name} satellite carried on its music after the update")
+        except Exception as e:
+            logger.warning(f"The {name} satellite couldn't carry on its music after the update: {e}")
+
+    def _update_installing(self, name: str, version: str) -> None:
+        """
+        Called when a satellite says it is installing an update: keeps its music, to carry on
+        once it is back, then notes the install. The music is kept first, as the satellite is
+        about to restart and its session end.
+
+        Args:
+            name: The satellite's name.
+            version: The commit it is installing.
+        """
+        self.keep_music_for_update([name])
+        self.updates.installing(name, version)
 
     def _forget(self, session: Session):
         """Takes a session which has ended off the brain - unless another has already taken its place."""
@@ -2147,12 +2193,35 @@ class Brain:
             return "an approval"
         return None
 
-    def keep_music_for_update(self) -> None:
+    def keep_music_for_update(self, names: Optional[Iterable[str]] = None) -> None:
         """
-        Keeps the music playing on each satellite, to carry on where it was once the brain
-        is back from an update's restart. It does nothing yet: carrying the music over is
-        still to be built.
+        Keeps the music playing on each satellite, to carry on where it was once that
+        satellite is back from an update's restart - see _resume_music. Only Navidrome music
+        which is playing is kept, handed over after any pause on its way lands; paused music
+        isn't, and Spotify's plays on its own speaker and isn't stopped by a restart. A
+        failure is logged and that satellite skipped.
+
+        Args:
+            names: The satellites to keep it for - the one which is installing - or None for
+                every connected one, as the brain's own restart has.
         """
+        with self._lock:
+            sessions = [(name, session) for name, session in self.sessions.items()
+                        if names is None or name in set(names)]
+        for name, session in sessions:
+            player = session.music_player
+            if not hasattr(player, "hand_over"):
+                continue
+            try:
+                session.music.wait()
+                if not player.is_playing():
+                    continue
+                state = player.hand_over()
+                if state is not None:
+                    self.music_resume.keep(name, state)
+                    logger.info(f"Kept the {name} satellite's music, to carry on after the update")
+            except Exception as e:
+                logger.warning(f"Couldn't keep the {name} satellite's music for the update: {e}")
 
     def _approvers(self) -> List[RemoteSatellite]:
         """

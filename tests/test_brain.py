@@ -4902,3 +4902,106 @@ def test_a_restart_for_an_update_waits_for_a_wake_in_its_moment(brain, monkeypat
     assert not done.wait(0.5)
     busy.clear()
     assert done.wait(5) and brain.restarting
+
+
+# Music carrying on after an update
+
+def _with_player(monkeypatch, player):
+    """Has every session made from now on play through `player`, as a satellite's Navidrome player does."""
+    made = brain_module.Session
+
+    def session(brain, satellite):
+        fake = made(brain, satellite)
+        fake.music_player = player
+        fake.music = SimpleNamespace(wait=lambda: None)
+        return fake
+
+    monkeypatch.setattr(brain_module, "Session", session)
+
+
+def test_music_playing_before_an_update_plays_on_where_it_was(moving, connect, monkeypatch):
+    # Playing on the Pi, paused on the PC and nothing on the Mac.
+    moving.add("bedroom", music=True, playing=True)
+    moving.add("pc", music=True, playing=False)
+    moving.add("mac")
+    brain = moving.brain
+
+    brain.keep_music_for_update()
+
+    # Only what was playing is handed over, after its pause on the way lands.
+    assert moving.moved() == [("hand_over", "bedroom")]
+    assert ("wait", "bedroom") in moving.happened
+    kept = brain.music_resume._read()
+    assert set(kept) == {"bedroom"}
+
+    # The brain is back and the Pi connects: its music carries on once it's settled, and only once.
+    brain.sessions.clear()
+    player = MovingPlayer("bedroom", moving.happened)
+    _with_player(monkeypatch, player)
+    serving(brain)
+    connect(brain)
+    assert wait_for(lambda: brain.session_for("bedroom") is not None and "bedroom" in brain._caught_up)
+    assert wait_for(lambda: [event for event in moving.happened if event[0] == "take_over"])
+    assert moving.moved()[-1] == ("take_over", "bedroom", {"queue": ["a song from bedroom"]})
+    assert brain.music_resume.take("bedroom") is None
+
+
+def test_only_the_named_satellites_music_is_kept(moving):
+    moving.add("bedroom", music=True, playing=True)
+    moving.add("pc", music=True, playing=True)
+
+    moving.brain.keep_music_for_update(["pc"])
+
+    assert moving.moved() == [("hand_over", "pc")]
+
+
+def test_music_which_cant_be_handed_over_is_skipped_and_logged(moving, caplog):
+    class Failing(MovingPlayer):
+        def hand_over(self):
+            raise RuntimeError("the queue broke")
+
+    moving.add("bedroom", player=Failing("bedroom", moving.happened, True, True))
+    moving.add("pc", music=True, playing=True)
+    # Spotify's controller has no hand_over, so it's left to play on.
+    moving.add("mac", player=Spotify())
+
+    with caplog.at_level(logging.WARNING, logger="voice_assistant.brain"):
+        moving.brain.keep_music_for_update()
+
+    assert set(moving.brain.music_resume._read()) == {"pc"}
+    assert any("bedroom" in record.message and "the queue broke" in record.message for record in caplog.records)
+
+
+def test_a_satellite_that_cant_take_its_music_back_is_logged_and_drops_it(moving, connect, monkeypatch, caplog):
+    class Failing(MovingPlayer):
+        def take_over(self, state):
+            raise RuntimeError("no song")
+
+    brain = moving.brain
+    brain.music_resume.keep("bedroom", {"queue": ["a song"]})
+    _with_player(monkeypatch, Failing("bedroom", moving.happened))
+    serving(brain)
+    with caplog.at_level(logging.WARNING, logger="voice_assistant.brain"):
+        connect(brain)
+        assert wait_for(lambda: any("no song" in record.message for record in caplog.records))
+    assert brain.music_resume.take("bedroom") is None
+
+
+def test_a_satellite_installing_keeps_its_music_for_its_return(moving, connect, monkeypatch):
+    brain = moving.brain
+    noted = []
+    brain.updates.installing = lambda name, version: noted.append((name, version))
+    player = MovingPlayer("bedroom", moving.happened, True, True)
+    _with_player(monkeypatch, player)
+    serving(brain)
+    satellite = connect(brain)
+    connected(brain)
+    moving.happened.clear()
+
+    satellite.say("update_installing", version="a" * 40)
+
+    assert wait_for(lambda: noted)
+    # Kept before the installing is noted, and the other satellites' music is left alone.
+    assert noted == [("bedroom", "a" * 40)]
+    assert moving.moved() == [("hand_over", "bedroom")]
+    assert set(brain.music_resume._read()) == {"bedroom"}
