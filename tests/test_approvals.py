@@ -635,3 +635,18 @@ def test_a_pc_whose_wait_runs_out_has_its_prompt_withdrawn(tmp_path, made):
     request = world.service.request("Remove 'Dentist'")
     _until(lambda: pc.withdrawn)
     assert pc.withdrawn == [request.id] and request.outcome is None
+
+
+def test_waiting_while_a_request_is_open(tmp_path, made):
+    # No trust window, so the second request waits for an answer of its own.
+    world = World(tmp_path, made, settings={"trust_minutes": 0, "wait_minutes": 2, "album_count": 3})
+    assert not world.service.waiting()
+    request = world.service.request("Remove 'Dentist'")
+    assert world.service.waiting()
+    world.approve(request)
+    assert request.outcome == "approved" and not world.service.waiting()
+    # One past its wait which no waiter has settled yet isn't waiting any more.
+    world.service.request("Remove 'Gym'")
+    assert world.service.waiting()
+    world.clock.move(121)
+    assert not world.service.waiting()

@@ -540,6 +540,16 @@ class Approvals:
             return self._late(request) or {"success": False, "message": ALREADY}
         return {"success": True, "message": REFUSED}
 
+    def waiting(self) -> bool:
+        """
+        Whether any request is still open for an answer - which holds up the brain's update,
+        as a restart would refuse it. One past its wait which no waiter has settled yet
+        isn't counted: it can no longer be approved, and the waiter will settle it.
+        """
+        with self._lock:
+            now = self._now()
+            return any(now < request.expires for request in self._open.values())
+
     def stop(self):
         """Settles everything waiting "stopped", so nothing runs after the brain stops."""
         with self._lock:

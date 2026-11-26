@@ -31,6 +31,7 @@ import numpy as np
 from voice_assistant import code_version, logging_setup, paths, protocol, satellite_names, storage, watchdog
 from voice_assistant.approvals import Approvals
 from voice_assistant.batteries import HOME_FAILURES, BatteryChoices, BatteryWatcher
+from voice_assistant.brain_update import BrainUpdate
 from voice_assistant.choices import ChoiceStore
 from voice_assistant.clean_check import CleanCheck
 from voice_assistant.clean_schedule import CleanSchedule
@@ -322,6 +323,10 @@ class Brain:
         # as it connects - see Updates. The brain's commit is read once, as it starts.
         self.updates = Updates(paths.PROJECT_DIRECTORY, code_version.running_version(), self.passwords.get,
                                os.path.join(paths.DATA_DIR, "update"))
+        # The brain's own update, from "Update Nova" to "I'm updated." - see brain_update.py. The
+        # same folder as the updater's, and the commit Updates read, so both agree on what runs.
+        self.update = BrainUpdate(self, self.updates.version, os.path.join(paths.DATA_DIR, "update"),
+                                  lambda: self.config.section("updates"))
 
         # What's known of each satellite - whether it records on a press, and its room in
         # Home Assistant - which outlasts its connection. Made before any session, as
@@ -1803,6 +1808,9 @@ class Brain:
         with self._lock:
             if self.sessions.get(satellite.name) is session:
                 self._caught_up.add(satellite.name)
+        # "I'm updated." at the satellite he asked at, if the brain has just restarted into
+        # an update - said on a thread of its own, so this session isn't held up.
+        self.update.caught_up(satellite.name)
         return True
 
     def _forget(self, session: Session):
@@ -2079,6 +2087,72 @@ class Brain:
             # Its thread couldn't be started, most likely. Raised, it would end the
             # download's watch with a traceback instead.
             logger.exception(f"A download message couldn't be sent to the phone: {message}")
+
+    def _say_update(self, satellite: Optional[str], message: str) -> None:
+        """
+        Says how the brain's update went on the satellite he asked at, as _say_download
+        has a download said - at any hour, as he asked for it. With that satellite away, or
+        the message not said, it goes to his phone. Nothing is said for None - an update
+        started on the settings page, which shows how it went instead. Never raises.
+
+        Args:
+            satellite: The satellite he asked at, or None for the settings page.
+            message: What to say, e.g. "I'm updated."
+        """
+        if satellite is None:
+            logger.info("An update's message isn't said, as it was started on the settings page")
+            return
+        where = f"the {satellite} satellite"
+        try:
+            session = self.session_for(satellite)
+            if session is None:
+                logger.warning(f"An update's message wasn't said, as {where} isn't connected")
+            elif session.announce(message):
+                return
+            else:
+                logger.warning(f"An update's message wasn't said on {where}")
+        except Exception:
+            # The satellite going away mid-sentence, most likely.
+            logger.exception(f"An update's message couldn't be said on {where}")
+        # Read once, so a topic cleared on the settings page meanwhile is never sent to as "".
+        phone = self.ntfy.phone if self.ntfy else ""
+        if not phone:
+            logger.warning(f"An update's message had nowhere to go, with no phone topic for ntfy: {message}")
+            return
+        try:
+            self.ntfy.send_soon(phone, message, title="Nova update")
+        except Exception:
+            logger.exception(f"An update's message couldn't be sent to the phone: {message}")
+
+    def busy_reason(self) -> Optional[str]:
+        """
+        What holds up a restart for an update, as nothing restarts during a recording, a
+        reply, a conversation, something ringing or an approval waiting for an answer.
+        Music isn't counted: it is kept and carries on after - see keep_music_for_update.
+
+        Returns:
+            Why Nova is busy, for the log - "talking at kitchen", "a conversation",
+            "something ringing" or "an approval" - or None if it's free.
+        """
+        with self._lock:
+            sessions = list(self.sessions.items())
+        for name, session in sessions:
+            if session.activity != "idle":
+                return f"talking at {name}"
+        if self.open_conversation.satellite is not None:
+            return "a conversation"
+        if self.clock.is_ringing():
+            return "something ringing"
+        if self.approvals.waiting():
+            return "an approval"
+        return None
+
+    def keep_music_for_update(self) -> None:
+        """
+        Keeps the music playing on each satellite, to carry on where it was once the brain
+        is back from an update's restart. It does nothing yet: carrying the music over is
+        still to be built.
+        """
 
     def _approvers(self) -> List[RemoteSatellite]:
         """
@@ -2417,6 +2491,8 @@ class Brain:
         if self.calendar:
             threading.Thread(target=self._read_calendars, daemon=True, name="calendars").start()
         logger.info(f"{self.name}'s brain is ready")
+        # How an update which restarted the brain went, before any satellite is caught up to hear it.
+        self.update.after_start()
 
         # However listening ends - a stop signal, stop() or something unexpected -
         # everything is closed down here, once, on the main thread.
@@ -2454,6 +2530,25 @@ class Brain:
         timer.daemon = True
         timer.start()
         return "Restarting - give it half a minute."
+
+    def restart_for_update(self) -> bool:
+        """
+        Stops the brain cleanly, a moment from now, for systemd to start the new code the
+        updater has put in place - as restart does for the settings page, exiting 75.
+
+        Returns:
+            Whether it is restarting: False when it isn't running under systemd, which
+            wouldn't start it again.
+        """
+        if not os.getenv("INVOCATION_ID"):
+            return False
+        self.restarting = True
+        logger.info("Restarting into the brain's updated code")
+        # Stopping listening ends run(), which then cleans up as for any stop.
+        timer = threading.Timer(RESTART_DELAY, self.stop)
+        timer.daemon = True
+        timer.start()
+        return True
 
     def shutdown(self, *args):
         """

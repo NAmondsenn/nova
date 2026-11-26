@@ -4841,3 +4841,48 @@ def test_a_satellite_behind_is_sent_the_brains_commit_as_it_connects(make_brain,
         assert offer["proof"] == protocol.update_proof(BEDROOM, *satellite.nonces, commits[1], "zip", archive)
     finally:
         satellite.go()
+
+
+# The brain's own update - see brain_update.py
+
+def test_busy_reason_names_what_holds_an_update(brain, monkeypatch):
+    assert brain.busy_reason() is None
+    put_in_session(brain, "kitchen")
+    assert brain.busy_reason() is None
+    brain.sessions["kitchen"].activity = "speaking"
+    assert brain.busy_reason() == "talking at kitchen"
+    brain.sessions["kitchen"].activity = "idle"
+    monkeypatch.setattr(brain.clock, "is_ringing", lambda *args, **kwargs: True)
+    assert brain.busy_reason() == "something ringing"
+    monkeypatch.setattr(brain.clock, "is_ringing", lambda *args, **kwargs: False)
+    assert brain.open_conversation.start("kitchen") == "started"
+    assert brain.busy_reason() == "a conversation"
+    brain.open_conversation.end("asked", satellite="kitchen")
+    assert brain.busy_reason() is None
+    monkeypatch.setattr(brain.approvals, "waiting", lambda: True)
+    assert brain.busy_reason() == "an approval"
+
+
+def test_a_restart_for_an_update_exits_for_systemd_to_start_the_new_code(brain, monkeypatch):
+    monkeypatch.setenv("INVOCATION_ID", "abc")
+    monkeypatch.setattr(brain_module, "RESTART_DELAY", 0)
+    done = threading.Event()
+    threading.Thread(target=lambda: (brain.run(), done.set()), daemon=True).start()
+    assert wait_for(lambda: brain.port)
+    assert brain.restart_for_update() is True
+    assert done.wait(5) and brain.restarting
+
+
+def test_a_restart_for_an_update_outside_systemd_is_refused(brain, monkeypatch):
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
+    assert brain.restart_for_update() is False
+    assert not brain.restarting
+
+
+def test_an_updates_outcome_is_said_where_he_asked_and_nowhere_for_the_page(brain):
+    put_in_session(brain, "kitchen")
+    brain.ntfy = FakeNtfy()
+    brain._say_update(None, "Already up to date.")
+    assert brain.sessions["kitchen"].announced == [] and brain.ntfy.sent == []
+    brain._say_update("kitchen", "Already up to date.")
+    assert brain.sessions["kitchen"].announced == ["Already up to date."]
