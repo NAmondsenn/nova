@@ -121,3 +121,17 @@ def test_not_a_zip_has_no_commit():
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.comment = b"hello"
     assert update_archive.zip_commit(buffer.getvalue()) is None
+
+
+@pytest.mark.parametrize("error", [OSError(28, "No space left on device"), EOFError(), NotImplementedError()])
+def test_unpack_reports_every_way_extracting_can_fail(tmp_path, monkeypatch, error):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("a.txt", "a")
+
+    def fail(self, *arguments, **keywords):
+        raise error
+
+    monkeypatch.setattr(zipfile.ZipFile, "extractall", fail)
+    with pytest.raises(ArchiveError, match="couldn't unpack"):
+        update_archive.unpack_zip(buffer.getvalue(), str(tmp_path / "into"))

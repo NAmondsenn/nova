@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
+import zlib
 from typing import Optional
 
 from voice_assistant.protocol import COMMIT
@@ -181,10 +182,16 @@ def unpack_zip(archive: bytes, into: str) -> None:
             backslash, or has a ".." part.
     """
     try:
-        with zipfile.ZipFile(io.BytesIO(archive)) as opened:
-            for name in opened.namelist():
-                if _unsafe(name):
-                    raise ArchiveError("the archive has a name outside its folder")
+        opened = zipfile.ZipFile(io.BytesIO(archive))
+    except zipfile.BadZipFile:
+        raise ArchiveError("the archive isn't a zip") from None
+    with opened:
+        for name in opened.namelist():
+            if _unsafe(name):
+                raise ArchiveError("the archive has a name outside its folder")
+        # Emptying and extracting can fail on a locked file, a too-long path, a full disk
+        # or a damaged member, and the caller only handles ArchiveError.
+        try:
             os.makedirs(into, exist_ok=True)
             for entry in os.listdir(into):
                 path = os.path.join(into, entry)
@@ -193,5 +200,6 @@ def unpack_zip(archive: bytes, into: str) -> None:
                 else:
                     os.remove(path)
             opened.extractall(into)
-    except zipfile.BadZipFile:
-        raise ArchiveError("the archive isn't a zip") from None
+        except (OSError, zlib.error, EOFError, NotImplementedError, RuntimeError, ValueError) as e:
+            reason = getattr(e, "strerror", None) or type(e).__name__
+            raise ArchiveError(f"couldn't unpack the archive: {reason}") from None
