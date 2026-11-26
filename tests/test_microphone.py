@@ -46,9 +46,9 @@ class FakeInputStream:
     def close(self, ignore_errors=False):
         self.closed = True
 
-    def feed(self, samples):
+    def feed(self, samples, time_info=None):
         """Delivers 16-bit sample values as one captured block."""
-        self.callback(as_captured(samples).reshape(-1, 1), len(samples), None, None)
+        self.callback(as_captured(samples).reshape(-1, 1), len(samples), time_info, None)
 
 
 def as_captured(samples):
@@ -79,6 +79,42 @@ def wait_for(condition, timeout=2.0):
     while not condition():
         assert time.monotonic() < give_up_at, "timed out waiting"
         time.sleep(0.005)
+
+
+# The echo canceller's timestamps
+
+class FakeEcho:
+    """Stands in for the echo canceller, keeping when each block was said to be heard."""
+
+    def __init__(self):
+        self.heard_at = []
+
+    def process(self, samples, adc_time):
+        self.heard_at.append(adc_time)
+        return samples
+
+
+def test_a_block_is_stamped_with_portaudios_own_time(streams):
+    echo = FakeEcho()
+    Microphone(sample_rate=RATE, echo=echo)
+    streams[0].time = 50.0
+
+    streams[0].feed(np.zeros(FRAME), SimpleNamespace(inputBufferAdcTime=49.9))
+
+    assert echo.heard_at == [49.9]
+
+
+def test_a_block_windows_gave_no_time_is_stamped_from_the_streams_clock(streams):
+    # Windows' ordinary sound system says 0 or 0.03 for every block, whatever the clock
+    # says, and with those the canceller never lined up, so the voice never cut in at the PC.
+    echo = FakeEcho()
+    Microphone(sample_rate=RATE, echo=echo)
+    streams[0].time = 10293.0
+
+    streams[0].feed(np.zeros(FRAME), SimpleNamespace(inputBufferAdcTime=0.0))
+    streams[0].feed(np.zeros(FRAME), SimpleNamespace(inputBufferAdcTime=0.03))
+
+    assert echo.heard_at == [pytest.approx(10293.0 - FRAME / RATE)] * 2
 
 
 # Reading

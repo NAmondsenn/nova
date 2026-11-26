@@ -49,8 +49,34 @@ BLOCK_SECONDS = 0.03
 # rather than 130ms, and this leaves room for several of them.
 INPUT_LATENCY = 0.25
 
+# How far from the stream's clock, in seconds, a block's own time may be and still be
+# believed - a real one is behind it by no more than what PortAudio holds (INPUT_LATENCY).
+STAMP_WITHIN = 2.0
+
 # The longest wait between attempts to reopen a microphone which has gone quiet.
 MAX_RETRY_SECONDS = 30.0
+
+
+def _heard_at(time_info, stream, seconds: float) -> Optional[float]:
+    """
+    When a block's first sample was heard, by PortAudio's clock, for the echo canceller.
+    Windows' ordinary sound system stamps no block properly (its time is 0, or a fraction
+    of a second, whatever the clock says), and with such times the canceller never lines
+    up, so a time nowhere near the stream's own clock is replaced by that clock as the
+    block arrives, less the block's length.
+
+    Args:
+        time_info: What PortAudio said of the block's timing.
+        stream: The stream the block came from.
+        seconds: How long the block is.
+    """
+    stamped = getattr(time_info, "inputBufferAdcTime", None)
+    now = getattr(stream, "time", None)
+    if not now:
+        return stamped or None
+    if stamped and abs(now - stamped) <= STAMP_WITHIN:
+        return stamped
+    return now - seconds
 
 
 class Microphone:
@@ -142,11 +168,12 @@ class Microphone:
                     audio = resampler.resample_chunk(audio)
                 samples = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
                 if self.echo is not None:
-                    samples = self.echo.process(samples, getattr(time_info, "inputBufferAdcTime", None))
+                    samples = self.echo.process(samples, _heard_at(time_info, stream, frames / self.capture_rate))
                 self._append(samples)
             except Exception as e:
                 logger.error(f"Microphone audio dropped: {e}")
 
+        stream = None
         try:
             stream = sd.InputStream(samplerate=self.capture_rate, channels=1, dtype="float32",
                                     blocksize=int(self.capture_rate * BLOCK_SECONDS),
