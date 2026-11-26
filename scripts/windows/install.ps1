@@ -14,6 +14,10 @@
 # Windows names the process Nova, or through pythonw.exe if Nova.exe couldn't be built. It
 # never writes .env: the password the brain's `add-satellite pc` gave goes in config\.env
 # by hand, as NOVA_BACKEND_TOKEN=<password>. It doesn't start or stop the satellite either.
+# A third task, "Nova update", with no trigger, runs data\update\update_pc.ps1, the helper
+# which installs an update the brain sent (see voice_assistant/update_install.py). That
+# helper runs this script itself with -FromUpdate, and then the task, which is the one
+# running it, is left alone instead of being registered again.
 #
 # Plain ASCII, and nothing newer than Windows PowerShell 5.1. The `python` on this PC's
 # PATH is the Microsoft Store stub, so only the `py` launcher is used.
@@ -22,7 +26,11 @@ param(
     # The folder holding the code to install: the root of a checkout, or of what
     # `git archive` made.
     [Parameter(Mandatory = $true)]
-    [string]$Source
+    [string]$Source,
+    # Set by the update helper (update_pc.ps1), which runs inside the task "Nova update":
+    # everything is done as usual except that task, which is neither registered again nor
+    # given the helper's files, as it is running them.
+    [switch]$FromUpdate
 )
 
 $ErrorActionPreference = 'Stop'
@@ -318,6 +326,24 @@ Register-ScheduledTask -TaskName 'Nova satellite' -Action $logonAction -Trigger 
     -Settings $taskSettings -Description "Nova's satellite, started at logon" -Force | Out-Null
 Register-ScheduledTask -TaskName 'Nova start' -Action $startAction -Principal $principal `
     -Settings $taskSettings -Description "Nova's satellite, started by a deploy" -Force | Out-Null
+
+# The task "Nova update", which runs the helper from the update folder, where voice_assistant/
+# update_install.py puts it for each update. It has no trigger and the same principal and
+# settings as "Nova start": it is only ever started by the satellite, on his word. The helper's
+# files are put there too, so the task works the first time too. Not from an update, as the
+# helper is running as this task, and registering it again would end the run.
+if (-not $FromUpdate) {
+    $updateFolder = Join-Path $data 'update'
+    New-Item -ItemType Directory -Force -Path $updateFolder | Out-Null
+    foreach ($name in @('update_pc.ps1', 'stop_nova.ps1')) {
+        Copy-Item -LiteralPath (Join-Path $windows $name) -Destination (Join-Path $updateFolder $name) -Force
+    }
+    $updateAction = New-ScheduledTaskAction -Execute 'powershell.exe' -WorkingDirectory $updateFolder `
+        -Argument ('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Join-Path $updateFolder 'update_pc.ps1') + '"')
+    Write-Host "Registering the task 'Nova update' for $user"
+    Register-ScheduledTask -TaskName 'Nova update' -Action $updateAction -Principal $principal `
+        -Settings $taskSettings -Description "Installs the update Nova's brain sent" -Force | Out-Null
+}
 
 # A Start-menu shortcut "Nova", which Windows names the satellite's music after in its
 # media controls (docs/decisions/0031): the satellite says it is Nova.Satellite, and

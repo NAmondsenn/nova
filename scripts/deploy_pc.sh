@@ -42,48 +42,24 @@ scp -q "$work/nova.zip" pc:AppData/Local/Temp/nova-deploy.zip
 
 # Run on the PC. Kept short, with its comments here rather than in it: the whole of it
 # goes on ssh's command line, encoded, which cmd.exe there limits to 8191 characters
-# (a test holds it to that). Everything running is stopped first, since the running
-# satellite holds numpy's and the sound libraries' files open and pip can't replace them,
-# nor can Nova.exe be replaced while it runs, and stopping the satellite alone isn't
-# enough, as the launcher starts it again within seconds. So both tasks are stopped
-# (either may not be there yet), then the launcher and the satellite: Nova.exe processes
-# run from the install's venv\Scripts, and, for an install from before Nova.exe, the
-# venv's pythonw running app\launcher.pyw or app\satellite.py, found by its command line.
-# Any other Python on the PC is left alone. Whether any of them was running, and whether
-# app\satellite.py was there yet, is noted before anything is stopped. Then it installs,
-# and starts the task "Nova start" (never the logon task, whose start the launcher takes
-# for a logon) as above. Windows has no SIGTERM, so ending the satellite is a hard stop,
-# which the launcher's next start forgives.
+# (a test holds it to that). The archive is expanded first, and the stop logic comes from
+# it: scripts\windows\stop_nova.ps1, which the update helper uses too, stops both tasks
+# and then the launcher and the satellite (see that file for why, and for the old pythonw
+# Nova). Whether any of them was running, and whether app\satellite.py was there yet, is
+# noted before anything is stopped. Then it installs (which registers the task "Nova update"
+# the satellite's updates run from), and starts the task "Nova start" (never the logon task,
+# whose start the launcher takes for a logon) as above.
 script=$(cat <<'POWERSHELL'
 $ErrorActionPreference = 'Stop'
-$base = Join-Path $env:LOCALAPPDATA 'nova'
-$app = Join-Path $base 'app'
-$scripts = (Join-Path $app 'venv\Scripts') + '\'
-function Find-Running {
-    Get-CimInstance Win32_Process -Filter "Name = 'Nova.exe'" | Where-Object {
-        $_.ExecutablePath -and $_.ExecutablePath.StartsWith($scripts, [StringComparison]::OrdinalIgnoreCase) }
-    Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe'" | Where-Object {
-        $_.CommandLine -and ($_.CommandLine.IndexOf((Join-Path $app 'satellite.py'), [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-            $_.CommandLine.IndexOf((Join-Path $app 'scripts\windows\launcher.pyw'), [StringComparison]::OrdinalIgnoreCase) -ge 0) }
-}
-$firstInstall = -not (Test-Path (Join-Path $app 'satellite.py'))
-$wasRunning = @(Find-Running).Count -gt 0
-foreach ($task in @('Nova satellite', 'Nova start')) {
-    try { Stop-ScheduledTask -TaskName $task -ErrorAction Stop } catch { }
-}
-for ($try = 0; $try -lt 20 -and @(Find-Running).Count -gt 0; $try++) {
-    foreach ($process in @(Find-Running)) {
-        Write-Host "Ending process $($process.ProcessId)"
-        Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
-    }
-    Start-Sleep -Milliseconds 500
-}
-if (@(Find-Running).Count -gt 0) { throw 'Nova is still running, so the install would fail partway' }
 $temp = Join-Path $env:LOCALAPPDATA 'Temp'
 $zip = Join-Path $temp 'nova-deploy.zip'
 $src = Join-Path $temp 'nova-deploy'
 if (Test-Path $src) { Remove-Item $src -Recurse -Force }
 Expand-Archive -LiteralPath $zip -DestinationPath $src
+. (Join-Path $src 'scripts\windows\stop_nova.ps1')
+$firstInstall = -not (Test-Path (Join-Path $app 'satellite.py'))
+$wasRunning = @(Find-Running).Count -gt 0
+Stop-Nova
 & (Join-Path $src 'scripts\windows\install.ps1') -Source $src
 Set-Content -LiteralPath (Join-Path $app 'COMMIT') -Value $COMMIT -Encoding ASCII
 if (-not ($wasRunning -or $firstInstall)) {
