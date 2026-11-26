@@ -17,14 +17,16 @@ Description=Nova's brain
 # Tailscale passes the tailnet's connections on to it.
 After=network-online.target tailscaled.service
 Wants=network-online.target
-# Three failed starts in ten minutes hand over to nova-takeback.service, which moves the
+# Five failed starts in ten minutes hand over to nova-takeback.service, which moves the
 # code back to what it was before the last update and starts the brain again. The default
 # limit never trips here - Restart=on-failure with RestartSec=10 makes six starts a minute
 # at most, and the default allows five in ten seconds - so without these lines OnFailure=
-# would never run. An ordinary crash loop is carried on afterwards as before, after one
-# extra pause.
+# would never run. Five rather than three so that two recent restarts from the settings
+# page can't make an update's own restart trip a take-back of good code. An ordinary crash
+# loop is carried on afterwards as before, after one extra pause. RestartMode=direct,
+# below, is what keeps OnFailure= for the limit alone.
 StartLimitIntervalSec=600
-StartLimitBurst=3
+StartLimitBurst=5
 OnFailure=nova-takeback.service
 
 [Service]
@@ -70,6 +72,13 @@ RestartSec=10
 # (RESTART_EXIT_STATUS in voice_assistant/brain.py), as the nova user can't ask
 # systemd itself.
 RestartForceExitStatus=75
+# From systemd 254 every automatic restart passes through "failed" by default
+# (RestartMode=normal), which fires OnFailure= straight away - so the update's own exit-75
+# restart would start the take-back and undo every update, and the take-back's
+# reset-failed would clear the start count so the limit never tripped. With direct the
+# restart goes straight back to activating, and OnFailure= runs only once the start limit
+# above is hit.
+RestartMode=direct
 
 [Install]
 WantedBy=multi-user.target

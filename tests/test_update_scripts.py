@@ -490,11 +490,15 @@ def test_the_updater_is_outside_the_brains_sandbox_but_never_root():
     assert "ProtectSystem" in text and "ProtectHome" in text  # the comment saying why
 
 
-def test_the_brain_takes_back_after_three_failed_starts():
+def test_the_brain_takes_back_after_five_failed_starts():
     text = unit("nova-backend.service")
     unit_section = text[text.index("[Unit]"):text.index("[Service]")]
-    for line in ("StartLimitIntervalSec=600", "StartLimitBurst=3", "OnFailure=nova-takeback.service"):
+    for line in ("StartLimitIntervalSec=600", "StartLimitBurst=5", "OnFailure=nova-takeback.service"):
         assert f"\n{line}\n" in unit_section
+    # Without it systemd 254 and later pass every automatic restart - the update's own
+    # exit-75 one included - through "failed", which fires OnFailure= at once.
+    service_section = text[text.index("[Service]"):text.index("[Install]")]
+    assert "\nRestartMode=direct\n" in service_section
     # The lock stays.
     for line in ("NoNewPrivileges=yes", "ProtectSystem=strict", "ProtectHome=read-only"):
         assert f"\n{line}\n" in text
