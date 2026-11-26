@@ -519,7 +519,9 @@ class Session:
                                       # One not updated since the brain was would have its turns as ordinary
                                       # listens, so none starts there - nor at one whose session has been let
                                       # go of, still answering a turn, where nothing would hear or end it.
-                                      converses=lambda: self.satellite.can_converse and not self._closed.is_set())
+                                      converses=lambda: self.satellite.can_converse and not self._closed.is_set(),
+                                      # How an approval asked for here ended, for Claude with the next turn.
+                                      noted=lambda text: self.llm.note(text))
 
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.

@@ -767,6 +767,24 @@ def test_a_note_waits_for_a_message_which_is_kept(llm):
     assert llm.history[-1]["notes"] == [STOPPED]
 
 
+def test_a_note_made_while_claude_is_asked_is_for_the_next_message(llm):
+    # An approval ends on a thread of its own, whenever it's answered.
+    class Noting(FakeClient):
+        def create(self, **request):
+            llm.note("The user refused \"Remove 'Dentist'\", so it was not done.")
+            return super().create(**request)
+
+    llm.client = Noting(_reply("Paris."))
+    llm.note(STOPPED)
+    llm.process_query("what's the capital of France")
+    assert llm.history[-1]["notes"] == [STOPPED]
+    llm.client = FakeClient(_reply("Okay."))
+    llm.process_query("thanks")
+    sent = llm.client.requests[0]["messages"]
+    assert sent[0]["content"] == f"({STOPPED})\nwhat's the capital of France"
+    assert sent[-1]["content"].startswith("(The user refused \"Remove 'Dentist'\", so it was not done.)\n[")
+
+
 def test_an_exchange_remembered_locally_takes_the_note_too(llm):
     llm.note(STOPPED)
     llm.remember("what time is it", "It's 7:36 PM.")

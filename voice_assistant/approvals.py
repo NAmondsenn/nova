@@ -54,6 +54,14 @@ DIDNT_CHECK = "That didn't check out."
 APPROVED = "Approved."
 REFUSED = "Refused."
 
+# What Claude is told of how a request asked for in a turn ended, by how it did, with what it
+# would do as he was shown it: the outcome is said in a gap, so isn't in its history, and
+# "okay, done" could otherwise have it ask for the same again.
+ENDED_NOTES = {"approved": 'The user approved "{}" and it has been done.',
+               "failed": 'The user approved "{}", but it didn\'t work, so it was not done.',
+               "refused": 'The user refused "{}", so it was not done.',
+               "timeout": '"{}" wasn\'t answered in time, so it was not done.'}
+
 # The phone, as it is named in "Check your phone or the PC."
 PHONE = "your phone"
 # Who refused, for the recent list, when it was the phone's page (refusing needs no passkey).
@@ -370,7 +378,8 @@ class Approvals:
         return self.wait(self.request(description, without, fresh)) == "approved"
 
     def gate(self, description: str, do: Callable[[], Dict], satellite: Optional[str],
-             done: Optional[Callable[[Dict], None]] = None) -> Dict:
+             done: Optional[Callable[[Dict], None]] = None,
+             ended: Optional[Callable[[str], None]] = None) -> Dict:
         """Runs a big action once it's approved, without holding up whoever asked.
 
         Args:
@@ -378,6 +387,8 @@ class Approvals:
             do: Does it, giving a reply with a "message".
             satellite: Where the outcome is said, once it comes.
             done: Given do's reply, once it has run after waiting, e.g. to keep it for "undo that".
+            ended: Given what to tell Claude of how it ended, one of ENDED_NOTES, once it has after
+                waiting - before it's said, so the user's answer to it is sent with it.
 
         Returns:
             do's reply at once when the trust window is open; a refusal when there's no
@@ -391,12 +402,12 @@ class Approvals:
             return {"success": False, "message": NO_WAY}
         if request.outcome == "stopped":
             return {"success": False, "message": FAILED_SAID}
-        threading.Thread(target=self._carry_out, args=(request, do, satellite, done), name="approval-wait",
+        threading.Thread(target=self._carry_out, args=(request, do, satellite, done, ended), name="approval-wait",
                          daemon=True).start()
         return {"success": True, "message": pending_said(request.asked)}
 
     def _carry_out(self, request: Request, do: Callable[[], Dict], satellite: Optional[str],
-                   done: Optional[Callable[[Dict], None]]):
+                   done: Optional[Callable[[Dict], None]], ended: Optional[Callable[[str], None]] = None):
         """Waits for the request, then does the action or says why not."""
         outcome = self.wait(request)
         if outcome == "approved":
@@ -405,16 +416,23 @@ class Approvals:
                 if done is not None:
                     done(reply)
                 message = reply["message"]
+                if not reply.get("success", True):
+                    outcome = "failed"
             except Exception as e:
                 # The type only: the message could hold the event's name or his words.
                 logger.error(f"An approved action failed ({type(e).__name__})")
-                message = FAILED_SAID
+                message, outcome = FAILED_SAID, "failed"
         elif outcome == "refused":
             message = REFUSED_SAID
         elif outcome == "timeout":
             message = TIMED_OUT_SAID
         else:
             return
+        if ended is not None:
+            try:
+                ended(ENDED_NOTES[outcome].format(request.description))
+            except Exception as e:
+                logger.error(f"Could not note how an approval ended ({type(e).__name__})")
         try:
             self._say(satellite, message)
         except Exception as e:

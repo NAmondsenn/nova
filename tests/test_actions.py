@@ -1276,6 +1276,14 @@ def test_removing_an_event_asks_first_with_what_it_found():
     assert calendar.removed == ["Dentist"]
 
 
+def test_how_a_removal_ended_is_noted_for_claude_here():
+    # Its outcome is said in a gap, so Claude is told it with the next turn at the satellite which asked.
+    notes, approvals = [], FakeApprovals("wait")
+    ActionExecutor(calendar=RecordingChangeCalendar(), approvals=approvals, satellite="kitchen",
+                   noted=notes.append).execute(CANCEL_DENTIST)
+    assert approvals.ended == [notes.append]
+
+
 def test_no_match_is_said_without_asking():
     for said in ("I can't find the optician on your calendar.",
                  "I found 2: Dentist on Monday, at 9 AM; and Dentist on Thursday, at 3 PM. Which one?"):

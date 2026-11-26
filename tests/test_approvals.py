@@ -210,6 +210,51 @@ def test_an_approval_by_passkey_runs_it_and_says_its_result(tmp_path, made):
     assert request.outcome == "approved" and request.by == "Phone"
 
 
+def _noting(world):
+    """What a gate's ended is given, each with what had been said by then."""
+    notes = []
+    return notes, lambda note: notes.append((note, list(world.said)))
+
+
+@pytest.mark.parametrize("ending, note", [
+    ("approved", 'The user approved "Remove \'Dentist\'" and it has been done.'),
+    ("refused", 'The user refused "Remove \'Dentist\'", so it was not done.'),
+    ("timeout", '"Remove \'Dentist\'" wasn\'t answered in time, so it was not done.'),
+    ("raised", 'The user approved "Remove \'Dentist\'", but it didn\'t work, so it was not done.'),
+    ("didnt_work", 'The user approved "Remove \'Dentist\'", but it didn\'t work, so it was not done.')])
+def test_how_it_ended_is_noted_for_claude_before_its_said(tmp_path, made, ending, note):
+    # Said in a gap, the outcome isn't in Claude's history, so "okay, done" could have it ask again.
+    world = World(tmp_path, made)
+    notes, ended = _noting(world)
+
+    def do():
+        if ending == "raised":
+            raise RuntimeError("calendar down")
+        return {"success": ending != "didnt_work", "message": "Removed Dentist."}
+
+    world.service.gate("Remove 'Dentist'", do, "kitchen", ended=ended)
+    request = world.service.lookup(world.last_id())
+    if ending == "refused":
+        world.service.refuse_by_phone(request.id)
+    elif ending == "timeout":
+        world.clock.move(121)
+    else:
+        world.approve(request)
+    _until(lambda: world.said)
+    assert notes == [(note, [])]
+
+
+def test_nothing_is_noted_when_the_trust_window_does_it_at_once(tmp_path, made):
+    # Its reply is the tool's own answer, which Claude already has.
+    world = World(tmp_path, made)
+    world.service.gate("Remove 'Dentist'", Doing(), "kitchen")
+    world.approve(world.service.lookup(world.last_id()))
+    _until(lambda: world.said)
+    notes, ended = _noting(world)
+    assert world.service.gate("Remove 'Gym'", Doing(), "kitchen", ended=ended)["message"] == "Done it."
+    assert notes == []
+
+
 def test_a_bad_assertion_leaves_it_open(tmp_path, made):
     world = World(tmp_path, made)
     request = world.service.request("Remove 'Dentist'")

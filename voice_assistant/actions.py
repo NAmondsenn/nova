@@ -464,7 +464,8 @@ class ActionExecutor:
                  pc_name: Callable[[], Optional[str]] = lambda: None,
                  microphone: Optional[Callable[[bool, Optional[str]], Dict]] = None, approvals=None,
                  rang: Optional[RangLately] = None, conversation: Optional[OpenConversation] = None,
-                 muted: Callable[[], bool] = lambda: False, converses: Callable[[], bool] = lambda: True):
+                 muted: Callable[[], bool] = lambda: False, converses: Callable[[], bool] = lambda: True,
+                 noted: Optional[Callable[[str], None]] = None):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -552,6 +553,8 @@ class ActionExecutor:
                 can start. Never, by default.
             converses: Whether the satellite spoken at knows a conversation's messages, without which
                 none starts there - see RemoteSatellite.can_converse. Always, by default.
+            noted: Notes something for Claude with the user's next message here - see
+                LLMHandler.note - or None for nothing noted.
         """
         self.music = music
         self.clock = clock
@@ -591,6 +594,7 @@ class ActionExecutor:
         self.conversation = conversation
         self.muted = muted
         self.converses = converses
+        self.noted = noted
         # The music's level before "mute", for "unmute" to put it back to - see _mute_music.
         self._level_before_mute: Optional[int] = None
         # What was last asked, and what the assistant said - or the last alert, and
@@ -841,13 +845,13 @@ class ActionExecutor:
 
         Returns:
             do's reply when the trust window is open; else the words saying where to look, its
-            outcome said later where he asked - or, with no Approvals or no way to approve, that
-            it needs a way first, and nothing is done.
+            outcome said later where he asked, and noted for Claude there - or, with no Approvals
+            or no way to approve, that it needs a way first, and nothing is done.
         """
         if self.approvals is None:
             return {"success": False, "message": NO_WAY}
         return self.approvals.gate(description, do, self.satellite,
-                                   done=lambda reply: self._keep_or_note(tool, reply))
+                                   done=lambda reply: self._keep_or_note(tool, reply), ended=self.noted)
 
     # Music
 

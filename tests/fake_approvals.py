@@ -19,9 +19,12 @@ class FakeApprovals:
         self.asked = []
         # The actions still waiting, as (do, done).
         self.waiting = []
+        # What each gate call was given to tell Claude how it ended.
+        self.ended = []
 
-    def gate(self, description, do, satellite, done=None):
+    def gate(self, description, do, satellite, done=None, ended=None):
         self.asked.append((description, satellite))
+        self.ended.append(ended)
         if self.answer == "approve":
             return do()
         if self.answer == "none":

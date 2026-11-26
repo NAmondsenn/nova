@@ -203,6 +203,8 @@ class LLMHandler:
         # notice that it's ended - see _settle_history.
         self._was_talking = False
         # What Claude is to be told with the user's next message, which their words can't say - see note.
+        # Only ever added to at its end, from any thread (an approval's own), and taken from its start by
+        # this session's, each in one step.
         self._notes: List[str] = []
 
         # Web search is opt-in per query rather than always on, so ordinary replies
@@ -296,21 +298,26 @@ class LLMHandler:
         del self._notes[:len(earlier.get("notes", []))]
         self.history.append(earlier)
 
-    def _keep(self, turn: Dict):
+    def _keep(self, turn: Dict, notes: Optional[Sequence[str]] = None):
         """
         Adds an exchange to the history, which keeps only so many: the last history_length,
         or in a conversation the last conversation.history_exchanges, read as they are set
-        now - so the history doesn't grow indefinitely. Any notes for its message go with it
+        now - so the history doesn't grow indefinitely. The notes for its message go with it
         (see note).
 
         Args:
             turn: The exchange.
+            notes: The notes its message was sent with, which are the first of those held - one
+                noted since, while Claude was being asked, is held for the next - or None for all
+                of them, for a message Claude wasn't sent.
         """
         talking = self._settle_history()
         if talking:
             turn["talked"] = True
-        if self._notes:
-            turn["notes"], self._notes = self._notes, []
+        notes = list(self._notes if notes is None else notes)
+        if notes:
+            turn["notes"] = notes
+            del self._notes[:len(notes)]
         self.history.append(turn)
         cap = self.history_length
         if talking:
@@ -715,8 +722,9 @@ class LLMHandler:
             # Adds the current user query to the messages list, after the details which
             # change from one request to the next - see _system_prompt.
             # Any notes for it at its head, as the history will have them.
+            notes = list(self._notes)
             messages.append({"role": "user", "content": self._noted(
-                self._notes, self._situation(now, context, lights, playing, device) + text)})
+                notes, self._situation(now, context, lights, playing, device) + text)})
 
             # The tools are always offered, so the model decides what the user meant
             # rather than a keyword match guessing at it.
@@ -910,7 +918,7 @@ class LLMHandler:
             # can't do anything twice - see Conversation. Not one remembered from a local command.
             self._keep({"user": text, "assistant": response_text, "at": time.monotonic(),
                         "tools": [(action.tool, dict(action.params)) for action in actions],
-                        "model_text": response_text, "reads": read_so_far, "plain": not actions})
+                        "model_text": response_text, "reads": read_so_far, "plain": not actions}, notes)
 
             # A download the user's words didn't ask for is only offered, by Nova's own
             # offer_download, which only asks - for a plain yes. After
@@ -1141,7 +1149,7 @@ class LLMHandler:
             # Notes held for the next message are about what was said before it, so they go
             # once all of that has.
             if not kept:
-                self._notes = []
+                self._notes.clear()
         self.history = kept
 
     def remember(self, user_text: str, reply: str):

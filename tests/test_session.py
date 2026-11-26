@@ -1581,6 +1581,14 @@ def test_the_session_sends_its_satellite_the_longest_request(brain, connect, mak
     assert pi.messages("state")[-1]["longest_request"] == 22.0
 
 
+def test_what_the_actions_note_for_claude_goes_with_the_next_turn_here(brain, connect, make_session):
+    # How an approval asked for here ended, which is said in a gap and isn't otherwise in Claude's history.
+    session = make_session(connect()[0])
+    session.actions.noted("The user refused \"Remove 'Dentist'\", so it was not done.")
+    session.llm.remember("okay", "Okay.")
+    assert session.llm.history[-1]["notes"] == ["The user refused \"Remove 'Dentist'\", so it was not done."]
+
+
 def test_a_push_to_talk_satellite_is_sent_its_screen_orb(brain, connect, make_session):
     pc, pc_link = connect("pc", "pc.local")
     pc.push_to_talk = True
