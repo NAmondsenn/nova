@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 # Most "needs you" lines kept, so one result stays small.
 _NEEDS_YOU_MOST = 3
+# Longest a why or a command is kept, so a damaged notes file can't make a huge result.
+_TEXT_MOST = 200
 
 
 class UpdateState:
@@ -68,16 +70,16 @@ class UpdateState:
     def _needs_you(self) -> list:
         """The notes file's lines as {why, command}, at most _NEEDS_YOU_MOST."""
         try:
-            with open(self._path("notes")) as file:
+            with open(self._path("notes"), encoding="utf-8", errors="replace") as file:
                 lines = file.read().splitlines()
-        except OSError:
+        except (OSError, ValueError):
             return []
         found = []
         for line in lines:
             if not line.strip():
                 continue
             why, _, command = line.partition("\t")
-            found.append({"why": why, "command": command})
+            found.append({"why": why[:_TEXT_MOST], "command": command[:_TEXT_MOST]})
         return found[:_NEEDS_YOU_MOST]
 
     def confirm(self, running: Optional[str]) -> bool:

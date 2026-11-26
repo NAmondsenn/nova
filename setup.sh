@@ -110,6 +110,16 @@ skipped() { echo "  – $*"; }
 problem() { echo "  ✗ $*" >&2; }
 step() { echo ""; echo "$*"; }
 
+# A problem only he can put right: said as a problem, and, when an update is running (see
+# scripts/update_satellite.sh), kept in NOVA_UPDATE_NOTES as "why TAB command" for the
+# settings page to show beside the one command to run.
+needs_you() {
+    problem "$1 (To put it right, run: $2)"
+    if [ -n "${NOVA_UPDATE_NOTES:-}" ]; then
+        printf '%s\t%s\n' "$1" "$2" >> "$NOVA_UPDATE_NOTES"
+    fi
+}
+
 # Runs a command as root - through sudo, unless that's who's running this already, as
 # in the brain's container, which may not have sudo at all.
 root_do() {

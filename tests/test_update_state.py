@@ -63,3 +63,13 @@ def test_a_broken_file_reads_as_nothing_and_pending_clears(tmp_path):
     state.clear_pending()
     assert not os.path.exists(tmp_path / "pending.json")
     assert state.confirm("a" * 40) is False
+
+
+def test_a_bad_notes_file_never_stops_a_confirm(tmp_path):
+    state = UpdateState(str(tmp_path))
+    state.begin("a" * 40, "b" * 40)
+    (tmp_path / "notes").write_bytes(b"caf\xe9 \xff\tcmd\n" + b"w" * 500 + b"\t" + b"c" * 500 + b"\n")
+    assert state.confirm("a" * 40) is True
+    needs = state.result_to_send()["needs_you"]
+    assert len(needs) == 2
+    assert len(needs[1]["why"]) == 200 and len(needs[1]["command"]) == 200

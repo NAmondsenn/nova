@@ -120,7 +120,7 @@ run_steps install_python_packages download_models
 # shorter audio bursts is pointed out rather than changed behind the user's back. Only
 # a satellite has one.
 if [ "$ROLE" = "satellite" ] && grep -q "pcm.shared_out" /etc/asound.conf 2> /dev/null && ! grep -q "period_size" /etc/asound.conf; then
-    problem "/etc/asound.conf is from before Nova's shorter audio bursts - run 'bash setup.sh' and let it write it again, for quicker stopping and wake word."
+    needs_you "/etc/asound.conf is from before Nova's shorter audio bursts - run 'bash setup.sh' and let it write it again, for quicker stopping and wake word." "bash ${PROJECT_DIRECTORY}/setup.sh"
 fi
 
 # Stopped before its files are moved, so the old version can't write to where they
