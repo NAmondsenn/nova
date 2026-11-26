@@ -624,10 +624,13 @@ function updateMachines(updates) {
 
 // How the page says a satellite mid-sentence, "the PC" or the name he gave it, from what the state
 // says of the satellites - or, for one it hasn't, its own name with PC and Pi in their usual case.
+const UPDATE_MACHINE_WORDS = { pc: "PC", pi: "Pi", mac: "Mac" };
+
 function updateSpoken(name) {
   const known = satellites.find((one) => one.name === name);
-  if (known) return spokenOf(known);
-  return { pc: "PC", pi: "Pi", mac: "Mac" }[name] || name;
+  const spoken = known ? spokenOf(known) : name;
+  // Only the raw machine name is written as the machine is; a name he gave it stays as he gave it.
+  return spoken === name && UPDATE_MACHINE_WORDS[name] ? UPDATE_MACHINE_WORDS[name] : spoken;
 }
 
 // The same to start a sentence or a row.

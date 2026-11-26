@@ -326,3 +326,14 @@ test("satellites are named as the rest of the page names them, or capitalised wi
   assert.equal(machines[1].spoken, "the PC");
   assert.equal(machines[0].spoken, "the brain");
 });
+
+test("a satellite whose spoken name is just its raw machine name is written as PC, Pi or Mac", () => {
+  const shown = page();
+  vm.runInContext('satellites = [{ name: "pc", spoken: "pc" }, { name: "pi", spoken: "pi" }, { name: "den", spoken: "the den" }]', shown.context);
+  assert.equal(shown.context.updateName("pc"), "PC");
+  assert.equal(shown.context.updateSpoken("pi"), "Pi");
+  // A name he gave it stays as he gave it.
+  assert.equal(shown.context.updateSpoken("den"), "the den");
+  vm.runInContext('satellites = [{ name: "pc", spoken: "Pc" }]', shown.context);
+  assert.equal(shown.context.updateName("pc"), "Pc");
+});
