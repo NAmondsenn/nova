@@ -210,6 +210,52 @@ def test_ready_only_once_the_gap_is_agreed(monkeypatch):
     assert canceller.speex.resets == resets + 1
 
 
+def _play_unheard(canceller, played, block=2000):
+    """Plays something through the canceller's speaker which its microphone hears nothing of, as through headphones."""
+    # A room's own hiss, as a microphone is never wholly silent.
+    silence = np.random.default_rng(7).normal(0, 20, len(played)).astype(np.int16)
+    for start in range(0, len(played), block):
+        canceller.played.played(played[start:start + block].astype(np.float32) / 32767, 100.0 + start / RATE)
+        canceller.process(silence[start:start + block], 100.0 + start / RATE)
+        if start and start % (RATE // 2) == 0:
+            canceller.played.fit_clock()
+            canceller.heard.fit_clock()
+            if start % (2 * RATE) == 0:
+                canceller.measure()
+
+
+def test_ready_once_the_microphone_plainly_doesnt_hear_the_speaker(monkeypatch):
+    canceller = _canceller(monkeypatch, FakeSpeex())
+    # Headphones: something loud is played and nothing of it is heard, so no gap is ever found.
+    assert not canceller.ready
+    _play_unheard(canceller, _music(16.0))
+    assert canceller.unheard and canceller.ready and canceller.delay is None
+    # Found once, it needn't be found again each time the devices are opened.
+    canceller.reset()
+    assert canceller.ready
+
+
+def test_silence_played_isnt_taken_for_a_speaker_which_isnt_heard(monkeypatch):
+    canceller = _canceller(monkeypatch, FakeSpeex())
+    _play_unheard(canceller, np.zeros(16 * RATE, dtype=np.int16))
+    assert not canceller.unheard and not canceller.ready and not canceller._unmatched
+
+
+def test_a_speaker_heard_after_all_is_lined_up_before_its_ready_again(monkeypatch):
+    canceller = _canceller(monkeypatch, FakeSpeex())
+    _play_unheard(canceller, _music(16.0))
+    assert canceller.unheard and canceller.ready
+    canceller.reset()
+    # Headphones swapped for a loudspeaker: the first match says so, and the gap is waited for.
+    monkeypatch.setattr(echo_module, "measure_delay", lambda *args: 1650)
+    monkeypatch.setattr(canceller, "_played_positions", lambda *args: np.zeros(10))
+    canceller.measure()
+    assert not canceller.unheard and not canceller.ready
+    canceller.measure()
+    canceller.measure()
+    assert canceller.ready and canceller.delay is not None
+
+
 def test_a_clock_fitted_from_before_the_stream_was_forgotten_isnt_kept(monkeypatch):
     samples = Samples()
     for block in range(60):
