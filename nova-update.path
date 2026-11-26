@@ -1,0 +1,17 @@
+[Unit]
+# Starts the brain's updater when the brain asks for it - see nova-update.service and
+# docs/decisions/0040. The brain's sandbox can't run sudo or start units, but it can write
+# in its own data folder, so asking is dropping this file there; the updater removes it
+# as its first step. This is the narrow rule: the brain can start that one job and
+# nothing else, and the job only fast-forwards from GitHub.
+#
+# A template, installed by setup.sh as root with __HOME__ filled in (the brain's user's
+# home). It's enabled with "systemctl enable --now nova-update.path".
+Description=Nova's brain asks for an update
+
+[Path]
+PathExists=__HOME__/.local/share/nova/update/request
+Unit=nova-update.service
+
+[Install]
+WantedBy=multi-user.target

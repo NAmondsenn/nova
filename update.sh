@@ -5,6 +5,9 @@
 #
 #   bash update.sh              fetches the latest code first
 #   bash update.sh --no-pull    uses the code as it is, e.g. after switching branch
+#   bash update.sh --no-restart goes through every step and the settings check, but leaves
+#                               Nova running as it is, for it to restart into the new
+#                               code itself (the brain's updater, scripts/update_brain.sh)
 #
 # Only the code, its Python packages, any new models and the service file change.
 # This install's settings, keys and saved data, in ~/.config/nova and
@@ -17,9 +20,11 @@
 source "$(dirname "${BASH_SOURCE[0]}")/setup.sh"
 
 PULL=true
+NO_RESTART=false
 for argument in "$@"; do
     case "$argument" in
         --no-pull) PULL=false ;;
+        --no-restart) NO_RESTART=true ;;
         *) echo "Unknown option: ${argument} (see the top of update.sh)" >&2; exit 1 ;;
     esac
 done
@@ -103,7 +108,8 @@ if [ "$PULL" = true ]; then
     # And with where it was before, to go back to if the new code is refused.
     if [ "$(as_user git -C "$PROJECT_DIRECTORY" rev-parse HEAD)" != "$before" ]; then
         export NOVA_UPDATED_FROM="$before"
-        exec bash "${PROJECT_DIRECTORY}/update.sh" --no-pull
+        # Still not restarting, if it was asked not to.
+        exec bash "${PROJECT_DIRECTORY}/update.sh" --no-pull $([ "$NO_RESTART" = true ] && echo --no-restart)
     fi
 fi
 done_ "On $(as_user git -C "$PROJECT_DIRECTORY" rev-parse --abbrev-ref HEAD) at $(as_user git -C "$PROJECT_DIRECTORY" log -1 --format='%h %s')"
@@ -185,6 +191,13 @@ except Exception as e:
 # END settings check
 settings_check || exit 1
 steps_finished
+
+# Nothing after this is the code's to take back: it is in place and checked, and whoever
+# asked for no restart (the brain restarts itself, by exiting) starts it from here.
+if [ "$NO_RESTART" = true ]; then
+    done_ "Ready, for Nova to restart into"
+    exit 0
+fi
 
 # A satellite updated by its brain (scripts/update_satellite.sh says where) keeps this file
 # while it is busy - a reply, a ringing alarm - so it isn't stopped part way through. It is

@@ -1,0 +1,24 @@
+[Unit]
+# Updates the brain's code: fast-forwards the clone to GitHub's main, installs what the
+# new code needs and says in update/brain.json how it went - see scripts/update_brain.sh.
+# Started by nova-update.path, never by hand or on a timer: he starts every update.
+#
+# A template, installed by setup.sh as root with __USER__, __HOME__ and
+# __PROJECT_DIRECTORY__ filled in.
+Description=Update Nova's brain
+
+[Service]
+Type=oneshot
+# The clone's owner, never root: what it writes is the user's own code and venv.
+User=__USER__
+WorkingDirectory=__PROJECT_DIRECTORY__
+ExecStart=/bin/bash __PROJECT_DIRECTORY__/scripts/update_brain.sh
+UMask=0077
+# It can never gain more privileges than it starts with.
+NoNewPrivileges=yes
+# Installing packages and downloading models can be slow.
+TimeoutStartSec=1800
+# There is no ProtectSystem or ProtectHome here, on purpose: unlike nova-backend.service
+# this job writes the clone and the venv (the brain's sandbox makes both read-only), which
+# is what it is for. It runs as the brain's user and can't touch the system itself, so a
+# change that needs root is left to him (the page shows the command).

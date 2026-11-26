@@ -8,6 +8,7 @@ and that uninstall.sh leaves a brain alone, and takes raspotify's settings away 
 """
 
 import os
+import pwd
 import shutil
 import stat
 import subprocess
@@ -619,3 +620,27 @@ def test_uninstall_deletes_the_saved_data_of_the_user_the_clone_belongs_to(tmp_p
     assert str(data) in result.stdout
     assert not data.exists()
     assert (roots / "marker").exists()
+
+
+def test_the_brains_install_puts_the_updater_in_place(tmp_path):
+    # As root, with runuser stood in for (the test is no root), and the units written to a
+    # scratch folder rather than /etc/systemd/system.
+    bin_directory = tmp_path / "bin"
+    bin_directory.mkdir()
+    runuser = bin_directory / "runuser"
+    runuser.write_text('#!/bin/bash\nshift 2\nexec "$@"\n')
+    runuser.chmod(0o755)
+    units = tmp_path / "units"
+    units.mkdir()
+    data = tmp_path / "data"
+    done = run_setup(tmp_path, f'BRAIN_SERVICE_FILE="{units}/nova-backend.service"; NOVA_DATA="{data}"; '
+                     "ROLE=brain; install_service", role="brain", as_root=True)
+    assert done.returncode == 0, done.stderr
+    for name in ("nova-backend.service", "nova-update.service", "nova-update.path", "nova-takeback.service"):
+        text = (units / name).read_text()
+        assert "__" not in text.replace("__init__", ""), name
+    assert f"User={pwd.getpwuid(SETUP.parent.stat().st_uid).pw_name}\n" in (units / "nova-update.service").read_text()
+    calls = restarts(tmp_path)
+    assert "enable -q nova-backend" in calls and "enable -q --now nova-update.path" in calls
+    assert calls.index("daemon-reload") < calls.index("enable -q --now nova-update.path")
+    assert (data / "update").is_dir()

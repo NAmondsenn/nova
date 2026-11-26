@@ -745,13 +745,24 @@ install_service() {
         # Root's: a system service, which runs as the service user - the clone's owner,
         # never root. It's passed their home folder too, as the only places it may write
         # besides its own are its settings and data.
-        sed -e "s|__PROJECT_DIRECTORY__|${PROJECT_DIRECTORY}|g" -e "s|__USER__|${SERVICE_USER}|g" \
-            -e "s|__HOME__|${SERVICE_HOME}|g" "$BRAIN_SERVICE_TEMPLATE" | root_do tee "$BRAIN_SERVICE_FILE" > /dev/null
-        # Both folders must be there for the service's sandbox to start.
+        local unit_directory template
+        unit_directory="$(dirname "$BRAIN_SERVICE_FILE")"
+        # The brain's own unit, and the three that update it and take an update back (see
+        # scripts/update_brain.sh), all root's so the brain can't change them.
+        for template in "$BRAIN_SERVICE_TEMPLATE" "${PROJECT_DIRECTORY}/nova-update.service" \
+            "${PROJECT_DIRECTORY}/nova-update.path" "${PROJECT_DIRECTORY}/nova-takeback.service"; do
+            sed -e "s|__PROJECT_DIRECTORY__|${PROJECT_DIRECTORY}|g" -e "s|__USER__|${SERVICE_USER}|g" \
+                -e "s|__HOME__|${SERVICE_HOME}|g" "$template" \
+                | root_do tee "${unit_directory}/$(basename "$template")" > /dev/null
+        done
+        # The folders must be there for the service's sandbox to start, and the update
+        # folder for the updater's path unit to watch.
         as_user mkdir -p -m 700 "$CONFIG_DIRECTORY" "${NOVA_DATA:-${SERVICE_HOME}/.local/share/nova}"
+        as_user mkdir -p -m 700 "${NOVA_DATA:-${SERVICE_HOME}/.local/share/nova}/update"
         root_do systemctl daemon-reload
         root_do systemctl enable -q "$BRAIN_SERVICE_NAME"
-        done_ "Installed as the ${BRAIN_SERVICE_NAME} service"
+        root_do systemctl enable -q --now nova-update.path
+        done_ "Installed as the ${BRAIN_SERVICE_NAME} service, with its updater"
         return
     fi
     mkdir -p "$(dirname "$SERVICE_FILE")"

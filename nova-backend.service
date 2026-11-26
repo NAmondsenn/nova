@@ -10,10 +10,22 @@
 #       nova-backend.service > /etc/systemd/system/nova-backend.service
 #   systemctl daemon-reload
 #   systemctl enable --now nova-backend
+#
+# setup.sh installs it together with nova-update.path, nova-update.service and
+# nova-takeback.service (see docs/decisions/0040).
 Description=Nova's brain
 # Tailscale passes the tailnet's connections on to it.
 After=network-online.target tailscaled.service
 Wants=network-online.target
+# Three failed starts in ten minutes hand over to nova-takeback.service, which moves the
+# code back to what it was before the last update and starts the brain again. The default
+# limit never trips here - Restart=on-failure with RestartSec=10 makes six starts a minute
+# at most, and the default allows five in ten seconds - so without these lines OnFailure=
+# would never run. An ordinary crash loop is carried on afterwards as before, after one
+# extra pause.
+StartLimitIntervalSec=600
+StartLimitBurst=3
+OnFailure=nova-takeback.service
 
 [Service]
 # It tells systemd once it has loaded, then keeps telling it it's still working, so a

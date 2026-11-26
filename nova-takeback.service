@@ -1,0 +1,30 @@
+[Unit]
+# Runs when nova-backend.service fails to start three times in ten minutes (OnFailure=
+# there). If an update left a commit in update/previous, the clone is moved back to it, so
+# a new version that won't start doesn't leave the brain dead. Either way the brain is
+# then started again: an ordinary crash loop carries on as it did, after one extra pause.
+#
+# A template, installed by setup.sh as root with __USER__, __HOME__ and
+# __PROJECT_DIRECTORY__ filled in. Root's, so the brain's user can't change what it does;
+# the file it reads is the brain's to write, so the git step runs as that user alone,
+# and takes nothing but exactly 40 hex digits from it. The reset keeps local changes
+# (--keep), and only when it worked is taken_back written and previous removed; a refused
+# one leaves previous for the brain to show. The "$$" is systemd's way of writing "$".
+Description=Take the brain's last update back after it failed to start
+# No starting of nova-backend happens until the two lines at the end, so this is
+# not itself restarted by the failure it answers.
+
+[Service]
+Type=oneshot
+Environment=HOME=__HOME__
+ExecStart=-/usr/sbin/runuser -u __USER__ -- /bin/sh -c 'd="__HOME__/.local/share/nova/update"; \
+    [ -f "$$d/previous" ] && [ ! -L "$$d/previous" ] || exit 0; \
+    read -r from < "$$d/previous"; \
+    case "$$from" in ""|*[!0-9a-f]*) exit 0;; esac; \
+    [ "$${#from}" = 40 ] || exit 0; \
+    git -C "__PROJECT_DIRECTORY__" reset -q --keep "$$from" || exit 0; \
+    rm -f "$$d/taken_back.tmp"; \
+    echo "$$from" > "$$d/taken_back.tmp" && mv -f "$$d/taken_back.tmp" "$$d/taken_back"; \
+    rm -f "$$d/previous"'
+ExecStart=/usr/bin/systemctl reset-failed nova-backend.service
+ExecStart=/usr/bin/systemctl start --no-block nova-backend.service

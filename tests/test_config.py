@@ -1002,3 +1002,17 @@ def test_the_screen_orbs_place_and_size_are_choices(tmp_path):
     computer = Config(path=str(tmp_path / "none.yaml")).section("computer")
     assert (computer["screen_orb"], computer["screen_orb_place"], computer["screen_orb_size"]) == (
         True, "bottom centre", "medium")
+
+
+def test_no_restart_stops_after_the_settings_check(tmp_path):
+    # The block between the settings check and "Restarting" is run on its own: with
+    # --no-restart it says it's ready and exits 0, never reaching the wait or the stop.
+    text = (Path(__file__).parent.parent / "update.sh").read_text()
+    between = text[text.index("\nsteps_finished\n") + len("\nsteps_finished\n"):text.index('\nstep "Restarting"')]
+    script = ('done_() { echo "DONE $*"; }\nwait_for_hold() { echo WAITED; }\nstop_service() { echo STOPPED; }\n'
+              f"{between}\necho reached\n")
+    held = subprocess.run(["bash", "-c", "NO_RESTART=true\n" + script], capture_output=True, text=True)
+    assert held.returncode == 0 and held.stdout.strip() == "DONE Ready, for Nova to restart into"
+    carried_on = subprocess.run(["bash", "-c", "NO_RESTART=false\n" + script], capture_output=True, text=True)
+    assert carried_on.stdout.strip() == "reached"
+    assert "--no-restart) NO_RESTART=true" in text
