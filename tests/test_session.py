@@ -396,6 +396,16 @@ def test_every_session_undoes_from_the_brains_one_slot(brain, connect, make_sess
     assert make_session().actions.last_change is make_session().actions.last_change
 
 
+def test_update_yourself_starts_the_brains_update_for_this_satellite(brain, connect, make_session):
+    # The brain's update is brain.update; brain.updates is the satellites' versions, which
+    # has no start, so a slip between the two would only show once he asked.
+    started = []
+    brain.update = SimpleNamespace(start=lambda name: started.append(name) or "Updating. I'll be back in a minute.")
+    session = make_session(connect(name="kitchen")[0])
+    assert session.actions.updater() == {"success": True, "message": "Updating. I'll be back in a minute."}
+    assert started == ["kitchen"]
+
+
 def test_a_timer_set_through_a_satellite_rings_on_it(brain, connect, make_session):
     satellite, pi = connect()
     brain.stt.texts = ["Set a timer for ten minutes."]
