@@ -4886,3 +4886,19 @@ def test_an_updates_outcome_is_said_where_he_asked_and_nowhere_for_the_page(brai
     assert brain.sessions["kitchen"].announced == [] and brain.ntfy.sent == []
     brain._say_update("kitchen", "Already up to date.")
     assert brain.sessions["kitchen"].announced == ["Already up to date."]
+
+
+def test_a_restart_for_an_update_waits_for_a_wake_in_its_moment(brain, monkeypatch):
+    # Woken in the moment before it stops: it waits for that to be over.
+    monkeypatch.setenv("INVOCATION_ID", "abc")
+    monkeypatch.setattr(brain_module, "RESTART_DELAY", 0.05)
+    busy = threading.Event()
+    busy.set()
+    monkeypatch.setattr(brain, "busy_reason", lambda: "talking at kitchen" if busy.is_set() else None)
+    done = threading.Event()
+    threading.Thread(target=lambda: (brain.run(), done.set()), daemon=True).start()
+    assert wait_for(lambda: brain.port)
+    assert brain.restart_for_update() is True
+    assert not done.wait(0.5)
+    busy.clear()
+    assert done.wait(5) and brain.restarting

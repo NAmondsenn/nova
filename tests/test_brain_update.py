@@ -339,7 +339,8 @@ def test_back_on_the_new_code_says_im_updated_where_he_asked(folder):
     update.caught_up("kitchen")
     time.sleep(0.1)
     assert brain.said == [("kitchen", "I'm updated.")]
-    assert not (folder / "asked.json").exists()
+    # Kept, marked said, until the new code has run its minute - see below.
+    assert json.loads((folder / "asked.json").read_text())["said"] is True
 
 
 def test_back_with_something_needing_him_says_so_too(folder):
@@ -408,3 +409,146 @@ def test_a_broken_outcome_reads_as_nothing(folder):
                                 "command": None, "needs_you": []}
     (folder / "outcome.json").write_text("[1, 2]")
     assert update.outcome()["state"] is None
+
+
+# Round 1 of the review.
+
+def test_a_busy_reason_which_keeps_failing_is_logged_once(folder, caplog):
+    brain = FakeBrain()
+    fails = [0]
+
+    def busy():
+        if fails[0] < 6:
+            fails[0] += 1
+            raise RuntimeError("no clock")
+        return None
+
+    brain.busy = busy
+    update = make(brain, folder)
+    updater(folder, "checking", "current", to=OLD)
+    with caplog.at_level("INFO"):
+        update.start("kitchen")
+        assert wait_for(lambda: not update.running)
+    assert sum("Couldn't tell whether Nova is busy" in record.getMessage() for record in caplog.records) == 1
+    assert brain.said == [("kitchen", "Already up to date.")]
+
+
+def test_new_code_waiting_too_long_to_restart_needs_him_but_still_waits(folder):
+    brain = FakeBrain()
+    update = make(brain, folder, minutes=1)
+    taken = updater(folder, "checking", "ready")
+    free = threading.Event()
+    brain.busy = lambda: "talking at kitchen" if taken.is_set() and not free.is_set() else None
+    update.start("kitchen")
+    assert wait_for(lambda: update.outcome()["state"] == "needs_you")
+    outcome = update.outcome()
+    assert outcome["reason"] == ("The new code is in place, but Nova hasn't been free for 1 minute to restart "
+                                 "into it.")
+    assert outcome["command"] == "sudo systemctl restart nova-backend"
+    # Still waiting, not given up.
+    assert update.running and brain.restarts == 0
+    free.set()
+    assert wait_for(lambda: brain.restarts == 1)
+    # Replaced once back on the new code.
+    back = make(FakeBrain(), folder, version=NEW)
+    (folder / "previous").write_text(OLD + "\n")
+    back.after_start()
+    assert back.outcome()["state"] == "done"
+
+
+def test_im_updated_isnt_said_again_and_a_later_take_back_still_says_it_failed(folder):
+    back_from(folder)
+    brain = FakeBrain()
+    update = make(brain, folder, version=NEW)
+    update.after_start()
+    update.caught_up("kitchen")
+    assert wait_for(lambda: brain.said)
+    # Kept, marked said, until the new code has run its minute.
+    assert json.loads((folder / "asked.json").read_text())["said"] is True
+    # The new code crashed and started again within the minute: nothing said twice.
+    again = FakeBrain()
+    update = make(again, folder, version=NEW)
+    update.after_start()
+    update.caught_up("kitchen")
+    time.sleep(0.1)
+    assert again.said == []
+    # Then the take-back: the failure is said where he asked, though "I'm updated." was.
+    (folder / "taken_back").write_text(OLD + "\n")
+    os.remove(folder / "previous")
+    last = FakeBrain()
+    update = make(last, folder, version=OLD)
+    update.after_start()
+    update.caught_up("kitchen")
+    assert wait_for(lambda: last.said)
+    assert last.said == [("kitchen", "The update didn't work, so I'm still on the old version. "
+                                     "The settings page says why.")]
+
+
+def test_asked_goes_with_previous_after_the_first_minute(folder, monkeypatch):
+    monkeypatch.setattr(brain_update_module, "STARTED_AFTER", 0.5)
+    back_from(folder)
+    brain = FakeBrain()
+    update = make(brain, folder, version=NEW)
+    update.after_start()
+    update.caught_up("kitchen")
+    assert wait_for(lambda: brain.said)
+    assert (folder / "asked.json").exists()
+    assert wait_for(lambda: not (folder / "previous").exists())
+    assert wait_for(lambda: not (folder / "asked.json").exists())
+
+
+def test_a_stale_taken_back_doesnt_keep_previous_for_ever(folder, monkeypatch):
+    monkeypatch.setattr(brain_update_module, "STARTED_AFTER", 0.3)
+    back_from(folder)
+    (folder / "taken_back").write_text("c" * 40 + "\n")
+    update = make(FakeBrain(), folder, version=NEW)
+    update.after_start()
+    assert update.outcome()["state"] == "done"
+    assert not (folder / "taken_back").exists()
+    assert wait_for(lambda: not (folder / "previous").exists())
+
+
+def test_an_updater_which_stops_without_a_word_failed(folder, monkeypatch):
+    monkeypatch.setattr(brain_update_module, "UNHEARD_AFTER", 0.3)
+    brain = FakeBrain()
+    update = make(brain, folder)
+    updater(folder)
+    update.start("kitchen")
+    assert wait_for(lambda: not update.running)
+    outcome = update.outcome()
+    assert outcome["state"] == "failed"
+    assert outcome["reason"] == "The brain's updater stopped without saying how it went."
+    assert outcome["command"] == "sudo journalctl -u nova-update"
+    assert brain.said == [("kitchen", "The update didn't work, so I'm still on the old version. "
+                                      "The settings page says why.")]
+
+
+def test_a_status_written_with_an_earlier_clock_is_still_heard(folder):
+    # The last run's brain.json says a later time than now (the clock was put back): the
+    # new file is this run's answer all the same.
+    write_status(folder, "failed", error="Old news", at=now_iso(later=3600))
+    brain = FakeBrain()
+    update = make(brain, folder)
+    updater(folder, "checking", "current", to=OLD)
+    update.start("kitchen")
+    assert wait_for(lambda: not update.running)
+    assert brain.said == [("kitchen", "Already up to date.")]
+
+
+def test_a_restart_which_breaks_says_the_new_code_waits_for_the_next(folder):
+    brain = FakeBrain()
+
+    def broken():
+        raise RuntimeError("no timer")
+
+    brain.restart_for_update = broken
+    update = make(brain, folder)
+    updater(folder, "checking", "ready")
+    update.start("kitchen")
+    assert wait_for(lambda: not update.running)
+    outcome = update.outcome()
+    assert outcome["state"] == "needs_you"
+    assert outcome["reason"] == "The new code is in place, and will start the next time Nova restarts."
+    assert outcome["command"] == "sudo systemctl restart nova-backend"
+    assert brain.said == [("kitchen", "The update needs you: the settings page says what to run.")]
+    assert not (folder / "asked.json").exists()

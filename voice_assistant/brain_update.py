@@ -54,6 +54,10 @@ NOT_A_SERVICE = "Nova isn't running as a service, so it can't restart itself."
 RESTART_COMMAND = "sudo systemctl restart nova-backend"
 UPDATER_STUCK = "The brain's updater didn't finish within 30 minutes."
 UPDATER_FAILED = "The brain's updater failed without saying why."
+UPDATER_SILENT = "The brain's updater stopped without saying how it went."
+UPDATER_LOG = "sudo journalctl -u nova-update"
+NOT_RESTARTED = "The new code is in place, but Nova hasn't been free for {} to restart into it."
+RESTART_BROKE = "The new code is in place, and will start the next time Nova restarts."
 BROKE = "Something went wrong in the brain while it updated."
 
 # How often it looks whether Nova is free, in seconds.
@@ -75,6 +79,9 @@ UPDATER_LONGEST = 1800
 # The updater takes the request away as its first step, so one still there after this
 # long means nothing is there to take it: the updater isn't installed yet.
 PICKED_UP_WITHIN = 30
+# The updater writes "checking" as soon as it has taken the request, so a request taken
+# with nothing heard for this long means the updater stopped without a word.
+UNHEARD_AFTER = 60
 # How long the new code must run before it counts as started, in seconds.
 STARTED_AFTER = 60
 # How long the note of where he asked is kept for, in seconds: the satellite he asked
@@ -90,15 +97,6 @@ FIELDS = ("state", "at", "from", "to", "reason", "command")
 def _now_iso() -> str:
     """The time now, as the updater writes it."""
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-
-
-def _when(at) -> Optional[datetime.datetime]:
-    """An `at` as a time, or None if it isn't one."""
-    try:
-        when = datetime.datetime.fromisoformat(at)
-    except (TypeError, ValueError):
-        return None
-    return when if when.tzinfo is not None else when.replace(tzinfo=datetime.timezone.utc)
 
 
 def _commit(value) -> Optional[str]:
@@ -204,7 +202,7 @@ class BrainUpdate:
             minutes = IDLE_WAIT_MINUTES
         return max(LEAST_MINUTES, min(MOST_MINUTES, minutes))
 
-    def _wait_free(self, longest: Optional[float]) -> bool:
+    def _wait_free(self, longest: Optional[float], overdue: Optional[Callable[[], None]] = None) -> bool:
         """
         Waits until Nova is free: busy_reason gives None on FREE_LOOKS looks in a row.
 
@@ -214,6 +212,8 @@ class BrainUpdate:
 
         Args:
             longest: The longest to wait, in seconds, or None for no limit.
+            overdue: If given, called once the limit has passed, and the wait carries
+                on with no limit rather than giving up.
 
         Returns:
             Whether Nova is free; False if it was still busy once the limit passed.
@@ -221,12 +221,17 @@ class BrainUpdate:
         give_up = None if longest is None else time.monotonic() + longest
         free = 0
         last = None
+        failure = None
         while True:
             try:
                 reason = self.brain.busy_reason()
-            except Exception:
-                # Not knowing is counted as busy, so nothing restarts under a recording.
-                logger.exception("Couldn't tell whether Nova is busy, so taking it for busy")
+                failure = None
+            except Exception as e:
+                # Not knowing is counted as busy, so nothing restarts under a recording -
+                # logged only as it starts or changes, so one which goes on doesn't fill the log.
+                if repr(e) != failure:
+                    logger.exception("Couldn't tell whether Nova is busy, so taking it for busy")
+                failure = repr(e)
                 reason = "something unknown"
             if reason is None:
                 free += 1
@@ -238,7 +243,10 @@ class BrainUpdate:
                     logger.info(f"The brain's update is waiting for {reason}")
             last = reason
             if give_up is not None and time.monotonic() >= give_up:
-                return False
+                if overdue is None:
+                    return False
+                overdue()
+                give_up = None
             time.sleep(IDLE_LOOK)
 
     def _run(self, asked_at: Optional[str]) -> bool:
@@ -249,8 +257,8 @@ class BrainUpdate:
             Whether the brain is restarting into the new code.
         """
         minutes = self._idle_minutes()
+        said = "1 minute" if minutes == 1 else f"{minutes} minutes"
         if not self._wait_free(minutes * MINUTE):
-            said = "1 minute" if minutes == 1 else f"{minutes} minutes"
             self._keep("busy", f"Nova was busy for {said}, so the update didn't start.")
             self._say(asked_at, BUSY.format(said))
             return False
@@ -277,20 +285,37 @@ class BrainUpdate:
             return False
 
         # The new code is in place: the restart waits until Nova is free however long that
-        # takes, as giving up would leave the new code for the next crash to start.
+        # takes, as giving up would leave the new code for the next crash to start. Past the
+        # idle limit, the page says so and what to run, and the wait carries on; the
+        # outcome is replaced as the brain is back.
         logger.info(f"The brain's new code ({code_version.short(target)}) is in place, so restarting into it "
                     f"once Nova is free")
-        self._wait_free(None)
+
+        def overdue():
+            why = NOT_RESTARTED.format(said)
+            self._keep("needs_you", why, [{"why": why, "command": RESTART_COMMAND}], source, target)
+
+        self._wait_free(minutes * MINUTE, overdue)
         try:
             self.brain.keep_music_for_update()
         except Exception:
             logger.exception("Couldn't keep the music playing for after the update")
         try:
-            storage.save_json(self._path("asked.json"), {"satellite": asked_at, "at": time.time()})
+            storage.save_json(self._path("asked.json"), {"satellite": asked_at, "at": time.time(), "said": False})
         except (OSError, TypeError) as e:
             # Only "I'm updated." is lost; the page still shows how it went.
             logger.warning(f"Couldn't note where the update was asked for: {e}")
-        if self.brain.restart_for_update():
+        try:
+            restarting = self.brain.restart_for_update()
+        except Exception:
+            # Not "still on the old version": the new code is on disk, and starts at the next restart.
+            logger.exception("Couldn't restart into the brain's new code")
+            self._remove("asked.json")
+            self._keep("needs_you", RESTART_BROKE, [{"why": RESTART_BROKE, "command": RESTART_COMMAND}], source,
+                       target)
+            self._say(asked_at, NEEDS_YOU)
+            return False
+        if restarting:
             logger.info(f"Restarting into the brain's new code ({code_version.short(target)})")
             return True
         self._remove("asked.json")
@@ -317,13 +342,13 @@ class BrainUpdate:
         Drops the request, and waits for the updater to say how it went.
 
         brain.json may be left from an earlier run, so only one written since - another
-        file, at no earlier a time - which isn't "checking" is this run's answer.
+        file, as the updater replaces it whole each time - which isn't "checking" is this
+        run's answer. Its `at` isn't compared, as the clock may have been put back.
 
         Returns:
             What the updater said: brain.json, or one made here when it never answered.
         """
-        before_file, before = self._status()
-        before_at = _when(before.get("at"))
+        before_file, _ = self._status()
         try:
             storage.save_text(self._path("request"), _now_iso() + "\n")
         except OSError as e:
@@ -332,17 +357,22 @@ class BrainUpdate:
         logger.info("Asked the brain's updater")
         asked = time.monotonic()
         heard = False
+        taken_at = None
         while True:
             file, status = self._status()
             if file is not None and file != before_file:
-                at = _when(status.get("at"))
-                if before_at is None or at is None or at >= before_at:
-                    if status.get("state") != "checking":
-                        logger.info(f"The brain's updater says {status.get('state')}")
-                        return status
-                    heard = True
-            waited = time.monotonic() - asked
+                if status.get("state") != "checking":
+                    logger.info(f"The brain's updater says {status.get('state')}")
+                    return status
+                heard = True
+            now = time.monotonic()
+            waited = now - asked
             unanswered = not heard and os.path.exists(self._path("request"))
+            if not heard and not unanswered:
+                taken_at = taken_at or now
+                if now - taken_at >= UNHEARD_AFTER:
+                    return {"state": "failed", "error": UPDATER_SILENT, "from": self.version,
+                            "needs_you": [{"why": UPDATER_SILENT, "command": UPDATER_LOG}]}
             if (unanswered and waited >= PICKED_UP_WITHIN) or waited >= UPDATER_LONGEST:
                 self._remove("request")
                 if heard:
@@ -370,64 +400,80 @@ class BrainUpdate:
         source, target = _commit(status.get("from")), _commit(status.get("to"))
         needs = _needs(status.get("needs_you"))
         previous = self._read("previous")
-        if os.path.exists(self._path("taken_back")):
+        taken_back = self._read("taken_back")
+        if taken_back is not None and taken_back != self.version:
+            # From some earlier take-back, as the brain doesn't run the commit it went back
+            # to: counted, it would keep previous for ever.
+            logger.warning(f"Ignoring an old note of a take-back to {code_version.short(taken_back)}, as the brain "
+                           f"runs {code_version.short(self.version)}")
+            self._remove("taken_back")
+            taken_back = None
+        asked, said_already = self._asked()
+        if taken_back is not None or (previous is not None and previous == self.version):
+            # The take-back moved the code back - noted, or not, if its note never came. The
+            # failure is said where he asked even if "I'm updated." was, as that was wrong.
             self._keep("failed", TAKEN_BACK, source=source, target=target)
             self._remove("taken_back")
-            # The take-back removes previous itself; one left on the commit the brain is
-            # back on has nothing left to take back.
-            if previous is not None and previous == self.version:
-                self._remove("previous")
             said = FAILED
-        elif previous is not None and previous == self.version:
-            # Back on the commit it came from, so the take-back moved it back but its
-            # note never came. previous goes, as there's nothing left to take back.
-            self._keep("failed", TAKEN_BACK, source=source, target=target)
-            self._remove("previous")
-            said = FAILED
+            said_already = False
         elif previous is not None:
             self._keep("done", needs[0]["why"] if needs else None, needs, previous, self.version)
             said = UPDATED + (UPDATED_NEEDS_YOU if needs else "")
-            # Only once the new code has run a while: until then the take-back may still
-            # need it, should the new code fail to start again.
-            timer = threading.Timer(STARTED_AFTER, self._started, args=(previous,))
-            timer.daemon = True
-            timer.start()
         else:
             # An ordinary start, so there's nothing to say - and a note of where an update
             # was asked for is from one which never restarted.
             self._remove("asked.json")
             return
-        asked = self._asked()
-        if asked is not None:
+        if previous is not None and previous == self.version:
+            # Nothing is left to take back.
+            self._remove("previous")
+            self._remove("asked.json")
+        elif previous is not None:
+            # Only once the new code has run a while: until then the take-back may still
+            # need it, should the new code fail to start again.
+            timer = threading.Timer(STARTED_AFTER, self._started, args=(previous,))
+            timer.daemon = True
+            timer.start()
+        if asked is not None and not said_already:
             with self._lock:
                 self._to_say = (asked, said)
-        else:
+        elif asked is None:
             self._remove("asked.json")
 
     def _started(self, previous: str):
-        """Removes `previous` once the new code has run STARTED_AFTER seconds - if it is still the same one."""
+        """
+        Removes `previous` once the new code has run STARTED_AFTER seconds - if it is still
+        the same one - and the note of where he asked with it, as nothing can now be taken back.
+        """
         if self._read("previous") == previous:
             self._remove("previous")
+            self._remove("asked.json")
             logger.info(f"The brain's new code has run for {STARTED_AFTER} seconds, so it is no longer taken "
                         f"back if it stops")
 
-    def _asked(self) -> Optional[str]:
-        """The satellite the update was asked at, from asked.json, if it was noted within ASKED_KEPT."""
+    def _asked(self) -> Tuple[Optional[str], bool]:
+        """
+        The satellite the update was asked at, from asked.json, if it was noted within
+        ASKED_KEPT, and whether "I'm updated." has been said there already.
+        """
         try:
             loaded = storage.load_json(self._path("asked.json"), {})
         except (OSError, ValueError):
-            return None
+            return None, False
         if not isinstance(loaded, dict):
-            return None
+            return None, False
         satellite, at = loaded.get("satellite"), loaded.get("at")
         if not isinstance(satellite, str) or not isinstance(at, (int, float)) or time.time() - at > ASKED_KEPT:
-            return None
-        return satellite
+            return None, False
+        return satellite, loaded.get("said") is True
 
     def caught_up(self, name: str) -> None:
         """
         Says how the update went at the satellite he asked at, once it is caught up after
-        the restart - once only, on a thread of its own so its session isn't held up.
+        the restart - once only, on a thread of its own so its session isn't held up. The
+        note of where he asked is kept, marked said, until the new code has run its minute,
+        so a crash and start meanwhile doesn't say it again, and a take-back still says
+        that it failed.
 
         Args:
             name: The satellite just caught up.
@@ -437,7 +483,15 @@ class BrainUpdate:
                 return
             satellite, message = self._to_say
             self._to_say = None
-        self._remove("asked.json")
+        if message == FAILED:
+            self._remove("asked.json")
+        else:
+            try:
+                loaded = storage.load_json(self._path("asked.json"), {})
+                if isinstance(loaded, dict):
+                    storage.save_json(self._path("asked.json"), dict(loaded, said=True))
+            except (OSError, ValueError, TypeError) as e:
+                logger.warning(f"Couldn't note that the update was said: {e}")
         threading.Thread(target=self._say, args=(satellite, message), daemon=True, name="update-said").start()
 
     # What's kept.

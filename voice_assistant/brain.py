@@ -2544,11 +2544,31 @@ class Brain:
             return False
         self.restarting = True
         logger.info("Restarting into the brain's updated code")
-        # Stopping listening ends run(), which then cleans up as for any stop.
-        timer = threading.Timer(RESTART_DELAY, self.stop)
+        self._restart_when_free()
+        return True
+
+    def _restart_when_free(self):
+        """
+        Stops the brain RESTART_DELAY from now - unless Nova has become busy in that moment,
+        say woken just then, when it looks again after the same delay, so a restart for an
+        update never cuts off a recording or a reply.
+        """
+        def stop_or_wait():
+            try:
+                reason = self.busy_reason()
+            except Exception:
+                # The update has already waited until Nova was free, so not knowing now stops it.
+                logger.exception("Couldn't tell whether Nova is busy, so restarting anyway")
+                reason = None
+            if reason is None:
+                # Stopping listening ends run(), which then cleans up as for any stop.
+                self.stop()
+            else:
+                self._restart_when_free()
+
+        timer = threading.Timer(RESTART_DELAY, stop_or_wait)
         timer.daemon = True
         timer.start()
-        return True
 
     def shutdown(self, *args):
         """
