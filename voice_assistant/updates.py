@@ -198,7 +198,8 @@ class Updates:
 
     def result(self, name: str, message: Dict) -> None:
         """
-        Notes how a satellite's update went, as it said.
+        Notes how a satellite's update went, as it said. One which worked, but to a commit the
+        brain has since moved from, is only behind again, not failed.
 
         Args:
             name: The satellite.
@@ -215,6 +216,14 @@ class Updates:
             else:
                 self._set(name, "current")
                 logger.info(f"The {name} satellite is updated to {code_version.short(version)}")
+            return
+        if message.get("ok"):
+            # It installed what it was offered, but the brain's code has moved on since: no
+            # failure, only behind again, which it reads as once its state is dropped.
+            with self._lock:
+                self._states.pop(name, None)
+            logger.info(f"The {name} satellite is updated to {code_version.short(version)}, which is no longer "
+                        f"the brain's commit")
             return
         error = message.get("error") or "It is not on the brain's commit"
         self._set(name, "failed", error)

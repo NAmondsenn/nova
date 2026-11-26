@@ -218,6 +218,20 @@ def test_results_show_as_states(repo, tmp_path):
     assert by_name["tv"]["state"] == "current"
 
 
+def test_an_ok_result_for_a_commit_the_brain_has_left_shows_behind_not_failed(repo, tmp_path, caplog):
+    # The brain moved on while the satellite installed what it had been offered: that
+    # install worked, so the satellite is only behind, and is offered the new commit.
+    updates, commits = make(repo, tmp_path)
+    updates.seen(FakeSatellite(version=commits[0]))
+    updates.installing("pi", commits[1])
+    with caplog.at_level("INFO"):
+        updates.result("pi", {"version": commits[1], "ok": True, "needs_you": []})
+    pi = updates.versions(["pi"])["satellites"][0]
+    assert (pi["state"], pi["reason"]) == ("behind", None)
+    assert "no longer the brain's" in caplog.text
+    assert "failed" not in caplog.text
+
+
 def test_installing_and_an_offer_show_as_updating(repo, tmp_path):
     updates, commits = make(repo, tmp_path)
     updates.installing("pi", commits[2])
