@@ -1,0 +1,67 @@
+# 0040: Update once, everything updates
+
+26 November 2026 · Asked for by the user in chat (the brain, the Pi and the PC each had their own update step, and he wanted one press) · Design: [the spec](../superpowers/specs/2026-11-26-update-everywhere-design.md) · Built; his named bootstrap and hand checks (142 to 158) to come
+
+**Context.** Updating Nova meant running `update.sh` on the brain, then on the Pi, then `scripts/deploy_pc.sh` from CT 109, in that order, each by hand. The three could drift apart, and a satellite on different code from its brain can speak a different protocol. He wanted to press one button, or say one sentence, and have every machine end on the same commit, with nothing left dead if the new code won't start.
+
+**What he decided.**
+
+1. **He starts every update.** Nothing updates on a schedule, nothing checks GitHub by itself, and a routine can't start one. The page's "Update Nova" button and "Hey Nova, update yourself" (which needs his approval, as 0037 does for any big action) are the only starts.
+2. **Always GitHub's `main`, fast-forward only.** Every machine ends on the brain's commit; no machine is ever ahead of the brain (a satellite which is ahead is moved back to it).
+3. **The brain's lock stays.** `nova-backend.service` keeps `NoNewPrivileges=yes`, `ProtectSystem=strict`, `ProtectHome=read-only` and its two `ReadWritePaths`. The brain only asks for the updater; it never writes its own code.
+4. **A satellite never installs code it can't prove came from its brain unaltered.** The proof is HMAC-SHA256 keyed with that satellite's password, over the archive and the commit id, bound to this connection's two handshake nonces, and is checked before anything is written. The check is logged as pass or fail only; no proof, password or nonce is ever logged.
+5. **No machine restarts while in use:** not during a recording, a reply, a conversation, a ringing alarm or timer, or an approval in progress. Music isn't "in use": it is noted and resumes where it was.
+6. **Never a dead satellite and never a dead brain.** Each keeps the previous code and goes back to it, by itself, if the new code won't start.
+7. **Never silent.** Every outcome shows on the settings page and in the brain's log, with why, and "needs you" always carries the one command to run.
+8. **The messages are frozen for ever** (the hello's `version`, `updates` and `update_format`, `update_offer`, `update_chunk`, `update_end`, `update_installing`, `update_result`); a test pins their shape.
+9. **The words, exactly.** "Updating. I'll be back in a minute."; "Already up to date; updating {names}."; "Already up to date."; "I'm already updating."; "I couldn't update, as I was busy for {n} minutes. Ask again when I'm free."; "The update didn't work, so I'm still on the old version. The settings page says why."; "The update needs you: the settings page says what to run."; "I'm updated." at the satellite he asked at once it is back (with " One thing needs you on the settings page." when there is a needs-you note). The approval's description is "Update Nova on every machine".
+10. **One setting**, under Updates and used straight away: `idle_wait_minutes`, 10, a whole number from 1 to 60, "Minutes to wait for Nova to be free before updating".
+
+**What was built.** One commit per task.
+
+- **Task 1, the hello.** Each satellite says its commit (`version`), what it can be sent (`update_format`) and `updates`; the brain keeps the two handshake nonces on the link. New constants in `protocol.py`: `UPDATE_CHUNK` (256 KiB, inside `MAX_AUDIO`), `UPDATE_MOST` (64 MiB), `MOST_UPDATE_ERROR` (300).
+- **Task 2, the proof and the archives.** `update_proof` and the making and checking of a git bundle and a zip, with the commit id in the zip's comment; every way an archive can be damaged is reported as an unpack failure.
+- **Task 3, the link.** `SatelliteLink.send_update` sends in chunks and hears `update_installing` and `update_result`; a lost transfer is logged.
+- **Task 4, the offer.** The brain offers its own commit to every satellite as it connects and to all of them on a press, one transfer per satellite at a time.
+- **Task 5, receiving.** `UpdateReceiver` checks the proof before writing anything; `UpdateState` keeps what happened (result, confirmed, failed, hold) in the data folder.
+- **Task 6, the Pi's installer.** `update_install.py` and `scripts/update_satellite.sh` install a bundle into the Pi's own clone, run the new code's `update.sh --no-pull`, wait for the confirmation and take the code back if it doesn't come.
+- **Task 7, the PC's installer.** `update_pc.ps1`, run by a third task, snapshots, installs from the zip, confirms and rolls back.
+- **Task 8, taking it when free.** A satellite waits until it isn't busy, notes its music for the brain and installs once.
+- **Task 9, the brain's updater.** `nova-update.path` and `nova-update.service`, `nova-takeback.service` and the new start limit, all installed by `update.sh`/`setup.sh`.
+- **Task 10, the brain's own update,** from the press through the idle wait and the exit-75 restart to "I'm updated.".
+- **Task 11, music.** Navidrome music playing on a satellite carries on after its restart.
+- **Task 12, the page.** An Updates section: each machine's commit and state, "Last updated" or "Last tried", the needs-you command, the "Update Nova" button and the setting.
+- **Task 13, the preview** shown for his OK before anything went live.
+- **Task 14, the voice.** "Update yourself" through 0037's approval.
+- **Task 15, this record,** the hand checks and the branch made ready.
+
+**Builder's choices** (each with why; the cost is the price of being wrong).
+
+1. **The brain starts its updater through a path unit, not polkit or sudoers.** `NoNewPrivileges=yes` stops the brain running sudo, and polkit needs `polkitd`, which the brain's container doesn't have. So root installs `nova-update.path`, which starts `nova-update.service` when `~/.local/share/nova/update/request` appears in the brain's own writable data folder. The brain can start that one job and nothing else, and the job only fast-forwards from GitHub.
+2. **The brain restarts itself by exiting 75** once the updater says the new code is in place, because the updater, as `nova`, can't restart a system unit either.
+3. **Start-failure take-back on the brain.** `nova-backend.service` gains `StartLimitIntervalSec=600`, `StartLimitBurst=3` and `OnFailure=nova-takeback.service`. `RestartSec=10` never trips the default limit, so without this `OnFailure=` would never fire. The take-back's text is root's, so `nova` can't change it; it resets the clone to the commit in `update/previous` as `nova`, then, as root, `reset-failed` and starts the brain again. An ordinary crash loop, or four restarts in ten minutes from the page, carries on as today after one extra pause. Exit-75 restarts from the page count toward the three; cost: a 10 second extra pause.
+4. **A brain commit which needs root still restarts into the new code and reports "needs you".** Root-needing means the range changed a unit template (`nova-backend.service`, `nova-update.service`, `nova-update.path`, `nova-takeback.service`) or the body of `install_system_packages` in `setup.sh`. The command is per case: a unit template gives `sudo bash <clone>/update.sh --no-pull`; a system-package change gives `sudo bash <clone>/setup.sh` (which does the packages, where `update.sh --no-pull` doesn't); both gives both lines, setup first. Why: the first command alone left new system packages uninstalled. Cost: he runs the interactive setup once.
+5. **Formats.** The Pi gets a git bundle (thin, from its own commit when that is an ancestor of the brain's), so its clone stays a clone; the PC gets `git archive --format=zip`. The hello says which a satellite takes; the Mac says none until it has an installer.
+6. **"Started" on a satellite means the new code completed a handshake with the brain within 180 seconds.** The helper which installs and takes back is the running (old) code's copy; the install steps are the new code's.
+7. **A version which failed on a satellite isn't tried again on every reconnect.** The satellite keeps the failure in `failed.json` with the whole result (so the page keeps the needs-you command, not just the error) and answers the offer with it, unless the offer says `retry`, which only a press of Update Nova or the voice command sends. Only a retry press reinstalls.
+8. **The idle wait limit applies before the brain starts its updater.** Once new code is on disk the restart waits for idle with no limit on the clock, as giving up would leave new code for the next crash to start; after the limit the page shows "The new code is in place, but Nova hasn't been free for {n} minutes", with `sudo systemctl restart nova-backend`. Satellites wait for idle without a limit. "Busy" counts the whole turn (thinking included), not just the reply.
+9. **Music resume.** Only Navidrome music which was playing (`hand_over`), kept 600 seconds, resumed with `take_over` as the satellite's session is caught up. Spotify plays on the satellite's own Spotify Connect speaker, which neither restart stops.
+10. **The PC's rollback.** The helper snapshots `app` (without the venv), `venv\Scripts\Nova.exe` and the two marks every time, and the whole venv only when `requirements-pc.txt` changed; it restores them and starts the old code if the new one doesn't confirm. It runs in a third task, "Nova update", which `install.ps1` registers (not from inside an update), so it outlives the two tasks it stops. It also removes a stale `confirmed` before installing.
+11. **The Pi's install runs detached** with `systemd-run --user --collect`, so stopping `voice-assistant` doesn't stop it. Local changes or a diverged clone are "needs you". If the script is stopped part way (TERM, HUP, INT) a trap takes the code back, restarts, and writes "The update was stopped part way, so it was taken back."; a take-back which is refused still restarts (running beats stopped) but reports needs-you with the reset command rather than "taken back". Early failures also restart the service so the result is sent.
+12. **A hold marker before a satellite's restart.** While busy after hand-off the satellite keeps `update/hold`; `update.sh` (`NOVA_UPDATE_HOLD`) and `update_pc.ps1` wait on it before stopping Nova, looking every 2 seconds, giving up after 600 and going ahead. Why: the install is detached, so something must stop it racing a conversation. Cost: an update up to 10 minutes slower on a busy satellite.
+13. **The brain's take-back goes only to an ancestor of its current commit,** so a stale or forged `previous` can't move it sideways or forward. A stale `taken_back` doesn't keep `previous` alive.
+14. **The page says "Last updated" only for done or current, else "Last tried"; a non-empty needs-you means needs-you whatever the state; a busy outcome reads "Didn't start: {reason}".** Why: a done update with something left for him must not read as "Up to date", and a refused start must not read as success.
+15. **The page button is on both of the page's addresses,** behind its login (his call: the login covers it).
+
+**Known limits** (none is worse than updating by hand).
+
+- A power cut during the Pi's install, in the three-minute confirmation window, leaves the new code with no take-back: the trap and the timer both died with the Pi.
+- The PC's helper killed mid-update (a log-off, a shutdown) has no take-back.
+- The take-back restores code, not packages: a take-back after a changed `requirements.lock` or the brain's `requirements-backend.txt` leaves the newer packages in the venv (the PC alone restores its venv, and only when its requirements changed).
+- While the brain waits for idle to restart, the page serves the new `web/` files against the old backend, with the venv already updated.
+- A failed version is re-sent in full on every reconnect, only to be refused (choice 7).
+- A brain update needing a system package or a unit still needs him to run the command named; it never installs them itself.
+
+**Anti-goals** (a failure even if it works). An update which nobody started; a satellite installing code without a proof which checks; a machine restarting under a recording, a ringing timer or an approval; a machine left dead after a failed update; an outcome shown nowhere; a proof, password or nonce in any log.
+
+**Setting it up (his named jobs, in order).** Push `update-everywhere` merged into main. On the brain, as root, `bash /home/nova/Home-Assistant/update.sh` (installs the updater, its path unit, the take-back and the new start limit). On the Pi, `bash ~/Home-Assistant/update.sh`. On CT 109, `bash scripts/deploy_pc.sh` (registers the "Nova update" task). Then hand checks 142 onwards in [the release checklist](../release-checklist.md).

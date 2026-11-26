@@ -132,6 +132,8 @@ bash setup.sh --new-password
 
 It asks for the new password (not shown as it's typed), puts it in `~/.config/nova/.env` in place of the old one, leaving the rest of the file as it was, and restarts the satellite. A Pi with a new machine, or a new SD card, is set up as above with the same name, after New password - adding it again isn't needed, and removing it would move its timers, alarms and routines to the default satellite.
 
+Once the updater is installed (by the next `update.sh` on each machine), the easiest way is the settings page's Update Nova button, or "Hey Nova, update yourself" (which asks for your OK): it brings GitHub's `main` to the brain, the Pi and the PC in one go, waits until Nova is free, and takes any machine back to its old code if the new one won't start. See [docs/decisions/0040](docs/decisions/0040-update-once-everything-updates.md). The by-hand way below is still for a branch other than `main`, or when a machine says it needs you.
+
 To update to the latest code later - it never touches your settings, keys or saved data - run this on the brain (as root) and on each satellite (as its user), adding `--no-pull` to use the code as it is rather than fetching first - after switching branch by hand, say, or to go back to a tag, which can't be pulled:
 
 ```bash
