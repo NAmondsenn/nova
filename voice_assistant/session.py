@@ -521,7 +521,11 @@ class Session:
                                       # go of, still answering a turn, where nothing would hear or end it.
                                       converses=lambda: self.satellite.can_converse and not self._closed.is_set(),
                                       # How an approval asked for here ended, for Claude with the next turn.
-                                      noted=lambda text: self.llm.note(text))
+                                      noted=lambda text: self.llm.note(text),
+                                      # "Update yourself", once he's approved it: the brain's update says
+                                      # what to tell him, and tells him again at this satellite when done.
+                                      updater=lambda: {"success": True,
+                                                       "message": brain.update.start(self.satellite.name)})
 
         # The everyday commands handled without Claude - see intents.py. The activities are
         # the calendars' names, so "when's gym tomorrow?" is heard once there's a Gym calendar.

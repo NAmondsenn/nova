@@ -440,6 +440,10 @@ class LocalIntents:
             # is then what's asked of it.
             (rf"(?:{BIGGER_MODEL})(?P<rest> .+)?", self._use_bigger_model),
             (QUICK_MODEL, self._use_quick_model),
+            # Nova's own update, on his word and then his approval. The whole of what's said only, so
+            # "update my shopping list" and "update me on the football" are still Assist's and Claude's.
+            (r"(?:update|upgrade) (?:yourself|nova|everything)|update all (?:of )?your (?:devices|satellites)",
+             self._update_nova),
             # "Set of one minute timer" is how Moonshine heard "set a one minute timer"
             # with the network cable out - so it went to Claude, who couldn't be asked.
             (r"(?:(?:set|start) (?:me )?(?:a |an |of )?)?timer for (?P<amount>[a-z0-9 ]+?) (?P<unit>second|minute|hour)s?",
@@ -704,6 +708,10 @@ class LocalIntents:
         # What came after is Conversation's to ask the bigger model, which says nothing of its own first.
         params = {"rest": found["rest"].strip()} if found["rest"] else {}
         return self._result("Okay.", [Action("use_bigger_model", params)])
+
+    def _update_nova(self, found) -> Optional[Dict]:
+        # Only the action: the tool asks his OK and says what the update says in place of this "Okay.".
+        return self._result("Okay.", [Action("update_nova")])
 
     def _use_quick_model(self, found) -> Optional[Dict]:
         if self.conversation is None or not self.conversation.on_at(self.satellite):

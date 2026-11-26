@@ -1491,3 +1491,24 @@ def test_the_model_phrases_mean_nothing_outside_a_conversation(phrase):
     # Nor when it's on at another satellite, which isn't the one he's talking to.
     assert _talk(phrase, on_at="bedroom") is None
     assert LocalIntents().match(phrase) is None
+
+
+UPDATE_PHRASES = ["update yourself", "update nova", "update everything", "upgrade yourself", "upgrade nova",
+                  "upgrade everything", "update all your devices", "update all of your satellites",
+                  "please update yourself", "update nova please"]
+
+
+@pytest.mark.parametrize("phrase", UPDATE_PHRASES)
+def test_update_yourself_is_nova_s_own_command(phrase):
+    for said in (phrase, phrase.capitalize() + ".", phrase.upper() + "!"):
+        result = LocalIntents().match(said)
+        assert result["actions"] == [Action("update_nova")] and result["response"] == "Okay."
+
+
+@pytest.mark.parametrize("phrase", [
+    "update my shopping list", "update me on the football", "update the calendar", "upgrade my plan",
+    "update nova's settings", "update yourself on the football", "update everything on my calendar",
+    "upgrade me", "update all your devices on friday"])
+def test_other_updates_are_left_alone(phrase):
+    result = LocalIntents().match(phrase)
+    assert result is None or Action("update_nova") not in result["actions"]

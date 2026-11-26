@@ -4129,7 +4129,7 @@ def test_a_satellite_which_doesnt_know_conversations_is_told_it_needs_updating()
 
 def test_a_routine_never_runs_start_conversation():
     # A routine may run by itself, with nobody there - see Conversation._run.
-    assert ActionExecutor.routine_refusals() == {"start_conversation": "A routine can't start a conversation."}
+    assert ActionExecutor.routine_refusals()["start_conversation"] == "A routine can't start a conversation."
 
 
 def test_end_conversation_ends_it_and_says_okay():
@@ -4240,3 +4240,55 @@ def test_the_model_tools_only_move_the_conversation_which_is_on_here():
     conversation.move_up("bedroom")
     result = ActionExecutor.tools()["use_quick_model"](executor)
     assert (result.ok, result.say) == (False, "We're not in a conversation.") and conversation.bigger
+
+
+# "Nova, update yourself" - see brain_update.py and approvals.py
+
+UPDATE_STARTED = "Updating. I'll be back in a minute."
+
+
+def _updater(calls):
+    def start():
+        calls.append("started")
+        return {"success": True, "message": UPDATE_STARTED}
+    return start
+
+
+def test_update_nova_asks_his_ok_first():
+    calls, approvals = [], FakeApprovals("wait")
+    executor = ActionExecutor(updater=_updater(calls), approvals=approvals, satellite="kitchen")
+    result = executor.execute(Action("update_nova"))
+    assert approvals.asked == [("Update Nova on every machine", "kitchen")]
+    assert (result.ok, result.say) == (True, pending_said(["your phone"]))
+    # Nothing starts while it waits; once approved, what the update says is what is said.
+    assert calls == []
+    assert [reply["message"] for reply in approvals.approve_waiting()] == [UPDATE_STARTED]
+    assert calls == ["started"]
+
+
+def test_update_nova_with_the_trust_window_open_starts_at_once():
+    calls = []
+    executor = ActionExecutor(updater=_updater(calls), approvals=FakeApprovals("approve"))
+    result = executor.execute(Action("update_nova"))
+    assert calls == ["started"]
+    assert (result.ok, result.say) == (True, UPDATE_STARTED)
+
+
+def test_update_nova_with_no_way_to_approve_does_nothing():
+    for approvals in (None, FakeApprovals("none")):
+        calls = []
+        result = ActionExecutor(updater=_updater(calls), approvals=approvals).execute(Action("update_nova"))
+        assert (result.ok, result.say) == (False, NO_WAY) and calls == []
+
+
+def test_a_routine_cant_update_nova():
+    assert ActionExecutor.routine_refusals()["update_nova"] == "A routine can't update Nova: ask me yourself."
+
+
+def test_without_an_updater_the_tool_isnt_offered():
+    def offered(executor):
+        return [schema["name"] for schema in executor.tool_schemas()]
+    assert "update_nova" not in offered(ActionExecutor(approvals=FakeApprovals()))
+    assert "update_nova" in offered(ActionExecutor(updater=_updater([]), approvals=FakeApprovals()))
+    result = ActionExecutor(approvals=FakeApprovals()).execute(Action("update_nova"))
+    assert (result.ok, result.say) == (False, "Updating isn't available right now.")

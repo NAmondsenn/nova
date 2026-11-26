@@ -77,6 +77,8 @@ UNAVAILABLE = {
     "conversation_open": "We're not in a conversation.",
     # Which only a race can reach too: the tool is offered only while it can move up.
     "think_harder": "I can't move up to the bigger model right now.",
+    # Nothing to start an update with, as in a test or a brain without one.
+    "updater": "Updating isn't available right now.",
 }
 
 # What's said on starting a conversation, and on ending one he asked to end. Said through the
@@ -468,7 +470,8 @@ class ActionExecutor:
                  microphone: Optional[Callable[[bool, Optional[str]], Dict]] = None, approvals=None,
                  rang: Optional[RangLately] = None, conversation: Optional[OpenConversation] = None,
                  muted: Callable[[], bool] = lambda: False, converses: Callable[[], bool] = lambda: True,
-                 noted: Optional[Callable[[str], None]] = None):
+                 noted: Optional[Callable[[str], None]] = None,
+                 updater: Optional[Callable[[], Dict]] = None):
         """
         Args:
             music: The music player - SpotifyController - or None if there isn't one.
@@ -558,6 +561,8 @@ class ActionExecutor:
                 none starts there - see RemoteSatellite.can_converse. Always, by default.
             noted: Notes something for Claude with the user's next message here - see
                 LLMHandler.note - or None for nothing noted.
+            updater: Starts the update of Nova on every machine, giving the sentence to say as its
+                message - see BrainUpdate.start - or None if there is no way to update.
         """
         self.music = music
         self.clock = clock
@@ -598,6 +603,7 @@ class ActionExecutor:
         self.muted = muted
         self.converses = converses
         self.noted = noted
+        self.updater = updater
         # The music's level before "mute", for "unmute" to put it back to - see _mute_music.
         self._level_before_mute: Optional[int] = None
         # What was last asked, and what the assistant said - or the last alert, and
@@ -855,6 +861,17 @@ class ActionExecutor:
             return {"success": False, "message": NO_WAY}
         return self.approvals.gate(description, do, self.satellite,
                                    done=lambda reply: self._keep_or_note(tool, reply), ended=self.noted)
+
+    # Updating
+
+    @tool(
+        "Update Nova on every machine, the brain from GitHub and then each satellite, for 'update yourself' or "
+        "'update Nova'. It asks the user's OK first. What is said is said for you, so just reply 'Okay.'",
+        needs="updater",
+        not_in_routines="A routine can't update Nova: ask me yourself.",
+    )
+    def update_nova(self):
+        return self._approved("Update Nova on every machine", self.updater, ActionExecutor.update_nova)
 
     # Music
 
