@@ -46,7 +46,7 @@ const view = (changes = {}) => ({
   satellites: [{ name: "bedroom", connected: true, isDefault: true }],
   voice: 60,
   webSearch: true,
-  conversation: { on: true, talkOver: "voice" },
+  conversation: { on: true, talkOver: "voice_at_computers" },
   quiet: { from: "23:00", until: "07:00" },
   memories: 12,
   keys: { set: 6, total: 11 },
@@ -300,7 +300,9 @@ test("the Claude line says whether web search is on", () => {
 });
 
 test("the Conversation line says whether conversations are on and what cuts in", () => {
-  assert.equal(said("conversation"), "Conversations on, your voice cuts in");
+  assert.equal(said("conversation"), "Conversations on, your voice cuts in at a computer");
+  assert.equal(said("conversation", { conversation: { on: true, talkOver: "voice" } }),
+    "Conversations on, your voice cuts in anywhere");
   assert.equal(said("conversation", { conversation: { on: true, talkOver: "wake_word_or_press" } }),
     "Conversations on, the wake word or a press cuts in");
   assert.equal(said("conversation", { conversation: { on: true, talkOver: null } }), "Conversations on");

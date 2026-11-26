@@ -2225,7 +2225,7 @@ def test_the_conversation_settings_are_on_the_page_used_straight_away(files):
             "conversation.pause_seconds": ("Seconds of quiet which end your turn", 1.5),
             "conversation.longest_turn": ("Longest turn, in seconds", 90),
             "conversation.idle_minutes": ("Minutes of quiet which end a conversation", 5),
-            "conversation.talk_over": ("What cuts in on a reply", "voice"),
+            "conversation.talk_over": ("What cuts in on a reply", "voice_at_computers"),
             "conversation.dip_level": ("How far a reply turns down when you talk", 0.3),
             "conversation.bigger_model": ("Model for planning", "claude-sonnet-5-5"),
             "conversation.switch_itself": ("Nova may move up by itself", True),
@@ -2235,7 +2235,7 @@ def test_the_conversation_settings_are_on_the_page_used_straight_away(files):
     for key, (label, value) in rows.items():
         assert (shown[key]["label"], shown[key]["value"], shown[key]["used"]) == (label, value, NOW), key
     assert shown["conversation.enabled"]["kind"] == shown["conversation.switch_itself"]["kind"] == "yes/no"
-    assert shown["conversation.talk_over"]["choices"] == ["voice", "wake_word_or_press"]
+    assert shown["conversation.talk_over"]["choices"] == ["voice_at_computers", "voice", "wake_word_or_press"]
     assert shown["conversation.bigger_model"]["choices"] == ["claude-sonnet-5-5", "claude-opus-5-5"]
     for key, low, high in (("pause_seconds", 0.6, 5), ("longest_turn", 15, 300), ("idle_minutes", 1, 30),
                            ("dip_level", 0.1, 0.8), ("history_exchanges", 20, 300)):

@@ -203,7 +203,8 @@
       const conversation = view.conversation;
       if (!conversation) return { text: "" };
       if (!conversation.on) return { text: "Conversations off" };
-      if (conversation.talkOver === "voice") return { text: "Conversations on, your voice cuts in" };
+      if (conversation.talkOver === "voice_at_computers") return { text: "Conversations on, your voice cuts in at a computer" };
+      if (conversation.talkOver === "voice") return { text: "Conversations on, your voice cuts in anywhere" };
       if (conversation.talkOver === "wake_word_or_press") return { text: "Conversations on, the wake word or a press cuts in" };
       return { text: "Conversations on" };
     },

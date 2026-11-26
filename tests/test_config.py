@@ -216,7 +216,7 @@ def test_the_conversation_settings_load_with_their_defaults_and_limits(tmp_path)
     assert (conversation["enabled"], conversation["switch_itself"]) == (True, True)
     assert (conversation["pause_seconds"], conversation["longest_turn"], conversation["idle_minutes"]) == (1.5, 90, 5)
     assert (conversation["dip_level"], conversation["history_exchanges"]) == (0.3, 100)
-    assert (conversation["talk_over"], conversation["bigger_model"]) == ("voice", "claude-sonnet-5-5")
+    assert (conversation["talk_over"], conversation["bigger_model"]) == ("voice_at_computers", "claude-sonnet-5-5")
     for name, (low, high), message in (("pause_seconds", (0.6, 5), "should be from 0.6 to 5"),
                                        ("longest_turn", (15, 300), "should be from 15 to 300"),
                                        ("idle_minutes", (1, 30), "should be from 1 to 30"),
@@ -231,7 +231,8 @@ def test_the_conversations_talk_over_and_bigger_model_are_choices(tmp_path):
     (tmp_path / "config.yaml").write_text("conversation:\n  talk_over: shouting\n")
     with pytest.raises(ConfigError) as caught:
         Config(path=str(tmp_path / "config.yaml"))
-    assert "'conversation.talk_over' should be one of voice, wake_word_or_press, not 'shouting'" in str(caught.value)
+    assert ("'conversation.talk_over' should be one of voice_at_computers, voice, wake_word_or_press, "
+            "not 'shouting'") in str(caught.value)
 
     (tmp_path / "config.yaml").write_text("conversation:\n  bigger_model: claude-haiku-5-5\n")
     with pytest.raises(ConfigError) as caught:
@@ -239,7 +240,8 @@ def test_the_conversations_talk_over_and_bigger_model_are_choices(tmp_path):
     assert ("'conversation.bigger_model' should be one of claude-sonnet-5-5, claude-opus-5-5, "
             "not 'claude-haiku-5-5'") in str(caught.value)
 
-    for talk_over, model in (("wake_word_or_press", "claude-opus-5-5"), ("voice", "claude-sonnet-5-5")):
+    for talk_over, model in (("wake_word_or_press", "claude-opus-5-5"), ("voice", "claude-sonnet-5-5"),
+                             ("voice_at_computers", "claude-sonnet-5-5")):
         (tmp_path / "config.yaml").write_text(f"conversation:\n  talk_over: {talk_over}\n  bigger_model: {model}\n")
         conversation = Config(path=str(tmp_path / "config.yaml")).section("conversation")
         assert (conversation["talk_over"], conversation["bigger_model"]) == (talk_over, model)

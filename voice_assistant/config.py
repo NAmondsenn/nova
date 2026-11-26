@@ -38,7 +38,7 @@ CHOICES = {
     ("computer", "screen_orb_place"): ("bottom centre", "bottom left", "bottom right",
                                        "top centre", "top left", "top right"),
     ("computer", "screen_orb_size"): ("small", "medium", "large"),
-    ("conversation", "talk_over"): ("voice", "wake_word_or_press"),
+    ("conversation", "talk_over"): ("voice_at_computers", "voice", "wake_word_or_press"),
     ("conversation", "bigger_model"): ("claude-sonnet-5-5", "claude-opus-5-5"),
 }
 # Battery marks are percentages, and how many each kind of device has - the settings page

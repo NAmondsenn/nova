@@ -178,14 +178,18 @@ conversation:
   # lower it if it stays listening long after you've left the room. From 1 to 30. Used
   # straight away.
   idle_minutes: 5
-  # What can cut in on a reply while Nova speaks: voice (your voice) or wake_word_or_press
-  # (only the wake word, or a press at a computer, as at any other time). With voice the
+  # What can cut in on a reply while Nova speaks: voice_at_computers (your voice at a
+  # computer, the wake word elsewhere), voice (your voice anywhere) or wake_word_or_press
+  # (only the wake word, or a press at a computer, as at any other time). With your voice the
   # reply turns down at once when you talk and stops once Nova has heard real words from you
   # (a cough carries on, as does "yeah"; "stop" always stops it). Your voice is the quickest,
-  # but anyone talking nearby counts as you; the other is steadier in a noisy room, but needs
-  # the wake word or a press to interrupt. Voice is only used while nothing else is playing in
-  # the room, and once the satellite's echo canceller is ready. Used straight away.
-  talk_over: voice
+  # but anyone talking nearby counts as you; the wake word is steadier in a noisy room, but is
+  # needed to interrupt. voice_at_computers is the default because at a loudspeaker next to
+  # the microphone, as at a Pi, Nova's own voice drowns yours, while a computer plays into
+  # headphones; use voice for a satellite whose microphone can take it. Voice is only used
+  # while nothing else is playing in the room, and once the satellite's echo canceller is
+  # ready. Used straight away.
+  talk_over: voice_at_computers
   # How far a reply turns down when your voice is heard over it, as a share of its volume: 0.3
   # is 30%. Raise it to hear more of the reply while you talk; lower it to hear less. From 0.1
   # to 0.8. Used straight away.

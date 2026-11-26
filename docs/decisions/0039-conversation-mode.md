@@ -44,7 +44,7 @@
 - **The bigger model.** By his words ("think harder", "use the bigger model"; back with "quick answers", "back to normal") or, with `switch_itself` on, by Claude's `think_harder` tool.
 - **Things during one.** Timers, alarms and announcements wait for a gap; music, the room's other satellite and mute are covered below.
 - **Home Assistant.** A "Conversation" switch on each satellite's device: on while one is running there, on starts one, off ends it. It is withdrawn while conversations are switched off.
-- **Settings**, a section "Conversation" on the settings page (in the Nova group, after Claude), all used straight away, even in the conversation in progress: `conversation.enabled` (on), `pause_seconds` (1.5, 0.6 to 5), `longest_turn` (90, 15 to 300), `idle_minutes` (5, 1 to 30), `talk_over` (voice, or wake word or press), `dip_level` (0.3, 0.1 to 0.8), `bigger_model` (Sonnet 5.5, or Opus 5.5), `switch_itself` (on) and `history_exchanges` (100, 20 to 300); and, under Claude with the other usage prices, the bigger model's two.
+- **Settings**, a section "Conversation" on the settings page (in the Nova group, after Claude), all used straight away, even in the conversation in progress: `conversation.enabled` (on), `pause_seconds` (1.5, 0.6 to 5), `longest_turn` (90, 15 to 300), `idle_minutes` (5, 1 to 30), `talk_over` (the voice at a computer and the wake word elsewhere, the voice anywhere, or the wake word or a press), `dip_level` (0.3, 0.1 to 0.8), `bigger_model` (Sonnet 5.5, or Opus 5.5), `switch_itself` (on) and `history_exchanges` (100, 20 to 300); and, under Claude with the other usage prices, the bigger model's two.
 
 **Decisions made during the build.**
 
@@ -74,6 +74,7 @@
 - A satellite not updated for conversations (the PC asleep through a deploy, say) can't start one: it says "This satellite needs updating for conversations.", Claude isn't offered the tool there, and its device has no Conversation switch. Its turns would have been ordinary listens, and an older PC mutes Windows' microphone again at the end of each.
 - A session the brain has let go of (its satellite dropped and connected again, or was removed, while its turn was still being answered) can't start a conversation: the executor is told it can't converse there, and refuses as at any satellite which can't, though nothing will be heard. Its turn's own start, if it was past that check as the session was let go of, is ended as the turn finishes, as nothing else would end it: OpenConversation notes which executor started each conversation, and the old session ends only one its own started, and not one a newer session at the satellite has begun as its own. Before this one could stay on with nobody listening, the switch on, the room's other satellite kept quiet and every other satellite refused.
 - The reply that starts a conversation ("Go ahead.") isn't listened over, as the satellite hasn't been told yet.
+- By default (`talk_over` "voice_at_computers") the voice cuts in only at a satellite pressed to talk, a computer's; at the Pi only the wake word does, as with "wake_word_or_press", and nothing is listened to or dipped over a reply there. Measured at the Pi on 22 November, its echo canceller took only about 3 dB off Nova's own voice, which the detector read as speech about 97% of the time and which drowned his words over it, so a reply there would dip at once, stay dipped and seldom stop; the PC plays into headphones. "voice" keeps the voice cutting in anywhere, for a satellite whose microphone can take it.
 - The Conversation switch's start is judged when it is taken, not when it was asked for, with at most one pending: a second tap while the session is busy does nothing, off cancels a start waiting, and one for conversations switched off meanwhile is refused aloud.
 
 *Music, timers and routines.*
@@ -89,7 +90,7 @@
 - A phrase of his that also occurs in the reply doesn't stop it ("no" in "there is no rain"), and "right", "okay" and "yes" never stop it even as real answers. "Stop" always does.
 - A timer ringing at the room's other satellite can't be dismissed by that satellite's wake word during a conversation, as it is kept quiet; a press works.
 - On Spotify, music asked for at another satellite in the room, or by Home Assistant's own play button, during a conversation still plays at once.
-- `install.ps1` and the PC's library have not run on Windows; that is the first of the morning's checks.
+- `install.ps1` has not run on Windows: the PC's library has been loaded there once by hand, but the install step itself is untested; that is the first of the morning's checks.
 
 **Anti-goals** (a failure even if it works). A conversation that starts by itself or carries on with nobody there; Nova stopping for its own voice; Nova talking over him, or cutting him off while he thinks; anything changing outside a conversation; a reply stopping for the television; a big bill by accident.
 

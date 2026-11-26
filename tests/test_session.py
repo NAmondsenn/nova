@@ -5829,6 +5829,8 @@ def _over_a_reply(brain, connect, make_session, *texts, ready=True, setup=None):
     lets it finish, with "Tuesday's clear." the reply after. Speech-to-text hears the texts given after those
     two. setup, if given, is called with the session before it runs.
     """
+    # The satellite is a Pi, where the voice cuts in only with it set to anywhere - unless the test says otherwise.
+    brain.config.data.setdefault("conversation", {"talk_over": "voice"})
     session, pi = _in_a_conversation(brain, connect, make_session, Reply(say="Okay."), Reply(say=TODAY),
                                      Reply(say="Tuesday's clear."))
     session.satellite.echo_ready = ready
@@ -6023,6 +6025,29 @@ def test_no_voice_cut_in_while_something_else_plays_in_the_room(brain, connect, 
     _only_the_wake_word_cuts_in(session, pi, then=lambda: setattr(brain, "media", _playing()))
 
 
+def test_by_default_only_the_wake_word_cuts_in_at_a_pi(brain, connect, make_session):
+    # At a loudspeaker beside its microphone Nova's own voice drowns the user's, so a reply would dip at once and
+    # stay dipped - unless the voice is set to cut in anywhere.
+    brain.config.data["conversation"] = {}
+    session, pi = _over_a_reply(brain, connect, make_session, "What about Tuesday?")
+    _only_the_wake_word_cuts_in(session, pi,
+                                then=lambda: brain.config.data.update(conversation={"talk_over": "voice"}))
+
+
+def test_by_default_the_voice_cuts_in_at_a_computer(brain, connect, make_session):
+    brain.config.data["conversation"] = {}
+    session, pi = _over_a_reply(brain, connect, make_session, "Hang on, what about Tuesday?",
+                                "Hang on, what about Tuesday?",
+                                setup=lambda session: setattr(session.satellite, "push_to_talk", True))
+    heard = _open_microphone(pi)
+    reply = pi.messages("play_stream")[1]["id"]
+    heard.put(said(seconds=1.0, before=0.96, after=0))
+    assert wait_for(lambda: len(pi.messages("play_stream")) >= 3, seconds=TURNS)
+    assert _fades(pi, reply) == [(0.21, 0.05)] and _stopped(pi, reply)
+    assert session.conversation.heard[2] == ("Hang on, what about Tuesday?", False)
+    _ended(session)
+
+
 def test_talk_over_set_to_the_wake_word_or_a_press(brain, connect, make_session):
     brain.config.data["conversation"] = {"talk_over": "wake_word_or_press"}
     session, pi = _over_a_reply(brain, connect, make_session, "What about Tuesday?")
@@ -6061,6 +6086,7 @@ def test_a_turn_begun_over_a_reply_by_the_wake_word_or_a_press_has_the_conversat
 
 
 def test_outside_a_conversation_nothing_listens_during_a_reply(brain, connect, make_session):
+    brain.config.data["conversation"] = {"talk_over": "voice"}
     brain.open_conversation = OpenConversation(lambda: {"enabled": True})
     satellite, pi = connect(conversations=True)
     satellite.echo_ready = True

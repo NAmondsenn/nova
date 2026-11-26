@@ -73,9 +73,9 @@ DEFAULT_PAUSE_SECONDS = 1.5
 DEFAULT_LONGEST_TURN = 90
 
 # How a voice over a reply in a conversation is taken if config.yaml has been left without these
-# two settings, the same as config.yaml starts them: it may cut in, and dips the reply to this
-# much of its volume while it's heard.
-DEFAULT_TALK_OVER = "voice"
+# two settings, the same as config.yaml starts them: it may cut in only at a computer, and dips
+# the reply to this much of its volume while it's heard.
+DEFAULT_TALK_OVER = "voice_at_computers"
 DEFAULT_DIP_LEVEL = 0.3
 
 # How long a reply takes to dip when a voice is heard over it, and to come back, in seconds - a
@@ -1333,14 +1333,19 @@ class Session:
 
         Returns:
             True in a conversation under way here (the satellite told - not the reply which
-            started it), while conversation.talk_over is "voice", once the satellite's echo
-            canceller is taking Nova's own voice out of what it hears, and while nothing else
-            plays in its room - the test which makes its wake word harder to set off - so a
-            film's dialogue can't stop a reply.
+            started it), while conversation.talk_over is "voice", or is "voice_at_computers"
+            and this satellite is a computer's, pressed to talk - at a loudspeaker next to its
+            microphone Nova's own voice drowns the user's - once the satellite's echo canceller
+            is taking Nova's own voice out of what it hears, and while nothing else plays in its
+            room - the test which makes its wake word harder to set off - so a film's dialogue
+            can't stop a reply.
         """
         if not self._conversing or not self._conversation_here() or not self.satellite.echo_ready:
             return False
-        if self.brain.config.section("conversation").get("talk_over", DEFAULT_TALK_OVER) != "voice":
+        talk_over = self.brain.config.section("conversation").get("talk_over", DEFAULT_TALK_OVER)
+        if talk_over == "voice_at_computers" and not self.satellite.push_to_talk:
+            return False
+        if talk_over not in ("voice", "voice_at_computers"):
             return False
         return not self.playing_here()
 
