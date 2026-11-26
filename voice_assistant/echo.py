@@ -81,6 +81,10 @@ QUIETEST_TO_MEASURE = 300
 # real room; two unrelated stretches of music with the same rhythm, around 8 times.
 # The same gap has to be found twice running as well.
 CLEAR_MATCH = 12.0
+# How many measurements running, of something loud enough to measure by, have to find no
+# match at all before the microphone is taken not to hear the speaker - headphones, most
+# likely - so there's nothing to take out and nothing to wait for.
+UNHEARD_AFTER = 3
 # How long each stream's timestamps are fitted over, and how much of them is needed
 # before they're trusted.
 CLOCK_SECONDS = 600.0
@@ -358,6 +362,11 @@ class EchoCanceller:
         # Samples between being played and being heard, once measured.
         self.delay: Optional[int] = None
         self._measured: deque = deque(maxlen=MEASUREMENTS_KEPT)
+        # Whether the microphone doesn't hear what's played at all, and how many measurements
+        # running have found no match in something loud. Kept through a reset, so headphones
+        # needn't be found again each time the devices are opened, and dropped by the first match.
+        self.unheard = False
+        self._unmatched = 0
         self._pending = np.zeros(0, dtype=np.int16)
         self._done = 0
         # Bumped by every reset, so a measurement which began before one isn't kept.
@@ -389,8 +398,12 @@ class EchoCanceller:
 
     @property
     def ready(self) -> bool:
-        """Whether the speaker is lined up with the microphone and being taken out - engaged, and the gap measured and agreed."""
-        return self._engaged and self.delay is not None
+        """
+        Whether Nova's own sound is out of what's heard - engaged, and either the speaker is lined
+        up with the microphone and being taken out (the gap measured and agreed), or the
+        microphone doesn't hear the speaker at all, as with headphones.
+        """
+        return self._engaged and (self.delay is not None or self.unheard)
 
     def reset(self):
         """
@@ -407,6 +420,7 @@ class EchoCanceller:
         self._generation += 1
         self.delay = None
         self._measured.clear()
+        self._unmatched = 0
         self.heard.forget()
         self.played.forget()
         # What was waiting for a whole frame is of the old stream too, and what's heard next
@@ -484,8 +498,11 @@ class EchoCanceller:
         if played_positions is None:
             return
         heard = self.heard.read(end - count, count)
-        found = measure_delay(heard, self.played.read_at(played_positions), most)
+        played = self.played.read_at(played_positions)
+        found = measure_delay(heard, played, most)
         if found is None:
+            if np.sqrt(np.mean(played.astype(np.float64) ** 2)) >= QUIETEST_TO_MEASURE:
+                self._note_unmatched(generation)
             return
         # From the first note of it to the last, under the lock which reset() takes, so a
         # reset can't come between them, and a measurement made of what was there before
@@ -494,6 +511,9 @@ class EchoCanceller:
             if generation != self._generation:
                 return
             self._measured.append(found)
+            # The speaker is heard after all - headphones swapped for a loudspeaker, say.
+            self._unmatched = 0
+            self.unheard = False
             middle = int(np.median(self._measured))
             if sum(abs(measured - middle) <= AGREEMENT for measured in self._measured) < MEASUREMENTS_AGREEING:
                 return
@@ -503,6 +523,26 @@ class EchoCanceller:
             self.delay = delay
             self.speex.reset()
         logger.info(f"Echo cancelling: what's played is heard {1000 * middle / RATE:.0f}ms later")
+
+    def _note_unmatched(self, generation: int):
+        """
+        Notes a measurement which found nothing of something loud in what was heard, and takes
+        the microphone not to hear the speaker once enough have running, while no gap is agreed.
+
+        Args:
+            generation: The generation the measurement began in - one from before a reset isn't kept.
+        """
+        with self._lock:
+            if generation != self._generation:
+                return
+            self._unmatched += 1
+            if self.unheard or self.delay is not None or self._unmatched < UNHEARD_AFTER:
+                return
+            # A stray match from before these, which nothing agreed with, goes.
+            self._measured.clear()
+            self.unheard = True
+        logger.info("Echo cancelling: the microphone doesn't hear what's played - headphones, most likely - "
+                    "so there's nothing to take out")
 
     def close(self):
         self._stopping.set()
