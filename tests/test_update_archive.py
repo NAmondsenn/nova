@@ -123,7 +123,8 @@ def test_not_a_zip_has_no_commit():
     assert update_archive.zip_commit(buffer.getvalue()) is None
 
 
-@pytest.mark.parametrize("error", [OSError(28, "No space left on device"), EOFError(), NotImplementedError()])
+@pytest.mark.parametrize("error", [OSError(28, "No space left on device"), EOFError(), NotImplementedError(),
+                                   zipfile.BadZipFile("Bad CRC-32")])
 def test_unpack_reports_every_way_extracting_can_fail(tmp_path, monkeypatch, error):
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
@@ -135,3 +136,14 @@ def test_unpack_reports_every_way_extracting_can_fail(tmp_path, monkeypatch, err
     monkeypatch.setattr(zipfile.ZipFile, "extractall", fail)
     with pytest.raises(ArchiveError, match="couldn't unpack"):
         update_archive.unpack_zip(buffer.getvalue(), str(tmp_path / "into"))
+
+
+def test_unpack_reports_a_damaged_member(tmp_path):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr("a.txt", "some stored text")
+    data = bytearray(buffer.getvalue())
+    # A stored member's bytes sit right after its header, so this breaks its CRC-32.
+    data[data.index(b"some stored text")] ^= 1
+    with pytest.raises(ArchiveError, match="couldn't unpack"):
+        update_archive.unpack_zip(bytes(data), str(tmp_path / "into"))

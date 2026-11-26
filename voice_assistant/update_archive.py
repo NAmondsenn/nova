@@ -200,6 +200,9 @@ def unpack_zip(archive: bytes, into: str) -> None:
                 else:
                     os.remove(path)
             opened.extractall(into)
-        except (OSError, zlib.error, EOFError, NotImplementedError, RuntimeError, ValueError) as e:
-            reason = getattr(e, "strerror", None) or type(e).__name__
+        except (OSError, zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError, ValueError) as e:
+            if isinstance(e, (zipfile.BadZipFile, zlib.error, EOFError)):
+                reason = "damaged data"
+            else:
+                reason = getattr(e, "strerror", None) or type(e).__name__
             raise ArchiveError(f"couldn't unpack the archive: {reason}") from None
