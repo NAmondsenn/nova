@@ -86,12 +86,14 @@ UPDATE_LOOK = 2.0
 # update.sh's wait_for_hold and update_pc.ps1.
 HOLD_FILE = "hold"
 
-# The longest an installer has, in seconds from the hand-off, to restart the satellite: the
-# installers' own wait for the hold to go (600 seconds, in update.sh and update_pc.ps1), and
-# five minutes more. One which hasn't by then never will - its helper broke before stopping
-# the satellite, say - so the update is given up and reported, rather than this satellite
-# holding every later update off for ever. A constant so the tests can shorten it.
-HANDOFF_LONGEST = 600 + 300
+# The longest an installer has, in seconds from the hand-off, to restart the satellite. A
+# backstop for an installer which died - its helper broke before stopping the satellite, say -
+# never for a slow one, so it is far longer than any install: the Pi's packages and models
+# are installed before its 600 second wait for the hold, and giving up on a good install
+# still going would clear what it confirms against, so it would be taken back and its
+# version refused. Once past, the update is given up and reported, rather than this
+# satellite holding every later update off for ever. A constant so the tests can shorten it.
+HANDOFF_LONGEST = 2 * 60 * 60
 
 # What the brain is told when that happens and the installer left no result of its own.
 HANDOFF_LAPSED = "The installer didn't restart the satellite, so the update didn't happen."
@@ -582,7 +584,8 @@ class Satellite:
         # on - under _update_lock, so only one ever is. It stays True once the installer has
         # taken the update over, as the installer then stops this process, and a second
         # install meanwhile would undo the first; a new process starts it False, and so does
-        # an installer which hasn't stopped it by HANDOFF_LONGEST.
+        # an installer which hasn't stopped it by HANDOFF_LONGEST - two hours, so only one
+        # which died, never one which is slow.
         self._update_lock = threading.Lock()
         self._installing = False
         # Held across noting or reading a result and sending it, so the install thread and

@@ -5686,6 +5686,13 @@ def test_a_hand_off_whose_installer_never_restarts_the_satellite_is_given_up(bra
     assert wait_for(lambda: len(updates) == 2)
 
 
+def test_a_hand_off_is_given_up_only_long_after_a_slow_install_would_end():
+    # A backstop for an installer which died, never for a slow one: the Pi's packages and
+    # models come before its 600 second hold, and giving up on a good install which is still
+    # going would take it back and block its version.
+    assert satellite.HANDOFF_LONGEST >= 60 * 60
+
+
 def test_a_hand_off_given_up_sends_the_installers_own_result(brain, make, updates, tmp_path, monkeypatch):
     monkeypatch.setattr(satellite, "HANDOFF_LONGEST", 0.3, raising=False)
     made = updatable(brain, make)
