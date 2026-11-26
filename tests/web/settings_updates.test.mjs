@@ -251,3 +251,47 @@ test("with nothing said of updates the section shows no machines and no button",
   assert.equal(rows(shown).length, 0);
   assert.equal(shown.node("updates-button").disabled, true);
 });
+
+test("an unknown version says so, as short() gives \"unknown\" and never nothing", () => {
+  const shown = page();
+  shown.context.showUpdates(updates({ versions: { brain: BRAIN, satellites: [
+    { ...PI, version: null, short: "unknown", date: null }] } }));
+  assert.match(said(rows(shown)[1]), /Version not known/);
+  assert.doesNotMatch(said(rows(shown)[1]), /unknown/);
+});
+
+test("a done update which left things for him still shows the brain as needing him, each command copyable", () => {
+  const shown = page();
+  shown.context.showUpdates(updates({ last: { ...DONE, needs_you: [
+    { why: "New unit", command: "sudo systemctl enable y" }, { why: "New package", command: "sudo apt install x" }] } }));
+  const brain = rows(shown)[0];
+  assert.match(said(brain), /Needs you/);
+  assert.deepEqual(commands(brain), ["sudo systemctl enable y", "sudo apt install x"]);
+  // It did restart into the new code, so that was an update.
+  assert.match(shown.node("updates-last").textContent, /^Last updated /);
+});
+
+test("an update which didn't start says so with its reason, and the time is Last tried", () => {
+  const shown = page();
+  const busy = { ...DONE, state: "busy", reason: "Nova was busy for 10 minutes, so the update didn't start." };
+  shown.context.showUpdates(updates({ last: busy }));
+  assert.match(said(rows(shown)[0]), /Didn't start: Nova was busy for 10 minutes/);
+  assert.doesNotMatch(said(rows(shown)[0]), /Up to date/);
+  assert.match(shown.node("updates-last").textContent, /^Last tried /);
+  shown.context.showUpdates(updates({ last: { ...DONE, state: "failed", reason: "Broke" } }));
+  assert.match(shown.node("updates-last").textContent, /^Last tried /);
+  shown.context.showUpdates(updates({ last: { ...DONE, state: "needs_you", reason: "x", command: "c",
+                                              needs_you: [{ why: "x", command: "c" }] } }));
+  assert.match(shown.node("updates-last").textContent, /^Last tried /);
+  shown.context.showUpdates(updates({ last: { ...DONE, state: "current" } }));
+  assert.match(shown.node("updates-last").textContent, /^Last updated /);
+});
+
+test("the list reads the brain as needing him when its update left things for him, whatever the state", () => {
+  const shown = page();
+  const machines = (last) => JSON.parse(JSON.stringify(shown.context.updateMachines(updates({ last }))));
+  const left = { ...DONE, needs_you: [{ why: "New unit", command: "sudo systemctl enable y" }] };
+  assert.equal(machines(left)[0].state, "needs_you");
+  assert.equal(machines(DONE)[0].state, "current");
+  assert.equal(machines({ ...DONE, state: "busy", reason: "Busy" })[0].state, "busy");
+});

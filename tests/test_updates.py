@@ -10,7 +10,7 @@ import threading
 
 import pytest
 
-from voice_assistant import protocol, update_archive
+from voice_assistant import code_version, protocol, update_archive
 from voice_assistant.updates import Updates
 
 NONCES = ("a" * 32, "b" * 32)
@@ -82,6 +82,20 @@ def test_an_old_satellite_isnt_offered_and_shows_as_old(repo, tmp_path):
     assert satellite.sent == []
     only, = updates.versions(["pi"])["satellites"]
     assert (only["state"], only["reason"]) == ("old", "Update by hand once")
+
+
+def test_a_commits_date_is_looked_up_once_however_often_the_page_asks(repo, tmp_path, monkeypatch):
+    updates, commits = make(repo, tmp_path)
+    updates.seen(FakeSatellite(version=commits[1]))
+    asked = []
+    real = code_version.commit_date
+    monkeypatch.setattr("voice_assistant.updates.code_version.commit_date",
+                        lambda project, version: asked.append(version) or real(project, version))
+    first = updates.versions(["pi"])
+    again = updates.versions(["pi"])
+    assert first == again and first["brain"]["date"] and first["satellites"][0]["date"]
+    # Each commit once, as a commit's date never changes.
+    assert len(asked) == len(set(asked)) == 2
 
 
 def test_no_offer_while_the_brains_code_has_moved_under_it(repo, tmp_path):

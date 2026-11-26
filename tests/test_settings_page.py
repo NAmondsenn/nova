@@ -3753,7 +3753,7 @@ class FakeUpdates:
                 "satellites": [
                     {"name": "pi", "version": "a" * 40, "short": "aaaaaaa", "date": "2026-11-20", "connected": True,
                      "state": "behind", "reason": None, "command": None},
-                    {"name": "pc", "version": None, "short": None, "date": None, "connected": False,
+                    {"name": "pc", "version": None, "short": "unknown", "date": None, "connected": False,
                      "state": "needs_you", "reason": "Needs a new package", "command": "pip install thing"}]}
 
     def __init__(self):
@@ -3785,10 +3785,14 @@ class FakeBrainUpdate:
 def test_the_updates_section_lists_every_machine_and_its_state(files):
     updates, update = FakeUpdates(), FakeBrainUpdate(running=True)
     page = _page(known=["pi", "pc"], updates=updates, update=update)
+    reads = []
+    names = page.brain.satellites
+    page.brain.satellites = lambda: reads.append(1) or names()
     shown = page.state()["updates"]
     assert shown == {"versions": FakeUpdates.VERSIONS, "last": FakeBrainUpdate.OUTCOME, "running": True}
     # Every satellite he has, in the order the brain lists them.
-    assert updates.asked == [["pi", "pc"]]
+    # The names the page read once for the whole state, not read again.
+    assert updates.asked == [["pi", "pc"]] and len(reads) == 1
     assert _page().state()["updates"] is None
 
 

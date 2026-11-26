@@ -587,6 +587,8 @@ const UPDATE_STATES = {
   failed: ["Failed", "bad"],
   needs_you: ["Needs you", "bad"],
   old: ["Old: update by hand once", "off"],
+  // The brain's last update, which never began as Nova was busy.
+  busy: ["Didn't start", "warning"],
 };
 
 // A commit's date, "2026-11-20", as "20 Nov", or "" if it isn't one.
@@ -602,11 +604,13 @@ function commitDate(text) {
 function brainUpdateState(updates) {
   if (updates.running) return { state: "updating", reason: null, commands: [] };
   const last = updates.last || {};
-  if (last.state === "failed" || last.state === "needs_you") {
-    const needs = Array.isArray(last.needs_you) ? last.needs_you : [];
+  const needs = Array.isArray(last.needs_you) ? last.needs_you : [];
+  // Anything left for him is his to do, even after an update which worked and restarted Nova.
+  if (needs.length || last.state === "failed" || last.state === "needs_you") {
     const commands = needs.length ? needs.map((one) => one.command) : [last.command];
-    return { state: last.state, reason: last.reason, commands: commands.filter(Boolean) };
+    return { state: needs.length ? "needs_you" : last.state, reason: last.reason, commands: commands.filter(Boolean) };
   }
+  if (last.state === "busy") return { state: "busy", reason: last.reason, commands: [] };
   return { state: "current", reason: null, commands: [] };
 }
 
@@ -650,13 +654,13 @@ function updateRow(machine) {
   const what = element("span", undefined, "what");
   what.append(machine.name);
   if (machine.away) what.append(element("span", "Away", "badge"));
-  const version = machine.short ? [machine.short, commitDate(machine.date)].filter(Boolean).join(", ") : "Version not known";
+  const version = machine.version ? [machine.short, commitDate(machine.date)].filter(Boolean).join(", ") : "Version not known";
   what.append(element("span", version, "detail version"));
   const state = element("span", undefined, "detail state");
   state.append(dot(mood));
   const needs = machine.state === "needs_you";
-  const failed = machine.state === "failed";
-  state.append(failed && machine.reason ? `${word}: ${machine.reason}` : needs ? `${word}:` : word);
+  const reasoned = machine.state === "failed" || machine.state === "busy";
+  state.append(reasoned && machine.reason ? `${word}: ${machine.reason}` : needs ? `${word}:` : word);
   what.append(state);
   if (needs && machine.reason) what.append(element("span", machine.reason, "detail"));
   for (const command of machine.commands) what.append(commandLine(command));
@@ -679,10 +683,10 @@ function showUpdates(updates) {
   }
   const brain = brainUpdateState(updates);
   const machines = [{ name: "Brain", state: brain.state, reason: brain.reason, commands: brain.commands,
-                      short: updates.versions.brain.short, date: updates.versions.brain.date, away: false }];
+                      version: updates.versions.brain.version, short: updates.versions.brain.short, date: updates.versions.brain.date, away: false }];
   for (const one of updates.versions.satellites || []) {
     machines.push({ name: one.name, state: one.state, reason: one.reason, commands: one.command ? [one.command] : [],
-                    short: one.short, date: one.date, away: !one.connected });
+                    version: one.version, short: one.short, date: one.date, away: !one.connected });
   }
   document.getElementById("updates-machines").replaceChildren(...machines.map(updateRow));
   button.disabled = Boolean(updates.running);
@@ -692,7 +696,9 @@ function showUpdates(updates) {
   last.hidden = !known;
   if (known) {
     const day = dayOf(at);
-    last.textContent = `Last updated ${day === "Today" || day === "Yesterday" ? day.toLowerCase() : day} at ${clockTime(at)}`;
+    // Only an update which went through is "updated"; one which failed, didn't start or waits for him was tried.
+    const went = updates.last.state === "done" || updates.last.state === "current";
+    last.textContent = `Last ${went ? "updated" : "tried"} ${day === "Today" || day === "Yesterday" ? day.toLowerCase() : day} at ${clockTime(at)}`;
   } else {
     last.textContent = "";
   }

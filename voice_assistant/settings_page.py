@@ -844,7 +844,7 @@ class SettingsPage:
                 "settings": settings,
                 "settings_problem": problem,
                 # Each machine's version, how the last update went, and whether one is going on.
-                "updates": self.updates_state(),
+                "updates": self.updates_state(names),
                 "restart_needed": self._restart_needed(saved),
                 "page": self.page_version}
 
@@ -2055,10 +2055,13 @@ class SettingsPage:
         logger.info(f"Settings page: {who} asked to stop the library check")
         return self.brain.clean_check.stop()
 
-    def updates_state(self) -> Optional[Dict]:
+    def updates_state(self, names: Optional[List[str]]) -> Optional[Dict]:
         """
         The Updates section: each machine's version and state, how the brain's last update
         went, and whether one is going on now.
+
+        Args:
+            names: The satellites, as state() read them, or None if their file can't be read.
 
         Returns:
             {"versions": ..., "last": ..., "running": ...} as Updates.versions,
@@ -2069,7 +2072,7 @@ class SettingsPage:
         if updates is None or update is None:
             return None
         # An unreadable satellites file is said elsewhere on the page, and here as none to list.
-        return {"versions": updates.versions(self._satellite_names() or []), "last": update.outcome(),
+        return {"versions": updates.versions(names or []), "last": update.outcome(),
                 "running": update.running}
 
     def start_update(self, who: str) -> Dict:

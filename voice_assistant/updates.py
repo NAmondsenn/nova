@@ -49,6 +49,8 @@ class Updates:
         self.folder = folder
         # Guards everything below and the file. Never held while an archive is made or sent.
         self._lock = threading.Lock()
+        # Each commit's date, found once: it never changes, and the page asks every few seconds.
+        self._dates: Dict[str, Optional[str]] = {}
         self._zip: Optional[Tuple[str, bytes]] = None
         self._bundles: "collections.OrderedDict[Tuple[str, Optional[str]], bytes]" = collections.OrderedDict()
         # How each satellite's update is going: {"state", "reason", "command"}.
@@ -229,6 +231,20 @@ class Updates:
             return [name for name, entry in self._known.items()
                     if entry.get("connected") and entry.get("updates") and entry.get("version") != self.version]
 
+    def _date(self, version: Optional[str]) -> Optional[str]:
+        """A commit's date as commit_date gives it, asked of git once for each commit."""
+        if version is None:
+            return None
+        with self._lock:
+            if version in self._dates:
+                return self._dates[version]
+        date = code_version.commit_date(self.project, version)
+        # Not kept when git couldn't say, as the commit may arrive later.
+        if date is not None:
+            with self._lock:
+                self._dates[version] = date
+        return date
+
     def versions(self, known: Iterable[str]) -> Dict:
         """
         What the settings page shows.
@@ -259,9 +275,9 @@ class Updates:
             else:
                 state = "current"
             satellites.append({"name": name, "version": version, "short": code_version.short(version),
-                               "date": code_version.commit_date(self.project, version),
+                               "date": self._date(version),
                                "connected": bool(entry.get("connected")), "state": state,
                                "reason": reason, "command": command})
         return {"brain": {"version": self.version, "short": code_version.short(self.version),
-                          "date": code_version.commit_date(self.project, self.version)},
+                          "date": self._date(self.version)},
                 "satellites": satellites}
