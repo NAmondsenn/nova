@@ -2646,24 +2646,31 @@ class Brain:
         self._restart_when_free()
         return True
 
-    def _restart_when_free(self):
+    def _restart_when_free(self, told: bool = False):
         """
         Stops the brain RESTART_DELAY from now - unless Nova has become busy in that moment,
         say woken just then, when it looks again after the same delay, so a restart for an
-        update never cuts off a recording or a reply.
+        update never cuts off a recording or a reply. Not being able to tell is taken for
+        busy, for the same reason.
+
+        Args:
+            told: Whether the log has already said it couldn't tell, so it says so once
+                rather than every RESTART_DELAY.
         """
         def stop_or_wait():
+            nonlocal told
             try:
                 reason = self.busy_reason()
             except Exception:
-                # The update has already waited until Nova was free, so not knowing now stops it.
-                logger.exception("Couldn't tell whether Nova is busy, so restarting anyway")
-                reason = None
+                if not told:
+                    logger.exception("Couldn't tell whether Nova is busy, so the restart waits and looks again")
+                    told = True
+                reason = "unknown"
             if reason is None:
                 # Stopping listening ends run(), which then cleans up as for any stop.
                 self.stop()
             else:
-                self._restart_when_free()
+                self._restart_when_free(told)
 
         timer = threading.Timer(RESTART_DELAY, stop_or_wait)
         timer.daemon = True

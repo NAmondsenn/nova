@@ -4904,6 +4904,30 @@ def test_a_restart_for_an_update_waits_for_a_wake_in_its_moment(brain, monkeypat
     assert done.wait(5) and brain.restarting
 
 
+def test_a_restart_for_an_update_waits_while_busy_cant_be_told(brain, monkeypatch, caplog):
+    # Not knowing whether Nova is busy is taken for busy, as a restart mustn't cut off a
+    # reply; it looks again, and says so in the log only once.
+    monkeypatch.setenv("INVOCATION_ID", "abc")
+    monkeypatch.setattr(brain_module, "RESTART_DELAY", 0.05)
+    broken = threading.Event()
+    broken.set()
+
+    def busy_reason():
+        if broken.is_set():
+            raise RuntimeError("the clock is wedged")
+        return None
+
+    monkeypatch.setattr(brain, "busy_reason", busy_reason)
+    done = threading.Event()
+    threading.Thread(target=lambda: (brain.run(), done.set()), daemon=True).start()
+    assert wait_for(lambda: brain.port)
+    assert brain.restart_for_update() is True
+    assert not done.wait(0.5)
+    assert caplog.text.count("Couldn't tell whether Nova is busy") == 1
+    broken.clear()
+    assert done.wait(5) and brain.restarting
+
+
 # Music carrying on after an update
 
 def _with_player(monkeypatch, player):
