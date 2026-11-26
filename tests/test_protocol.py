@@ -519,3 +519,56 @@ def test_the_update_messages_are_frozen():
     assert protocol.UPDATE_CHUNK == 256 * 1024 <= protocol.MAX_AUDIO
     assert protocol.UPDATE_MOST == 64 * 1024 * 1024
     assert protocol.MOST_UPDATE_ERROR == 300
+
+
+ARCHIVE = bytes(range(256)) * 8
+COMMIT_ID = "0123456789abcdef" * 2 + "01234567"
+
+
+def _update(archive=ARCHIVE, password="secret", first="a" * 32, second="b" * 32, version=COMMIT_ID, format="zip"):
+    return protocol.update_proof(password, first, second, version, format, archive)
+
+
+def test_an_update_proof_checks_with_the_same_everything():
+    assert _update() == _update()
+    assert len(_update()) == 64
+
+
+def test_a_tampered_archive_doesnt_prove():
+    middle = len(ARCHIVE) // 2
+    changed = []
+    for index in (0, middle, len(ARCHIVE) - 1):
+        data = bytearray(ARCHIVE)
+        data[index] ^= 1
+        changed.append(bytes(data))
+    changed += [ARCHIVE + b"x", ARCHIVE[:-1]]
+    for archive in changed:
+        assert _update(archive) != _update()
+
+
+def test_another_commit_doesnt_prove():
+    assert _update(version="f" * 40) != _update()
+
+
+def test_another_format_doesnt_prove():
+    assert _update(format="bundle") != _update()
+
+
+def test_a_proof_from_another_connection_doesnt_prove():
+    outcome, _ = _handshake("pw", {"bedroom": "pw"})
+    first, second = outcome["brain"]["nonces"]
+    other, _ = _handshake("pw", {"bedroom": "pw"})
+    third, fourth = other["brain"]["nonces"]
+    here = _update(password="pw", first=first, second=second)
+    assert _update(password="pw", first=third, second=fourth) != here
+    assert _update(password="pw", first=second, second=first) != here
+
+
+def test_an_update_proof_is_never_a_handshake_proof():
+    update = _update(archive=b"")
+    assert update != protocol.proof("secret", "brain", "a" * 32, "b" * 32)
+    assert update != protocol.proof("secret", "satellite", "a" * 32, "b" * 32)
+
+
+def test_another_password_doesnt_prove():
+    assert _update(password="other") != _update()

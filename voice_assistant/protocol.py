@@ -259,6 +259,34 @@ def proof(password: str, role: str, first: str, second: str) -> str:
     return hmac.new(password.encode(), message, "sha256").hexdigest()
 
 
+def update_proof(password: str, satellite_nonce: str, brain_nonce: str, version: str, format: str,
+                 archive: bytes) -> str:
+    """
+    Proves an update archive came from the brain this satellite is connected to.
+
+    Args:
+        password: The satellite's password.
+        satellite_nonce: The satellite's nonce from this connection's handshake.
+        brain_nonce: The brain's nonce from the same handshake. Binding both means a proof
+            recorded on one connection is no good on another.
+        version: The commit id the archive brings the satellite to.
+        format: The archive's format, one of UPDATE_FORMATS.
+        archive: The archive's bytes.
+
+    Returns:
+        The HMAC-SHA256 in hex, keyed with the password, over the nonces, version, format
+        and the archive's length, then the archive itself. It starts "update|", which a
+        handshake proof never does, so neither can stand in for the other.
+    """
+    message = hmac.new(password.encode(), digestmod="sha256")
+    message.update(f"update|{satellite_nonce}|{brain_nonce}|{version}|{format}|{len(archive)}|".encode())
+    # Fed in pieces so a large archive isn't copied to make one message.
+    view = memoryview(archive)
+    for start in range(0, len(view), UPDATE_CHUNK):
+        message.update(view[start:start + UPDATE_CHUNK])
+    return message.hexdigest()
+
+
 def _expect(stream: BinaryIO, kind: str, *fields: str) -> Dict:
     """Receives the next message, which has to be this kind with these fields as strings."""
     message, _ = receive(stream)
