@@ -538,6 +538,31 @@ class ComputerControl:
         logger.info(f"Closing {window} on the {target} satellite")
         return self._ask(target, computer, self._there(f"Closing {window}.", target), "close", name=window)
 
+    def hide(self, name: str, where: Optional[str] = None) -> Dict:
+        """
+        Minimises a program's windows to the taskbar on the computer - or, for "this", the one in
+        front. Nothing is closed, so it's still running.
+
+        Args:
+            name: The program, as said, or "this".
+            where: The words for which computer, or None.
+
+        Returns:
+            {"success", "message"}: "Hiding Discord.", "Steam isn't open.", or why not.
+        """
+        target, computer, refused = self._target(where)
+        if refused:
+            return refused
+        if plain(name) == "this":
+            # Which program it is only the computer knows, so it says so itself.
+            logger.info(f"Hiding the window in front on the {target} satellite")
+            return self._ask(target, computer, None, "hide_front")
+        window = match_window(name, self.brain.computers.windows(target))
+        if window is None:
+            return {"success": False, "message": f"{_capital(name.strip())} isn't open."}
+        logger.info(f"Hiding {window} on the {target} satellite")
+        return self._ask(target, computer, self._there(f"Hiding {window}.", target), "hide", name=window)
+
     def volume(self, **change) -> Dict:
         """
         Changes the computer the user is talking to's own volume, as Windows' volume keys do.

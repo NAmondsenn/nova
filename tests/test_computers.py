@@ -250,6 +250,24 @@ def test_close_this_closes_the_front_window():
     assert brain.computer.asked == [("close_front", {})]
 
 
+def test_hide_matches_open_windows():
+    brain = FakeBrain()
+    brain.computers.set_windows("pc", ["Discord", "Firefox"])
+    assert at(brain).hide("discord") == {"success": True, "message": "Hiding Discord."}
+    assert brain.computer.asked == [("hide", {"name": "Discord"})]
+    assert at(brain).hide("steam") == {"success": False, "message": "Steam isn't open."}
+    assert len(brain.computer.asked) == 1
+    brain.computer.answer = {"error": "Steam isn't open."}
+    assert at(brain).hide("firefox") == {"success": False, "message": "Steam isn't open."}
+
+
+def test_hide_this_hides_the_front_window():
+    brain = FakeBrain()
+    brain.computer.answer = {"said": "Hiding Notepad."}
+    assert at(brain).hide("this") == {"success": True, "message": "Hiding Notepad."}
+    assert brain.computer.asked == [("hide_front", {})]
+
+
 def test_offered_only_while_a_computer_opens_things():
     brain = FakeBrain()
     assert not at(brain).offered()

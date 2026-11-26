@@ -185,6 +185,7 @@ APPROVALS_KEPT = 50
 NOT_HERE = "That's not on this PC any more."
 COULDNT_OPEN = "That couldn't be opened."
 NOTHING_TO_CLOSE = "There's nothing to close."
+NOTHING_TO_HIDE = "There's nothing to hide."
 NO_VOLUME = "This computer's volume can't be changed."
 NO_MICROPHONE = "This computer's microphone can't be changed."
 CANT_DO = "I can't do that on this computer."
@@ -1902,6 +1903,21 @@ class Satellite:
                 return {"error": NOTHING_TO_CLOSE}, None
             logger.info(f"Closing {closed}, which was in front")
             return {"said": f"Closing {closed}."}, None
+        if action == "hide":
+            name = message.get("name")
+            if not isinstance(name, str) or not name.strip():
+                return {"error": CANT_DO}, None
+            hidden = pc_windows.hide(name)
+            if hidden is None:
+                return {"error": f"{name.strip()} isn't open."}, None
+            logger.info(f"Hiding {hidden}")
+            return {"said": f"Hiding {hidden}."}, None
+        if action == "hide_front":
+            hidden = pc_windows.hide_front()
+            if hidden is None:
+                return {"error": NOTHING_TO_HIDE}, None
+            logger.info(f"Hiding {hidden}, which was in front")
+            return {"said": f"Hiding {hidden}."}, None
         # One added to the protocol which this satellite doesn't know yet.
         return {"error": CANT_DO}, None
 

@@ -272,6 +272,12 @@ For [decision 0039](decisions/0039-conversation-mode.md). The brain, the Pi and 
 139. Makes sound. An approval in a conversation. With no approval in the last few minutes (so it asks), in a conversation at the PC say "cancel the dentist" (an event made for it): Nova says to check your phone or the PC. Refuse it on the phone: "Okay, I won't." is said in a gap. Then say "okay, done": Claude doesn't ask to cancel it again. Ask "did you cancel it?": it says you refused it. Once more, approving it this time: "Removed Dentist." and Claude knows it was done.
 140. Makes sound, and shuts the PC down: save your work first. Shutting down in a conversation. In a conversation at the Pi, say "restart the PC": Nova asks "Restart the PC?" and nothing happens; say "what's the time": it is answered, and the PC isn't restarted. Then "shut down the PC" and "yes": the chime, and the PC shuts down. Outside a conversation, "Hey Nova, lock the PC" still locks it at once, and shutting down at once is as in the PC's own checks.
 
+## Hiding windows at the computer
+
+For the commands at the computer of [decision 0034](decisions/0034-opening-things-and-commands-at-the-computer.md). The brain and the PC need the branch (the PC by `scripts/deploy_pc.sh`), and the PC must be on with Nova running. Checks marked "Makes sound." talk, ring or play in his room: say so first.
+
+141. Makes sound. "Hide Discord" at the PC, with Discord open: it says "Hiding Discord.", every window of Discord goes to the taskbar, and Discord is still running (its tray icon and the taskbar button remain, and "open Discord" brings it back). Saying it again, with the windows already minimised, says the same. "Hide this" with Notepad in front: it says "Hiding Notepad." and that window goes to the taskbar, with nothing closed and nothing asked to save. "Hide this" with the desktop or the taskbar in front, or with Nova's own window: "There's nothing to hide." and nothing changes. "Hide Steam" with Steam not open: "Steam isn't open." and nothing goes to Claude. "Minimise Calculator on my PC" from the Pi does the same on the PC, with "Hiding Calculator on <the PC's name>."
+
 ## The manual scripts
 
 `scripts/manual/` has seven checks which need real hardware or accounts, so nothing runs them for you. None is needed for every release; run one when what it checks has changed. Each is run from the clone with `venv/bin/python`, and the brain's as the brain's user (with `runuser -u nova -- ` in front, as the README says).

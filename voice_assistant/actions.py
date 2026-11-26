@@ -2776,6 +2776,21 @@ class ActionExecutor:
             return {"success": False, "message": "I didn't catch what to close."}
         return self.computer.close(name.strip(), _where(where))
 
+    @tool(
+        "Hide a program on a computer, for 'hide Discord', 'minimise Steam on my PC' - or the window in front, for "
+        "'hide this', with name 'this'. Its windows go to the taskbar as its own minimise button sends them, and "
+        "nothing is closed. What happened is said for you, so just reply 'Okay.'",
+        needs="computer",
+        required=["name"],
+        name={"type": "string", "description": "The program's name, as the user said it, or 'this' for the window "
+                                               "in front."},
+        where=ON_A_COMPUTER,
+    )
+    def hide_on_computer(self, name: str = "", where: Optional[str] = None):
+        if not isinstance(name, str) or not name.strip():
+            return {"success": False, "message": "I didn't catch what to hide."}
+        return self.computer.hide(name.strip(), _where(where))
+
     # Memory
 
     @tool(

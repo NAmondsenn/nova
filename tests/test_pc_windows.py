@@ -23,6 +23,7 @@ class FakeWindows:
         self.front = front
         self.descriptions = {}
         self.closed = []
+        self.minimised = []
         self.raised = []
         self.restored = []
         self.attached = []
@@ -62,6 +63,10 @@ class FakeWindows:
 
     def post_close(self, hwnd):
         self.closed.append(hwnd)
+        return True
+
+    def minimise(self, hwnd):
+        self.minimised.append(hwnd)
         return True
 
     def allow_foreground(self):
@@ -185,6 +190,38 @@ def test_close_front_closes_the_program_in_front(windows):
     fake = windows(dict([DESKTOP, NOTEPAD, DISCORD]), front=30)
     assert pc_windows.close_front() == "notepad"
     assert fake.closed == [30]
+
+
+def test_hide_minimises_every_window_of_the_program_and_closes_none(windows):
+    fake = windows(dict([DESKTOP, NOTEPAD, DISCORD]))
+    assert pc_windows.hide("discord") == "Discord"
+    assert fake.minimised == [20]
+    assert fake.closed == []
+    # A window already minimised still counts, so saying it twice says the same.
+    fake.iconic.add(20)
+    assert pc_windows.hide("Discord") == "Discord"
+    assert fake.minimised == [20, 20]
+
+
+def test_hide_of_something_not_open_minimises_nothing(windows):
+    fake = windows(dict([NOTEPAD]))
+    assert pc_windows.hide("Steam") is None
+    assert fake.minimised == []
+
+
+@pytest.mark.parametrize("front", [0, 10, 11, 12, 13, 14])
+def test_hide_front_never_desktop(windows, front):
+    # Nothing in front, the desktop, the taskbar, a folder, the Start menu, or Nova itself.
+    fake = windows(dict([DESKTOP, TASKBAR, FOLDER, START, NOVA, NOTEPAD]), front=front)
+    assert pc_windows.hide_front() is None
+    assert fake.minimised == []
+
+
+def test_hide_front_minimises_the_program_in_front(windows):
+    fake = windows(dict([DESKTOP, NOTEPAD, DISCORD]), front=30)
+    assert pc_windows.hide_front() == "notepad"
+    assert fake.minimised == [30]
+    assert fake.closed == []
 
 
 def test_ready_to_open_lets_what_opens_take_the_front(windows):
