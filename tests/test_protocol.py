@@ -115,8 +115,11 @@ def test_the_handshake_admits_a_satellite_which_knows_its_password():
                                 "sample_rate": 48000, "unclean": False, "speaker": None,
                                 "push_to_talk": False, "machine": None, "saves_notes": False,
                                 "media_controls": False, "opens": False, "system_volume": False,
-                                "approves": False, "conversations": False}
-    assert outcome["satellite"] is None
+                                "approves": False, "conversations": False,
+                                "version": None, "updates": False, "update_format": None,
+                                "nonces": outcome["brain"]["nonces"]}
+    assert len(outcome["brain"]["nonces"]) == 2
+    assert outcome["satellite"] == outcome["brain"]["nonces"]
     assert sent == ["challenge", "ready"]
 
 
@@ -286,7 +289,7 @@ def test_a_satellite_says_its_spotify_speaker():
     outcome, sent = _handshake(PASSWORD, {"bedroom": PASSWORD}, speaker="Bedroom Pi")
 
     assert outcome["brain"]["speaker"] == "Bedroom Pi"
-    assert outcome["satellite"] is None
+    assert outcome["satellite"] == outcome["brain"]["nonces"]
     assert sent == ["challenge", "ready"]
 
 
@@ -345,12 +348,16 @@ def test_a_hello_without_a_speaker_still_connects():
     # left out, never the reason a satellite can't connect.
     assert _admitted()["speaker"] is None
     for speaker in ("x" * 200, 7, "", None, True, ["Bedroom Pi"], "Bedroom\nPi", "Bedroom\x00Pi"):
-        assert _admitted(speaker=speaker) == {"name": "bedroom", "hostname": "h", "sample_rate": 48000,
+        admitted = _admitted(speaker=speaker)
+        # The nonces are fresh each time, and have their own test.
+        assert len(admitted.pop("nonces")) == 2
+        assert admitted == {"name": "bedroom", "hostname": "h", "sample_rate": 48000,
                                               "unclean": False, "speaker": None, "push_to_talk": False,
                                               "machine": None, "saves_notes": False,
                                               "media_controls": False, "opens": False,
                                               "system_volume": False, "approves": False,
-                                              "conversations": False}
+                                              "conversations": False, "version": None,
+                                              "updates": False, "update_format": None}
     # Up to 64 characters, of any language.
     assert _admitted(speaker="x" * 64)["speaker"] == "x" * 64
     assert _admitted(speaker="Cuisine de Zoë")["speaker"] == "Cuisine de Zoë"
@@ -451,3 +458,64 @@ def test_an_unknown_satellite_is_refused():
 def test_a_proof_depends_on_who_gives_it():
     assert protocol.proof(PASSWORD, "brain", "a", "b") != protocol.proof(PASSWORD, "satellite", "a", "b")
     assert protocol.proof(PASSWORD, "brain", "a", "b") != protocol.proof(PASSWORD, "brain", "b", "a")
+
+
+def test_hello_says_the_version_and_updates_only_with_both():
+    hello = _hello_sent(version="a" * 40, update_format="bundle")
+    assert hello["version"] == "a" * 40
+    assert hello["updates"] is True
+    assert hello["update_format"] == "bundle"
+    # So a brain from before updates is sent the hello it always was.
+    for hello in (_hello_sent(version="a" * 40), _hello_sent(update_format="zip"), _hello_sent()):
+        assert "version" not in hello and "updates" not in hello and "update_format" not in hello
+
+
+def test_admit_reads_the_version_and_format():
+    admitted = _admitted(version="b" * 40, updates=True, update_format="zip")
+    assert admitted["version"] == "b" * 40
+    assert admitted["updates"] is True
+    assert admitted["update_format"] == "zip"
+    admitted = _admitted()
+    assert admitted["version"] is None and admitted["updates"] is False
+    assert admitted["update_format"] is None
+
+
+@pytest.mark.parametrize("fields, version, updates", [
+    ({"version": "A" * 40, "updates": True, "update_format": "zip"}, None, False),
+    ({"version": "a" * 39, "updates": True, "update_format": "zip"}, None, False),
+    ({"version": 123, "updates": True, "update_format": "zip"}, None, False),
+    ({"version": "a" * 40, "updates": True, "update_format": "tar"}, "a" * 40, False),
+], ids=["capitals", "too short", "number", "unknown format"])
+def test_admit_takes_a_nonsense_version_or_format_as_none_not_refused(fields, version, updates):
+    admitted = _admitted(**fields)
+    assert admitted["version"] == version
+    assert admitted["updates"] is updates
+    assert admitted["update_format"] == (None if fields["update_format"] == "tar" else "zip")
+
+
+def test_both_sides_get_the_same_nonces():
+    outcome, _ = _handshake(PASSWORD, {"bedroom": PASSWORD})
+    satellite_nonces = outcome["satellite"]
+    assert satellite_nonces == outcome["brain"]["nonces"]
+    first, second = satellite_nonces
+    assert first != second
+    assert protocol.NONCE.fullmatch(first) and protocol.NONCE.fullmatch(second)
+
+
+def test_the_update_messages_are_frozen():
+    # Changing any of this breaks every satellite in the house: an old satellite can only
+    # be updated by a newer brain if both still mean the same by these messages.
+    assert protocol.FROZEN_UPDATE_MESSAGES == {
+        "hello": {"fields": (), "optional": ("version", "updates", "update_format"), "payload": False},
+        "update_offer": {"fields": ("id", "version", "format", "size", "chunks", "proof", "retry"),
+                         "optional": (), "payload": False},
+        "update_chunk": {"fields": ("id", "index"), "optional": (), "payload": True},
+        "update_end": {"fields": ("id",), "optional": (), "payload": False},
+        "update_installing": {"fields": ("version",), "optional": (), "payload": False},
+        "update_result": {"fields": ("version", "ok"), "optional": ("error", "needs_you"), "payload": False},
+    }
+    assert protocol.COMMIT.fullmatch("0123456789abcdef" * 2 + "01234567")
+    assert protocol.UPDATE_FORMATS == ("zip", "bundle")
+    assert protocol.UPDATE_CHUNK == 256 * 1024 <= protocol.MAX_AUDIO
+    assert protocol.UPDATE_MOST == 64 * 1024 * 1024
+    assert protocol.MOST_UPDATE_ERROR == 300

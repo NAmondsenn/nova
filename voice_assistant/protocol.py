@@ -91,10 +91,29 @@ brain's to the satellite, without the password itself ever being sent:
 
     hello  {name, hostname, sample_rate, unclean, nonce, speaker?, push_to_talk?, machine?,
             saves_notes?, media_controls?, opens?, system_volume?, approves?,
-            conversations?}    (satellite)
+            conversations?, version?, updates?, update_format?}    (satellite; version: the
+            40-digit commit its code is, updates: true and update_format: "zip" or "bundle", said
+            only together with a version)
     challenge  {nonce, proof}    (brain; or refused, and the connection is closed)
     proof  {proof}    (satellite, once the brain's proof is right)
     ready, or refused    (brain)
+
+The update messages are FROZEN, for ever: the hello's version, updates and update_format, and
+
+    update_offer  {"id": ..., "version": ..., "format": "zip"|"bundle", "size": ..., "chunks": ...,
+        "proof": ..., "retry": ...}  (brain: an update to install; proof is an HMAC-SHA256 keyed with
+        the satellite's password, over the archive and the commit id and bound to this connection's
+        two handshake nonces)
+    update_chunk  {"id": ..., "index": ...}  (brain; payload: the next UPDATE_CHUNK bytes of the archive)
+    update_end  {"id": ...}  (brain: the last chunk has been sent)
+    update_installing  {"version": ...}  (satellite: the proof is right and it is installing)
+    update_result  {"version": ..., "ok": true|false, "error"?: ..., "needs_you"?: ...}  (satellite:
+        how it went, once it is back on the brain)
+
+They are frozen because the satellite which most needs updating is an old one, running code from
+before whatever the brain has learnt since: any newer brain must always be able to update any older
+satellite which can update at all, and so neither side may ever change what these mean. A test
+(FROZEN_UPDATE_MESSAGES) pins them.
 """
 
 import hmac
@@ -130,6 +149,35 @@ APP_KINDS = ("app", "epic", "steam")
 # What a nonce is: 32 hex digits, as secrets.token_hex(16) makes. Written out rather than
 # tried with int(nonce, 16), which lets through digits of other scripts, and spaces.
 NONCE = re.compile(r"[0-9a-fA-F]{32}")
+
+
+# What a commit id is: git's 40 lowercase hex digits.
+COMMIT = re.compile(r"[0-9a-f]{40}")
+
+# The ways a satellite can be updated, as its hello's update_format.
+UPDATE_FORMATS = ("zip", "bundle")
+
+# How much of an update one update_chunk carries - well inside MAX_AUDIO, which caps every payload.
+UPDATE_CHUNK = 256 * 1024
+
+# The largest update archive either side will take, so neither can be made to store for ever.
+UPDATE_MOST = 64 * 1024 * 1024
+
+# The longest an update_result's error may be, in characters, so it fits a line.
+MOST_UPDATE_ERROR = 300
+
+# The update messages and their fields: "fields" always there, "optional" there sometimes,
+# "payload" whether audio-style bytes follow. FROZEN: changing any of it breaks every satellite
+# in the house, as an old one can only be updated by a brain which still means the same.
+FROZEN_UPDATE_MESSAGES = {
+    "hello": {"fields": (), "optional": ("version", "updates", "update_format"), "payload": False},
+    "update_offer": {"fields": ("id", "version", "format", "size", "chunks", "proof", "retry"),
+                     "optional": (), "payload": False},
+    "update_chunk": {"fields": ("id", "index"), "optional": (), "payload": True},
+    "update_end": {"fields": ("id",), "optional": (), "payload": False},
+    "update_installing": {"fields": ("version",), "optional": (), "payload": False},
+    "update_result": {"fields": ("version", "ok"), "optional": ("error", "needs_you"), "payload": False},
+}
 
 
 class ProtocolError(Exception):
@@ -224,7 +272,8 @@ def _expect(stream: BinaryIO, kind: str, *fields: str) -> Dict:
 def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate: int, unclean: bool,
           speaker: Optional[str] = None, push_to_talk: bool = False, machine: Optional[str] = None,
           saves_notes: bool = False, media_controls: bool = False, opens: bool = False,
-          system_volume: bool = False, approves: bool = False, conversations: bool = False):
+          system_volume: bool = False, approves: bool = False, conversations: bool = False,
+          version: Optional[str] = None, update_format: Optional[str] = None) -> Tuple[str, str]:
     """
     The satellite's side of the handshake.
 
@@ -253,6 +302,13 @@ def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate
             answer - left out of the hello if False.
         conversations: Whether it knows a conversation's messages - open recordings, the
             conversation on and off, and cut_in and echo_ready - left out of the hello if False.
+        version: The commit its code is - left out of the hello, with updates and
+            update_format, unless update_format is given too.
+        update_format: How it can be updated, one of UPDATE_FORMATS - see version.
+
+    Returns:
+        The satellite's nonce and the brain's, in that order: this connection's, which an
+        update's proof is bound to.
 
     Raises:
         Refused: The brain refused it, or couldn't prove it knows the password - in
@@ -280,6 +336,11 @@ def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate
         extra["approves"] = True
     if conversations:
         extra["conversations"] = True
+    # Only both together, as a version with no way to update is no use to the brain.
+    if version is not None and update_format is not None:
+        extra["version"] = version
+        extra["updates"] = True
+        extra["update_format"] = update_format
     send(stream, "hello", name=name, hostname=hostname, sample_rate=sample_rate,
          unclean=unclean, nonce=nonce, **extra)
     challenge = _expect(stream, "challenge", "nonce", "proof")
@@ -288,6 +349,7 @@ def greet(stream: BinaryIO, name: str, hostname: str, password: str, sample_rate
         raise Refused("The brain couldn't prove it knows the password")
     send(stream, "proof", proof=proof(password, "satellite", challenge["nonce"], nonce))
     _expect(stream, "ready")
+    return nonce, challenge["nonce"]
 
 
 def admit(stream: BinaryIO, password_for: Callable[[str], Optional[str]]) -> Dict:
@@ -306,7 +368,10 @@ def admit(stream: BinaryIO, password_for: Callable[[str], Optional[str]]) -> Dic
         notes. The last two are None and False if the hello leaves them out or says what
         makes no sense, which never keeps a satellite out: they are extras. So are whether
         it opens things, whether it has system volume, whether it approves and whether it
-        knows conversations, each False in the same cases.
+        knows conversations, each False in the same cases. Also its version (None unless it
+        is a commit id), whether it updates (False unless it has a version and an
+        update_format), its update_format (one of UPDATE_FORMATS, else None) and the
+        handshake's nonces, (satellite's, brain's).
 
     Raises:
         Refused: The satellite is unknown or got the password wrong. It has been told so.
@@ -356,10 +421,24 @@ def admit(stream: BinaryIO, password_for: Callable[[str], Optional[str]]) -> Dic
     system_volume = _flag(name, hello, "system_volume", "has system volume")
     approves = _flag(name, hello, "approves", "approves")
     conversations = _flag(name, hello, "conversations", "knows conversations")
+    version = hello.get("version")
+    if version is not None and not (isinstance(version, str) and COMMIT.fullmatch(version)):
+        logger.warning(f"{name} said a version which isn't a commit, so it's taken as unknown: "
+                       f"{ascii(version)[:80]}")
+        version = None
+    update_format = hello.get("update_format")
+    if update_format is not None and update_format not in UPDATE_FORMATS:
+        logger.warning(f"{name} said a way of updating the brain doesn't know, so it's taken as none: "
+                       f"{ascii(update_format)[:80]}")
+        update_format = None
+    updates = _flag(name, hello, "updates", "updates")
+    if version is None or update_format is None:
+        updates = False
     return {"name": name, "hostname": hostname, "sample_rate": sample_rate, "unclean": unclean,
             "speaker": speaker, "push_to_talk": push_to_talk, "machine": machine, "saves_notes": saves_notes,
             "media_controls": media_controls, "opens": opens, "system_volume": system_volume,
-            "approves": approves, "conversations": conversations}
+            "approves": approves, "conversations": conversations, "version": version,
+            "updates": updates, "update_format": update_format, "nonces": (nonce, brain_nonce)}
 
 
 def _flag(name: str, hello: Dict, key: str, meaning: str) -> bool:

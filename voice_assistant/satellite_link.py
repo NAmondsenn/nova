@@ -182,7 +182,8 @@ class SatelliteLink:
                  on_connected: Callable[[bool], None], speaker: Optional[str] = None,
                  push_to_talk: bool = False, machine: Optional[str] = None, saves_notes: bool = False,
                  media_controls: bool = False, opens: bool = False, system_volume: bool = False,
-                 approves: bool = False, conversations: bool = False):
+                 approves: bool = False, conversations: bool = False, version: Optional[str] = None,
+                 update_format: Optional[str] = None):
         """
         Args:
             address: The brain's "name:port" on the tailnet, or "[address]:port" for an
@@ -208,6 +209,9 @@ class SatelliteLink:
             system_volume: Whether it can set its computer's own volume, said in every hello.
             approves: Whether it can ask the user's OK to a big action, said in every hello.
             conversations: Whether it knows a conversation's messages, said in every hello.
+            version: The commit its code is, said in every hello with update_format - or
+                left out if None.
+            update_format: How it can be updated, "zip" or "bundle", or None for not.
 
         Raises:
             ConfigError: The address can't be one.
@@ -226,6 +230,9 @@ class SatelliteLink:
         self.system_volume = system_volume
         self.approves = approves
         self.conversations = conversations
+        self.version = version
+        self.update_format = update_format
+        self._nonces: Optional[Tuple[str, str]] = None
         self._unclean = unclean
         self._on_message = on_message
         self._on_connected = on_connected
@@ -247,6 +254,11 @@ class SatelliteLink:
     def connected(self) -> bool:
         """Whether the brain has accepted the satellite and not been lost since."""
         return self._connected
+
+    @property
+    def nonces(self) -> Optional[Tuple[str, str]]:
+        """This connection's handshake nonces (satellite's, brain's), or None while not connected."""
+        return self._nonces if self._connected else None
 
     def start(self):
         """Starts connecting, and keeps at it until stop."""
@@ -358,10 +370,11 @@ class SatelliteLink:
         sock = socket.create_connection(self.address, timeout=SOCKET_TIMEOUT)
         stream = Stream(sock)
         try:
-            greet(stream, self.name, self.hostname, self.password, self.sample_rate, self._unclean,
+            nonces = greet(stream, self.name, self.hostname, self.password, self.sample_rate, self._unclean,
                   self.speaker, self.push_to_talk, self.machine, self.saves_notes, self.media_controls,
                   opens=self.opens, system_volume=self.system_volume, approves=self.approves,
-                  conversations=self.conversations)
+                  conversations=self.conversations, version=self.version,
+                  update_format=self.update_format)
         except BaseException:
             sock.close()
             raise
@@ -372,6 +385,7 @@ class SatelliteLink:
                 raise ConnectionError("Stopped")
             self._socket = sock
             self._stream = stream
+            self._nonces = nonces
             # Under the same lock as the check, so a stop() from here on finds it True,
             # and its close leaves it False.
             self._connected = True

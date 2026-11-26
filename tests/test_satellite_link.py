@@ -210,10 +210,12 @@ def test_the_link_connects_and_reports_it(brain, make):
     link.start()
     assert wait_for(lambda: events == [True] and len(brain.hellos) == 1)
     assert link.connected
+    assert len(brain.hellos[0].pop("nonces")) == 2
     assert brain.hellos == [{"name": "bedroom", "hostname": "pi", "sample_rate": 48000, "unclean": True,
                              "speaker": None, "push_to_talk": False, "machine": None,
                              "saves_notes": False, "media_controls": False, "opens": False,
-                             "system_volume": False, "approves": False, "conversations": False}]
+                             "system_volume": False, "approves": False, "conversations": False,
+                             "version": None, "updates": False, "update_format": None}]
 
     brain.say("listen")
     brain.say("phrase", rate=22050)
@@ -677,3 +679,20 @@ def test_the_stream_doesnt_take_bytes_still_to_read_for_a_hang_up():
     arrived(stream)
     assert stream.hung_up() is True
     stream._socket.close()
+
+
+def test_the_link_says_its_version_and_keeps_the_nonces(brain, make):
+    link, events, messages = make(brain.address, version="d" * 40, update_format="bundle")
+    assert link.nonces is None
+    link.start()
+    assert wait_for(lambda: len(brain.hellos) == 1 and link.connected)
+    hello = brain.hellos[0]
+    assert (hello["version"], hello["updates"], hello["update_format"]) == ("d" * 40, True, "bundle")
+    assert link.nonces == hello["nonces"]
+    first = link.nonces
+    brain.drop_everyone()
+    assert wait_for(lambda: len(brain.hellos) == 2 and link.nonces == brain.hellos[1]["nonces"])
+    # Each connection has its own, which is what ties an update to one.
+    assert link.nonces != first
+    link.stop()
+    assert link.nonces is None
