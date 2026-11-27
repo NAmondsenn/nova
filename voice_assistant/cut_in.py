@@ -11,7 +11,7 @@ words have come: he is cutting in) and when it should come back (no words came).
 It stops for words, not for sound, because the echo canceller never takes out all of
 Nova's own voice: what's left reads as speech, and would stop every reply the moment it
 began. So words which are a run of the reply's own (own_words), or only listening noises
-such as "yeah" and "mm-hm" (only_listening_noises), never stop it - but "stop" always does.
+such as "yeah" and "mm-hm" (only_listening_noises), never stop it - but his "stop" always does.
 
 It is pure logic, with no audio device, network or thread of its own: the session feeds
 it, and acts on what it says.
@@ -43,8 +43,8 @@ LISTENING_NOISES = frozenset({"yeah", "yes", "yep", "mm", "mhm", "mm hm", "uh hu
 # swallowed a one-word "no" or "so" into "north" or "also"; three still takes "tod" and "rature".
 EDGE_FRAGMENT = 3
 
-# The word which stops a reply whatever else is heard with it - bar a reply which says it itself,
-# heard back with more of its own words (see CutIn.would_stop).
+# The word which stops a reply whatever else is heard with it - bar the reply's own, heard back
+# in its place with more of the reply's words (see CutIn.would_stop).
 STOP_WORD = "stop"
 
 # Words which say a number, and what a run of them, or of digits, is matched as: speech-to-text
@@ -86,12 +86,13 @@ def _numbers_as_one(words: List[str]) -> List[str]:
 
     Returns:
         Them with each run of numbers - digits or NUMBER_WORDS, and a "point" or "and" between
-        two of them - as the one NUMBER, so a number matches however it was said or written.
+        two of them, or after one as the last word, where speech-to-text hasn't got to the rest
+        - as the one NUMBER, so a number matches however it was said or written.
     """
     result = []
     for position, word in enumerate(words):
         joins = (word in NUMBER_JOINS and result and result[-1] == NUMBER
-                 and position + 1 < len(words) and _is_number(words[position + 1]))
+                 and (position + 1 == len(words) or _is_number(words[position + 1])))
         if not _is_number(word) and not joins:
             result.append(word)
         elif not result or result[-1] != NUMBER:
@@ -99,11 +100,13 @@ def _numbers_as_one(words: List[str]) -> List[str]:
     return result
 
 
-def _is_own(heard: List[str], saying: List[str]) -> bool:
+def _is_own(heard: List[str], saying: List[str], exactly: Optional[str] = None) -> bool:
     """
     Args:
         heard: The words heard, tidied, with its numbers as one.
         saying: The words of the reply, the same.
+        exactly: A word which, heard, has to be the reply's own there - never one of the wrong
+            ones a longer run is allowed.
 
     Returns:
         Whether own_words says the words heard are the reply's own.
@@ -117,6 +120,9 @@ def _is_own(heard: List[str], saying: List[str]) -> bool:
         for position, (said, was) in enumerate(zip(saying[start:start + length], heard)):
             if was == said:
                 continue
+            if was == exactly:
+                wrong = allowed + 1
+                break
             # Speech-to-text hasn't finished the last word it has so far, and a run may begin
             # part way through a word, so those two edges match a piece of the reply's word
             # without counting as wrong.
@@ -297,15 +303,16 @@ class CutIn:
 
         Returns:
             Whether they would stop the reply: they hold "stop", or are neither the
-            reply's own nor only listening noises. False for nothing - and for a reply which
-            says "stop" itself, heard back with more of its own words: where the microphone
-            hears the speaker, "Okay, I'll stop." stopped itself and was answered as the user's.
-            A lone "stop" always stops it.
+            reply's own nor only listening noises. False for nothing - and for the reply's
+            own "stop", heard back in its place with more of the reply's words: where the
+            microphone hears the speaker, "Okay, I'll stop." stopped itself and was answered as
+            the user's. A lone "stop" always stops it, as does one said where the reply has
+            another word.
         """
         tidied = _tidy(words)
         if not tidied:
             return False
-        own = _is_own(_numbers_as_one(tidied), self._saying_words)
-        if STOP_WORD in tidied and not (own and len(tidied) > 1 and STOP_WORD in self._saying_words):
-            return True
-        return not own and not only_listening_noises(words)
+        numbered = _numbers_as_one(tidied)
+        if STOP_WORD in tidied:
+            return not (len(tidied) > 1 and _is_own(numbered, self._saying_words, exactly=STOP_WORD))
+        return not _is_own(numbered, self._saying_words) and not only_listening_noises(words)

@@ -162,6 +162,8 @@ def test_stop_always_stops_it():
     assert dipped("I'll stop the music when you like").hear(loud(), "stop") == "stop"
     # And said after the reply's own words, heard back, which don't go on to it.
     assert dipped("The first twenty digits after the point").hear(loud(), "the first twenty digits stop") == "stop"
+    # Even when the reply says it somewhere else: his isn't one of the wrong words a long run is allowed.
+    assert dipped("Here are the first thirty digits, then I'll stop.").hear(loud(), "here are the first stop") == "stop"
 
 
 def test_a_reply_which_says_stop_doesnt_stop_itself():
@@ -284,13 +286,15 @@ def test_a_two_letter_fragment_isnt_the_replys_own():
 
 
 def test_a_number_is_the_replys_own_however_its_said():
-    # Speech-to-text heard a reply's digits as words, which stopped the reply as the user's
-    # (26 Nov): "or three point one four one five" over "are 3.14159".
+    # Speech-to-text hears a reply's digits as words, which word for word are nothing like its text.
     assert own_words("is twelve", "The temperature today is 12 degrees")
     assert own_words("decimal point are three point one four one five nine two",
                      "after the decimal point are 3.14159265, so that's all")
     assert own_words("go off at five twenty seven pm", "set to go off at 5:27 PM.")
     assert own_words("were one hundred and five people", "There were 105 people there")
+    # Part way through a number, at a word which joins two.
+    assert own_words("point are three point", "after the decimal point are 3.14159265, so that's all")
+    assert own_words("were one hundred and", "There were 105 people there")
     # A number isn't a word, nor a word a number.
     assert not own_words("is cold", "The temperature today is 12 degrees")
     assert not own_words("point and laugh", "They 3 and 4")
