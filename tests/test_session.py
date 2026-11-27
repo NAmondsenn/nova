@@ -6270,6 +6270,18 @@ def test_the_replys_own_words_are_taken_off_the_turn_which_cut_in(brain, connect
     _ended(session)
 
 
+def test_with_headphones_on_the_replys_words_at_the_start_of_a_turn_are_his_own(brain, connect, make_session):
+    # Nothing of the reply is in the microphone there, so repeating it back is what he said.
+    brain.config.data["conversation"] = {}
+    session, pi = _over_a_reply(brain, connect, make_session, "What about",
+                                "Today, you've got lunch. What about Tuesday?", setup=_a_computers(unheard=True))
+    heard = _open_microphone(pi)
+    heard.put(said(seconds=0.5, before=0.5, after=0))
+    assert wait_for(lambda: len(session.conversation.heard) >= 3, seconds=TURNS)
+    assert session.conversation.heard[2][0] == "Today, you've got lunch. What about Tuesday?"
+    _ended(session)
+
+
 def test_ended_while_a_reply_is_listened_over_stops_the_listen_and_the_reply_finishes(brain, connect,
                                                                                     make_session):
     session, pi = _over_a_reply(brain, connect, make_session, "")

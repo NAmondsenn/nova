@@ -1802,7 +1802,7 @@ class Session:
                 self._play_sound("listening.wav")
             return self._handle_interaction(feed, follow_up=follow_up, timeline=timeline, open_turn=True,
                                             listen_from=listen_from, pressed=pressed,
-                                            over=cut_in["saying"] if cut_in is not None else None)
+                                            over=cut_in["heard_back"] if cut_in is not None else None)
         except Exception as e:
             # Said, as for any request, so it isn't taken for not having been heard - and the
             # conversation ended, rather than every turn after it going wrong the same way at once.
@@ -2027,9 +2027,8 @@ class Session:
                 is as patient as the conversation's settings say. Silence, noise and words
                 imagined in noise say and play nothing, as the next turn simply begins.
             listen_from: For an open turn, where in the feed it starts - its start if None.
-            over: For a turn which cut in on a reply, that reply's text: the turn starts a moment
-                before the voice did, so where the microphone hears the speaker its first words
-                are the reply's own, which are taken off it (see after_own_words).
+            over: For a turn which cut in on a reply and may start with the reply's own words
+                (see _cut_in), that reply's text: they are taken off it (see after_own_words).
 
         Returns:
             The wake word heard over the reply, which the next request starts from - see
@@ -2711,14 +2710,18 @@ class Session:
 
         Returns:
             {"talked_over": True, "feed": the feed, "from": where in it their turn starts,
-            "cut_in": "voice" or "press", "saying": the reply's text}.
+            "cut_in": "voice" or "press", "heard_back": the reply's text if their turn may start
+            with it - a voice's, which starts a moment before it did, at a satellite whose
+            microphone hears its speaker - or None: with headphones on, or after a press, the
+            reply's words at its start are their own}.
         """
         start, how = cut
         playback.stop()
         logger.info(f"Cut in on by {how}")
         if timeline:
             timeline.note(cut_in=how)
-        return {"talked_over": True, "feed": feed, "from": start, "cut_in": how, "saying": saying}
+        heard_back = saying if how == "voice" and not self.satellite.echo_unheard else None
+        return {"talked_over": True, "feed": feed, "from": start, "cut_in": how, "heard_back": heard_back}
 
     @staticmethod
     def _judge_voice(listening, voice: CutIn) -> bool:
