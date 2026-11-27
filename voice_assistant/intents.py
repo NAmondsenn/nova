@@ -103,6 +103,11 @@ START_CONVERSATION = (r"let's talk|let's have a conversation|conversation mode|s
                       r"start a conversation")
 END_CONVERSATION = (r"end conversation|end the conversation|end conversation mode|stop the conversation|that's all|"
                     r"that's everything|goodbye")
+# Said with nothing else, in one, what means he's had enough of it - so it ends, rather than Claude answering
+# "Okay, I'll stop." and listening on. Over a reply a bare "stop" only stops the reply, before any rule is asked
+# (see Conversation.handle); a timer ringing takes it first too. To stop the music in one, "pause" does.
+_STOP = r"(?:stop(?: it| talking| speaking| listening)?|be quiet|shut up|go away)"
+STOP_CONVERSATION = rf"(?:(?:okay|ok|alright|no|just|nova) )*{_STOP}(?: (?:{_STOP}|now|man|mate|nova))*"
 # What moves an open conversation up to the bigger model, which may have more said after it - "think
 # harder about the route to Leeds" - and what takes it back to the usual one, which is the whole of it.
 BIGGER_MODEL = r"think harder|use the bigger model|use the big model"
@@ -436,6 +441,7 @@ class LocalIntents:
             # start a longer request.
             (START_CONVERSATION, self._conversation_started),
             (END_CONVERSATION, self._conversation_ended),
+            (STOP_CONVERSATION, self._conversation_ended),
             # Which model answers, said only in one. The bigger one may have more said after it, which
             # is then what's asked of it.
             (rf"(?:{BIGGER_MODEL})(?P<rest> .+)?", self._use_bigger_model),

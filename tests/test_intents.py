@@ -1385,6 +1385,21 @@ def test_each_end_phrase_ends_it(phrase):
     assert _talk(phrase.upper() + "!", on_at="pc") == [Action("end_conversation")]
 
 
+@pytest.mark.parametrize("text", ["Stop.", "Stop it.", "Okay, stop it.", "No, stop, stop it now.", "Stop talking, man.",
+                                  "Stop speaking now.", "Stop listening.", "Go away.", "Be quiet."])
+def test_told_to_stop_in_one_ends_it(text):
+    # Said four ways on 26 Nov, and each time Claude said "Okay, I'll stop." and listened on.
+    assert _talk(text, on_at="pc") == [Action("end_conversation")]
+    # Outside one, or with it on elsewhere, they're whatever they were: "stop" is the music's.
+    assert _talk(text) != [Action("end_conversation")]
+    assert _talk(text, on_at="bedroom") != [Action("end_conversation")]
+
+
+@pytest.mark.parametrize("text", ["Stop the music.", "Stop the timer.", "Don't stop.", "Stop it raining."])
+def test_stopping_something_else_doesnt_end_it(text):
+    assert _talk(text, on_at="pc") != [Action("end_conversation")]
+
+
 @pytest.mark.parametrize("text", [
     "That's all I can think of for the kitchen.", "Goodbye for now.", "End the conversation about the bins.",
     "Let's talk about the weather.", "Start a conversation with the neighbours.", "Let's talk later.",
