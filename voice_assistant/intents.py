@@ -102,11 +102,12 @@ MOVE_WHERE = r"(?P<where>[a-z0-9']+(?: [a-z0-9']+){0,3})"
 START_CONVERSATION = (r"let's talk|let's have a conversation|conversation mode|start conversation mode|"
                       r"start a conversation")
 END_CONVERSATION = (r"end conversation|end the conversation|end conversation mode|stop the conversation|that's all|"
-                    r"that's everything|goodbye")
+                    r"that's everything|goodbye|go away")
 # Said with nothing else, in one, what means he's had enough of it - so it ends, rather than Claude answering
-# "Okay, I'll stop." and listening on. Over a reply a bare "stop" only stops the reply, before any rule is asked
-# (see Conversation.handle); a timer ringing takes it first too. To stop the music in one, "pause" does.
-_STOP = r"(?:stop(?: it| talking| speaking| listening)?|be quiet|shut up|go away)"
+# "Okay, I'll stop." and listening on. Over a reply they only stop the reply, before any rule is asked (see
+# told_to_stop and Conversation.handle); a timer ringing takes a bare "stop" first too. To stop the music in
+# one, "pause" does. Not "stop listening", which is the microphone's, as outside one.
+_STOP = r"(?:stop(?: it| talking| speaking)?|be quiet|shut up)"
 STOP_CONVERSATION = rf"(?:(?:okay|ok|alright|no|just|nova) )*{_STOP}(?: (?:{_STOP}|now|man|mate|nova))*"
 # What moves an open conversation up to the bigger model, which may have more said after it - "think
 # harder about the route to Leeds" - and what takes it back to the usual one, which is the whole of it.
@@ -328,6 +329,19 @@ def calendar_days(day: Optional[str], today: date) -> Tuple[date, int]:
 def _tidied(text: str) -> str:
     """Words as the rules see them: lower case, letters, digits and apostrophes, single-spaced."""
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9' ]", " ", text.lower())).strip()
+
+
+def told_to_stop(text: str) -> bool:
+    """
+    Args:
+        text: What the user said.
+
+    Returns:
+        Whether it is only being told to stop - STOP_CONVERSATION, as the rules see it - which in
+        a conversation ends it, and said over a reply only stops the reply.
+    """
+    request = re.sub(POLITE_END, "", re.sub(POLITE_START, "", _tidied(text))).strip()
+    return re.fullmatch(STOP_CONVERSATION, request) is not None
 
 
 # The letters which Unicode doesn't decompose into a plain letter and an accent, as they are written plain.

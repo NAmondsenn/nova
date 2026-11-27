@@ -25,6 +25,7 @@ from voice_assistant.actions import (LET_ME_THINK, PC_NOT_IN_A_ROUTINE, Action, 
                                      confirm)
 from voice_assistant.clock_ringing import Where, heard_in
 from voice_assistant.devices import told_claude
+from voice_assistant.intents import told_to_stop
 from voice_assistant.journeys import told_claude as journey_told_claude
 from voice_assistant.logging_setup import TRANSCRIPT
 from voice_assistant.timeline import Timeline
@@ -295,8 +296,11 @@ class Conversation:
 
         # "Hey Nova, stop" or "Hey Nova, okay" over a reply only means stop talking,
         # which the wake word already did. Taken as a command, "stop" would pause the
-        # music as well - which was only quiet while the assistant was talking.
-        if self.talked_over and not follow_up and self.clock.looks_like_dismissal(text):
+        # music as well - which was only quiet while the assistant was talking. In an open
+        # conversation, where being told to stop ends it, so is "stop talking": over a reply
+        # each only stops the reply, and it's said again in the quiet to end it.
+        if self.talked_over and not follow_up and (self.clock.looks_like_dismissal(text)
+                                                   or self.conversing() and told_to_stop(text)):
             timeline.note(outcome="stopped_talking")
             logger.info("Told to stop talking, so said nothing more")
             return Reply()

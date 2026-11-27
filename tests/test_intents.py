@@ -14,7 +14,7 @@ from voice_assistant import intents as intents_module
 from voice_assistant.actions import Action
 from voice_assistant.clock_words import ClockWords
 from voice_assistant.computers import ComputerHooks, Computers
-from voice_assistant.intents import LocalIntents, calendar_days
+from voice_assistant.intents import LocalIntents, calendar_days, told_to_stop
 from voice_assistant.open_conversation import OpenConversation
 
 
@@ -1353,7 +1353,7 @@ def test_a_pc_which_cant_reach_windows_sound_mutes_as_before():
 START_PHRASES = ["let's talk", "let's have a conversation", "conversation mode", "start conversation mode",
                  "start a conversation"]
 END_PHRASES = ["end conversation", "end the conversation", "end conversation mode", "stop the conversation",
-               "that's all", "that's everything", "goodbye"]
+               "that's all", "that's everything", "goodbye", "go away"]
 
 
 def _talk(text, on_at=None, enabled=True, here="pc", **intents):
@@ -1386,17 +1386,26 @@ def test_each_end_phrase_ends_it(phrase):
 
 
 @pytest.mark.parametrize("text", ["Stop.", "Stop it.", "Okay, stop it.", "No, stop, stop it now.", "Stop talking, man.",
-                                  "Stop speaking now.", "Stop listening.", "Go away.", "Be quiet."])
+                                  "Stop speaking now.", "Be quiet.", "Please shut up."])
 def test_told_to_stop_in_one_ends_it(text):
     # Said four ways on 26 Nov, and each time Claude said "Okay, I'll stop." and listened on.
+    assert told_to_stop(text)
     assert _talk(text, on_at="pc") == [Action("end_conversation")]
     # Outside one, or with it on elsewhere, they're whatever they were: "stop" is the music's.
     assert _talk(text) != [Action("end_conversation")]
     assert _talk(text, on_at="bedroom") != [Action("end_conversation")]
 
 
+def test_stop_listening_in_one_is_still_the_microphones():
+    # As outside one - where ending the conversation alone left a microphone he'd asked to be off still on.
+    assert not told_to_stop("Stop listening.")
+    assert _talk("Stop listening.", on_at="pc") == _talk("Stop listening.")
+    assert _talk("Stop listening.", on_at="pc") != [Action("end_conversation")]
+
+
 @pytest.mark.parametrize("text", ["Stop the music.", "Stop the timer.", "Don't stop.", "Stop it raining."])
 def test_stopping_something_else_doesnt_end_it(text):
+    assert not told_to_stop(text)
     assert _talk(text, on_at="pc") != [Action("end_conversation")]
 
 

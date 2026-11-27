@@ -643,6 +643,32 @@ def test_stop_said_over_a_reply_only_stops_the_talking():
     assert actions.run == [] and llm.asked == [] and llm.remembered == []
 
 
+def test_told_to_stop_over_a_reply_in_a_conversation_only_stops_the_talking():
+    # In the quiet each ends the conversation: over a reply, "stop talking" is no more than "stop" is.
+    talk = OpenConversation(lambda: {"enabled": True})
+    talk.start("pc")
+    llm = FakeLLM()
+    actions = FakeActions()
+    conversation = _conversation(intents=LocalIntents(conversation=talk, satellite="pc"), llm=llm, actions=actions,
+                                 conversing=lambda: True)
+    conversation.start(talked_over=True)
+    for said in ("Stop talking.", "Stop speaking now.", "Be quiet.", "No, stop it."):
+        reply = conversation.handle(said)
+        assert (reply.say, reply.sounds, reply.listen_again) == ("", [], False)
+    assert actions.run == [] and llm.asked == []
+    # "Go away" is to end it, whenever it's said.
+    conversation.handle("Go away.")
+    assert actions.run == ["end_conversation"]
+
+
+def test_stop_talking_over_a_reply_outside_a_conversation_is_claudes_as_ever():
+    llm = FakeLLM(_answer("Okay."))
+    conversation = _conversation(llm=llm)
+    conversation.start(talked_over=True)
+    conversation.handle("Stop talking.")
+    assert llm.asked == ["Stop talking."]
+
+
 def test_a_request_said_over_a_reply_is_answered_as_usual():
     llm = FakeLLM(_answer("Paris."))
     conversation = _conversation(llm=llm)
