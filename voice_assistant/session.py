@@ -33,7 +33,7 @@ from voice_assistant.clock_ringing import heard_in
 from voice_assistant.computers import MIC_MUTE_MINUTES, ComputerControl, ComputerHooks
 from voice_assistant.config import CHOICES
 from voice_assistant.conversation import NOT_CAUGHT, Conversation
-from voice_assistant.cut_in import CutIn
+from voice_assistant.cut_in import CutIn, after_own_words
 from voice_assistant.ha_device import DeviceControls, NovaDevice
 from voice_assistant.home_assistant import HomeAssistant
 from voice_assistant.intents import LocalIntents
@@ -1788,7 +1788,8 @@ class Session:
             if listening_sound and self.listening_sound_enabled:
                 self._play_sound("listening.wav")
             return self._handle_interaction(feed, follow_up=follow_up, timeline=timeline, open_turn=True,
-                                            listen_from=listen_from, pressed=pressed)
+                                            listen_from=listen_from, pressed=pressed,
+                                            over=cut_in["saying"] if cut_in is not None else None)
         except Exception as e:
             # Said, as for any request, so it isn't taken for not having been heard - and the
             # conversation ended, rather than every turn after it going wrong the same way at once.
@@ -1987,7 +1988,7 @@ class Session:
 
     def _handle_interaction(self, feed, follow_up: bool = False, timeline: Optional[Timeline] = None,
                             pre_roll: Optional[int] = None, pressed: bool = False, open_turn: bool = False,
-                            listen_from: Optional[int] = None) -> Optional[Dict]:
+                            listen_from: Optional[int] = None, over: Optional[str] = None) -> Optional[Dict]:
         """
         Handles one full interaction after the wake word: records the query from what
         the satellite sends, transcribes it, has the conversation work out the reply
@@ -2013,6 +2014,9 @@ class Session:
                 is as patient as the conversation's settings say. Silence, noise and words
                 imagined in noise say and play nothing, as the next turn simply begins.
             listen_from: For an open turn, where in the feed it starts - its start if None.
+            over: For a turn which cut in on a reply, that reply's text: the turn starts a moment
+                before the voice did, so where the microphone hears the speaker its first words
+                are the reply's own, which are taken off it (see after_own_words).
 
         Returns:
             The wake word heard over the reply, which the next request starts from - see
@@ -2184,6 +2188,8 @@ class Session:
         # Retrieves the transcribed text, without the end of the wake word which the
         # recording sometimes catches - see strip_wake_word.
         text = strip_wake_word((transcription or {}).get("text", ""), self.wake_word)
+        if over:
+            text = after_own_words(text, over)
         if self.satellite.push_to_talk:
             self._note_if_long(report, timeline, text, stt_error="error" in (transcription or {}))
         if not text.strip():
@@ -2605,7 +2611,7 @@ class Session:
                     # Pressed just as it ended: the satellite says so before it says the reply stopped.
                     cut = (feed.position, "press")
                 if cut is not None:
-                    return self._cut_in(playback, feed, cut, timeline)
+                    return self._cut_in(playback, feed, cut, saying, timeline)
                 # One last look, as _heard_over has, for a wake word said just as the reply ended.
                 wake = self._wake_waiting()
                 if wake is not None:
@@ -2675,7 +2681,8 @@ class Session:
         self._let_go_of_open_feed(feed)
         return wake if wake is not None else self._heard_over(playback)
 
-    def _cut_in(self, playback, feed: AudioFeed, cut: Tuple[int, str], timeline: Optional[Timeline]) -> Dict:
+    def _cut_in(self, playback, feed: AudioFeed, cut: Tuple[int, str], saying: str,
+                timeline: Optional[Timeline]) -> Dict:
         """
         Stops a reply the user has cut in on - before anything else, as they're talking over it.
 
@@ -2683,18 +2690,19 @@ class Session:
             playback: The reply, playing on the satellite.
             feed: The listen it was heard over, which their turn goes on in.
             cut: Where in it their turn starts, and how they cut in - "voice" or "press".
+            saying: The reply's text.
             timeline: The turn's Timeline, noting how, or None.
 
         Returns:
             {"talked_over": True, "feed": the feed, "from": where in it their turn starts,
-            "cut_in": "voice" or "press"}.
+            "cut_in": "voice" or "press", "saying": the reply's text}.
         """
         start, how = cut
         playback.stop()
         logger.info(f"Cut in on by {how}")
         if timeline:
             timeline.note(cut_in=how)
-        return {"talked_over": True, "feed": feed, "from": start, "cut_in": how}
+        return {"talked_over": True, "feed": feed, "from": start, "cut_in": how, "saying": saying}
 
     @staticmethod
     def _judge_voice(listening, voice: CutIn) -> bool:

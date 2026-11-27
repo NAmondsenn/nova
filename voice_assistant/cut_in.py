@@ -43,8 +43,23 @@ LISTENING_NOISES = frozenset({"yeah", "yes", "yep", "mm", "mhm", "mm hm", "uh hu
 # swallowed a one-word "no" or "so" into "north" or "also"; three still takes "tod" and "rature".
 EDGE_FRAGMENT = 3
 
-# The word which always stops a reply, even when the reply itself says it.
+# The word which stops a reply whatever else is heard with it - bar a reply which says it itself,
+# heard back with more of its own words (see CutIn.would_stop).
 STOP_WORD = "stop"
+
+# Words which say a number, and what a run of them, or of digits, is matched as: speech-to-text
+# hears a reply's "3.14" as "three point one four" and its "5:27" as "five twenty seven", which
+# word for word are nothing like what the reply's text says.
+NUMBER_WORDS = frozenset(
+    "zero oh one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen "
+    "seventeen eighteen nineteen twenty thirty forty fifty sixty seventy eighty ninety hundred thousand million"
+    .split())
+NUMBER_JOINS = frozenset({"point", "and"})
+NUMBER = "#"
+
+# The fewest of a reply's own words, in a row, at the start of a turn begun over it, for them to
+# be taken off it - see after_own_words. Fewer are as likely the user's: "I think" starts both.
+OWN_START = 3
 
 
 def _tidy(text: str) -> List[str]:
@@ -60,11 +75,35 @@ def _tidy(text: str) -> List[str]:
     return [word for word in (found.strip("'") for found in re.findall(r"[\w']+", text.lower())) if word]
 
 
+def _is_number(word: str) -> bool:
+    return word.isdigit() or word in NUMBER_WORDS
+
+
+def _numbers_as_one(words: List[str]) -> List[str]:
+    """
+    Args:
+        words: Tidied words.
+
+    Returns:
+        Them with each run of numbers - digits or NUMBER_WORDS, and a "point" or "and" between
+        two of them - as the one NUMBER, so a number matches however it was said or written.
+    """
+    result = []
+    for position, word in enumerate(words):
+        joins = (word in NUMBER_JOINS and result and result[-1] == NUMBER
+                 and position + 1 < len(words) and _is_number(words[position + 1]))
+        if not _is_number(word) and not joins:
+            result.append(word)
+        elif not result or result[-1] != NUMBER:
+            result.append(NUMBER)
+    return result
+
+
 def _is_own(heard: List[str], saying: List[str]) -> bool:
     """
     Args:
-        heard: The words heard, tidied.
-        saying: The words of the reply, tidied.
+        heard: The words heard, tidied, with its numbers as one.
+        saying: The words of the reply, the same.
 
     Returns:
         Whether own_words says the words heard are the reply's own.
@@ -92,9 +131,9 @@ def _is_own(heard: List[str], saying: List[str]) -> bool:
 
 def own_words(heard: str, saying: str) -> bool:
     """
-    The allowance is for speech-to-text mishearing a word in a longer run. Digits and
-    contractions aren't normalised: a number heard as digits ("12" against "twelve") is just
-    a wrong word, which a run of four or more words can absorb but a short run can't.
+    The allowance is for speech-to-text mishearing a word in a longer run. A number matches
+    any number, however long, as its words and its digits can't be told apart word for word
+    (see NUMBER_WORDS). Contractions aren't normalised: "it is" isn't "it's".
 
     Args:
         heard: The words speech-to-text heard.
@@ -108,7 +147,46 @@ def own_words(heard: str, saying: str) -> bool:
         letters), as speech-to-text hasn't finished the last word, and a run may begin
         part way through one; those aren't counted as wrong. False if nothing was heard.
     """
-    return _is_own(_tidy(heard), _tidy(saying))
+    return _is_own(_numbers_as_one(_tidy(heard)), _numbers_as_one(_tidy(saying)))
+
+
+def after_own_words(heard: str, saying: str) -> str:
+    """
+    A turn begun over a reply starts a moment before the voice which stopped it, and where the
+    microphone hears the speaker that moment holds the reply's own words: "I think those were
+    right no hey stop speaking now", of which only the last five are the user's.
+
+    Args:
+        heard: The words of a turn which began over a reply.
+        saying: The text of that reply.
+
+    Returns:
+        heard without the run of the reply's own words it starts with, if that is OWN_START
+        words or more - the first OWN_START exactly, then up to one wrong in every four, ending
+        on one which matches. All of it otherwise, and "" if it was nothing but the reply's own.
+    """
+    straight = heard.replace("\u2019", "'").replace("\u2018", "'")
+    words, starts = [], []
+    for found in re.finditer(r"[\w']+", straight):
+        tidied = _tidy(found.group())
+        if tidied:
+            words.append(tidied[0])
+            starts.append(found.start())
+    reply = _tidy(saying)
+    own = 0
+    for start in range(len(reply)):
+        wrong = matched = 0
+        for position, word in enumerate(words[:len(reply) - start]):
+            if word == reply[start + position]:
+                matched = position + 1
+                continue
+            wrong += 1
+            if wrong > (position + 1) // 4:
+                break
+        own = max(own, matched)
+    if own < OWN_START:
+        return heard
+    return heard[starts[own]:] if own < len(words) else ""
 
 
 def only_listening_noises(heard: str) -> bool:
@@ -150,7 +228,7 @@ class CutIn:
         """
         self.detector = detector
         # Tidied once here, not for every frame.
-        self._saying_words = _tidy(saying)
+        self._saying_words = _numbers_as_one(_tidy(saying))
         self.threshold = detector.threshold if threshold is None else threshold
         # Counted in frames, with a little allowance so a whole number of frames which is
         # exactly the time asked for isn't pushed up by floating point.
@@ -219,11 +297,15 @@ class CutIn:
 
         Returns:
             Whether they would stop the reply: they hold "stop", or are neither the
-            reply's own nor only listening noises. False for nothing.
+            reply's own nor only listening noises. False for nothing - and for a reply which
+            says "stop" itself, heard back with more of its own words: where the microphone
+            hears the speaker, "Okay, I'll stop." stopped itself and was answered as the user's.
+            A lone "stop" always stops it.
         """
         tidied = _tidy(words)
         if not tidied:
             return False
-        if STOP_WORD in tidied:
+        own = _is_own(_numbers_as_one(tidied), self._saying_words)
+        if STOP_WORD in tidied and not (own and len(tidied) > 1 and STOP_WORD in self._saying_words):
             return True
-        return not _is_own(tidied, self._saying_words) and not only_listening_noises(words)
+        return not own and not only_listening_noises(words)

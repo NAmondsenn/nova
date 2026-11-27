@@ -8,7 +8,8 @@ import numpy as np
 import pytest
 from test_recording import FakeDetector
 
-from voice_assistant.cut_in import CUT_IN_WAIT, DIP_AFTER, LISTENING_NOISES, CutIn, only_listening_noises, own_words
+from voice_assistant.cut_in import (CUT_IN_WAIT, DIP_AFTER, LISTENING_NOISES, CutIn, after_own_words,
+                                    only_listening_noises, own_words)
 from voice_assistant.recording import FRAME, RATE
 
 SAYING = "The weather today is dry and bright"
@@ -158,10 +159,18 @@ def test_stop_always_stops_it():
     assert dipped().hear(loud(), "Stop!") == "stop"
     assert dipped().hear(loud(), "please stop") == "stop"
     # Even when the reply says it itself.
-    assert dipped("I'll stop the music when you like").hear(loud(), "stop the music") == "stop"
     assert dipped("I'll stop the music when you like").hear(loud(), "stop") == "stop"
-    # Even in the middle of the reply's own words.
-    assert dipped("A bus stop is near").hear(loud(), "bus stop") == "stop"
+    # And said after the reply's own words, heard back, which don't go on to it.
+    assert dipped("The first twenty digits after the point").hear(loud(), "the first twenty digits stop") == "stop"
+
+
+def test_a_reply_which_says_stop_doesnt_stop_itself():
+    # At the PC's speakers on 26 Nov, "Okay, I'll stop." was heard back, stopped itself, and was
+    # answered as the user's turn.
+    assert dipped("Okay, I'll stop.").hear(loud(), "Okay, I'll stop") is None
+    assert dipped("A bus stop is near").hear(loud(), "bus stop") is None
+    # With words which aren't the reply's, it's the user's.
+    assert dipped("Okay, I'll stop.").hear(loud(), "no stop it now") == "stop"
 
 
 def test_listening_noises_dont_stop_it():
@@ -274,11 +283,20 @@ def test_a_two_letter_fragment_isnt_the_replys_own():
     assert own_words("nor", "it is north of here")
 
 
-def test_digits_and_contractions_are_not_normalised():
-    said = "The temperature today is 12 degrees"
-    # A longer run absorbs one such word as its one wrong in four, a shorter one can't.
-    assert own_words("today is twelve degrees", said)
-    assert not own_words("is twelve", said)
+def test_a_number_is_the_replys_own_however_its_said():
+    # Speech-to-text heard a reply's digits as words, which stopped the reply as the user's
+    # (26 Nov): "or three point one four one five" over "are 3.14159".
+    assert own_words("is twelve", "The temperature today is 12 degrees")
+    assert own_words("decimal point are three point one four one five nine two",
+                     "after the decimal point are 3.14159265, so that's all")
+    assert own_words("go off at five twenty seven pm", "set to go off at 5:27 PM.")
+    assert own_words("were one hundred and five people", "There were 105 people there")
+    # A number isn't a word, nor a word a number.
+    assert not own_words("is cold", "The temperature today is 12 degrees")
+    assert not own_words("point and laugh", "They 3 and 4")
+
+
+def test_contractions_are_not_normalised():
     assert not own_words("it is", "It's twelve")
 
 
@@ -325,8 +343,9 @@ def test_would_stop_is_what_hear_judges_words_by():
     assert feed(cut_in, [loud()] * DIP_FRAMES)[-1] == "dip"
 
 
-def test_would_stop_holds_stop_even_when_the_reply_says_it():
-    assert CutIn(FakeDetector(), "I'll stop the music when you like").would_stop("stop the music")
+def test_would_stop_holds_a_lone_stop_even_when_the_reply_says_it():
+    assert CutIn(FakeDetector(), "I'll stop the music when you like").would_stop("stop")
+    assert not CutIn(FakeDetector(), "I'll stop the music when you like").would_stop("stop the music")
 
 
 def test_would_stop_after_a_stop_leaves_it_stopped_and_judges_on():
@@ -339,6 +358,38 @@ def test_would_stop_after_a_stop_leaves_it_stopped_and_judges_on():
 def test_the_replys_text_is_tidied_once():
     cut_in = CutIn(FakeDetector(), "The weather, TODAY!")
     assert cut_in._saying_words == ["the", "weather", "today"]
+
+
+# after_own_words
+
+PI_REPLY = "I think those were right. Pi after the decimal point starts 1415926535, which is thirty digits."
+
+
+def test_the_replys_own_words_are_taken_off_the_start_of_a_turn():
+    assert after_own_words("I think those were right no hey stop speaking now", PI_REPLY) == "no hey stop speaking now"
+    # From anywhere in the reply, and with what the user said left as it was written.
+    assert after_own_words("Those were right. Pi after, No! Stop.", PI_REPLY) == "No! Stop."
+
+
+def test_a_turn_which_is_all_the_replys_own_is_nothing():
+    assert after_own_words("I think those were right", PI_REPLY) == ""
+    assert after_own_words("Okay, I'll stop", "Okay, I'll stop.") == ""
+
+
+def test_a_word_misheard_in_a_long_run_is_still_taken_off():
+    assert after_own_words("I think those were tight pi after wait what", PI_REPLY) == "wait what"
+
+
+def test_a_word_or_two_of_the_replys_stays_as_the_users():
+    # "I think" starts his own sentence as well as the reply's.
+    assert after_own_words("I think you're wrong", PI_REPLY) == "I think you're wrong"
+    assert after_own_words("which is wrong", PI_REPLY) == "which is wrong"
+    assert after_own_words("what time is it", PI_REPLY) == "what time is it"
+    assert after_own_words("", PI_REPLY) == ""
+
+
+def test_the_first_words_must_match_exactly():
+    assert after_own_words("I thought those were right about that", PI_REPLY) == "I thought those were right about that"
 
 
 # only_listening_noises
