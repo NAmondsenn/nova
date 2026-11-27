@@ -713,6 +713,25 @@ def test_echo_ready_is_false_until_said(talker):
     assert wait_for(lambda: satellite.echo_ready is False)
 
 
+def test_a_microphone_which_doesnt_hear_its_speaker_is_only_one_which_says_so(talker):
+    satellite, fake, serving = talker
+    assert satellite.echo_unheard is False
+    # A satellite from before this says only whether it's ready.
+    fake.say("echo_ready", ready=True)
+    assert wait_for(lambda: satellite.echo_ready is True)
+    assert satellite.echo_unheard is False
+    fake.say("echo_ready", ready=True, unheard=True)
+    assert wait_for(lambda: satellite.echo_unheard is True)
+    # The speaker heard after all, its sound being taken out.
+    fake.say("echo_ready", ready=True)
+    assert wait_for(lambda: satellite.echo_unheard is False)
+    # Never without being ready, and only true itself.
+    fake.say("echo_ready", ready=False, unheard=True)
+    fake.say("echo_ready", ready=True, unheard="yes")
+    assert wait_for(lambda: satellite.echo_ready is True)
+    assert satellite.echo_unheard is False
+
+
 def test_an_echo_ready_which_isnt_true_or_false_is_left_alone(talker, caplog):
     satellite, fake, serving = talker
     fake.say("echo_ready", ready=True)

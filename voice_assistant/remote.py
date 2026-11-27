@@ -600,6 +600,9 @@ class RemoteSatellite:
         # Whether its echo canceller is taking Nova's own sound out, as it last said - False
         # until it does, so each connection starts as if nothing had been said.
         self.echo_ready: bool = False
+        # Whether that is because its microphone doesn't hear its speaker at all, as with
+        # headphones on - False from a satellite which doesn't say.
+        self.echo_unheard: bool = False
         # Whether it has been told a conversation is on there, as set_conversation last said - so a
         # wake's feed is as uncapped as the recording the satellite then sends for it.
         self.conversing: bool = False
@@ -1289,6 +1292,7 @@ class RemoteSatellite:
         ready = message.get("ready")
         if isinstance(ready, bool):
             self.echo_ready = ready
+            self.echo_unheard = ready and message.get("unheard") is True
         else:
             logger.warning(f"The {self.name} satellite sent echo_ready without true or false: {ascii(ready)[:40]}")
 

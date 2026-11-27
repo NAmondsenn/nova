@@ -6083,17 +6083,67 @@ def test_by_default_only_the_wake_word_cuts_in_at_a_pi(brain, connect, make_sess
                                 then=lambda: brain.config.data.update(conversation={"talk_over": "voice"}))
 
 
-def test_by_default_the_voice_cuts_in_at_a_computer(brain, connect, make_session):
+def _a_computers(unheard):
+    """A setup for _over_a_reply: the satellite is a computer's, its microphone hearing its speaker or not."""
+    def setup(session):
+        session.satellite.push_to_talk = True
+        session.satellite.echo_unheard = unheard
+    return setup
+
+
+def test_by_default_the_voice_cuts_in_at_a_computer_whose_microphone_doesnt_hear_its_speaker(brain, connect,
+                                                                                            make_session):
     brain.config.data["conversation"] = {}
     session, pi = _over_a_reply(brain, connect, make_session, "Hang on, what about Tuesday?",
-                                "Hang on, what about Tuesday?",
-                                setup=lambda session: setattr(session.satellite, "push_to_talk", True))
+                                "Hang on, what about Tuesday?", setup=_a_computers(unheard=True))
     heard = _open_microphone(pi)
     reply = pi.messages("play_stream")[1]["id"]
     heard.put(said(seconds=1.0, before=0.96, after=0))
     assert wait_for(lambda: len(pi.messages("play_stream")) >= 3, seconds=TURNS)
     assert _fades(pi, reply) == [(0.21, 0.05)] and _stopped(pi, reply)
     assert session.conversation.heard[2] == ("Hang on, what about Tuesday?", False)
+    _ended(session)
+
+
+def test_by_default_the_voice_doesnt_cut_in_at_a_computer_playing_aloud(brain, connect, make_session):
+    # At the PC's speakers on 26 and 27 Nov, what the echo canceller left of Nova's voice was heard as words
+    # which weren't the reply's, so replies stopped themselves and were answered as his. Headphones on, it does.
+    brain.config.data["conversation"] = {}
+    session, pi = _over_a_reply(brain, connect, make_session, "What about Tuesday?", setup=_a_computers(unheard=False))
+    _only_the_wake_word_cuts_in(session, pi, then=lambda: setattr(session.satellite, "echo_unheard", True))
+
+
+def test_set_to_the_voice_it_cuts_in_at_a_computer_playing_aloud_too(brain, connect, make_session):
+    brain.config.data["conversation"] = {"talk_over": "voice"}
+    session, pi = _over_a_reply(brain, connect, make_session, "Hang on, what about Tuesday?",
+                                "Hang on, what about Tuesday?", setup=_a_computers(unheard=False))
+    heard = _open_microphone(pi)
+    reply = pi.messages("play_stream")[1]["id"]
+    heard.put(said(seconds=1.0, before=0.96, after=0))
+    assert wait_for(lambda: _stopped(pi, reply), seconds=TURNS)
+    _ended(session)
+
+
+def test_a_microphone_found_to_hear_the_speaker_part_way_through_a_reply_is_listened_to_no_more(brain, connect,
+                                                                                               make_session):
+    # Headphones swapped for the speakers since the last conversation: the canceller finds it some seconds into
+    # the first reply, which had dipped for Nova's own voice.
+    brain.config.data["conversation"] = {}
+    session, pi = _over_a_reply(brain, connect, make_session, "", setup=_a_computers(unheard=True))
+    heard = _open_microphone(pi)
+    reply = pi.messages("play_stream")[1]["id"]
+    heard.put(said(seconds=0.3, before=0.5, after=0))
+    assert wait_for(lambda: _fades(pi, reply))
+    session.satellite.echo_unheard = False
+    # The listen over it is stopped, and the reply comes back up and is said to its end.
+    recording = pi.messages("listen")[1]["recording"]
+    assert wait_for(lambda: any(message.get("recording") == recording for message in pi.messages("stop_listening")))
+    assert wait_for(lambda: len(_fades(pi, reply)) == 2) and _fades(pi, reply)[1] == (0.7, 0.05)
+    time.sleep(0.2)
+    assert not _stopped(pi, reply)
+    pi.say("played", id=reply)
+    # The conversation goes on: the next turn is listened for once the reply has ended.
+    assert wait_for(lambda: len(pi.messages("listen")) >= 3, seconds=TURNS)
     _ended(session)
 
 

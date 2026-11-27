@@ -32,9 +32,11 @@ After the handshake, what a satellite sends the brain:
     approval_answer  {"id": ..., "approved": true|false}  (the user's answer to an approval, once)
     shortcut_taken  {"taken": true|false}  (whether another program has the shortcut the satellite's
         app listens on, said each time that changes and as it connects)
-    echo_ready  {"ready": true|false}  (whether its echo canceller has lined its speaker up with its
-        microphone and is taking Nova's own sound out - said as it connects, and each time that
-        changes; false where it has none, or while a conversation isn't holding its devices open)
+    echo_ready  {"ready": true|false, "unheard"?: true}  (whether its echo canceller has lined its
+        speaker up with its microphone and is taking Nova's own sound out - said as it connects, and
+        each time that changes; false where it has none, or while a conversation isn't holding its
+        devices open. unheard, only with ready, when there is nothing to take out: its microphone
+        doesn't hear its speaker at all, as with headphones on)
     cut_in  {"recording": ...}  (a press over a reply while an open recording was being sent, which
         stopped the reply at once and left the recording going - see listen's open)
 

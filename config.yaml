@@ -185,14 +185,17 @@ conversation:
   # straight away.
   idle_minutes: 5
   # What can cut in on a reply while Nova speaks: voice_at_computers (your voice at a
-  # computer, the wake word elsewhere), voice (your voice anywhere) or wake_word_or_press
-  # (only the wake word, or a press at a computer, as at any other time). With your voice the
+  # computer with headphones on; elsewhere the wake word, or a press at a computer playing
+  # aloud), voice (your voice anywhere) or wake_word_or_press (only the wake word, or a
+  # press at a computer, as at any other time). With your voice the
   # reply turns down at once when you talk and stops once Nova has heard real words from you
   # (a cough carries on, as does "yeah"; "stop" always stops it). Your voice is the quickest,
   # but anyone talking nearby counts as you; the wake word is steadier in a noisy room, but is
-  # needed to interrupt. voice_at_computers is the default because at a loudspeaker next to
-  # the microphone, as at a Pi, Nova's own voice drowns yours, while a computer plays into
-  # headphones; use voice for a satellite whose microphone can take it. Voice is only used
+  # needed to interrupt. voice_at_computers is the default because where the microphone
+  # hears the loudspeaker, at a Pi or a computer playing aloud, what's left of Nova's own
+  # voice is taken for yours and replies stop themselves, while with headphones on it hears
+  # none of it - which a computer finds out for itself, a few replies into a conversation.
+  # Use voice for a satellite whose microphone can take it. Voice is only used
   # while nothing else is playing in the room, and once the satellite's echo canceller is
   # ready. Used straight away.
   talk_over: voice_at_computers

@@ -568,7 +568,7 @@ class Satellite:
         # What the brain was last told of the echo canceller - see _tell_echo_ready - under a lock
         # of its own, held across the tell, so two threads' tells reach the brain in order.
         self._echo_lock = threading.Lock()
-        self._echo_told: Optional[bool] = None
+        self._echo_told: Optional[Tuple[bool, bool]] = None
 
         # The commit this code is and how it can be updated, said in every hello so the
         # brain can tell whether this satellite is behind it and offer it the update.
@@ -2673,19 +2673,22 @@ class Satellite:
         """
         Tells the brain whether the echo canceller has lined the speaker up with the
         microphone and is taking Nova's own sound out - when the brain is reached, and each
-        time that changes. False where there's none, or while it isn't engaged.
+        time that changes. False where there's none, or while it isn't engaged. And whether
+        it's ready because the microphone doesn't hear the speaker at all, as with headphones
+        on: only then may the voice cut in at a computer - see Session._voice_cuts_in_here.
 
         Args:
             connecting: Whether the brain has just been reached, and is told whatever it is.
         """
         with self._echo_lock:
             ready = self.echo is not None and self.echo.ready
-            if ready == self._echo_told and not connecting:
+            unheard = ready and self.echo.unheard
+            if (ready, unheard) == self._echo_told and not connecting:
                 return
             link = self.link
             # Not noted as told if it wasn't sent, so the next look tries again.
-            if link is not None and link.send("echo_ready", ready=ready):
-                self._echo_told = ready
+            if link is not None and link.send("echo_ready", ready=ready, **({"unheard": True} if unheard else {})):
+                self._echo_told = (ready, unheard)
 
     def _take_quiet(self, message: Dict, payload: bytes):
         """

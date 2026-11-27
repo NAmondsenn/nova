@@ -1331,6 +1331,27 @@ class Session:
         talk = self.brain.open_conversation
         return talk is not None and talk.on_at(self.satellite.name)
 
+    def _voice_cuts_in_here(self) -> bool:
+        """
+        Whether the setting and the satellite's microphone let the user's voice cut in on a reply.
+        Either can change while one plays - the setting saved, or headphones swapped for a
+        loudspeaker - so it's asked again all through one which is listened over.
+
+        Returns:
+            True once the satellite's echo canceller has Nova's own voice out of what it hears,
+            while conversation.talk_over is "voice" - or is "voice_at_computers", and this
+            satellite is a computer's, pressed to talk, whose microphone doesn't hear its speaker
+            at all, as with headphones on. Where it does, at a Pi or a computer playing aloud,
+            what the canceller leaves of Nova's voice reads as speech, and as words which aren't
+            the reply's: replies stopped themselves and were answered as the user's.
+        """
+        if not self.satellite.echo_ready:
+            return False
+        talk_over = self.brain.config.section("conversation").get("talk_over", DEFAULT_TALK_OVER)
+        if talk_over == "voice_at_computers":
+            return self.satellite.push_to_talk and self.satellite.echo_unheard
+        return talk_over == "voice"
+
     def _voice_may_cut_in(self) -> bool:
         """
         Whether the user's voice may cut in on a reply here, so what the satellite hears is
@@ -1339,19 +1360,11 @@ class Session:
 
         Returns:
             True in a conversation under way here (the satellite told - not the reply which
-            started it), while conversation.talk_over is "voice", or is "voice_at_computers"
-            and this satellite is a computer's, pressed to talk - at a loudspeaker next to its
-            microphone Nova's own voice drowns the user's - once the satellite's echo canceller
-            is taking Nova's own voice out of what it hears, and while nothing else plays in its
-            room - the test which makes its wake word harder to set off - so a film's dialogue
-            can't stop a reply.
+            started it), where the setting and the satellite's microphone let it (see
+            _voice_cuts_in_here), and while nothing else plays in its room - the test which
+            makes its wake word harder to set off - so a film's dialogue can't stop a reply.
         """
-        if not self._conversing or not self._conversation_here() or not self.satellite.echo_ready:
-            return False
-        talk_over = self.brain.config.section("conversation").get("talk_over", DEFAULT_TALK_OVER)
-        if talk_over == "voice_at_computers" and not self.satellite.push_to_talk:
-            return False
-        if talk_over not in ("voice", "voice_at_computers"):
+        if not self._conversing or not self._conversation_here() or not self._voice_cuts_in_here():
             return False
         return not self.playing_here()
 
@@ -2581,10 +2594,13 @@ class Session:
                         cut = (feed.position, "press")
                         break
                     wake = self._wake_waiting()
-                    frame = reader.read(FRAME) if wake is None and self._conversation_here() else None
+                    hearing = wake is None and self._conversation_here() and self._voice_cuts_in_here()
+                    frame = reader.read(FRAME) if hearing else None
                     if frame is None or len(frame) < FRAME:
-                        # A wake word, the conversation ended from elsewhere, or the listen ended or
-                        # stalled - the satellite gone, say - so there's nothing more to hear over it.
+                        # A wake word, the conversation ended from elsewhere, the voice no longer
+                        # cutting in here - the microphone found to hear the speaker after all - or the
+                        # listen ended or stalled - the satellite gone, say - so there's nothing more to
+                        # hear over it.
                         return self._stop_hearing_over(playback, feed, wake, full if began is not None else None)
                     if listening is not None:
                         listening.add(frame.astype(np.float32) / 32768.0)

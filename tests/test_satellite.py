@@ -4762,6 +4762,8 @@ class FakeEcho:
         # Whether the gap between the speaker and the microphone has been found, which its
         # own thread does some seconds after it starts.
         self.lined_up = False
+        # Whether the microphone has been found not to hear the speaker at all, as with headphones.
+        self.unheard = False
         self.played = types.SimpleNamespace()
 
     @property
@@ -4776,7 +4778,7 @@ class FakeEcho:
 
     @property
     def ready(self):
-        return self._engaged and self.lined_up
+        return self._engaged and (self.lined_up or self.unheard)
 
 
 @pytest.fixture
@@ -5206,6 +5208,25 @@ def test_the_satellite_says_when_its_echo_canceller_is_ready(brain, make, echoes
     conversation(brain, on=False)
     assert wait_for(lambda: len(brain.messages("echo_ready")) == 3)
     assert brain.messages("echo_ready")[2] == {"type": "echo_ready", "ready": False}
+
+
+def test_the_satellite_says_when_its_microphone_doesnt_hear_its_speaker(brain, make, echoes):
+    made = pressable(brain, make)
+    (echo,) = echoes
+    start_conversation(brain, made)
+    # Headphones: ready, with nothing to take out.
+    echo.unheard = True
+    assert wait_for(lambda: len(brain.messages("echo_ready")) == 2)
+    assert brain.messages("echo_ready")[1] == {"type": "echo_ready", "ready": True, "unheard": True}
+    # The speaker heard after all, and lined up: still ready, but said, as the voice no longer cuts in.
+    echo.lined_up = True
+    echo.unheard = False
+    assert wait_for(lambda: len(brain.messages("echo_ready")) == 3)
+    assert brain.messages("echo_ready")[2] == {"type": "echo_ready", "ready": True}
+    # Between conversations it isn't ready, whatever it found in the last.
+    echo.unheard = True
+    conversation(brain, on=False)
+    assert wait_for(lambda: brain.messages("echo_ready")[-1] == {"type": "echo_ready", "ready": False})
 
 
 def test_a_wake_word_satellites_canceller_is_ready_once_it_has_found_the_gap(brain, make, echoes):

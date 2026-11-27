@@ -301,7 +301,7 @@ test("the Claude line says whether web search is on", () => {
 });
 
 test("the Conversation line says whether conversations are on and what cuts in", () => {
-  assert.equal(said("conversation"), "Conversations on, your voice cuts in at a computer");
+  assert.equal(said("conversation"), "Conversations on, your voice cuts in at a computer with headphones");
   assert.equal(said("conversation", { conversation: { on: true, talkOver: "voice" } }),
     "Conversations on, your voice cuts in anywhere");
   assert.equal(said("conversation", { conversation: { on: true, talkOver: "wake_word_or_press" } }),
